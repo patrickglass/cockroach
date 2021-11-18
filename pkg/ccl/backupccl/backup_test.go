@@ -482,10 +482,6 @@ func TestBackupRestorePartitioned(t *testing.T) {
 		subDir := filepath.Join(locationToDir(location), "data")
 		files, err := ioutil.ReadDir(subDir)
 		if err != nil {
-			if oserror.IsNotExist(err) {
-				return false
-			}
-
 			t.Fatal(err)
 		}
 		found := false
@@ -542,27 +538,22 @@ func TestBackupRestorePartitioned(t *testing.T) {
 		sqlDB.Exec(t, restoreQuery, locationURIArgs...)
 	}
 
-	// Ensure that each node has at least one leaseholder. These are wrapped with
-	// SucceedsSoon() because EXPERIMENTAL_RELOCATE can fail if there are other
-	// replication changes happening.
-	ensureLeaseholder := func(t *testing.T, sqlDB *sqlutils.SQLRunner) {
-		for _, stmt := range []string{
-			`ALTER TABLE data.bank SPLIT AT VALUES (0)`,
-			`ALTER TABLE data.bank SPLIT AT VALUES (100)`,
-			`ALTER TABLE data.bank SPLIT AT VALUES (200)`,
-			`ALTER TABLE data.bank EXPERIMENTAL_RELOCATE VALUES (ARRAY[1], 0)`,
-			`ALTER TABLE data.bank EXPERIMENTAL_RELOCATE VALUES (ARRAY[2], 100)`,
-			`ALTER TABLE data.bank EXPERIMENTAL_RELOCATE VALUES (ARRAY[3], 200)`,
-		} {
-			testutils.SucceedsSoon(t, func() error {
-				_, err := sqlDB.DB.ExecContext(ctx, stmt)
-				return err
-			})
-		}
+	// Ensure that each node has at least one leaseholder. (These splits were
+	// made in BackupRestoreTestSetup.) These are wrapped with SucceedsSoon()
+	// because EXPERIMENTAL_RELOCATE can fail if there are other replication
+	// changes happening.
+	for _, stmt := range []string{
+		`ALTER TABLE data.bank EXPERIMENTAL_RELOCATE VALUES (ARRAY[1], 0)`,
+		`ALTER TABLE data.bank EXPERIMENTAL_RELOCATE VALUES (ARRAY[2], 100)`,
+		`ALTER TABLE data.bank EXPERIMENTAL_RELOCATE VALUES (ARRAY[3], 200)`,
+	} {
+		testutils.SucceedsSoon(t, func() error {
+			_, err := sqlDB.DB.ExecContext(ctx, stmt)
+			return err
+		})
 	}
 
 	t.Run("partition-by-unique-key", func(t *testing.T) {
-		ensureLeaseholder(t, sqlDB)
 		testSubDir := t.Name()
 		locations := []string{
 			LocalFoo + "/" + testSubDir + "/1",
@@ -587,7 +578,8 @@ func TestBackupRestorePartitioned(t *testing.T) {
 
 	// Test that we're selecting the most specific locality tier for a location.
 	t.Run("partition-by-different-tiers", func(t *testing.T) {
-		ensureLeaseholder(t, sqlDB)
+		skip.WithIssue(t, 64974, "flaky test")
+
 		testSubDir := t.Name()
 		locations := []string{
 			LocalFoo + "/" + testSubDir + "/1",
@@ -611,7 +603,6 @@ func TestBackupRestorePartitioned(t *testing.T) {
 	})
 
 	t.Run("partition-by-several-keys", func(t *testing.T) {
-		ensureLeaseholder(t, sqlDB)
 		testSubDir := t.Name()
 		locations := []string{
 			LocalFoo + "/" + testSubDir + "/1",
@@ -2917,58 +2908,6 @@ INSERT INTO d.t2 VALUES (ARRAY['hello']);
 		}
 	})
 
-	// Test cases where we attempt to remap types in the backup to types that
-	// already exist in the cluster with user defined schema.
-	t.Run("backup-remap-uds", func(t *testing.T) {
-		_, _, sqlDB, _, cleanupFn := BackupRestoreTestSetup(t, singleNode, 0, InitManualReplication)
-		defer cleanupFn()
-		sqlDB.Exec(t, `
-CREATE DATABASE d;
-CREATE SCHEMA d.s;
-CREATE TYPE d.s.greeting AS ENUM ('hello', 'howdy', 'hi');
-CREATE TABLE d.s.t (x d.s.greeting);
-INSERT INTO d.s.t VALUES ('hello'), ('howdy');
-CREATE TYPE d.s.farewell AS ENUM ('bye', 'cya');
-CREATE TABLE d.s.t2 (x d.s.greeting[]);
-INSERT INTO d.s.t2 VALUES (ARRAY['hello']);
-`)
-		{
-			// Backup and restore t.
-			sqlDB.Exec(t, `BACKUP TABLE d.s.t TO $1`, LocalFoo+"/1")
-			sqlDB.Exec(t, `DROP TABLE d.s.t`)
-			sqlDB.Exec(t, `RESTORE TABLE d.s.t FROM $1`, LocalFoo+"/1")
-
-			// Check that the table data is restored correctly and the types aren't touched.
-			sqlDB.CheckQueryResults(t, `SELECT 'hello'::d.s.greeting, ARRAY['hello']::d.s.greeting[]`, [][]string{{"hello", "{hello}"}})
-			sqlDB.CheckQueryResults(t, `SELECT * FROM d.s.t ORDER BY x`, [][]string{{"hello"}, {"howdy"}})
-
-			// d.t should be added as a back reference to greeting.
-			sqlDB.ExpectErr(t, `pq: cannot drop type "greeting" because other objects \(.*\) still depend on it`, `DROP TYPE d.s.greeting`)
-		}
-
-		{
-			// Test that backing up and restoring a table with just the array type
-			// will remap types appropriately.
-			sqlDB.Exec(t, `BACKUP TABLE d.s.t2 TO $1`, LocalFoo+"/2")
-			sqlDB.Exec(t, `DROP TABLE d.s.t2`)
-			sqlDB.Exec(t, `RESTORE TABLE d.s.t2 FROM $1`, LocalFoo+"/2")
-			sqlDB.CheckQueryResults(t, `SELECT 'hello'::d.s.greeting, ARRAY['hello']::d.s.greeting[]`, [][]string{{"hello", "{hello}"}})
-			sqlDB.CheckQueryResults(t, `SELECT * FROM d.s.t2 ORDER BY x`, [][]string{{"{hello}"}})
-		}
-
-		{
-			// Create another database with compatible types.
-			sqlDB.Exec(t, `CREATE DATABASE d2`)
-			sqlDB.Exec(t, `CREATE SCHEMA d2.s`)
-			sqlDB.Exec(t, `CREATE TYPE d2.s.greeting AS ENUM ('hello', 'howdy', 'hi')`)
-
-			// Now restore t into this database. It should remap d.greeting to d2.greeting.
-			sqlDB.Exec(t, `RESTORE TABLE d.s.t FROM $1 WITH into_db = 'd2'`, LocalFoo+"/1")
-			// d.t should be added as a back reference to greeting.
-			sqlDB.ExpectErr(t, `pq: cannot drop type "greeting" because other objects \(.*\) still depend on it`, `DROP TYPE d2.s.greeting`)
-		}
-	})
-
 	t.Run("incremental", func(t *testing.T) {
 		_, _, sqlDB, _, cleanupFn := BackupRestoreTestSetup(t, singleNode, 0, InitManualReplication)
 		defer cleanupFn()
@@ -3109,6 +3048,8 @@ func TestBackupRestoreDuringUserDefinedTypeChange(t *testing.T) {
 
 			// Create a database with a type.
 			sqlDB.Exec(t, `
+SET CLUSTER SETTING sql.defaults.drop_enum_value.enabled = true;
+SET enable_drop_enum_value = true;
 CREATE DATABASE d;
 CREATE TYPE d.greeting AS ENUM ('hello', 'howdy', 'hi');
 `)
@@ -7452,7 +7393,8 @@ func TestBackupExportRequestTimeout(t *testing.T) {
 	// should hang. The timeout should save us in this case.
 	_, err := sqlSessions[1].DB.ExecContext(ctx, "BACKUP data.bank TO 'nodelocal://0/timeout'")
 	require.True(t, testutils.IsError(err,
-		"timeout: operation \"ExportRequest for span /Table/53/.*\" timed out after 3s"))
+		"timeout: operation \"ExportRequest for span /Table/53/.*\" timed out after 3s: context"+
+			" deadline exceeded"))
 }
 
 func TestBackupDoesNotHangOnIntent(t *testing.T) {
@@ -7518,23 +7460,9 @@ CREATE TABLE db.table (k INT PRIMARY KEY, v db.typ);
 `)
 
 	// Back up the database, drop it, and restore into it.
-	sqlDB.Exec(t, `BACKUP DATABASE db TO 'nodelocal://0/test/1'`)
+	sqlDB.Exec(t, `BACKUP DATABASE db TO 'nodelocal://0/test/'`)
 	sqlDB.Exec(t, `DROP DATABASE db`)
-	sqlDB.ExpectErr(t, "boom", `RESTORE DATABASE db FROM 'nodelocal://0/test/1'`)
-	sqlDB.CheckQueryResults(t, `SELECT count(*) FROM system.namespace WHERE name = 'typ'`, [][]string{{"0"}})
-
-	// Back up database with user defined schema.
-	sqlDB.Exec(t, `
-CREATE DATABASE db;
-CREATE SCHEMA db.s;
-CREATE TYPE db.s.typ AS ENUM();
-CREATE TABLE db.s.table (k INT PRIMARY KEY, v db.s.typ);
-`)
-
-	// Back up the database, drop it, and restore into it.
-	sqlDB.Exec(t, `BACKUP DATABASE db TO 'nodelocal://0/test/2'`)
-	sqlDB.Exec(t, `DROP DATABASE db`)
-	sqlDB.ExpectErr(t, "boom", `RESTORE DATABASE db FROM 'nodelocal://0/test/2'`)
+	sqlDB.ExpectErr(t, "boom", `RESTORE DATABASE db FROM 'nodelocal://0/test/'`)
 	sqlDB.CheckQueryResults(t, `SELECT count(*) FROM system.namespace WHERE name = 'typ'`, [][]string{{"0"}})
 }
 
@@ -8624,7 +8552,7 @@ func TestBackupWorkerFailure(t *testing.T) {
 // Regression test for #66797 ensuring that the span merging optimization
 // doesn't produce an error when there are span-merging opportunities on
 // descriptor revisions from before the GC threshold of the table.
-func TestSpanMergeingBeforeGCThreshold(t *testing.T) {
+func TestSpanMergingBeforeGCThreshold(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
@@ -8832,9 +8760,11 @@ DROP TABLE foo;
 	sqlDBRestore.Exec(t, "RESTORE FROM $1 AS OF SYSTEM TIME "+aost, LocalFoo)
 }
 
-// TestRestoreNewDatabaseName tests the new_db_name optional feature for single database
-//restores, which allows the user to rename the database they intend to restore.
-func TestRestoreNewDatabaseName(t *testing.T) {
+// TestRestoreRemappingOfExistingUDTInColExpr is a regression test for a nil
+// pointer exception when restoring tables that point to existing types. When
+// updating the back references of the existing types we would index into a map
+// keyed on pre-rewrite IDs using a post rewrite ID.
+func TestRestoreRemappingOfExistingUDTInColExpr(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
@@ -8842,46 +8772,13 @@ func TestRestoreNewDatabaseName(t *testing.T) {
 	_, _, sqlDB, _, cleanupFn := BackupRestoreTestSetup(t, singleNode, numAccounts, InitManualReplication)
 	defer cleanupFn()
 
-	sqlDB.Exec(t, `CREATE DATABASE fkdb`)
-	sqlDB.Exec(t, `CREATE TABLE fkdb.fk (ind INT)`)
-
-	for i := 0; i < 10; i++ {
-		sqlDB.Exec(t, `INSERT INTO fkdb.fk (ind) VALUES ($1)`, i)
-	}
-	sqlDB.Exec(t, `BACKUP TO $1`, LocalFoo)
-
-	// Ensure restore fails with new_db_name on cluster, table, and multiple database restores
-	t.Run("new_db_name syntax checks", func(t *testing.T) {
-
-		expectedErr := "new_db_name can only be used for RESTORE DATABASE with a single target database"
-
-		sqlDB.ExpectErr(t, expectedErr, "RESTORE FROM $1 with new_db_name = 'new_fkdb'", LocalFoo)
-
-		sqlDB.ExpectErr(t, expectedErr, "RESTORE DATABASE fkdb, "+
-			"data FROM $1 with new_db_name = 'new_fkdb'", LocalFoo)
-
-		sqlDB.ExpectErr(t, expectedErr, "RESTORE TABLE fkdb.fk FROM $1 with new_db_name = 'new_fkdb'",
-			LocalFoo)
-
-	})
-
-	// Should fail because 'fkbd' database is still in cluster
-	sqlDB.ExpectErr(t, `database "fkdb" already exists`,
-		"RESTORE DATABASE fkdb FROM $1", LocalFoo)
-
-	// Should pass because 'new_fkdb' is not in cluster
-	sqlDB.Exec(t, "RESTORE DATABASE fkdb FROM $1 WITH new_db_name = 'new_fkdb'", LocalFoo)
-
-	// Verify restored database is in cluster with new name
-	sqlDB.CheckQueryResults(t,
-		`SELECT database_name FROM [SHOW DATABASES] WHERE database_name = 'new_fkdb'`,
-		[][]string{{"new_fkdb"}})
-
-	// Verify table was properly restored
-	sqlDB.CheckQueryResults(t, `SELECT count(*) FROM new_fkdb.fk`,
-		[][]string{{"10"}})
-
-	// Should fail because we just restored new_fkbd into cluster
-	sqlDB.ExpectErr(t, `database "new_fkdb" already exists`,
-		"RESTORE DATABASE fkdb FROM $1 WITH new_db_name = 'new_fkdb'", LocalFoo)
+	sqlDB.Exec(t, `
+CREATE TYPE status AS ENUM ('open', 'closed', 'inactive');
+CREATE TABLE foo (id INT PRIMARY KEY, what status default 'open');
+BACKUP DATABASE data to 'nodelocal://0/foo';
+DROP TABLE foo CASCADE;
+DROP TYPE status;
+CREATE TYPE status AS ENUM ('open', 'closed', 'inactive');
+RESTORE TABLE foo FROM 'nodelocal://0/foo';
+`)
 }

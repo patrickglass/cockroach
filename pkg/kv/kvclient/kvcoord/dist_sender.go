@@ -73,25 +73,25 @@ var (
 	}
 	metaTransportSentCount = metric.Metadata{
 		Name:        "distsender.rpc.sent",
-		Help:        "Number of replica-addressed RPCs sent",
+		Help:        "Number of RPCs sent",
 		Measurement: "RPCs",
 		Unit:        metric.Unit_COUNT,
 	}
 	metaTransportLocalSentCount = metric.Metadata{
 		Name:        "distsender.rpc.sent.local",
-		Help:        "Number of replica-addressed RPCs sent through the local-server optimization",
+		Help:        "Number of local RPCs sent",
 		Measurement: "RPCs",
 		Unit:        metric.Unit_COUNT,
 	}
 	metaTransportSenderNextReplicaErrCount = metric.Metadata{
 		Name:        "distsender.rpc.sent.nextreplicaerror",
-		Help:        "Number of replica-addressed RPCs sent due to per-replica errors",
+		Help:        "Number of RPCs sent due to per-replica errors",
 		Measurement: "RPCs",
 		Unit:        metric.Unit_COUNT,
 	}
 	metaDistSenderNotLeaseHolderErrCount = metric.Metadata{
 		Name:        "distsender.errors.notleaseholder",
-		Help:        "Number of NotLeaseHolderErrors encountered from replica-addressed RPCs",
+		Help:        "Number of NotLeaseHolderErrors encountered",
 		Measurement: "Errors",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -108,34 +108,20 @@ var (
 		Unit:        metric.Unit_COUNT,
 	}
 	metaDistSenderSlowRPCs = metric.Metadata{
-		Name: "requests.slow.distsender",
-		Help: `Number of replica-bound RPCs currently stuck or retrying for a long time.
-
-Note that this is not a good signal for KV health. The remote side of the
-RPCs tracked here may experience contention, so an end user can easily
-cause values for this metric to be emitted by leaving a transaction open
-for a long time and contending with it using a second transaction.`,
+		Name:        "requests.slow.distsender",
+		Help:        "Number of RPCs stuck or retrying for a long time",
 		Measurement: "Requests",
 		Unit:        metric.Unit_COUNT,
 	}
 	metaDistSenderMethodCountTmpl = metric.Metadata{
-		Name: "distsender.rpc.%s.sent",
-		Help: `Number of %s requests processed.
-
-This counts the requests in batches handed to DistSender, not the RPCs
-sent to individual Ranges as a result.`,
+		Name:        "distsender.rpc.%s.sent",
+		Help:        "Number of %s requests sent",
 		Measurement: "RPCs",
 		Unit:        metric.Unit_COUNT,
 	}
 	metaDistSenderErrCountTmpl = metric.Metadata{
-		Name: "distsender.rpc.err.%s",
-		Help: `Number of %s errors received replica-bound RPCs
-
-This counts how often error of the specified type was received back from replicas
-as part of executing possibly range-spanning requests. Failures to reach the target
-replica will be accounted for as 'roachpb.CommunicationErrType' and unclassified
-errors as 'roachpb.InternalErrType'.
-`,
+		Name:        "distsender.rpc.err.%s",
+		Help:        "Number of %s errors received",
 		Measurement: "Errors",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -1219,7 +1205,7 @@ func (ds *DistSender) divideAndSendBatchToRanges(
 	// If couldHaveSkippedResponses is set, resumeReason indicates the reason why
 	// the ResumeSpan is necessary. This reason is common to all individual
 	// responses that carry a ResumeSpan.
-	var resumeReason roachpb.ResumeReason
+	var resumeReason roachpb.ResponseHeader_ResumeReason
 	defer func() {
 		if r := recover(); r != nil {
 			// If we're in the middle of a panic, don't wait on responseChs.
@@ -1370,7 +1356,7 @@ func (ds *DistSender) divideAndSendBatchToRanges(
 					ba.TargetBytes -= replyBytes
 					if ba.TargetBytes <= 0 {
 						couldHaveSkippedResponses = true
-						resumeReason = roachpb.RESUME_BYTE_LIMIT
+						resumeReason = roachpb.RESUME_KEY_LIMIT
 						return
 					}
 				}
@@ -1694,7 +1680,7 @@ func fillSkippedResponses(
 	ba roachpb.BatchRequest,
 	br *roachpb.BatchResponse,
 	nextKey roachpb.RKey,
-	resumeReason roachpb.ResumeReason,
+	resumeReason roachpb.ResponseHeader_ResumeReason,
 ) {
 	// Some requests might have no response at all if we used a batch-wide
 	// limit; simply create trivial responses for those. Note that any type

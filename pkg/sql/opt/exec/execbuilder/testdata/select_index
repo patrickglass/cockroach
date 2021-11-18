@@ -1513,18 +1513,22 @@ EXPLAIN (VERBOSE) SELECT * FROM noncover ORDER BY c LIMIT 1000000
 distribution: local
 vectorized: true
 ·
-• top-k
+• limit
 │ columns: (a, b, c, d)
-│ ordering: +c
 │ estimated row count: 1,000 (missing stats)
-│ order: +c
-│ k: 1000000
+│ count: 1000000
 │
-└── • scan
-      columns: (a, b, c, d)
-      estimated row count: 1,000 (missing stats)
-      table: noncover@primary
-      spans: FULL SCAN
+└── • sort
+    │ columns: (a, b, c, d)
+    │ ordering: +c
+    │ estimated row count: 1,000 (missing stats)
+    │ order: +c
+    │
+    └── • scan
+          columns: (a, b, c, d)
+          estimated row count: 1,000 (missing stats)
+          table: noncover@primary
+          spans: FULL SCAN
 
 # ------------------------------------------------------------------------------
 # These tests verify that while we are joining an index with the table, we

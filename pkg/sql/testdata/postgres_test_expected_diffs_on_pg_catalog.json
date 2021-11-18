@@ -2,10 +2,10 @@
   "pgVersion": "13.3",
   "diffSummary": {
     "TotalTables": 129,
-    "TotalColumns": 1192,
-    "MissingTables": 0,
-    "MissingColumns": 0,
-    "DatatypeMismatches": 19
+    "TotalColumns": 1130,
+    "MissingTables": 4,
+    "MissingColumns": 1,
+    "DatatypeMismatches": 20
   },
   "pgMetadata": {
     "pg_am": {
@@ -15,6 +15,9 @@
         "expectedOid": 24,
         "expectedDataType": "regproc"
       }
+    },
+    "pg_attribute": {
+      "attmissingval": null
     },
     "pg_collation": {
       "collcollate": {
@@ -143,7 +146,24 @@
         "expectedOid": 23,
         "expectedDataType": "int4"
       }
+    },
+    "pg_statistic": {},
+    "pg_statistic_ext_data": {},
+    "pg_stats": {},
+    "pg_stats_ext": {},
+    "pg_user": {
+      "valuntil": {
+        "oid": 1114,
+        "dataType": "timestamp",
+        "expectedOid": 1184,
+        "expectedDataType": "timestamptz"
+      }
     }
   },
-  "unimplementedTypes": null
+  "unimplementedTypes": {
+    "2277": "anyarray",
+    "3361": "pg_ndistinct",
+    "3402": "pg_dependencies",
+    "5017": "pg_mcv_list"
+  }
 }

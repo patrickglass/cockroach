@@ -1784,7 +1784,7 @@ CREATE INDEX idx ON p (i) WHERE s = 'foo'
 memo expect-not=GenerateConstrainedScans
 SELECT i FROM p WHERE s = 'bar' AND i = 5
 ----
-memo (optimized, ~8KB, required=[presentation: i:2])
+memo (optimized, ~7KB, required=[presentation: i:2])
  ├── G1: (project G2 G3 i)
  │    └── [presentation: i:2]
  │         ├── best: (project G2 G3 i)
@@ -5183,6 +5183,8 @@ CREATE TABLE pqr
     r INT,
     s STRING,
     t STRING,
+    u STRING NOT NULL,
+    v STRING,
     INDEX q (q),
     INDEX r (r),
     INDEX s (s) STORING (r),
@@ -5269,22 +5271,22 @@ memo (optimized, ~13KB, required=[presentation: q:2,r:3])
  ├── G2: (scan pqr,cols=(2,3))
  │    └── []
  │         ├── best: (scan pqr,cols=(2,3))
- │         └── cost: 10724.72
+ │         └── cost: 10924.92
  ├── G3: (filters G9 G10)
  ├── G4: (index-join G11 pqr,cols=(2,3))
  │    └── []
  │         ├── best: (index-join G11 pqr,cols=(2,3))
- │         └── cost: 84.50
+ │         └── cost: 84.70
  ├── G5: (filters G10)
  ├── G6: (index-join G12 pqr,cols=(2,3))
  │    └── []
  │         ├── best: (index-join G12 pqr,cols=(2,3))
- │         └── cost: 725.04
+ │         └── cost: 727.04
  ├── G7: (filters G9)
  ├── G8: (index-join G13 pqr,cols=(2,3))
  │    └── []
  │         ├── best: (index-join G13 pqr,cols=(2,3))
- │         └── cost: 726.04
+ │         └── cost: 728.04
  ├── G9: (eq G14 G15)
  ├── G10: (eq G16 G17)
  ├── G11: (scan pqr@q,cols=(1,2),constrained)
@@ -5346,26 +5348,26 @@ memo (optimized, ~15KB, required=[presentation: q:2,r:3,s:4])
  ├── G1: (select G2 G3) (select G4 G5) (select G6 G7) (select G8 G7) (lookup-join G9 G10 pqr,keyCols=[1],outCols=(2-4))
  │    └── [presentation: q:2,r:3,s:4]
  │         ├── best: (lookup-join G9 G10 pqr,keyCols=[1],outCols=(2-4))
- │         └── cost: 17.49
+ │         └── cost: 17.51
  ├── G2: (scan pqr,cols=(2-4))
  │    └── []
  │         ├── best: (scan pqr,cols=(2-4))
- │         └── cost: 10824.82
+ │         └── cost: 11025.02
  ├── G3: (filters G11 G12)
  ├── G4: (index-join G13 pqr,cols=(2-4))
  │    └── []
  │         ├── best: (index-join G13 pqr,cols=(2-4))
- │         └── cost: 84.60
+ │         └── cost: 84.80
  ├── G5: (filters G12)
  ├── G6: (index-join G14 pqr,cols=(2-4))
  │    └── []
  │         ├── best: (index-join G14 pqr,cols=(2-4))
- │         └── cost: 726.04
+ │         └── cost: 728.04
  ├── G7: (filters G11)
  ├── G8: (index-join G15 pqr,cols=(2-4))
  │    └── []
  │         ├── best: (index-join G15 pqr,cols=(2-4))
- │         └── cost: 727.04
+ │         └── cost: 729.04
  ├── G9: (zigzag-join G3 pqr@q pqr@r)
  │    └── []
  │         ├── best: (zigzag-join G3 pqr@q pqr@r)
@@ -5415,17 +5417,17 @@ memo (optimized, ~11KB, required=[presentation: q:2,s:4])
  ├── G2: (scan pqr,cols=(2,4))
  │    └── []
  │         ├── best: (scan pqr,cols=(2,4))
- │         └── cost: 10724.72
+ │         └── cost: 10924.92
  ├── G3: (filters G8 G9)
  ├── G4: (index-join G10 pqr,cols=(2,4))
  │    └── []
  │         ├── best: (index-join G10 pqr,cols=(2,4))
- │         └── cost: 84.50
+ │         └── cost: 84.70
  ├── G5: (filters G9)
  ├── G6: (index-join G11 pqr,cols=(2,4))
  │    └── []
  │         ├── best: (index-join G11 pqr,cols=(2,4))
- │         └── cost: 7134.04
+ │         └── cost: 7154.04
  ├── G7: (filters G8)
  ├── G8: (eq G12 G13)
  ├── G9: (eq G14 G15)
@@ -5442,15 +5444,41 @@ memo (optimized, ~11KB, required=[presentation: q:2,s:4])
  ├── G14: (variable s)
  └── G15: (const 'foo')
 
-# Zigzag with implicit equality column in addition to primary key:
-# indexes on (r,s) and (t,s) should be chosen even though s is not being fixed
-# in the ON clause.
+# A zig-zag join cannot be planned on rs and ts because s is nullable, so it
+# cannot be an implicit equality column.
+opt expect-not=GenerateZigzagJoins
+SELECT r,t FROM pqr WHERE r = 1 AND t = 'foo'
+----
+select
+ ├── columns: r:3!null t:5!null
+ ├── fd: ()-->(3,5)
+ ├── index-join pqr
+ │    ├── columns: r:3 t:5
+ │    ├── fd: ()-->(5)
+ │    └── scan pqr@ts
+ │         ├── columns: p:1!null t:5!null
+ │         ├── constraint: /5/4/1: [/'foo' - /'foo']
+ │         ├── key: (1)
+ │         └── fd: ()-->(5)
+ └── filters
+      └── r:3 = 1 [outer=(3), constraints=(/3: [/1 - /1]; tight), fd=()-->(3)]
+
+exec-ddl
+CREATE INDEX ru ON pqr (r, u)
+----
+
+exec-ddl
+CREATE INDEX tu ON pqr (t, u)
+----
+
+# A zig-zag join can be planned on ru and tu because u is non-nullable, so it
+# is an implicit equality column in addition to the primary key.
 opt expect=GenerateZigzagJoins
 SELECT r,t FROM pqr WHERE r = 1 AND t = 'foo'
 ----
-inner-join (zigzag pqr@rs pqr@ts)
+inner-join (zigzag pqr@ru pqr@tu)
  ├── columns: r:3!null t:5!null
- ├── eq columns: [4 1] = [4 1]
+ ├── eq columns: [6 1] = [6 1]
  ├── left fixed columns: [3] = [1]
  ├── right fixed columns: [5] = ['foo']
  ├── fd: ()-->(3,5)
@@ -5458,51 +5486,40 @@ inner-join (zigzag pqr@rs pqr@ts)
       ├── r:3 = 1 [outer=(3), constraints=(/3: [/1 - /1]; tight), fd=()-->(3)]
       └── t:5 = 'foo' [outer=(5), constraints=(/5: [/'foo' - /'foo']; tight), fd=()-->(5)]
 
-memo expect=GenerateZigzagJoins
-SELECT r,t FROM pqr WHERE r = 1 AND t = 'foo'
+exec-ddl
+DROP INDEX ru
 ----
-memo (optimized, ~13KB, required=[presentation: r:3,t:5])
- ├── G1: (select G2 G3) (select G4 G5) (select G6 G5) (select G7 G8) (zigzag-join G3 pqr@rs pqr@ts)
- │    └── [presentation: r:3,t:5]
- │         ├── best: (zigzag-join G3 pqr@rs pqr@ts)
- │         └── cost: 11.96
- ├── G2: (scan pqr,cols=(3,5))
- │    └── []
- │         ├── best: (scan pqr,cols=(3,5))
- │         └── cost: 10724.72
- ├── G3: (filters G9 G10)
- ├── G4: (index-join G11 pqr,cols=(3,5))
- │    └── []
- │         ├── best: (index-join G11 pqr,cols=(3,5))
- │         └── cost: 725.04
- ├── G5: (filters G10)
- ├── G6: (index-join G12 pqr,cols=(3,5))
- │    └── []
- │         ├── best: (index-join G12 pqr,cols=(3,5))
- │         └── cost: 726.04
- ├── G7: (index-join G13 pqr,cols=(3,5))
- │    └── []
- │         ├── best: (index-join G13 pqr,cols=(3,5))
- │         └── cost: 84.60
- ├── G8: (filters G9)
- ├── G9: (eq G14 G15)
- ├── G10: (eq G16 G17)
- ├── G11: (scan pqr@r,cols=(1,3),constrained)
- │    └── []
- │         ├── best: (scan pqr@r,cols=(1,3),constrained)
- │         └── cost: 118.02
- ├── G12: (scan pqr@rs,cols=(1,3),constrained)
- │    └── []
- │         ├── best: (scan pqr@rs,cols=(1,3),constrained)
- │         └── cost: 119.02
- ├── G13: (scan pqr@ts,cols=(1,5),constrained)
- │    └── []
- │         ├── best: (scan pqr@ts,cols=(1,5),constrained)
- │         └── cost: 24.43
- ├── G14: (variable r)
- ├── G15: (const 1)
- ├── G16: (variable t)
- └── G17: (const 'foo')
+
+exec-ddl
+DROP INDEX tu
+----
+
+exec-ddl
+CREATE INDEX tv ON pqr (t, v)
+----
+
+# A zig-zag join can be planned on rs and tv even though s and v are nullable
+# because they are explicit equality columns. The query filters out rows where s
+# IS NULL or v IS NULL.
+opt expect=GenerateZigzagJoins
+SELECT r,t FROM pqr WHERE r = 1 AND t = 'foo' AND s = v
+----
+project
+ ├── columns: r:3!null t:5!null
+ ├── fd: ()-->(3,5)
+ └── inner-join (zigzag pqr@rs pqr@tv)
+      ├── columns: r:3!null s:4!null t:5!null v:7!null
+      ├── eq columns: [4 1] = [7 1]
+      ├── left fixed columns: [3] = [1]
+      ├── right fixed columns: [5] = ['foo']
+      ├── fd: ()-->(3,5), (4)==(7), (7)==(4)
+      └── filters
+           ├── r:3 = 1 [outer=(3), constraints=(/3: [/1 - /1]; tight), fd=()-->(3)]
+           └── t:5 = 'foo' [outer=(5), constraints=(/5: [/'foo' - /'foo']; tight), fd=()-->(5)]
+
+exec-ddl
+DROP INDEX tv
+----
 
 # Zigzag with choice between indexes for multiple equality predicates.
 opt expect=GenerateZigzagJoins
@@ -5903,27 +5920,27 @@ memo (optimized, ~31KB, required=[presentation: p:1,q:2,r:3,s:4])
  ├── G2: (scan pqr,cols=(1-4))
  │    └── []
  │         ├── best: (scan pqr,cols=(1-4))
- │         └── cost: 10924.92
+ │         └── cost: 11125.12
  ├── G3: (filters G14 G15 G16)
  ├── G4: (index-join G17 pqr,cols=(1-4))
  │    └── []
  │         ├── best: (index-join G17 pqr,cols=(1-4))
- │         └── cost: 84.60
+ │         └── cost: 84.80
  ├── G5: (filters G15 G16)
  ├── G6: (index-join G18 pqr,cols=(1-4))
  │    └── []
  │         ├── best: (index-join G18 pqr,cols=(1-4))
- │         └── cost: 726.04
+ │         └── cost: 728.04
  ├── G7: (filters G14 G16)
  ├── G8: (index-join G19 pqr,cols=(1-4))
  │    └── []
  │         ├── best: (index-join G19 pqr,cols=(1-4))
- │         └── cost: 1144.77
+ │         └── cost: 1144.97
  ├── G9: (filters G14)
  ├── G10: (index-join G20 pqr,cols=(1-4))
  │    └── []
  │         ├── best: (index-join G20 pqr,cols=(1-4))
- │         └── cost: 85.34
+ │         └── cost: 85.54
  ├── G11: (zigzag-join G21 pqr@q pqr@r)
  │    └── []
  │         ├── best: (zigzag-join G21 pqr@q pqr@r)
@@ -5991,21 +6008,21 @@ memo (optimized, ~9KB, required=[presentation: q:2,t:5])
  ├── G1: (select G2 G3) (select G4 G5) (select G6 G7)
  │    └── [presentation: q:2,t:5]
  │         ├── best: (select G4 G5)
- │         └── cost: 84.63
+ │         └── cost: 84.83
  ├── G2: (scan pqr,cols=(2,5))
  │    └── []
  │         ├── best: (scan pqr,cols=(2,5))
- │         └── cost: 10724.72
+ │         └── cost: 10924.92
  ├── G3: (filters G8 G9)
  ├── G4: (index-join G10 pqr,cols=(2,5))
  │    └── []
  │         ├── best: (index-join G10 pqr,cols=(2,5))
- │         └── cost: 84.50
+ │         └── cost: 84.70
  ├── G5: (filters G9)
  ├── G6: (index-join G11 pqr,cols=(2,5))
  │    └── []
  │         ├── best: (index-join G11 pqr,cols=(2,5))
- │         └── cost: 84.60
+ │         └── cost: 84.80
  ├── G7: (filters G8)
  ├── G8: (eq G12 G13)
  ├── G9: (eq G14 G15)
@@ -6066,122 +6083,6 @@ select
  │         └── fd: ()-->(2)
  └── filters
       └── r:3 = 2 [outer=(3), constraints=(/3: [/2 - /2]; tight), fd=()-->(3)]
-
-# Zigzag join hinting tests
-exec-ddl
-CREATE TABLE zigzag
-(
-    n INT PRIMARY KEY,
-    a INT,
-    b INT,
-    c STRING,
-    INDEX a_idx(a),
-    INDEX b_idx(b),
-    UNIQUE INDEX c_idx(b,c),
-    INDEX bc_idx(b,c)
-)
-----
-
-# Verify naked hint.
-opt
-SELECT * FROM zigzag@{FORCE_ZIGZAG} WHERE a = 3 AND b = 7;
-----
-inner-join (lookup zigzag)
- ├── columns: n:1!null a:2!null b:3!null c:4
- ├── key columns: [1] = [1]
- ├── lookup columns are key
- ├── key: (1)
- ├── fd: ()-->(2,3), (1)-->(4), (3,4)~~>(1)
- ├── inner-join (zigzag zigzag@a_idx zigzag@b_idx)
- │    ├── columns: n:1!null a:2!null b:3!null
- │    ├── eq columns: [1] = [1]
- │    ├── left fixed columns: [2] = [3]
- │    ├── right fixed columns: [3] = [7]
- │    ├── fd: ()-->(2,3)
- │    └── filters
- │         ├── a:2 = 3 [outer=(2), constraints=(/2: [/3 - /3]; tight), fd=()-->(2)]
- │         └── b:3 = 7 [outer=(3), constraints=(/3: [/7 - /7]; tight), fd=()-->(3)]
- └── filters (true)
-
-# Verify plan with one index.
-opt
-SELECT * FROM zigzag@{FORCE_ZIGZAG=a_idx} WHERE a = 3 AND b = 7;
-----
-inner-join (lookup zigzag)
- ├── columns: n:1!null a:2!null b:3!null c:4
- ├── key columns: [1] = [1]
- ├── lookup columns are key
- ├── key: (1)
- ├── fd: ()-->(2,3), (1)-->(4), (3,4)~~>(1)
- ├── inner-join (zigzag zigzag@a_idx zigzag@b_idx)
- │    ├── columns: n:1!null a:2!null b:3!null
- │    ├── eq columns: [1] = [1]
- │    ├── left fixed columns: [2] = [3]
- │    ├── right fixed columns: [3] = [7]
- │    ├── fd: ()-->(2,3)
- │    └── filters
- │         ├── a:2 = 3 [outer=(2), constraints=(/2: [/3 - /3]; tight), fd=()-->(2)]
- │         └── b:3 = 7 [outer=(3), constraints=(/3: [/7 - /7]; tight), fd=()-->(3)]
- └── filters (true)
-
-# Verify plan with other index.
-opt
-SELECT * FROM zigzag@{FORCE_ZIGZAG=b_idx} WHERE a = 3 AND b = 7;
-----
-inner-join (lookup zigzag)
- ├── columns: n:1!null a:2!null b:3!null c:4
- ├── key columns: [1] = [1]
- ├── lookup columns are key
- ├── key: (1)
- ├── fd: ()-->(2,3), (1)-->(4), (3,4)~~>(1)
- ├── inner-join (zigzag zigzag@a_idx zigzag@b_idx)
- │    ├── columns: n:1!null a:2!null b:3!null
- │    ├── eq columns: [1] = [1]
- │    ├── left fixed columns: [2] = [3]
- │    ├── right fixed columns: [3] = [7]
- │    ├── fd: ()-->(2,3)
- │    └── filters
- │         ├── a:2 = 3 [outer=(2), constraints=(/2: [/3 - /3]; tight), fd=()-->(2)]
- │         └── b:3 = 7 [outer=(3), constraints=(/3: [/7 - /7]; tight), fd=()-->(3)]
- └── filters (true)
-
-# Verify plan with both indexes hinted.
-opt
-SELECT * FROM zigzag@{FORCE_ZIGZAG=a_idx,FORCE_ZIGZAG=b_idx} WHERE a = 3 AND b = 7;
-----
-inner-join (lookup zigzag)
- ├── columns: n:1!null a:2!null b:3!null c:4
- ├── key columns: [1] = [1]
- ├── lookup columns are key
- ├── key: (1)
- ├── fd: ()-->(2,3), (1)-->(4), (3,4)~~>(1)
- ├── inner-join (zigzag zigzag@a_idx zigzag@b_idx)
- │    ├── columns: n:1!null a:2!null b:3!null
- │    ├── eq columns: [1] = [1]
- │    ├── left fixed columns: [2] = [3]
- │    ├── right fixed columns: [3] = [7]
- │    ├── fd: ()-->(2,3)
- │    └── filters
- │         ├── a:2 = 3 [outer=(2), constraints=(/2: [/3 - /3]; tight), fd=()-->(2)]
- │         └── b:3 = 7 [outer=(3), constraints=(/3: [/7 - /7]; tight), fd=()-->(3)]
- └── filters (true)
-
-# Verify force selection when there's multiple valid choices.
-opt
-SELECT * FROM zigzag@{FORCE_ZIGZAG=a_idx,FORCE_ZIGZAG=bc_idx} WHERE a = 3 AND b = 7;
-----
-select
- ├── columns: n:1!null a:2!null b:3!null c:4
- ├── key: (1)
- ├── fd: ()-->(2,3), (1)-->(4), (3,4)~~>(1)
- ├── scan zigzag
- │    ├── columns: n:1!null a:2 b:3 c:4
- │    ├── flags: force-zigzag=a_idx,bc_idx
- │    ├── key: (1)
- │    └── fd: (1)-->(2-4), (3,4)~~>(1,2)
- └── filters
-      ├── a:2 = 3 [outer=(2), constraints=(/2: [/3 - /3]; tight), fd=()-->(2)]
-      └── b:3 = 7 [outer=(3), constraints=(/3: [/7 - /7]; tight), fd=()-->(3)]
 
 # --------------------------------------------------
 # GenerateInvertedIndexZigzagJoins
@@ -6499,56 +6400,6 @@ project
       │              └── b
       └── filters
            └── j @> '{"a": 1, "b": 2}'
-
-# Generate a zigzag join with a hint.
-opt expect=GenerateInvertedIndexZigzagJoins
-SELECT k FROM inv_zz_partial@{FORCE_ZIGZAG} WHERE j @> '{"a": 1, "b": 2}' AND b AND s = 'foo'
-----
-project
- ├── columns: k:1!null
- ├── immutable
- ├── key: (1)
- └── inner-join (lookup inv_zz_partial)
-      ├── columns: k:1!null j:2!null b:3!null s:4!null
-      ├── key columns: [1] = [1]
-      ├── lookup columns are key
-      ├── immutable
-      ├── key: (1)
-      ├── fd: ()-->(3,4), (1)-->(2)
-      ├── inner-join (zigzag inv_zz_partial@zz_idx,partial inv_zz_partial@zz_idx,partial)
-      │    ├── columns: k:1!null
-      │    ├── eq columns: [1] = [1]
-      │    ├── left fixed columns: [7] = ['\x376100012a0200']
-      │    ├── right fixed columns: [7] = ['\x376200012a0400']
-      │    └── filters (true)
-      └── filters
-           ├── j:2 @> '{"a": 1, "b": 2}' [outer=(2), immutable, constraints=(/2: (/NULL - ])]
-           └── s:4 = 'foo' [outer=(4), constraints=(/4: [/'foo' - /'foo']; tight), fd=()-->(4)]
-
-# Generate an inverted zigzag join with a hint.
-opt expect=GenerateInvertedIndexZigzagJoins
-SELECT k FROM inv_zz_partial@{FORCE_ZIGZAG=zz_idx} WHERE j @> '{"a": 1, "b": 2}' AND b AND s = 'foo'
-----
-project
- ├── columns: k:1!null
- ├── immutable
- ├── key: (1)
- └── inner-join (lookup inv_zz_partial)
-      ├── columns: k:1!null j:2!null b:3!null s:4!null
-      ├── key columns: [1] = [1]
-      ├── lookup columns are key
-      ├── immutable
-      ├── key: (1)
-      ├── fd: ()-->(3,4), (1)-->(2)
-      ├── inner-join (zigzag inv_zz_partial@zz_idx,partial inv_zz_partial@zz_idx,partial)
-      │    ├── columns: k:1!null
-      │    ├── eq columns: [1] = [1]
-      │    ├── left fixed columns: [7] = ['\x376100012a0200']
-      │    ├── right fixed columns: [7] = ['\x376200012a0400']
-      │    └── filters (true)
-      └── filters
-           ├── j:2 @> '{"a": 1, "b": 2}' [outer=(2), immutable, constraints=(/2: (/NULL - ])]
-           └── s:4 = 'foo' [outer=(4), constraints=(/4: [/'foo' - /'foo']; tight), fd=()-->(4)]
 
 exec-ddl
 DROP INDEX zz_idx
@@ -7904,7 +7755,7 @@ JOIN t61795 AS t2 ON t1.c = t1.b AND t1.b = t2.b
 WHERE t1.a = 10 OR t2.b != abs(t2.b)
 ORDER BY t1.b ASC
 ----
-memo (optimized, ~29KB, required=[presentation: a:1] [ordering: +2])
+memo (optimized, ~28KB, required=[presentation: a:1] [ordering: +2])
  ├── G1: (project G2 G3 a b)
  │    ├── [presentation: a:1] [ordering: +2]
  │    │    ├── best: (sort G1)

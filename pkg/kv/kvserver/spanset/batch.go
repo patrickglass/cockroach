@@ -212,9 +212,9 @@ func (i *MVCCIterator) FindSplitKey(
 
 // CheckForKeyCollisions is part of the storage.MVCCIterator interface.
 func (i *MVCCIterator) CheckForKeyCollisions(
-	sstData []byte, start, end roachpb.Key,
+	sstData []byte, start, end roachpb.Key, maxIntents int64,
 ) (enginepb.MVCCStats, error) {
-	return i.i.CheckForKeyCollisions(sstData, start, end)
+	return i.i.CheckForKeyCollisions(sstData, start, end, maxIntents)
 }
 
 // SetUpperBound is part of the storage.MVCCIterator interface.
@@ -418,9 +418,16 @@ func (s spanSetReader) Closed() bool {
 
 // ExportMVCCToSst is part of the storage.Reader interface.
 func (s spanSetReader) ExportMVCCToSst(
-	ctx context.Context, exportOptions storage.ExportOptions, dest io.Writer,
+	ctx context.Context,
+	startKey, endKey roachpb.Key,
+	startTS, endTS, firstKeyTS hlc.Timestamp,
+	exportAllRevisions bool,
+	targetSize, maxSize uint64,
+	stopMidKey, useTBI bool,
+	dest io.Writer,
 ) (roachpb.BulkOpSummary, roachpb.Key, hlc.Timestamp, error) {
-	return s.r.ExportMVCCToSst(ctx, exportOptions, dest)
+	return s.r.ExportMVCCToSst(ctx, startKey, endKey, startTS, endTS, firstKeyTS, exportAllRevisions, targetSize,
+		maxSize, stopMidKey, useTBI, dest)
 }
 
 func (s spanSetReader) MVCCGet(key storage.MVCCKey) ([]byte, error) {

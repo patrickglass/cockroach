@@ -539,6 +539,7 @@ func (b *Builder) buildScan(
 	if indexFlags != nil {
 		private.Flags.NoIndexJoin = indexFlags.NoIndexJoin
 		private.Flags.NoZigzagJoin = indexFlags.NoZigzagJoin
+		private.Flags.NoFullScan = indexFlags.NoFullScan
 		if indexFlags.Index != "" || indexFlags.IndexID != 0 {
 			idx := -1
 			for i := 0; i < tab.IndexCount(); i++ {
@@ -562,45 +563,6 @@ func (b *Builder) buildScan(
 			private.Flags.ForceIndex = true
 			private.Flags.Index = idx
 			private.Flags.Direction = indexFlags.Direction
-		}
-		private.Flags.ForceZigzag = indexFlags.ForceZigzag
-		if len(indexFlags.ZigzagIndexes) > 0 {
-			private.Flags.ForceZigzag = true
-			for _, name := range indexFlags.ZigzagIndexes {
-				var found bool
-				for i := 0; i < tab.IndexCount(); i++ {
-					if tab.Index(i).Name() == tree.Name(name) {
-						if private.Flags.ZigzagIndexes.Contains(i) {
-							panic(pgerror.New(pgcode.DuplicateObject, "FORCE_ZIGZAG index duplicated"))
-						}
-						private.Flags.ZigzagIndexes.Add(i)
-						found = true
-						break
-					}
-				}
-				if !found {
-					panic(pgerror.Newf(pgcode.UndefinedObject, "index %q not found", tree.ErrString(&name)))
-				}
-			}
-		}
-		if len(indexFlags.ZigzagIndexIDs) > 0 {
-			private.Flags.ForceZigzag = true
-			for _, id := range indexFlags.ZigzagIndexIDs {
-				var found bool
-				for i := 0; i < tab.IndexCount(); i++ {
-					if tab.Index(i).ID() == cat.StableID(id) {
-						if private.Flags.ZigzagIndexes.Contains(i) {
-							panic(pgerror.New(pgcode.DuplicateObject, "FORCE_ZIGZAG index duplicated"))
-						}
-						private.Flags.ZigzagIndexes.Add(i)
-						found = true
-						break
-					}
-				}
-				if !found {
-					panic(pgerror.Newf(pgcode.UndefinedObject, "index [%d] not found", id))
-				}
-			}
 		}
 	}
 	if locking.isSet() {
@@ -1204,6 +1166,7 @@ func (b *Builder) exprIsLateral(t tree.TableExpr) bool {
 	}
 	// Expressions which explicitly use the LATERAL keyword are lateral.
 	if ate.Lateral {
+		telemetry.Inc(sqltelemetry.LateralJoinUseCounter)
 		return true
 	}
 	// SRFs are always lateral.

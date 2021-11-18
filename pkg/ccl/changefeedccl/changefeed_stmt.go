@@ -84,6 +84,14 @@ func changefeedPlanHook(
 		return nil, nil, nil, false, nil
 	}
 
+	if err := featureflag.CheckEnabled(
+		ctx,
+		p.ExecCfg(),
+		featureChangefeedEnabled,
+		"CHANGEFEED",
+	); err != nil {
+		return nil, nil, nil, false, err
+	}
 	var sinkURIFn func() (string, error)
 	var header colinfo.ResultColumns
 	unspecifiedSink := changefeedStmt.SinkURI == nil
@@ -123,22 +131,6 @@ func changefeedPlanHook(
 	fn := func(ctx context.Context, _ []sql.PlanNode, resultsCh chan<- tree.Datums) error {
 		ctx, span := tracing.ChildSpan(ctx, stmt.StatementTag())
 		defer span.Finish()
-
-		if err := featureflag.CheckEnabled(
-			ctx,
-			p.ExecCfg(),
-			featureChangefeedEnabled,
-			"CHANGEFEED",
-		); err != nil {
-			return err
-		}
-
-		// Changefeeds are based on the Rangefeed abstraction, which
-		// requires the `kv.rangefeed.enabled` setting to be true.
-		if !kvserver.RangefeedEnabled.Get(&p.ExecCfg().Settings.SV) {
-			return errors.Errorf("rangefeeds require the kv.rangefeed.enabled setting. See %s",
-				docs.URL(`change-data-capture.html#enable-rangefeeds-to-reduce-latency`))
-		}
 
 		ok, err := p.HasRoleOption(ctx, roleoption.CONTROLCHANGEFEED)
 		if err != nil {
@@ -219,11 +211,6 @@ func changefeedPlanHook(
 		targetDescs, _, err := backupresolver.ResolveTargetsToDescriptors(
 			ctx, p, statementTime, &changefeedStmt.Targets)
 		if err != nil {
-			var m *backupresolver.MissingTableErr
-			if errors.As(err, &m) {
-				tableName := m.GetTableName()
-				err = errors.Errorf("table %q does not exist", tableName)
-			}
 			err = errors.Wrap(err, "failed to resolve targets in the CHANGEFEED stmt")
 			if !initialHighWater.IsEmpty() {
 				// We specified cursor -- it is possible the targets do not exist at that time.
@@ -348,6 +335,12 @@ func changefeedPlanHook(
 			return changefeedbase.MaybeStripRetryableErrorMarker(err)
 		}
 
+		// Changefeeds are based on the Rangefeed abstraction, which requires the
+		// `kv.rangefeed.enabled` setting to be true.
+		if !kvserver.RangefeedEnabled.Get(&p.ExecCfg().Settings.SV) {
+			return errors.Errorf("rangefeeds require the kv.rangefeed.enabled setting. See %s",
+				docs.URL(`change-data-capture.html#enable-rangefeeds-to-reduce-latency`))
+		}
 		if err := utilccl.CheckEnterpriseEnabled(
 			p.ExecCfg().Settings, p.ExecCfg().ClusterID(), p.ExecCfg().Organization(), "CHANGEFEED",
 		); err != nil {
@@ -742,7 +735,7 @@ func (b *changefeedResumer) resumeWithRetries(
 			return err
 		}
 
-		log.Warningf(ctx, `WARNING: CHANGEFEED job %d encountered retryable error: %v`, jobID, err)
+		log.Warningf(ctx, `CHANGEFEED job %d encountered retryable error: %v`, jobID, err)
 		b.setJobRunningStatus(ctx, "retryable error: %s", err)
 		if metrics, ok := execCfg.JobRegistry.MetricsStruct().Changefeed.(*Metrics); ok {
 			metrics.ErrorRetries.Inc(1)

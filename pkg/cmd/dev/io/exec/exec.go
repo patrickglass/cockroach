@@ -21,7 +21,6 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/alessio/shellescape"
 	"github.com/cockroachdb/cockroach/pkg/cmd/dev/recording"
 )
 
@@ -105,7 +104,7 @@ func (e *Exec) CommandContextInheritingStdStreams(
 ) error {
 	var command string
 	if len(args) > 0 {
-		command = fmt.Sprintf("%s %s", name, shellescape.QuoteCommand(args))
+		command = fmt.Sprintf("%s %s", name, strings.Join(args, " "))
 	} else {
 		command = name
 	}
@@ -157,7 +156,7 @@ func (e *Exec) commandContextImpl(
 ) ([]byte, error) {
 	var command string
 	if len(args) > 0 {
-		command = fmt.Sprintf("%s %s", name, shellescape.QuoteCommand(args))
+		command = fmt.Sprintf("%s %s", name, strings.Join(args, " "))
 	} else {
 		command = name
 	}

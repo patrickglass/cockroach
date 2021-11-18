@@ -12,7 +12,6 @@ package row
 
 import (
 	"context"
-	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -23,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 )
 
@@ -37,8 +37,8 @@ type KVFetcher struct {
 	newSpan       bool
 
 	// Observability fields.
-	// Note: these need to be read via an atomic op.
-	atomics struct {
+	mu struct {
+		syncutil.Mutex
 		bytesRead int64
 	}
 }
@@ -46,7 +46,6 @@ type KVFetcher struct {
 // NewKVFetcher creates a new KVFetcher.
 // If mon is non-nil, this fetcher will track its fetches and must be Closed.
 func NewKVFetcher(
-	ctx context.Context,
 	txn *kv.Txn,
 	spans roachpb.Spans,
 	bsHeader *roachpb.BoundedStalenessHeader,
@@ -86,7 +85,6 @@ func NewKVFetcher(
 	}
 
 	kvBatchFetcher, err := makeKVBatchFetcher(
-		ctx,
 		sendFn,
 		spans,
 		reverse,
@@ -116,7 +114,9 @@ func (f *KVFetcher) GetBytesRead() int64 {
 	if f == nil {
 		return 0
 	}
-	return atomic.LoadInt64(&f.atomics.bytesRead)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mu.bytesRead
 }
 
 // MVCCDecodingStrategy controls if and how the fetcher should decode MVCC
@@ -192,12 +192,9 @@ func (f *KVFetcher) NextKV(
 			return false, kv, false, nil
 		}
 		f.newSpan = true
-		nBytes := len(f.batchResponse)
-		for i := range f.kvs {
-			nBytes += len(f.kvs[i].Key)
-			nBytes += len(f.kvs[i].Value.RawBytes)
-		}
-		atomic.AddInt64(&f.atomics.bytesRead, int64(nBytes))
+		f.mu.Lock()
+		f.mu.bytesRead += int64(len(f.batchResponse))
+		f.mu.Unlock()
 	}
 }
 

@@ -61,8 +61,6 @@ func TestEndTxnUpdatesTransactionRecord(t *testing.T) {
 	restartedAndPushedHeaderTxn := txn.Clone()
 	restartedAndPushedHeaderTxn.Restart(-1, 0, ts2)
 	restartedAndPushedHeaderTxn.WriteTimestamp.Forward(ts3)
-	committedHeaderTxn := txn.Clone()
-	committedHeaderTxn.Status = roachpb.COMMITTED
 
 	pendingRecord := func() *roachpb.TransactionRecord {
 		record := txn.AsRecord()
@@ -831,16 +829,6 @@ func TestEndTxnUpdatesTransactionRecord(t *testing.T) {
 			expError: "TransactionStatusError: already committed (REASON_TXN_COMMITTED)",
 		},
 		{
-			name: "record and header committed, try rollback",
-			// Replica state.
-			existingTxn: committedRecord,
-			// Request state.
-			headerTxn: committedHeaderTxn,
-			commit:    false,
-			// Expected result.
-			expError: "TransactionStatusError: cannot perform EndTxn with txn status COMMITTED (REASON_TXN_COMMITTED)",
-		},
-		{
 			name: "record committed, try stage",
 			// Replica state.
 			existingTxn: committedRecord,
@@ -860,16 +848,6 @@ func TestEndTxnUpdatesTransactionRecord(t *testing.T) {
 			commit:    true,
 			// Expected result.
 			expError: "TransactionStatusError: already committed (REASON_TXN_COMMITTED)",
-		},
-		{
-			name: "record and header committed, try commit",
-			// Replica state.
-			existingTxn: committedRecord,
-			// Request state.
-			headerTxn: committedHeaderTxn,
-			commit:    true,
-			// Expected result.
-			expError: "TransactionStatusError: cannot perform EndTxn with txn status COMMITTED (REASON_TXN_COMMITTED)",
 		},
 		{
 			name: "record aborted, try stage",

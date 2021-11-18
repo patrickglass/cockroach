@@ -92,13 +92,13 @@ func (s *ColBatchScan) Init(ctx context.Context) {
 	s.Ctx, s.tracingSpan = execinfra.ProcessorSpan(s.Ctx, "colbatchscan")
 	limitBatches := !s.parallelize
 	if err := s.rf.StartScan(
-		s.Ctx,
 		s.flowCtx.Txn,
 		s.spans,
 		s.bsHeader,
 		limitBatches,
 		s.batchBytesLimit,
 		s.limitHint,
+		s.flowCtx.TraceKV,
 		s.flowCtx.EvalCtx.TestingKnobs.ForceProductionBatchSizes,
 	); err != nil {
 		colexecerror.InternalError(err)
@@ -169,11 +169,6 @@ func (s *ColBatchScan) GetCumulativeContentionTime() time.Duration {
 	return execinfra.GetCumulativeContentionTime(s.Ctx)
 }
 
-// GetScanStats is part of the colexecop.KVReader interface.
-func (s *ColBatchScan) GetScanStats() execinfra.ScanStats {
-	return execinfra.GetScanStats(s.Ctx)
-}
-
 var colBatchScanPool = sync.Pool{
 	New: func() interface{} {
 		return &ColBatchScan{}
@@ -205,9 +200,9 @@ func NewColBatchScan(
 	// just setting the ID and Version in the spec or something like that and
 	// retrieving the hydrated immutable from cache.
 	table := spec.BuildTableDescriptor()
-	invertedColumn := tabledesc.FindInvertedColumn(table, spec.InvertedColumn)
+	virtualColumn := tabledesc.FindVirtualColumn(table, spec.VirtualColumn)
 	typs, columnIdxMap, err := retrieveTypsAndColOrds(
-		ctx, flowCtx, evalCtx, table, invertedColumn, spec.Visibility, spec.HasSystemColumns)
+		ctx, flowCtx, evalCtx, table, virtualColumn, spec.Visibility, spec.HasSystemColumns)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +214,7 @@ func NewColBatchScan(
 
 	fetcher, err := initCFetcher(
 		flowCtx, allocator, table, table.ActiveIndexes()[spec.IndexIdx],
-		neededColumns, columnIdxMap, invertedColumn,
+		neededColumns, columnIdxMap, virtualColumn,
 		cFetcherArgs{
 			visibility:        spec.Visibility,
 			lockingStrength:   spec.LockingStrength,
@@ -293,7 +288,7 @@ func retrieveTypsAndColOrds(
 	flowCtx *execinfra.FlowCtx,
 	evalCtx *tree.EvalContext,
 	table catalog.TableDescriptor,
-	invertedCol catalog.Column,
+	virtualCol catalog.Column,
 	visibility execinfrapb.ScanVisibility,
 	hasSystemColumns bool,
 ) ([]*types.T, catalog.TableColMap, error) {
@@ -302,7 +297,7 @@ func retrieveTypsAndColOrds(
 		cols = table.DeletableColumns()
 	}
 	columnIdxMap := catalog.ColumnIDToOrdinalMap(cols)
-	typs := catalog.ColumnTypesWithInvertedCol(cols, invertedCol)
+	typs := catalog.ColumnTypesWithVirtualCol(cols, virtualCol)
 
 	// Add all requested system columns to the output.
 	if hasSystemColumns {
@@ -339,7 +334,6 @@ func (s *ColBatchScan) Release() {
 
 // Close implements the colexecop.Closer interface.
 func (s *ColBatchScan) Close() error {
-	s.rf.Close(s.EnsureCtx())
 	if s.tracingSpan != nil {
 		s.tracingSpan.Finish()
 		s.tracingSpan = nil

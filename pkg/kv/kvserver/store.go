@@ -839,18 +839,11 @@ func NewStore(
 		ctSender: cfg.ClosedTimestampSender,
 	}
 	if cfg.RPCContext != nil {
-		s.allocator = MakeAllocator(
-			cfg.StorePool,
-			cfg.RPCContext.RemoteClocks.Latency,
-			cfg.TestingKnobs.AllocatorKnobs,
-		)
+		s.allocator = MakeAllocator(cfg.StorePool, cfg.RPCContext.RemoteClocks.Latency)
 	} else {
-		s.allocator = MakeAllocator(
-			cfg.StorePool, func(string) (time.Duration, bool) {
-				return 0, false
-			},
-			cfg.TestingKnobs.AllocatorKnobs,
-		)
+		s.allocator = MakeAllocator(cfg.StorePool, func(string) (time.Duration, bool) {
+			return 0, false
+		})
 	}
 	s.replRankings = newReplicaRankings()
 
@@ -1653,6 +1646,22 @@ func (s *Store) Start(ctx context.Context, stopper *stop.Stopper) error {
 		rate := consistencyCheckRate.Get(&s.ClusterSettings().SV)
 		s.consistencyLimiter.UpdateLimit(quotapool.Limit(rate), rate*consistencyCheckRateBurstFactor)
 	})
+
+	// Storing suggested compactions in the store itself was deprecated with
+	// the removal of the Compactor in 21.1. See discussion in
+	// https://github.com/cockroachdb/cockroach/pull/55893
+	//
+	// TODO(bilal): Remove this code in versions after 21.1.
+	err = s.engine.MVCCIterate(
+		keys.StoreSuggestedCompactionKeyPrefix(),
+		keys.StoreSuggestedCompactionKeyPrefix().PrefixEnd(),
+		storage.MVCCKeyIterKind,
+		func(res storage.MVCCKeyValue) error {
+			return s.engine.ClearUnversioned(res.Key.Key)
+		})
+	if err != nil {
+		log.Warningf(ctx, "error when clearing compactor keys: %s", err)
+	}
 
 	// Set the started flag (for unittests).
 	atomic.StoreInt32(&s.started, 1)
@@ -2955,4 +2964,9 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestingDefaultSpanConfig exposes the default span config for testing purposes.
+func TestingDefaultSpanConfig() roachpb.SpanConfig {
+	return zonepb.DefaultZoneConfigRef().AsSpanConfig()
 }

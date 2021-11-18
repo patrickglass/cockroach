@@ -413,10 +413,11 @@ func convertPGIncompatibleDatabasePrivilegesToDefaultPrivileges(
 			}
 
 			p.BufferClientNotice(ctx, pgnotice.Newf(
-				"GRANT %s ON DATABASE is deprecated.\n"+
-					"This statement was automatically converted to %s\n"+
-					"Please use ALTER DEFAULT PRIVILEGES going forward",
-				incompatiblePrivs, translatedStatement,
+				"granting %s on databases is deprecated, "+
+					"please use ALTER DEFAULT PRIVILEGES FOR ALL ROLES.\n"+
+					"%s privileges were not granted, "+
+					"the statement was automatically translated to %s",
+				incompatiblePrivs, incompatiblePrivs, translatedStatement,
 			))
 		}
 	}

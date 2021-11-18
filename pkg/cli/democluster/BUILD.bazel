@@ -20,7 +20,6 @@ go_library(
         "//pkg/cli/clierror",
         "//pkg/cli/cliflags",
         "//pkg/cli/democluster/api",
-        "//pkg/jobs",
         "//pkg/kv/kvserver/liveness/livenesspb",
         "//pkg/roachpb:with-mocks",
         "//pkg/rpc",

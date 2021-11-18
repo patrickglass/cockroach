@@ -230,31 +230,6 @@ var tpccMeta = workload.Meta{
 	},
 }
 
-func queryDatabaseRegions(db *gosql.DB) (map[string]struct{}, error) {
-	regions := make(map[string]struct{})
-	rows, err := db.Query(`SELECT region FROM [SHOW REGIONS FROM DATABASE]`)
-	if err != nil {
-		return regions, err
-	}
-	defer func() {
-		_ = rows.Close()
-	}()
-	for rows.Next() {
-		if rows.Err() != nil {
-			return regions, err
-		}
-		var region string
-		if err := rows.Scan(&region); err != nil {
-			return regions, err
-		}
-		regions[region] = struct{}{}
-	}
-	if rows.Err() != nil {
-		return regions, err
-	}
-	return regions, nil
-}
-
 // Meta implements the Generator interface.
 func (*tpcc) Meta() workload.Meta { return tpccMeta }
 
@@ -379,8 +354,25 @@ func (w *tpcc) Hooks() workload.Hooks {
 				return nil
 			}
 
-			regions, err := queryDatabaseRegions(db)
+			regions := make(map[string]struct{})
+			rows, err := db.Query(`SELECT region FROM [SHOW REGIONS FROM DATABASE]`)
 			if err != nil {
+				return err
+			}
+			defer func() {
+				_ = rows.Close()
+			}()
+			for rows.Next() {
+				if rows.Err() != nil {
+					return err
+				}
+				var region string
+				if err := rows.Scan(&region); err != nil {
+					return err
+				}
+				regions[region] = struct{}{}
+			}
+			if rows.Err() != nil {
 				return err
 			}
 

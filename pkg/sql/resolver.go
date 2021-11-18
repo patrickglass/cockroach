@@ -295,6 +295,7 @@ func (p *planner) HasPrivilege(
 	specifier tree.HasPrivilegeSpecifier,
 	user security.SQLUsername,
 	kind privilege.Kind,
+	withGrantOpt bool,
 ) (bool, error) {
 	desc, err := p.ResolveDescriptorForPrivilegeSpecifier(
 		ctx,
@@ -322,6 +323,16 @@ func (p *planner) HasPrivilege(
 	}
 	if hasPrivilege {
 		return true, nil
+	}
+	// For WITH GRANT OPTION, check the roles also has the GRANT privilege.
+	if withGrantOpt {
+		hasPrivilege, err := hasPrivilegeFunc(privilege.GRANT)
+		if err != nil {
+			return false, err
+		}
+		if !hasPrivilege {
+			return false, nil
+		}
 	}
 	return hasPrivilegeFunc(kind)
 }

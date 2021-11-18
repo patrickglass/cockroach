@@ -113,9 +113,13 @@ func (r *Replica) evalAndPropose(
 	// 2. pErr != nil corresponds to a failed proposal - the command resulted
 	//    in an error.
 	if proposal.command == nil {
+		if proposal.Local.RequiresRaft() {
+			return nil, nil, "", roachpb.NewError(errors.AssertionFailedf(
+				"proposal resulting from batch %s erroneously bypassed Raft", ba))
+		}
 		intents := proposal.Local.DetachEncounteredIntents()
 		endTxns := proposal.Local.DetachEndTxns(pErr != nil /* alwaysOnly */)
-		r.handleReadWriteLocalEvalResult(ctx, *proposal.Local, false /* raftMuHeld */)
+		r.handleReadWriteLocalEvalResult(ctx, *proposal.Local)
 
 		pr := proposalResult{
 			Reply:              proposal.Local.Reply,
@@ -1994,7 +1998,7 @@ func (r *Replica) printRaftTail(
 			Key:   mvccKey,
 			Value: it.Value(),
 		}
-		sb.WriteString(truncateEntryString(SprintMVCCKeyValue(kv, true /* printKey */), 2000))
+		sb.WriteString(truncateEntryString(SprintKeyValue(kv, true /* printKey */), 2000))
 		sb.WriteRune('\n')
 
 		valid, err := it.PrevEngineKey()

@@ -8,20 +8,20 @@ func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
 	// Re-run the stringer command to generate them again.
 	var x [1]struct{}
-	_ = x[replacedTruncatedAndRangeAppliedStateMigration-0]
-	_ = x[replacedPostTruncatedAndRangeAppliedStateMigration-1]
-	_ = x[TruncatedAndRangeAppliedStateMigration-2]
-	_ = x[PostTruncatedAndRangeAppliedStateMigration-3]
-	_ = x[V21_1-4]
-	_ = x[Start21_1PLUS-5]
-	_ = x[Start21_2-6]
-	_ = x[JoinTokensTable-7]
-	_ = x[AcquisitionTypeInLeaseHistory-8]
-	_ = x[SerializeViewUDTs-9]
-	_ = x[ExpressionIndexes-10]
-	_ = x[DeleteDeprecatedNamespaceTableDescriptorMigration-11]
-	_ = x[FixDescriptors-12]
-	_ = x[SQLStatsTable-13]
+	_ = x[Start21_1-0]
+	_ = x[replacedTruncatedAndRangeAppliedStateMigration-1]
+	_ = x[replacedPostTruncatedAndRangeAppliedStateMigration-2]
+	_ = x[TruncatedAndRangeAppliedStateMigration-3]
+	_ = x[PostTruncatedAndRangeAppliedStateMigration-4]
+	_ = x[V21_1-5]
+	_ = x[Start21_1PLUS-6]
+	_ = x[Start21_2-7]
+	_ = x[JoinTokensTable-8]
+	_ = x[AcquisitionTypeInLeaseHistory-9]
+	_ = x[SerializeViewUDTs-10]
+	_ = x[ExpressionIndexes-11]
+	_ = x[DeleteDeprecatedNamespaceTableDescriptorMigration-12]
+	_ = x[FixDescriptors-13]
 	_ = x[DatabaseRoleSettings-14]
 	_ = x[TenantUsageTable-15]
 	_ = x[SQLInstancesTable-16]
@@ -42,18 +42,19 @@ func _() {
 	_ = x[OnUpdateExpressions-31]
 	_ = x[SpanConfigurationsTable-32]
 	_ = x[BoundedStaleness-33]
-	_ = x[SQLStatsCompactionScheduledJob-34]
-	_ = x[DateAndIntervalStyle-35]
-	_ = x[PebbleFormatVersioned-36]
-	_ = x[MarkerDataKeysRegistry-37]
-	_ = x[PebbleSetWithDelete-38]
-	_ = x[TenantUsageSingleConsumptionColumn-39]
-	_ = x[V21_2-40]
+	_ = x[DateAndIntervalStyle-34]
+	_ = x[PebbleFormatVersioned-35]
+	_ = x[MarkerDataKeysRegistry-36]
+	_ = x[PebbleSetWithDelete-37]
+	_ = x[TenantUsageSingleConsumptionColumn-38]
+	_ = x[SQLStatsTables-39]
+	_ = x[SQLStatsCompactionScheduledJob-40]
+	_ = x[V21_2-41]
 }
 
-const _Key_name = "replacedTruncatedAndRangeAppliedStateMigrationreplacedPostTruncatedAndRangeAppliedStateMigrationTruncatedAndRangeAppliedStateMigrationPostTruncatedAndRangeAppliedStateMigrationV21_1Start21_1PLUSStart21_2JoinTokensTableAcquisitionTypeInLeaseHistorySerializeViewUDTsExpressionIndexesDeleteDeprecatedNamespaceTableDescriptorMigrationFixDescriptorsSQLStatsTableDatabaseRoleSettingsTenantUsageTableSQLInstancesTableNewRetryableRangefeedErrorsAlterSystemWebSessionsCreateIndexesSeparatedIntentsMigrationPostSeparatedIntentsMigrationRetryJobsWithExponentialBackoffRecordsBasedRegistryAutoSpanConfigReconciliationJobPreventNewInterleavedTablesEnsureNoInterleavedTablesDefaultPrivilegesZonesTableForSecondaryTenantsUseKeyEncodeForHashShardedIndexesDatabasePlacementPolicyGeneratedAsIdentityOnUpdateExpressionsSpanConfigurationsTableBoundedStalenessSQLStatsCompactionScheduledJobDateAndIntervalStylePebbleFormatVersionedMarkerDataKeysRegistryPebbleSetWithDeleteTenantUsageSingleConsumptionColumnV21_2"
+const _Key_name = "Start21_1replacedTruncatedAndRangeAppliedStateMigrationreplacedPostTruncatedAndRangeAppliedStateMigrationTruncatedAndRangeAppliedStateMigrationPostTruncatedAndRangeAppliedStateMigrationV21_1Start21_1PLUSStart21_2JoinTokensTableAcquisitionTypeInLeaseHistorySerializeViewUDTsExpressionIndexesDeleteDeprecatedNamespaceTableDescriptorMigrationFixDescriptorsDatabaseRoleSettingsTenantUsageTableSQLInstancesTableNewRetryableRangefeedErrorsAlterSystemWebSessionsCreateIndexesSeparatedIntentsMigrationPostSeparatedIntentsMigrationRetryJobsWithExponentialBackoffRecordsBasedRegistryAutoSpanConfigReconciliationJobPreventNewInterleavedTablesEnsureNoInterleavedTablesDefaultPrivilegesZonesTableForSecondaryTenantsUseKeyEncodeForHashShardedIndexesDatabasePlacementPolicyGeneratedAsIdentityOnUpdateExpressionsSpanConfigurationsTableBoundedStalenessDateAndIntervalStylePebbleFormatVersionedMarkerDataKeysRegistryPebbleSetWithDeleteTenantUsageSingleConsumptionColumnSQLStatsTablesSQLStatsCompactionScheduledJobV21_2"
 
-var _Key_index = [...]uint16{0, 46, 96, 134, 176, 181, 194, 203, 218, 247, 264, 281, 330, 344, 357, 377, 393, 410, 437, 472, 497, 526, 557, 577, 608, 635, 660, 677, 706, 739, 762, 781, 800, 823, 839, 869, 889, 910, 932, 951, 985, 990}
+var _Key_index = [...]uint16{0, 9, 55, 105, 143, 185, 190, 203, 212, 227, 256, 273, 290, 339, 353, 373, 389, 406, 433, 468, 493, 522, 553, 573, 604, 631, 656, 673, 702, 735, 758, 777, 796, 819, 835, 855, 876, 898, 917, 951, 965, 995, 1000}
 
 func (i Key) String() string {
 	if i < 0 || i >= Key(len(_Key_index)-1) {

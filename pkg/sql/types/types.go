@@ -1194,20 +1194,25 @@ func (t *T) TypeModifier() int32 {
 	if t.Family() == ArrayFamily {
 		return t.ArrayContents().TypeModifier()
 	}
-	if width := t.Width(); width != 0 {
-		switch t.Family() {
-		case StringFamily, CollatedStringFamily:
+
+	switch t.Family() {
+	case StringFamily, CollatedStringFamily:
+		if width := t.Width(); width != 0 {
 			// Postgres adds 4 to the attypmod for bounded string types, the
 			// var header size.
-			typeModifier = width + 4
-		case BitFamily:
-			typeModifier = width
-		case DecimalFamily:
-			// attTypMod is calculated by putting the precision in the upper
-			// bits and the scale in the lower bits of a 32-bit int, and adding
-			// 4 (the var header size). We mock this for clients' sake. See
-			// numeric.c.
-			typeModifier = ((t.Precision() << 16) | width) + 4
+			return width + 4
+		}
+	case BitFamily:
+		if width := t.Width(); width != 0 {
+			return width
+		}
+	case DecimalFamily:
+		// attTypMod is calculated by putting the precision in the upper
+		// bits and the scale in the lower bits of a 32-bit int, and adding
+		// 4 (the var header size). We mock this for clients' sake. See
+		// https://github.com/postgres/postgres/blob/5a2832465fd8984d089e8c44c094e6900d987fcd/src/backend/utils/adt/numeric.c#L1242.
+		if width, precision := t.Width(), t.Precision(); precision != 0 || width != 0 {
+			return ((precision << 16) | width) + 4
 		}
 	}
 	return typeModifier
@@ -1813,9 +1818,9 @@ func (t *T) Equivalent(other *T) bool {
 }
 
 // EquivalentOrNull is the same as Equivalent, except it returns true if:
-// * `t` is Unknown (i.e., NULL) AND (allowNullTupleEquivalence OR `other` is not a tuple),
+// * `t` is Unknown (i.e., NULL) and `other` is not a tuple,
 // * `t` is a tuple with all non-Unknown elements matching the types in `other`.
-func (t *T) EquivalentOrNull(other *T, allowNullTupleEquivalence bool) bool {
+func (t *T) EquivalentOrNull(other *T) bool {
 	// Check normal equivalency first, then check for Null
 	normalEquivalency := t.Equivalent(other)
 	if normalEquivalency {
@@ -1824,7 +1829,7 @@ func (t *T) EquivalentOrNull(other *T, allowNullTupleEquivalence bool) bool {
 
 	switch t.Family() {
 	case UnknownFamily:
-		return allowNullTupleEquivalence || other.Family() != TupleFamily
+		return other.Family() != TupleFamily
 
 	case TupleFamily:
 		if other.Family() != TupleFamily {
@@ -1840,7 +1845,7 @@ func (t *T) EquivalentOrNull(other *T, allowNullTupleEquivalence bool) bool {
 			return false
 		}
 		for i := range t.TupleContents() {
-			if !t.TupleContents()[i].EquivalentOrNull(other.TupleContents()[i], allowNullTupleEquivalence) {
+			if !t.TupleContents()[i].EquivalentOrNull(other.TupleContents()[i]) {
 				return false
 			}
 		}
@@ -2452,6 +2457,8 @@ func IsStringType(t *T) bool {
 // the issue number should be included in the error report to inform the user.
 func IsValidArrayElementType(t *T) (valid bool, issueNum int) {
 	switch t.Family() {
+	case JsonFamily:
+		return false, 23468
 	default:
 		return true, 0
 	}

@@ -52,8 +52,6 @@ type tableReader struct {
 	fetcher rowFetcher
 	alloc   rowenc.DatumAlloc
 
-	scanStats execinfra.ScanStats
-
 	// rowsRead is the number of rows read and is tracked unconditionally.
 	rowsRead int64
 }
@@ -105,13 +103,13 @@ func newTableReader(
 	tr.maxTimestampAge = time.Duration(spec.MaxTimestampAgeNanos)
 
 	tableDesc := spec.BuildTableDescriptor()
-	invertedColumn := tabledesc.FindInvertedColumn(tableDesc, spec.InvertedColumn)
+	virtualColumn := tabledesc.FindVirtualColumn(tableDesc, spec.VirtualColumn)
 	cols := tableDesc.PublicColumns()
 	if spec.Visibility == execinfra.ScanVisibilityPublicAndNotPublic {
 		cols = tableDesc.DeletableColumns()
 	}
 	columnIdxMap := catalog.ColumnIDToOrdinalMap(cols)
-	resultTypes := catalog.ColumnTypesWithInvertedCol(cols, invertedColumn)
+	resultTypes := catalog.ColumnTypesWithVirtualCol(cols, virtualColumn)
 
 	// Add all requested system columns to the output.
 	if spec.HasSystemColumns {
@@ -160,7 +158,7 @@ func newTableReader(
 		spec.LockingStrength,
 		spec.LockingWaitPolicy,
 		spec.HasSystemColumns,
-		invertedColumn,
+		virtualColumn,
 	); err != nil {
 		return nil, err
 	}
@@ -316,8 +314,7 @@ func (tr *tableReader) execStatsForTrace() *execinfrapb.ComponentStats {
 	if !ok {
 		return nil
 	}
-	tr.scanStats = execinfra.GetScanStats(tr.Ctx)
-	ret := &execinfrapb.ComponentStats{
+	return &execinfrapb.ComponentStats{
 		KV: execinfrapb.KVStats{
 			BytesRead:      optional.MakeUint(uint64(tr.fetcher.GetBytesRead())),
 			TuplesRead:     is.NumTuples,
@@ -326,8 +323,6 @@ func (tr *tableReader) execStatsForTrace() *execinfrapb.ComponentStats {
 		},
 		Output: tr.OutputHelper.Stats(),
 	}
-	execinfra.PopulateKVMVCCStats(&ret.KV, &tr.scanStats)
-	return ret
 }
 
 func (tr *tableReader) generateMeta() []execinfrapb.ProducerMetadata {

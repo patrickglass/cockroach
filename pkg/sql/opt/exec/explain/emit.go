@@ -302,7 +302,6 @@ var nodeNames = [...]string{
 	simpleProjectOp:        "project",
 	serializingProjectOp:   "project",
 	sortOp:                 "sort",
-	topKOp:                 "top-k",
 	updateOp:               "update",
 	upsertOp:               "upsert",
 	valuesOp:               "", // This node does not have a fixed name.
@@ -369,18 +368,6 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 		}
 		if s.KVBytesRead.HasValue() {
 			e.ob.AddField("KV bytes read", humanize.IBytes(s.KVBytesRead.Value()))
-		}
-		if e.ob.flags.Verbose {
-			if s.StepCount.HasValue() {
-				e.ob.AddField("MVCC step count (ext/int)", fmt.Sprintf("%s/%s",
-					humanizeutil.Count(s.StepCount.Value()), humanizeutil.Count(s.InternalStepCount.Value()),
-				))
-			}
-			if s.SeekCount.HasValue() {
-				e.ob.AddField("MVCC seek count (ext/int)", fmt.Sprintf("%s/%s",
-					humanizeutil.Count(s.SeekCount.Value()), humanizeutil.Count(s.InternalSeekCount.Value()),
-				))
-			}
 		}
 	}
 
@@ -494,11 +481,6 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 		if p := a.AlreadyOrderedPrefix; p > 0 {
 			ob.Attr("already ordered", colinfo.ColumnOrdering(a.Ordering[:p]).String(n.Columns()))
 		}
-
-	case topKOp:
-		a := n.args.(*topKArgs)
-		ob.Attr("order", colinfo.ColumnOrdering(a.Ordering).String(n.Columns()))
-		ob.Attr("k", a.K)
 
 	case unionAllOp:
 		a := n.args.(*unionAllArgs)

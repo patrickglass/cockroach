@@ -294,15 +294,15 @@ func (c *tenantSideCostController) updateRunState(ctx context.Context) {
 	}
 	ru := deltaCPU * float64(c.costCfg.PodCPUSecond)
 
-	var deltaPGWireBytes uint64
-	if newExternalUsage.PGWireBytes > c.run.externalUsage.PGWireBytes {
-		deltaPGWireBytes = newExternalUsage.PGWireBytes - c.run.externalUsage.PGWireBytes
-		ru += float64(deltaPGWireBytes) * float64(c.costCfg.PGWireByte)
+	var deltaPGWireEgressBytes uint64
+	if newExternalUsage.PGWireEgressBytes > c.run.externalUsage.PGWireEgressBytes {
+		deltaPGWireEgressBytes = newExternalUsage.PGWireEgressBytes - c.run.externalUsage.PGWireEgressBytes
+		ru += float64(deltaPGWireEgressBytes) * float64(c.costCfg.PGWireEgressByte)
 	}
 
 	c.mu.Lock()
 	c.mu.consumption.SQLPodsCPUSeconds += deltaCPU
-	c.mu.consumption.PGWireBytes += deltaPGWireBytes
+	c.mu.consumption.PGWireEgressBytes += deltaPGWireEgressBytes
 	c.mu.consumption.RU += ru
 	newConsumption := c.mu.consumption
 	c.mu.Unlock()
@@ -311,9 +311,7 @@ func (c *tenantSideCostController) updateRunState(ctx context.Context) {
 	c.run.externalUsage = newExternalUsage
 	c.run.consumption = newConsumption
 
-	// TODO(radu): figure out how to "smooth out" this debt over a longer period
-	// (so we don't have periodic stalls).
-	c.limiter.AdjustTokens(newTime, -tenantcostmodel.RU(ru))
+	c.limiter.RemoveTokens(newTime, tenantcostmodel.RU(ru))
 }
 
 // updateAvgRUPerSec is called exactly once per mainLoopUpdateInterval.
@@ -426,7 +424,7 @@ func (c *tenantSideCostController) handleTokenBucketResponse(
 		c.run.initialRequestCompleted = true
 		// This is the first successful request. Take back the initial RUs that we
 		// used to pre-fill the bucket.
-		c.limiter.AdjustTokens(c.run.now, -initialRUs)
+		c.limiter.RemoveTokens(c.run.now, initialRUs)
 	}
 
 	granted := resp.GrantedRU
@@ -469,7 +467,7 @@ func (c *tenantSideCostController) handleTokenBucketResponse(
 	if resp.TrickleDuration == 0 {
 		// We received a batch of tokens to use as needed. Set up the token bucket
 		// to notify us when the tokens are running low.
-		cfg.TokenAdjustment = tenantcostmodel.RU(granted)
+		cfg.NewTokens = tenantcostmodel.RU(granted)
 		// TODO(radu): if we don't get more tokens in time, fall back to a "fallback"
 		// rate.
 		cfg.NewRate = 0
@@ -603,7 +601,7 @@ func (c *tenantSideCostController) OnResponse(
 		return
 	}
 	if resp.ReadBytes() > 0 {
-		c.limiter.AdjustTokens(c.timeSource.Now(), -c.costCfg.ResponseCost(resp))
+		c.limiter.RemoveTokens(c.timeSource.Now(), c.costCfg.ResponseCost(resp))
 	}
 
 	c.mu.Lock()

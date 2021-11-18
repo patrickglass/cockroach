@@ -174,7 +174,7 @@ func (t *TimeTZ) String() string {
 
 // ToTime converts a DTimeTZ to a time.Time, corrected to the given location.
 func (t *TimeTZ) ToTime() time.Time {
-	loc := timeutil.TimeZoneOffsetToLocation(-int(t.OffsetSecs))
+	loc := timeutil.FixedOffsetTimeZoneToLocation(-int(t.OffsetSecs), "TimeTZ")
 	return t.TimeOfDay.ToTime().Add(time.Duration(t.OffsetSecs) * time.Second).In(loc)
 }
 

@@ -13,6 +13,7 @@ package rowexec
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
@@ -148,10 +149,18 @@ func newSorter(
 	post *execinfrapb.PostProcessSpec,
 	output execinfra.RowReceiver,
 ) (execinfra.Processor, error) {
+	count := uint64(0)
+	if post.Limit != 0 {
+		// The sorter needs to produce Offset + Limit rows. The ProcOutputHelper
+		// will discard the first Offset ones.
+		if post.Limit <= math.MaxUint64-post.Offset {
+			count = post.Limit + post.Offset
+		}
+	}
 
 	// Choose the optimal processor.
 	if spec.OrderingMatchLen == 0 {
-		if spec.Limit == 0 {
+		if count == 0 {
 			// No specified ordering match length and unspecified limit; no
 			// optimizations are possible so we simply load all rows into memory and
 			// sort all values in-place. It has a worst-case time complexity of
@@ -162,7 +171,7 @@ func newSorter(
 		// our sort procedure by maintaining a max-heap populated with only the
 		// smallest k rows seen. It has a worst-case time complexity of
 		// O(n*log(k)) and a worst-case space complexity of O(k).
-		return newSortTopKProcessor(flowCtx, processorID, spec, input, post, output, uint64(spec.Limit))
+		return newSortTopKProcessor(flowCtx, processorID, spec, input, post, output, count)
 	}
 	// Ordering match length is specified. We will be able to use existing
 	// ordering in order to avoid loading all the rows into memory. If we're

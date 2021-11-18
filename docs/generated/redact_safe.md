@@ -2,10 +2,7 @@ The following types are considered always safe for reporting:
 
 File | Type
 --|--
-pkg/base/node_id.go | `*NodeIDContainer`
-pkg/base/node_id.go | `*StoreIDContainer`
 pkg/cli/exit/exit.go | `Code`
-pkg/jobs/jobspb/wrap.go | `JobID`
 pkg/jobs/jobspb/wrap.go | `Type`
 pkg/kv/kvserver/closedts/ctpb/service.go | `LAI`
 pkg/kv/kvserver/closedts/ctpb/service.go | `SeqNum`
@@ -13,7 +10,6 @@ pkg/kv/kvserver/concurrency/lock/locking.go | `WaitPolicy`
 pkg/kv/kvserver/raft.go | `SnapshotRequest_Type`
 pkg/roachpb/data.go | `LeaseSequence`
 pkg/roachpb/data.go | `ReplicaChangeType`
-pkg/roachpb/data.go | `TransactionStatus`
 pkg/roachpb/metadata.go | `NodeID`
 pkg/roachpb/metadata.go | `RangeGeneration`
 pkg/roachpb/metadata.go | `RangeID`
@@ -36,13 +32,9 @@ pkg/sql/catalog/descpb/structured.go | `IndexID`
 pkg/sql/catalog/descpb/structured.go | `MutationID`
 pkg/sql/sem/tree/table_ref.go | `ColumnID`
 pkg/sql/sem/tree/table_ref.go | `ID`
-pkg/sql/sqlliveness/sqlliveness.go | `SessionID`
-pkg/storage/enginepb/mvcc.go | `TxnEpoch`
-pkg/storage/enginepb/mvcc.go | `TxnSeq`
 pkg/storage/enginepb/mvcc3.go | `*MVCCStats`
 pkg/storage/enginepb/mvcc3.go | `MVCCStatsDelta`
 pkg/util/hlc/timestamp.go | `ClockTimestamp`
-pkg/util/hlc/timestamp.go | `LegacyTimestamp`
 pkg/util/hlc/timestamp.go | `Timestamp`
 vendor/github.com/cockroachdb/pebble/internal/humanize/humanize.go | `FormattedString`
 pkg/util/log/redact.go | `reflect.TypeOf(123)`

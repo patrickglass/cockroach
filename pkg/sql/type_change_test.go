@@ -40,9 +40,7 @@ func TestDrainingNamesAreCleanedOnTypeChangeFailure(t *testing.T) {
 	params, _ := tests.CreateTestServerParams()
 	params.Knobs.SQLTypeSchemaChanger = &sql.TypeSchemaChangerTestingKnobs{
 		RunBeforeExec: func() error {
-			// As the job is non-cancelable, return a permanent-marked error so that
-			// the job can revert.
-			return jobs.MarkAsPermanentJobError(errors.New("boom"))
+			return errors.New("boom")
 		},
 	}
 	// Decrease the adopt loop interval so that retries happen quickly.
@@ -176,7 +174,7 @@ func TestFailedTypeSchemaChangeRetriesTransparently(t *testing.T) {
 	cleanupSuccessfullyFinished := make(chan struct{})
 	params.Knobs.SQLTypeSchemaChanger = &sql.TypeSchemaChangerTestingKnobs{
 		RunBeforeExec: func() error {
-			return jobs.MarkAsPermanentJobError(errors.New("yikes"))
+			return errors.New("yikes")
 		},
 		RunAfterOnFailOrCancel: func() error {
 			mu.Lock()
@@ -197,6 +195,8 @@ func TestFailedTypeSchemaChangeRetriesTransparently(t *testing.T) {
 
 	// Create a type.
 	_, err := sqlDB.Exec(`
+SET CLUSTER SETTING sql.defaults.drop_enum_value.enabled = true;
+SET enable_drop_enum_value = true;
 CREATE DATABASE d;
 CREATE TYPE d.t AS ENUM();
 `)
@@ -237,6 +237,8 @@ func TestAddDropValuesInTransaction(t *testing.T) {
 	defer s.Stopper().Stop(ctx)
 
 	if _, err := sqlDB.Exec(`
+SET CLUSTER SETTING sql.defaults.drop_enum_value.enabled = true;
+SET enable_drop_enum_value = true;
 CREATE DATABASE d;
 USE d;
 CREATE TYPE greetings AS ENUM('hi', 'hello', 'yo');
@@ -399,6 +401,8 @@ func TestEnumMemberTransitionIsolation(t *testing.T) {
 
 	// Setup.
 	if _, err := sqlDB.Exec(`
+SET CLUSTER SETTING sql.defaults.drop_enum_value.enabled = true;
+SET enable_drop_enum_value = true;
 CREATE TYPE ab AS ENUM ('a', 'b')`,
 	); err != nil {
 		t.Fatal(err)
@@ -535,6 +539,8 @@ func TestTypeChangeJobCancelSemantics(t *testing.T) {
 
 			// Setup.
 			_, err := sqlDB.Exec(`
+SET CLUSTER SETTING sql.defaults.drop_enum_value.enabled = true;
+SET enable_drop_enum_value = true;
 CREATE DATABASE db;
 CREATE TYPE db.greetings AS ENUM ('hi', 'yo');
 `)

@@ -24,7 +24,6 @@ import (
 	"github.com/cockroachdb/logtags"
 	"github.com/gogo/protobuf/types"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/net/trace"
 	"google.golang.org/grpc/metadata"
 )
@@ -75,7 +74,7 @@ func TestRecordingString(t *testing.T) {
 	rec := root.GetRecording()
 	// Sanity check that the recording looks like we want. Note that this is not
 	// its String() representation; this just lists all the spans in order.
-	require.NoError(t, CheckRecordedSpans(rec, `
+	require.NoError(t, TestingCheckRecordedSpans(rec, `
 		span: root
 			tags: _verbose=1
 			event: root 1
@@ -91,7 +90,7 @@ func TestRecordingString(t *testing.T) {
 				event: local child 1
 		`))
 
-	require.NoError(t, CheckRecording(rec, `
+	require.NoError(t, TestingCheckRecording(rec, `
 		=== operation:root _verbose:1
 		event:root 1
 			=== operation:remote child _verbose:1
@@ -158,7 +157,7 @@ func TestRecordingInRecording(t *testing.T) {
 	root.Finish()
 
 	rootRec := root.GetRecording()
-	require.NoError(t, CheckRecordedSpans(rootRec, `
+	require.NoError(t, TestingCheckRecordedSpans(rootRec, `
 		span: root
 			tags: _verbose=1
 			span: child
@@ -168,14 +167,14 @@ func TestRecordingInRecording(t *testing.T) {
 		`))
 
 	childRec := child.GetRecording()
-	require.NoError(t, CheckRecordedSpans(childRec, `
+	require.NoError(t, TestingCheckRecordedSpans(childRec, `
 		span: child
 			tags: _verbose=1
 			span: grandchild
 				tags: _verbose=1
 		`))
 
-	require.NoError(t, CheckRecording(childRec, `
+	require.NoError(t, TestingCheckRecording(childRec, `
 		=== operation:child _verbose:1
 			=== operation:grandchild _verbose:1
 		`))
@@ -194,7 +193,7 @@ func TestSpan_ImportRemoteSpans(t *testing.T) {
 	sp.ImportRemoteSpans(ch.GetRecording())
 	sp.Finish()
 
-	require.NoError(t, CheckRecordedSpans(sp.GetRecording(), `
+	require.NoError(t, TestingCheckRecordedSpans(sp.GetRecording(), `
 		span: root
 			span: child
 				event: foo
@@ -209,16 +208,22 @@ func TestSpanRecordStructured(t *testing.T) {
 	sp.RecordStructured(&types.Int32Value{Value: 4})
 	rec := sp.GetRecording()
 	require.Len(t, rec, 1)
+	require.Len(t, rec[0].DeprecatedInternalStructured, 1)
+	deprecatedItem := rec[0].DeprecatedInternalStructured[0]
+	var deprecatedStructured types.DynamicAny
+	require.NoError(t, types.UnmarshalAny(deprecatedItem, &deprecatedStructured))
+	require.IsType(t, (*types.Int32Value)(nil), deprecatedStructured.Message)
+
 	require.Len(t, rec[0].StructuredRecords, 1)
 	item := rec[0].StructuredRecords[0]
 	var d1 types.DynamicAny
 	require.NoError(t, types.UnmarshalAny(item.Payload, &d1))
 	require.IsType(t, (*types.Int32Value)(nil), d1.Message)
 
-	require.NoError(t, CheckRecordedSpans(rec, `
+	require.NoError(t, TestingCheckRecordedSpans(rec, `
 		span: root
 		`))
-	require.NoError(t, CheckRecording(rec, `
+	require.NoError(t, TestingCheckRecording(rec, `
 		=== operation:root
         structured:{"@type":"type.googleapis.com/google.protobuf.Int32Value","value":4}
 	`))
@@ -285,14 +290,14 @@ func TestSpanRecordLimit(t *testing.T) {
 	msg := func(i int) string { return fmt.Sprintf("msg: %10d", i) }
 
 	// Determine the size of a log record by actually recording once.
-	sp.Recordf("%s", msg(42))
+	sp.Record(msg(42))
 	logSize := sp.GetRecording()[0].Logs[0].Size()
 	sp.ResetRecording()
 
 	numLogs := maxLogBytesPerSpan / logSize
 	const extra = 10
 	for i := 1; i <= numLogs+extra; i++ {
-		sp.Recordf("%s", msg(i))
+		sp.Record(msg(i))
 	}
 
 	rec := sp.GetRecording()
@@ -303,8 +308,8 @@ func TestSpanRecordLimit(t *testing.T) {
 	first := rec[0].Logs[0]
 	last := rec[0].Logs[len(rec[0].Logs)-1]
 
-	require.Equal(t, first.Msg().StripMarkers(), msg(extra+1))
-	require.Equal(t, last.Msg().StripMarkers(), msg(numLogs+extra))
+	require.Equal(t, first.Fields[0].Value, msg(extra+1))
+	require.Equal(t, last.Fields[0].Value, msg(numLogs+extra))
 }
 
 // testStructuredImpl is a testing implementation of Structured event.
@@ -340,11 +345,11 @@ func TestSpanReset(t *testing.T) {
 		if i%2 == 0 {
 			sp.RecordStructured(newTestStructured(i))
 		} else {
-			sp.Recordf("%d", i)
+			sp.Record(fmt.Sprintf("%d", i))
 		}
 	}
 
-	require.NoError(t, CheckRecordedSpans(sp.GetRecording(), `
+	require.NoError(t, TestingCheckRecordedSpans(sp.GetRecording(), `
 		span: root
 			tags: _unfinished=1 _verbose=1
 			event: 1
@@ -358,7 +363,7 @@ func TestSpanReset(t *testing.T) {
 			event: 9
 			event: structured=10
 		`))
-	require.NoError(t, CheckRecording(sp.GetRecording(), `
+	require.NoError(t, TestingCheckRecording(sp.GetRecording(), `
 		=== operation:root _unfinished:1 _verbose:1
 		event:1
 		event:structured=2
@@ -374,11 +379,11 @@ func TestSpanReset(t *testing.T) {
 
 	sp.ResetRecording()
 
-	require.NoError(t, CheckRecordedSpans(sp.GetRecording(), `
+	require.NoError(t, TestingCheckRecordedSpans(sp.GetRecording(), `
 		span: root
 			tags: _unfinished=1 _verbose=1
 		`))
-	require.NoError(t, CheckRecording(sp.GetRecording(), `
+	require.NoError(t, TestingCheckRecording(sp.GetRecording(), `
 		=== operation:root _unfinished:1 _verbose:1
 	`))
 
@@ -410,6 +415,7 @@ func TestNonVerboseChildSpanRegisteredWithParent(t *testing.T) {
 	// Check that the child span (incl its payload) is in the recording.
 	rec := sp.GetRecording()
 	require.Len(t, rec, 2)
+	require.Len(t, rec[1].DeprecatedInternalStructured, 1)
 	require.Len(t, rec[1].StructuredRecords, 1)
 }
 
@@ -497,13 +503,12 @@ func (i *countingStringer) String() string {
 	return fmt.Sprint(*i)
 }
 
-// TestSpanTagsInRecordings verifies that tags added before a recording started
-// are part of the recording.
+// TestSpanTagsInRecordings verifies that tags are dropped if the span is
+// not verbose.
 func TestSpanTagsInRecordings(t *testing.T) {
 	tr := NewTracer()
 	var counter countingStringer
 	logTags := logtags.SingleTagBuffer("tagfoo", "tagbar")
-	logTags = logTags.Add("foo1", &counter)
 	sp := tr.StartSpan("root",
 		WithForceRealSpan(),
 		WithLogTags(logTags),
@@ -511,27 +516,23 @@ func TestSpanTagsInRecordings(t *testing.T) {
 	defer sp.Finish()
 
 	require.False(t, sp.IsVerbose())
-	sp.SetTag("foo2", attribute.StringValue("bar2"))
+	sp.SetTag("foo1", &counter)
 	sp.Record("dummy recording")
 	rec := sp.GetRecording()
 	require.Len(t, rec, 0)
-	// We didn't stringify the log tag.
 	require.Zero(t, int(counter))
 
+	// Verify that we didn't hold onto anything underneath.
 	sp.SetVerbose(true)
 	rec = sp.GetRecording()
 	require.Len(t, rec, 1)
-	require.Len(t, rec[0].Tags, 5) // _unfinished:1 _verbose:1 tagfoo:tagbar foo1:1 foor2:bar2
-	_, ok := rec[0].Tags["foo2"]
-	require.True(t, ok)
-	require.Equal(t, 1, int(counter))
+	require.Len(t, rec[0].Tags, 3) // _unfinished:1 _verbose:1 tagfoo:tagbar
+	require.Zero(t, int(counter))
 
-	// Verify that subsequent tags are also captured.
-	sp.SetTag("foo3", attribute.StringValue("bar3"))
+	// Verify that subsequent tags are captured.
+	sp.SetTag("foo2", &counter)
 	rec = sp.GetRecording()
 	require.Len(t, rec, 1)
-	require.Len(t, rec[0].Tags, 6)
-	_, ok = rec[0].Tags["foo3"]
-	require.True(t, ok)
-	require.Equal(t, 2, int(counter))
+	require.Len(t, rec[0].Tags, 4)
+	require.Equal(t, 1, int(counter))
 }

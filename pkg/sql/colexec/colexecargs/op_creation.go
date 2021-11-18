@@ -13,7 +13,6 @@ package colexecargs
 import (
 	"context"
 	"sync"
-	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colcontainer"
@@ -25,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
 	"github.com/marusama/semaphore"
-	"github.com/stretchr/testify/require"
 )
 
 // TestNewColOperator is a test helper that's always aliased to
@@ -94,6 +92,10 @@ type NewColOperatorArgs struct {
 		// partitions are opened/closed, which ensures that the number of open
 		// files never exceeds what is expected.
 		DelegateFDAcquisitions bool
+		// PlanInvariantsCheckers indicates whether colexec.InvariantsCheckers
+		// should be planned on top of the main operators. This knob is needed
+		// so that correct operators are added to MetadataSources.
+		PlanInvariantsCheckers bool
 	}
 }
 
@@ -131,23 +133,13 @@ func (r *NewColOperatorResult) AssertInvariants() {
 
 // TestCleanup releases the resources associated with this result. It should
 // only be used in tests.
-func (r *NewColOperatorResult) TestCleanup() error {
-	if err := r.ToClose.Close(); err != nil {
-		return err
-	}
+func (r *NewColOperatorResult) TestCleanup() {
 	for _, acc := range r.OpAccounts {
 		acc.Close(context.Background())
 	}
 	for _, m := range r.OpMonitors {
 		m.Stop(context.Background())
 	}
-	return nil
-}
-
-// TestCleanupNoError is the same as TestCleanup but asserts that no error is
-// returned.
-func (r *NewColOperatorResult) TestCleanupNoError(t testing.TB) {
-	require.NoError(t, r.TestCleanup())
 }
 
 var newColOperatorResultPool = sync.Pool{

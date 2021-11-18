@@ -125,48 +125,28 @@ func (p PGMetadataTables) addDiff(
 	})
 }
 
-// Not using error interface because message is not relevant
-type compareResult int
-
-const (
-	success compareResult = 1 + iota
-	expectedDiffError
-	diffError
-)
-
-// compareColumns verifies if there is a datatype mismatch or if the diff is an expected diff
-func (p PGMetadataTables) compareColumns(
+// isDiffOid verifies if there is a datatype mismatch or if the diff is an expected diff
+func (p PGMetadataTables) isDiffOid(
 	tableName string, columnName string, expected *PGMetadataColumnType, actual *PGMetadataColumnType,
-) compareResult {
+) bool {
 	// MySQL don't have oid as they are in postgres so we can't compare oids.
-	if expected.Oid == 0 {
-		return 0
+	if expected.Oid == 0 || expected.Oid == actual.Oid {
+		return false
 	}
 
-	expectedDiff := p.getExpectedDiff(tableName, columnName)
-
-	if actual.Oid == expected.Oid {
-		if expectedDiff != nil {
-			// Need to update JSON file
-			return expectedDiffError
-		}
-	} else if expectedDiff == nil || expectedDiff.Oid != actual.Oid ||
-		*expectedDiff.ExpectedOid != expected.Oid {
-		// This diff is not expected
-		return diffError
-	}
-
-	return success
-}
-
-// If there is an expected diff for a table.column it will return it
-func (p PGMetadataTables) getExpectedDiff(tableName, columnName string) *PGMetadataColumnType {
 	columns, ok := p[tableName]
 	if !ok {
-		return nil
+		return true
 	}
 
-	return columns[columnName]
+	// For columns that are expected to be missing, the diff is stored as nil
+	// and is present in the map.
+	diff, ok := columns[columnName]
+	if !ok || diff == nil {
+		return true
+	}
+
+	return !(diff.Oid == actual.Oid && *diff.ExpectedOid == expected.Oid)
 }
 
 // isExpectedMissingTable is used by the diff PGMetadataTables to verify whether missing a table in cockroach is expected

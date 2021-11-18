@@ -1142,8 +1142,21 @@ func createImportingDescriptors(
 		}
 	}
 
-	// Assign new IDs to all of the type descriptors that need to be written.
-	if err := rewriteTypeDescs(typesToWrite, details.DescriptorRewrites); err != nil {
+	// Perform rewrites on ALL type descriptors that are present in the rewrite
+	// mapping.
+	//
+	// `types` contains a mix of existing type descriptors in the restoring
+	// cluster, and new type descriptors we will write from the backup.
+	//
+	// New type descriptors need to be rewritten with their generated IDs before
+	// they are written out to disk.
+	//
+	// Existing type descriptors need to be rewritten to the type ID of the type
+	// they are referring to in the restoring cluster. This ID is different from
+	// the ID the descriptor had when it was backed up. Changes to existing type
+	// descriptors will not be written to disk, and is only for accurate,
+	// in-memory resolution hereon out.
+	if err := rewriteTypeDescs(types, details.DescriptorRewrites); err != nil {
 		return nil, nil, err
 	}
 
@@ -1316,7 +1329,11 @@ func createImportingDescriptors(
 					return err
 				}
 				typeIDs, _, err := table.GetAllReferencedTypeIDs(dbDesc, func(id descpb.ID) (catalog.TypeDescriptor, error) {
-					return typesByID[id], nil
+					t, ok := typesByID[id]
+					if !ok {
+						return nil, errors.AssertionFailedf("type with id %d was not found in rewritten type mapping", id)
+					}
+					return t, nil
 				})
 				if err != nil {
 					return err
@@ -2241,36 +2258,24 @@ func (r *restoreResumer) dropDescriptors(
 
 	// Delete any schema descriptors that this restore created. Also collect the
 	// descriptors so we can update their parent databases later.
-	dbsWithDeletedSchemas := make(map[descpb.ID][]catalog.Descriptor)
+	dbsWithDeletedSchemas := make(map[descpb.ID][]catalog.SchemaDescriptor)
 	for _, schemaDesc := range details.SchemaDescs {
+		sc := schemadesc.NewBuilder(schemaDesc).BuildImmutableSchema()
 		// We need to ignore descriptors we just added since we haven't committed the txn that deletes these.
-		isSchemaEmpty, err := isSchemaEmpty(ctx, txn, schemaDesc.GetID(), allDescs, ignoredChildDescIDs)
+		isSchemaEmpty, err := isSchemaEmpty(ctx, txn, sc.GetID(), allDescs, ignoredChildDescIDs)
 		if err != nil {
-			return errors.Wrapf(err, "checking if schema %s is empty during restore cleanup", schemaDesc.GetName())
+			return errors.Wrapf(err, "checking if schema %s is empty during restore cleanup", sc.GetName())
 		}
 
 		if !isSchemaEmpty {
-			log.Warningf(ctx, "preserving schema %s on restore failure because it contains new child objects", schemaDesc.GetName())
+			log.Warningf(ctx, "preserving schema %s on restore failure because it contains new child objects", sc.GetName())
 			continue
 		}
 
-		mutSchema, err := descsCol.GetMutableDescriptorByID(ctx, schemaDesc.GetID(), txn)
-		if err != nil {
-			return err
-		}
-
-		// Mark schema as dropped and add uncommitted version to pass pre-txn
-		// descriptor validation.
-		mutSchema.SetDropped()
-		mutSchema.MaybeIncrementVersion()
-		if err := descsCol.AddUncommittedDescriptor(mutSchema); err != nil {
-			return err
-		}
-
-		b.Del(catalogkeys.EncodeNameKey(codec, mutSchema))
-		b.Del(catalogkeys.MakeDescMetadataKey(codec, mutSchema.GetID()))
-		descsCol.AddDeletedDescriptor(mutSchema)
-		dbsWithDeletedSchemas[mutSchema.GetParentID()] = append(dbsWithDeletedSchemas[mutSchema.GetParentID()], mutSchema)
+		b.Del(catalogkeys.EncodeNameKey(codec, sc))
+		b.Del(catalogkeys.MakeDescMetadataKey(codec, sc.GetID()))
+		descsCol.AddDeletedDescriptor(sc)
+		dbsWithDeletedSchemas[sc.GetParentID()] = append(dbsWithDeletedSchemas[sc.GetParentID()], sc)
 	}
 
 	// Delete the database descriptors.

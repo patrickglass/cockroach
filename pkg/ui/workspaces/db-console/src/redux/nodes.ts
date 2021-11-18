@@ -135,12 +135,9 @@ export const selectCommissionedNodeStatuses = createSelector(
 /**
  * nodeIDsSelector returns the NodeID of all nodes currently on the cluster.
  */
-export const nodeIDsSelector = createSelector(
-  nodeStatusesSelector,
-  nodeStatuses => {
-    return _.map(nodeStatuses, ns => ns.desc.node_id.toString());
-  },
-);
+const nodeIDsSelector = createSelector(nodeStatusesSelector, nodeStatuses => {
+  return _.map(nodeStatuses, ns => ns.desc.node_id.toString());
+});
 
 /**
  * nodeStatusByIDSelector returns a map from NodeID to a current INodeStatus.

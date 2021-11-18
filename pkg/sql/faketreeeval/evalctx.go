@@ -85,13 +85,29 @@ func (so *DummySequenceOperators) HasPrivilege(
 	specifier tree.HasPrivilegeSpecifier,
 	user security.SQLUsername,
 	kind privilege.Kind,
+	withGrantOpt bool,
 ) (bool, error) {
 	return false, errors.WithStack(errEvalPlanner)
+}
+
+// IncrementSequence is part of the tree.SequenceOperators interface.
+func (so *DummySequenceOperators) IncrementSequence(
+	ctx context.Context, seqName *tree.TableName,
+) (int64, error) {
+	return 0, errors.WithStack(errSequenceOperators)
 }
 
 // IncrementSequenceByID is part of the tree.SequenceOperators interface.
 func (so *DummySequenceOperators) IncrementSequenceByID(
 	ctx context.Context, seqID int64,
+) (int64, error) {
+	return 0, errors.WithStack(errSequenceOperators)
+}
+
+// GetLatestValueInSessionForSequence implements the tree.SequenceOperators
+// interface.
+func (so *DummySequenceOperators) GetLatestValueInSessionForSequence(
+	ctx context.Context, seqName *tree.TableName,
 ) (int64, error) {
 	return 0, errors.WithStack(errSequenceOperators)
 }
@@ -102,6 +118,13 @@ func (so *DummySequenceOperators) GetLatestValueInSessionForSequenceByID(
 	ctx context.Context, seqID int64,
 ) (int64, error) {
 	return 0, errors.WithStack(errSequenceOperators)
+}
+
+// SetSequenceValue implements the tree.SequenceOperators interface.
+func (so *DummySequenceOperators) SetSequenceValue(
+	ctx context.Context, seqName *tree.TableName, newVal int64, isCalled bool,
+) error {
+	return errors.WithStack(errSequenceOperators)
 }
 
 // SetSequenceValueByID implements the tree.SequenceOperators interface.
@@ -208,13 +231,6 @@ func (ep *DummyEvalPlanner) UnsafeDeleteNamespaceEntry(
 	return errors.WithStack(errEvalPlanner)
 }
 
-// UserHasAdminRole is part of the EvalPlanner interface.
-func (ep *DummyEvalPlanner) UserHasAdminRole(
-	ctx context.Context, user security.SQLUsername,
-) (bool, error) {
-	return false, errors.WithStack(errEvalPlanner)
-}
-
 // MemberOfWithAdminOption is part of the EvalPlanner interface.
 func (ep *DummyEvalPlanner) MemberOfWithAdminOption(
 	ctx context.Context, member security.SQLUsername,
@@ -295,6 +311,7 @@ func (ep *DummyEvalPlanner) HasPrivilege(
 	specifier tree.HasPrivilegeSpecifier,
 	user security.SQLUsername,
 	kind privilege.Kind,
+	withGrantOpt bool,
 ) (bool, error) {
 	return false, errors.WithStack(errEvalPlanner)
 }

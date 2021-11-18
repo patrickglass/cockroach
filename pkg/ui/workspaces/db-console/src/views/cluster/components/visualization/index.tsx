@@ -27,7 +27,6 @@ interface VisualizationProps {
   stale?: boolean;
   // If loading is true a spinner is shown instead of the graph.
   loading?: boolean;
-  preCalcGraphSize?: boolean;
 }
 
 /**
@@ -37,10 +36,9 @@ interface VisualizationProps {
  */
 export default class extends React.Component<VisualizationProps, {}> {
   render() {
-    const { title, subtitle, tooltip, stale, preCalcGraphSize } = this.props;
+    const { title, subtitle, tooltip, stale } = this.props;
     const vizClasses = classNames("visualization", {
       "visualization--faded": stale || false,
-      "visualization__graph-sizing": preCalcGraphSize,
     });
     const contentClasses = classNames("visualization__content", {
       "visualization--loading": this.props.loading,

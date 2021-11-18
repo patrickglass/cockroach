@@ -432,7 +432,7 @@ func (p *planner) processSetOrResetClause(
 			ctx, expr, nil, tree.IndexedVarHelper{}, types.String, false, "ALTER ROLE ... SET ",
 		)
 		if err != nil {
-			return unknown, "", sessionVar{}, nil, wrapSetVarError(err, varName, expr.String())
+			return unknown, "", sessionVar{}, nil, wrapSetVarError(varName, expr.String(), "%v", err)
 		}
 		typedValues = append(typedValues, typedValue)
 	}

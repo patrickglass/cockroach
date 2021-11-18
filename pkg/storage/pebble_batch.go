@@ -137,7 +137,15 @@ func (p *pebbleBatch) Closed() bool {
 
 // ExportMVCCToSst is part of the engine.Reader interface.
 func (p *pebbleBatch) ExportMVCCToSst(
-	ctx context.Context, exportOptions ExportOptions, dest io.Writer,
+	ctx context.Context,
+	startKey, endKey roachpb.Key,
+	startTS, endTS hlc.Timestamp,
+	firstKeyTS hlc.Timestamp,
+	exportAllRevisions bool,
+	targetSize, maxSize uint64,
+	stopMidKey bool,
+	useTBI bool,
+	dest io.Writer,
 ) (roachpb.BulkOpSummary, roachpb.Key, hlc.Timestamp, error) {
 	panic("unimplemented")
 }

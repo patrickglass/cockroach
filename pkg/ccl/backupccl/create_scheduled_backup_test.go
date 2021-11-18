@@ -66,8 +66,7 @@ func newTestHelper(t *testing.T) (*testHelper, func()) {
 	dir, dirCleanupFn := testutils.TempDir(t)
 
 	th := &testHelper{
-		env: jobstest.NewJobSchedulerTestEnv(
-			jobstest.UseSystemTables, timeutil.Now(), tree.ScheduledBackupExecutor),
+		env:   jobstest.NewJobSchedulerTestEnv(jobstest.UseSystemTables, timeutil.Now()),
 		iodir: dir,
 	}
 

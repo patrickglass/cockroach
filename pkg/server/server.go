@@ -388,14 +388,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		cfg.Locality,
 		&cfg.DefaultZoneConfig,
 	)
-
-	var dialerKnobs nodedialer.DialerTestingKnobs
-	if dk := cfg.TestingKnobs.DialerKnobs; dk != nil {
-		dialerKnobs = dk.(nodedialer.DialerTestingKnobs)
-	}
-
-	nodeDialer := nodedialer.NewWithOpt(rpcContext, gossip.AddressResolver(g),
-		nodedialer.DialerOpt{TestingKnobs: dialerKnobs})
+	nodeDialer := nodedialer.New(rpcContext, gossip.AddressResolver(g))
 
 	runtimeSampler := status.NewRuntimeStatSampler(ctx, clock)
 	registry.AddMetricStruct(runtimeSampler)
@@ -721,7 +714,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	}
 
 	kvProber := kvprober.NewProber(kvprober.Opts{
-		Tracer:                  cfg.AmbientCtx.Tracer,
+		AmbientCtx:              cfg.AmbientCtx,
 		DB:                      db,
 		Settings:                st,
 		HistogramWindowInterval: cfg.HistogramWindowInterval(),
@@ -772,7 +765,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	}
 	sStatus.setStmtDiagnosticsRequester(sqlServer.execCfg.StmtDiagnosticsRecorder)
 	sStatus.baseStatusServer.sqlServer = sqlServer
-	debugServer := debug.NewServer(st, sqlServer.pgServer.HBADebugFn(), sStatus)
+	debugServer := debug.NewServer(st, sqlServer.pgServer.HBADebugFn())
 	node.InitLogger(sqlServer.execCfg)
 
 	*lateBoundServer = Server{
@@ -1264,8 +1257,8 @@ func (s *Server) PreStart(ctx context.Context) error {
 		blobs.NewBlobClientFactory(s.nodeIDContainer.Get(),
 			s.nodeDialer, s.st.ExternalIODir), &fileTableInternalExecutor, s.db)
 
-	// Filter out self from the gossip bootstrap addresses.
-	filtered := s.cfg.FilterGossipBootstrapAddresses(ctx)
+	// Filter out self from the gossip bootstrap resolvers.
+	filtered := s.cfg.FilterGossipBootstrapResolvers(ctx)
 
 	// Set up the init server. We have to do this relatively early because we
 	// can't call RegisterInitServer() after `grpc.Serve`, which is called in

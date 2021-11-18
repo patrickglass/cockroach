@@ -49,6 +49,11 @@ const (
 	PgServerVersion = "13.0.0"
 	// PgServerVersionNum is the latest version of postgres that we claim to support in the numeric format of "server_version_num".
 	PgServerVersionNum = "130000"
+	// PgCompatLocale is the locale string we advertise in `LC_*` session
+	// variables. C.UTF-8 is the only locale that is allowed in CREATE DATABASE
+	// at the time of writing.
+	// See https://www.postgresql.org/docs/14/locale.html
+	PgCompatLocale = "C.UTF-8"
 )
 
 type getStringValFn = func(
@@ -340,7 +345,7 @@ var varGen = map[string]sessionVar{
 		Set: func(ctx context.Context, m sessionDataMutator, val string) error {
 			i, err := strconv.ParseInt(val, 10, 64)
 			if err != nil {
-				return wrapSetVarError(err, "default_int_size", val)
+				return wrapSetVarError("default_int_size", val, "%v", err)
 			}
 			if i != 4 && i != 8 {
 				return pgerror.New(pgcode.InvalidParameterValue,
@@ -814,7 +819,7 @@ var varGen = map[string]sessionVar{
 		) error {
 			i, err := strconv.ParseInt(s, 10, 64)
 			if err != nil {
-				return wrapSetVarError(err, "extra_float_digits", s)
+				return wrapSetVarError("extra_float_digits", s, "%v", err)
 			}
 			// Note: this is the range allowed by PostgreSQL.
 			// See also the documentation around (DataConversionConfig).GetFloatPrec()
@@ -1106,6 +1111,32 @@ var varGen = map[string]sessionVar{
 	// See https://www.postgresql.org/docs/10/static/runtime-config-preset.html#GUC-SERVER-VERSION-NUM
 	`server_version_num`: makeReadOnlyVar(PgServerVersionNum),
 
+	// This is read-only in Postgres also.
+	// See https://www.postgresql.org/docs/14/sql-show.html and
+	// https://www.postgresql.org/docs/14/locale.html
+	`lc_collate`: makeReadOnlyVar(PgCompatLocale),
+
+	// This is read-only in Postgres also.
+	// See https://www.postgresql.org/docs/14/sql-show.html and
+	// https://www.postgresql.org/docs/14/locale.html
+	`lc_ctype`: makeReadOnlyVar(PgCompatLocale),
+
+	// See https://www.postgresql.org/docs/14/sql-show.html and
+	// https://www.postgresql.org/docs/14/locale.html
+	`lc_messages`: makeCompatStringVar("lc_messages", PgCompatLocale),
+
+	// See https://www.postgresql.org/docs/14/sql-show.html and
+	// https://www.postgresql.org/docs/14/locale.html
+	`lc_monetary`: makeCompatStringVar("lc_monetary", PgCompatLocale),
+
+	// See https://www.postgresql.org/docs/14/sql-show.html and
+	// https://www.postgresql.org/docs/14/locale.html
+	`lc_numeric`: makeCompatStringVar("lc_numeric", PgCompatLocale),
+
+	// See https://www.postgresql.org/docs/14/sql-show.html and
+	// https://www.postgresql.org/docs/14/locale.html
+	`lc_time`: makeCompatStringVar("lc_time", PgCompatLocale),
+
 	// See https://www.postgresql.org/docs/9.4/runtime-config-connection.html
 	`ssl_renegotiation_limit`: {
 		Hidden:        true,
@@ -1115,7 +1146,7 @@ var varGen = map[string]sessionVar{
 		Set: func(_ context.Context, _ sessionDataMutator, s string) error {
 			i, err := strconv.ParseInt(s, 10, 64)
 			if err != nil {
-				return wrapSetVarError(err, "ssl_renegotiation_limit", s)
+				return wrapSetVarError("ssl_renegotiation_limit", s, "%v", err)
 			}
 			if i != 0 {
 				// See pg src/backend/utils/misc/guc.c: non-zero values are not to be supported.
@@ -1412,19 +1443,21 @@ var varGen = map[string]sessionVar{
 	},
 
 	// CockroachDB extension.
-	// This is only kept for backwards compatibility and no longer has any effect.
 	`enable_drop_enum_value`: {
-		Hidden:       true,
 		GetStringVal: makePostgresBoolGetStringValFn(`enable_drop_enum_value`),
 		Set: func(_ context.Context, m sessionDataMutator, s string) error {
-			_, err := paramparse.ParseBoolVar("enable_drop_enum_value", s)
-			return err
+			b, err := paramparse.ParseBoolVar("enable_drop_enum_value", s)
+			if err != nil {
+				return err
+			}
+			m.SetDropEnumValueEnabled(b)
+			return nil
 		},
 		Get: func(evalCtx *extendedEvalContext) string {
-			return formatBoolAsPostgresSetting(true)
+			return formatBoolAsPostgresSetting(evalCtx.SessionData().DropEnumValueEnabled)
 		},
 		GlobalDefault: func(sv *settings.Values) string {
-			return formatBoolAsPostgresSetting(true)
+			return formatBoolAsPostgresSetting(dropEnumValueEnabledClusterMode.Get(sv))
 		},
 	},
 
@@ -1806,7 +1839,7 @@ var globalFalse = displayPgBool(false)
 // specified by the user.
 func sessionDataTimeZoneFormat(loc *time.Location) string {
 	locStr := loc.String()
-	_, origRepr, parsed := timeutil.ParseTimeZoneOffset(locStr, timeutil.TimeZoneStringToLocationISO8601Standard)
+	_, origRepr, parsed := timeutil.ParseFixedOffsetTimeZone(locStr)
 	if parsed {
 		return origRepr
 	}

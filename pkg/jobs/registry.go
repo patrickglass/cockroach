@@ -1213,16 +1213,10 @@ func (r *Registry) stepThroughStateMachine(
 			return errors.Errorf("job %d: node liveness error: restarting in background", job.ID())
 		}
 		// TODO(spaskob): enforce a limit on retries.
-
-		if nonCancelableRetry := job.Payload().Noncancelable && !IsPermanentJobError(err); nonCancelableRetry ||
-			errors.Is(err, errRetryJobSentinel) {
+		if errors.Is(err, errRetryJobSentinel) {
 			jm.ResumeRetryError.Inc(1)
-			if nonCancelableRetry {
-				err = errors.Wrapf(err, "non-cancelable")
-			}
 			return onExecutionFailed(err)
 		}
-
 		jm.ResumeFailed.Inc(1)
 		if sErr := (*InvalidStatusError)(nil); errors.As(err, &sErr) {
 			if sErr.status != StatusCancelRequested && sErr.status != StatusPauseRequested {
@@ -1285,14 +1279,31 @@ func (r *Registry) stepThroughStateMachine(
 			}
 			return r.stepThroughStateMachine(ctx, execCtx, resumer, job, nextStatus, jobErr)
 		}
-		jm.FailOrCancelRetryError.Inc(1)
 		if onFailOrCancelCtx.Err() != nil {
+			jm.FailOrCancelRetryError.Inc(1)
 			// The context was canceled. Tell the user, but don't attempt to
 			// mark the job as failed because it can be resumed by another node.
 			return errors.Errorf("job %d: node liveness error: restarting in background", job.ID())
 		}
-		// All reverting jobs are retried.
-		return onExecutionFailed(err)
+		if errors.Is(err, errRetryJobSentinel) {
+			jm.FailOrCancelRetryError.Inc(1)
+			return onExecutionFailed(err)
+		}
+		// A non-cancelable job is always retried while reverting unless the error is marked as permanent.
+		if job.Payload().Noncancelable && !IsPermanentJobError(err) {
+			jm.FailOrCancelRetryError.Inc(1)
+			return errors.Wrapf(err, "job %d: job is non-cancelable, restarting in background", job.ID())
+		}
+		jm.FailOrCancelFailed.Inc(1)
+		if sErr := (*InvalidStatusError)(nil); errors.As(err, &sErr) {
+			if sErr.status != StatusPauseRequested {
+				return errors.NewAssertionErrorWithWrappedErrf(jobErr,
+					"job %d: unexpected status %s provided for a reverting job", job.ID(), sErr.status)
+			}
+			return sErr
+		}
+		return r.stepThroughStateMachine(ctx, execCtx, resumer, job, StatusRevertFailed,
+			errors.Wrapf(err, "job %d: cannot be reverted, manual cleanup may be required", job.ID()))
 	case StatusFailed:
 		if jobErr == nil {
 			return errors.AssertionFailedf("job %d: has StatusFailed but no error was provided", job.ID())
@@ -1305,9 +1316,6 @@ func (r *Registry) stepThroughStateMachine(
 		telemetry.Inc(TelemetryMetrics[jobType].Failed)
 		return jobErr
 	case StatusRevertFailed:
-		// TODO(sajjad): Remove StatusRevertFailed and related code in other places in v22.1.
-		// v21.2 modified all reverting jobs to retry instead of go to revert-failed. Therefore,
-		// revert-failed state is not reachable after 21.2.
 		if jobErr == nil {
 			return errors.AssertionFailedf("job %d: has StatusRevertFailed but no error was provided",
 				job.ID())

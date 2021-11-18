@@ -374,8 +374,8 @@
         "expectedDataType": null
       },
       "attmissingval": {
-        "oid": 1009,
-        "dataType": "_TEXT",
+        "oid": 2277,
+        "dataType": "anyarray",
         "expectedOid": null,
         "expectedDataType": null
       },
@@ -6270,32 +6270,32 @@
         "expectedDataType": null
       },
       "stavalues1": {
-        "oid": 1009,
-        "dataType": "_TEXT",
+        "oid": 2277,
+        "dataType": "anyarray",
         "expectedOid": null,
         "expectedDataType": null
       },
       "stavalues2": {
-        "oid": 1009,
-        "dataType": "_TEXT",
+        "oid": 2277,
+        "dataType": "anyarray",
         "expectedOid": null,
         "expectedDataType": null
       },
       "stavalues3": {
-        "oid": 1009,
-        "dataType": "_TEXT",
+        "oid": 2277,
+        "dataType": "anyarray",
         "expectedOid": null,
         "expectedDataType": null
       },
       "stavalues4": {
-        "oid": 1009,
-        "dataType": "_TEXT",
+        "oid": 2277,
+        "dataType": "anyarray",
         "expectedOid": null,
         "expectedDataType": null
       },
       "stavalues5": {
-        "oid": 1009,
-        "dataType": "_TEXT",
+        "oid": 2277,
+        "dataType": "anyarray",
         "expectedOid": null,
         "expectedDataType": null
       },
@@ -6358,20 +6358,20 @@
     },
     "pg_statistic_ext_data": {
       "stxddependencies": {
-        "oid": 17,
-        "dataType": "BYTEA",
+        "oid": 3402,
+        "dataType": "pg_dependencies",
         "expectedOid": null,
         "expectedDataType": null
       },
       "stxdmcv": {
-        "oid": 17,
-        "dataType": "BYTEA",
+        "oid": 5017,
+        "dataType": "pg_mcv_list",
         "expectedOid": null,
         "expectedDataType": null
       },
       "stxdndistinct": {
-        "oid": 17,
-        "dataType": "BYTEA",
+        "oid": 3361,
+        "dataType": "pg_ndistinct",
         "expectedOid": null,
         "expectedDataType": null
       },
@@ -6408,8 +6408,8 @@
         "expectedDataType": null
       },
       "histogram_bounds": {
-        "oid": 1009,
-        "dataType": "_TEXT",
+        "oid": 2277,
+        "dataType": "anyarray",
         "expectedOid": null,
         "expectedDataType": null
       },
@@ -6426,8 +6426,8 @@
         "expectedDataType": null
       },
       "most_common_elems": {
-        "oid": 1009,
-        "dataType": "_TEXT",
+        "oid": 2277,
+        "dataType": "anyarray",
         "expectedOid": null,
         "expectedDataType": null
       },
@@ -6438,8 +6438,8 @@
         "expectedDataType": null
       },
       "most_common_vals": {
-        "oid": 1009,
-        "dataType": "_TEXT",
+        "oid": 2277,
+        "dataType": "anyarray",
         "expectedOid": null,
         "expectedDataType": null
       },
@@ -6476,8 +6476,8 @@
         "expectedDataType": null
       },
       "dependencies": {
-        "oid": 17,
-        "dataType": "BYTEA",
+        "oid": 3402,
+        "dataType": "pg_dependencies",
         "expectedOid": null,
         "expectedDataType": null
       },
@@ -6512,8 +6512,8 @@
         "expectedDataType": null
       },
       "n_distinct": {
-        "oid": 17,
-        "dataType": "BYTEA",
+        "oid": 3361,
+        "dataType": "pg_ndistinct",
         "expectedOid": null,
         "expectedDataType": null
       },
@@ -7419,5 +7419,10 @@
       }
     }
   },
-  "unimplementedTypes": null
+  "unimplementedTypes": {
+    "2277": "anyarray",
+    "3361": "pg_ndistinct",
+    "3402": "pg_dependencies",
+    "5017": "pg_mcv_list"
+  }
 }

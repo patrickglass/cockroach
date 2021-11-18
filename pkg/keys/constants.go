@@ -152,6 +152,9 @@ var (
 	//
 	// LocalStorePrefix is the prefix identifying per-store data.
 	LocalStorePrefix = makeKey(LocalPrefix, roachpb.Key("s"))
+	// localStoreSuggestedCompactionSuffix stores suggested compactions to
+	// be aggregated and processed on the store.
+	localStoreSuggestedCompactionSuffix = []byte("comp")
 	// localStoreClusterVersionSuffix stores the cluster-wide version
 	// information for this store, updated any time the operator
 	// updates the minimum cluster version.
@@ -412,12 +415,11 @@ const (
 	SpanConfigurationsTableID           = 47
 
 	// CommentType is type for system.comments
-	DatabaseCommentType   = 0
-	TableCommentType      = 1
-	ColumnCommentType     = 2
-	IndexCommentType      = 3
-	SchemaCommentType     = 4
-	ConstraintCommentType = 5
+	DatabaseCommentType = 0
+	TableCommentType    = 1
+	ColumnCommentType   = 2
+	IndexCommentType    = 3
+	SchemaCommentType   = 4
 )
 
 const (

@@ -780,7 +780,7 @@ func (u *sqlSymUnion) setVar() *tree.SetVar {
 
 %token <str> FAILURE FALSE FAMILY FETCH FETCHVAL FETCHTEXT FETCHVAL_PATH FETCHTEXT_PATH
 %token <str> FILES FILTER
-%token <str> FIRST FLOAT FLOAT4 FLOAT8 FLOORDIV FOLLOWING FOR FORCE FORCE_INDEX FORCE_ZIGZAG FOREIGN FROM FULL FUNCTION FUNCTIONS
+%token <str> FIRST FLOAT FLOAT4 FLOAT8 FLOORDIV FOLLOWING FOR FORCE FORCE_INDEX FOREIGN FROM FULL FUNCTION FUNCTIONS
 
 %token <str> GENERATED GEOGRAPHY GEOMETRY GEOMETRYM GEOMETRYZ GEOMETRYZM
 %token <str> GEOMETRYCOLLECTION GEOMETRYCOLLECTIONM GEOMETRYCOLLECTIONZ GEOMETRYCOLLECTIONZM
@@ -809,10 +809,9 @@ func (u *sqlSymUnion) setVar() *tree.SetVar {
 %token <str> MULTIPOINT MULTIPOINTM MULTIPOINTZ MULTIPOINTZM
 %token <str> MULTIPOLYGON MULTIPOLYGONM MULTIPOLYGONZ MULTIPOLYGONZM
 
-%token <str> NAN NAME NAMES NATURAL NEVER NEW_DB_NAME NEXT NO NOCANCELQUERY NOCONTROLCHANGEFEED
-%token <str> NOCONTROLJOB NOCREATEDB NOCREATELOGIN NOCREATEROLE NOLOGIN NOMODIFYCLUSTERSETTING
-%token <str> NO_INDEX_JOIN NO_ZIGZAG_JOIN NONE NON_VOTERS NORMAL NOT NOTHING NOTNULL
-%token <str> NOVIEWACTIVITY NOWAIT NULL NULLIF NULLS NUMERIC
+%token <str> NAN NAME NAMES NATURAL NEVER NEXT NO NOCANCELQUERY NOCONTROLCHANGEFEED NOCONTROLJOB
+%token <str> NOCREATEDB NOCREATELOGIN NOCREATEROLE NOLOGIN NOMODIFYCLUSTERSETTING NO_INDEX_JOIN NO_ZIGZAG_JOIN
+%token <str> NO_FULL_SCAN NONE NON_VOTERS NORMAL NOT NOTHING NOTNULL NOVIEWACTIVITY NOWAIT NULL NULLIF NULLS NUMERIC
 
 %token <str> OF OFF OFFSET OID OIDS OIDVECTOR ON ONLY OPT OPTION OPTIONS OR
 %token <str> ORDER ORDINALITY OTHERS OUT OUTER OVER OVERLAPS OVERLAY OWNED OWNER OPERATOR
@@ -959,7 +958,6 @@ func (u *sqlSymUnion) setVar() *tree.SetVar {
 %type <tree.Statement> cancel_jobs_stmt
 %type <tree.Statement> cancel_queries_stmt
 %type <tree.Statement> cancel_sessions_stmt
-%type <tree.Statement> cancel_all_jobs_stmt
 
 // SCRUB
 %type <tree.Statement> scrub_stmt
@@ -1019,13 +1017,13 @@ func (u *sqlSymUnion) setVar() *tree.SetVar {
 %type <tree.Statement> grant_stmt
 %type <tree.Statement> insert_stmt
 %type <tree.Statement> import_stmt
-%type <tree.Statement> pause_stmt pause_jobs_stmt pause_schedules_stmt pause_all_jobs_stmt
+%type <tree.Statement> pause_stmt pause_jobs_stmt pause_schedules_stmt
 %type <*tree.Select>   for_schedules_clause
 %type <tree.Statement> reassign_owned_by_stmt
 %type <tree.Statement> drop_owned_by_stmt
 %type <tree.Statement> release_stmt
 %type <tree.Statement> reset_stmt reset_session_stmt reset_csetting_stmt
-%type <tree.Statement> resume_stmt resume_jobs_stmt resume_schedules_stmt resume_all_jobs_stmt
+%type <tree.Statement> resume_stmt resume_jobs_stmt resume_schedules_stmt
 %type <tree.Statement> drop_schedule_stmt
 %type <tree.Statement> restore_stmt
 %type <tree.StringOrPlaceholderOptList> string_or_placeholder_opt_list
@@ -1537,7 +1535,6 @@ alter_ddl_stmt:
 //   ALTER TABLE ... DROP [COLUMN] [IF EXISTS] <colname> [RESTRICT | CASCADE]
 //   ALTER TABLE ... DROP CONSTRAINT [IF EXISTS] <constraintname> [RESTRICT | CASCADE]
 //   ALTER TABLE ... ALTER [COLUMN] <colname> {SET DEFAULT <expr> | DROP DEFAULT}
-//   ALTER TABLE ... ALTER [COLUMN] <colname> {SET ON UPDATE <expr> | DROP ON UPDATE}
 //   ALTER TABLE ... ALTER [COLUMN] <colname> DROP NOT NULL
 //   ALTER TABLE ... ALTER [COLUMN] <colname> DROP STORED
 //   ALTER TABLE ... ALTER [COLUMN] <colname> [SET DATA] TYPE <type> [COLLATE <collation>]
@@ -2150,7 +2147,7 @@ alter_table_cmd:
   {
     $$.val = &tree.AlterTableSetDefault{Column: tree.Name($3), Default: $4.expr()}
   }
-  // ALTER TABLE <name> ALTER [COLUMN] <colname> {SET ON UPDATE <expr>|DROP ON UPDATE}
+  // ALTER TABLE <name> ALTER [COLUMN] <colname> {ON UPDATE <expr>|DROP ON UPDATE}
 | ALTER opt_column column_name alter_column_on_update
   {
     $$.val = &tree.AlterTableSetOnUpdate{Column: tree.Name($3), Expr: $4.expr()}
@@ -2508,11 +2505,10 @@ role_spec:
 username_or_sconst:
   non_reserved_word
   {
-    // Username was entered as a SQL keyword, or as a SQL identifier
-    // already subject to case normalization and NFC reduction.
-    // (or is it? In fact, there is a bug here: https://github.com/cockroachdb/cockroach/issues/55396
-    // which needs to be fixed to make this fully correct.)
-    $$.val = security.MakeSQLUsernameFromPreNormalizedString($1)
+    // We use UsernameValidation because username_or_sconst and role_spec
+    // are only used for usernames of existing accounts, not when
+    // creating new users or roles.
+    $$.val, _ = security.MakeSQLUsernameFromUserInput($1, security.UsernameValidation)
   }
 | SCONST
   {
@@ -2885,7 +2881,6 @@ opt_with_schedule_options:
 //    detached: execute restore job asynchronously, without waiting for its completion
 //    skip_localities_check: ignore difference of zone configuration between restore cluster and backup cluster
 //    debug_pause_on: describes the events that the job should pause itself on for debugging purposes.
-//    new_db_name: renames the restored database. only applies to database restores
 // %SeeAlso: BACKUP, WEBDOCS/restore.html
 restore_stmt:
   RESTORE FROM list_of_string_or_placeholder_opt_list opt_as_of_clause opt_with_restore_options
@@ -3025,10 +3020,6 @@ restore_options:
 | DEBUG_PAUSE_ON '=' string_or_placeholder
   {
     $$.val = &tree.RestoreOptions{DebugPauseOn: $3.expr()}
-  }
-| NEW_DB_NAME '=' string_or_placeholder
-  {
-    $$.val = &tree.RestoreOptions{NewDBName: $3.expr()}
   }
 
 import_format:
@@ -3292,11 +3283,10 @@ copy_options:
 // %Category: Group
 // %Text: CANCEL JOBS, CANCEL QUERIES, CANCEL SESSIONS
 cancel_stmt:
-  cancel_jobs_stmt      // EXTEND WITH HELP: CANCEL JOBS
-| cancel_queries_stmt   // EXTEND WITH HELP: CANCEL QUERIES
-| cancel_sessions_stmt  // EXTEND WITH HELP: CANCEL SESSIONS
-| cancel_all_jobs_stmt  // EXTEND WITH HELP: CANCEL ALL JOBS
-| CANCEL error          // SHOW HELP: CANCEL
+  cancel_jobs_stmt     // EXTEND WITH HELP: CANCEL JOBS
+| cancel_queries_stmt  // EXTEND WITH HELP: CANCEL QUERIES
+| cancel_sessions_stmt // EXTEND WITH HELP: CANCEL SESSIONS
+| CANCEL error         // SHOW HELP: CANCEL
 
 // %Help: CANCEL JOBS - cancel background jobs
 // %Category: Misc
@@ -3397,17 +3387,6 @@ cancel_sessions_stmt:
   }
 | CANCEL SESSIONS error // SHOW HELP: CANCEL SESSIONS
 
-// %Help: CANCEL ALL JOBS
-// %Category: Misc
-// %Text:
-// CANCEL ALL {BACKUP|CHANGEFEED|IMPORT|RESTORE} JOBS
-cancel_all_jobs_stmt:
-  CANCEL ALL name JOBS
-  {
-    $$.val = &tree.ControlJobsOfType{Type: $3, Command: tree.CancelJob}
-  }
-| CANCEL ALL error // SHOW HELP: CANCEL ALL JOBS
-
 comment_stmt:
   COMMENT ON DATABASE database_name IS comment_text
   {
@@ -3437,11 +3416,6 @@ comment_stmt:
 | COMMENT ON INDEX table_index_name IS comment_text
   {
     $$.val = &tree.CommentOnIndex{Index: $4.tableIndexName(), Comment: $6.strPtr()}
-  }
-
-| COMMENT ON CONSTRAINT constraint_name ON table_name IS comment_text
-  {
-    $$.val = &tree.CommentOnConstraint{Constraint:tree.Name($4), Table: $6.unresolvedObjectName(), Comment: $8.strPtr()}
   }
 | COMMENT ON EXTENSION error { return unimplemented(sqllex, "comment on extension") }
 
@@ -4970,9 +4944,9 @@ show_session_stmt:
 
 session_var:
   IDENT
-// Although ALL, SESSION_USER and DATABASE are identifiers for the
-// purpose of SHOW, they lex as separate token types, so they need
-// separate rules.
+// Although ALL, SESSION_USER, DATABASE, LC_COLLATE, and LC_CTYPE are
+// identifiers for the purpose of SHOW, they lex as separate token types, so
+// they need separate rules.
 | ALL
 | DATABASE
 // SET NAMES is standard SQL for SET client_encoding.
@@ -4980,6 +4954,8 @@ session_var:
 | NAMES { $$ = "client_encoding" }
 | ROLE
 | SESSION_USER
+| LC_COLLATE
+| LC_CTYPE
 // TIME ZONE is special: it is two tokens, but is really the identifier "TIME ZONE".
 | TIME ZONE { $$ = "timezone" }
 | TIME error // SHOW HELP: SHOW SESSION
@@ -5273,14 +5249,14 @@ show_indexes_stmt:
 // %Text: SHOW CONSTRAINTS FROM <tablename>
 // %SeeAlso: WEBDOCS/show-constraints.html
 show_constraints_stmt:
-  SHOW CONSTRAINT FROM table_name with_comment
+  SHOW CONSTRAINT FROM table_name
   {
-    $$.val = &tree.ShowConstraints{Table: $4.unresolvedObjectName(), WithComment: $5.bool()}
+    $$.val = &tree.ShowConstraints{Table: $4.unresolvedObjectName()}
   }
 | SHOW CONSTRAINT error // SHOW HELP: SHOW CONSTRAINTS
-| SHOW CONSTRAINTS FROM table_name with_comment
+| SHOW CONSTRAINTS FROM table_name
   {
-    $$.val = &tree.ShowConstraints{Table: $4.unresolvedObjectName(), WithComment: $5.bool()}
+    $$.val = &tree.ShowConstraints{Table: $4.unresolvedObjectName()}
   }
 | SHOW CONSTRAINTS error // SHOW HELP: SHOW CONSTRAINTS
 
@@ -6122,7 +6098,6 @@ for_grantee_clause:
 pause_stmt:
   pause_jobs_stmt       // EXTEND WITH HELP: PAUSE JOBS
 | pause_schedules_stmt  // EXTEND WITH HELP: PAUSE SCHEDULES
-| pause_all_jobs_stmt  // EXTEND WITH HELP: PAUSE ALL JOBS
 | PAUSE error           // SHOW HELP: PAUSE
 
 // %Help: RESUME
@@ -6131,23 +6106,11 @@ pause_stmt:
 //
 // Resume various background tasks and activities.
 //
-// RESUME JOBS, RESUME SCHEDULES, RESUME ALL BACKUP JOBS
+// RESUME JOBS, RESUME SCHEDULES
 resume_stmt:
   resume_jobs_stmt       // EXTEND WITH HELP: RESUME JOBS
 | resume_schedules_stmt  // EXTEND WITH HELP: RESUME SCHEDULES
-| resume_all_jobs_stmt  // EXTEND WITH HELP: RESUME ALL JOBS
 | RESUME error           // SHOW HELP: RESUME
-
-// %Help: RESUME ALL JOBS
-// %Category: Misc
-// %Text:
-// RESUME ALL {BACKUP|CHANGEFEED|IMPORT|RESTORE} JOBS
-resume_all_jobs_stmt:
-  RESUME ALL name JOBS
-  {
-    $$.val = &tree.ControlJobsOfType{Type: $3, Command: tree.ResumeJob}
-  }
-| RESUME ALL error // SHOW HELP: RESUME ALL JOBS
 
 // %Help: PAUSE JOBS - pause background jobs
 // %Category: Misc
@@ -6229,18 +6192,6 @@ pause_schedules_stmt:
     }
   }
 | PAUSE SCHEDULES error // SHOW HELP: PAUSE SCHEDULES
-
-// %Help: PAUSE ALL JOBS
-// %Category: Misc
-// %Text:
-// PAUSE ALL {BACKUP|CHANGEFEED|IMPORT|RESTORE} JOBS
-pause_all_jobs_stmt:
-  PAUSE ALL name JOBS
-  {
-    $$.val = &tree.ControlJobsOfType{Type: $3, Command: tree.PauseJob}
-  }
-| PAUSE ALL error // SHOW HELP: PAUSE ALL JOBS
-
 
 // %Help: CREATE SCHEMA - create a new schema
 // %Category: DDL
@@ -6325,7 +6276,7 @@ alter_schema_stmt:
 //    CHECK ( <expr> )
 //
 // Column qualifiers:
-//   [CONSTRAINT <constraintname>] {NULL | NOT NULL | NOT VISIBLE | UNIQUE | PRIMARY KEY | CHECK (<expr>) | DEFAULT <expr> | ON UPDATE <expr> | GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY [( <opt_sequence_option_list> )]}
+//   [CONSTRAINT <constraintname>] {NULL | NOT NULL | NOT VISIBLE | UNIQUE | PRIMARY KEY | CHECK (<expr>) | DEFAULT <expr> | GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY [( <opt_sequence_option_list> )]}
 //   FAMILY <familyname>, CREATE [IF NOT EXISTS] FAMILY [<familyname>]
 //   REFERENCES <tablename> [( <colnames...> )] [ON DELETE {NO ACTION | RESTRICT}] [ON UPDATE {NO ACTION | RESTRICT}]
 //   COLLATE <collationname>
@@ -9774,26 +9725,15 @@ index_flags_param:
     $$.val = &tree.IndexFlags{NoZigzagJoin: true}
   }
 |
+  NO_FULL_SCAN
+  {
+    $$.val = &tree.IndexFlags{NoFullScan: true}
+  }
+|
   IGNORE_FOREIGN_KEYS
   {
     /* SKIP DOC */
     $$.val = &tree.IndexFlags{IgnoreForeignKeys: true}
-  }
-|
-  FORCE_ZIGZAG
-  {
-     $$.val = &tree.IndexFlags{ForceZigzag: true}
-  }
-|
-  FORCE_ZIGZAG '=' index_name
-  {
-     $$.val = &tree.IndexFlags{ZigzagIndexes: []tree.UnrestrictedName{tree.UnrestrictedName($3)}}
-  }
-|
-  FORCE_ZIGZAG '=' '[' iconst64 ']'
-  {
-    /* SKIP DOC */
-     $$.val = &tree.IndexFlags{ZigzagIndexIDs: []tree.IndexID{tree.IndexID($4.int64())}}
   }
 
 index_flags_param_list:
@@ -9854,8 +9794,8 @@ opt_index_flags:
 //   '{' FORCE_INDEX = <idxname> [, ...] '}'
 //   '{' NO_INDEX_JOIN [, ...] '}'
 //   '{' NO_ZIGZAG_JOIN [, ...] '}'
+//   '{' NO_FULL_SCAN [, ...] '}'
 //   '{' IGNORE_FOREIGN_KEYS [, ...] '}'
-//   '{' FORCE_ZIGZAG = <idxname> [, ...]  '}'
 //
 // Join types:
 //   { INNER | { LEFT | RIGHT | FULL } [OUTER] } [ { HASH | MERGE | LOOKUP | INVERTED } ]
@@ -11755,7 +11695,7 @@ func_expr_common_subexpr:
   }
 | SESSION_USER
   {
-    $$.val = &tree.FuncExpr{Func: tree.WrapFunction("session_user")}
+    $$.val = &tree.FuncExpr{Func: tree.WrapFunction("current_user")}
   }
 | USER
   {
@@ -13216,7 +13156,6 @@ unreserved_keyword:
 | FOLLOWING
 | FORCE
 | FORCE_INDEX
-| FORCE_ZIGZAG
 | FUNCTION
 | FUNCTIONS
 | GENERATED
@@ -13301,12 +13240,12 @@ unreserved_keyword:
 | NAMES
 | NAN
 | NEVER
-| NEW_DB_NAME
 | NEXT
 | NO
 | NORMAL
 | NO_INDEX_JOIN
 | NO_ZIGZAG_JOIN
+| NO_FULL_SCAN
 | NOCREATEDB
 | NOCREATELOGIN
 | NOCANCELQUERY
@@ -13474,7 +13413,6 @@ unreserved_keyword:
 | VARYING
 | VIEW
 | VIEWACTIVITY
-| VISIBLE
 | VOTERS
 | WITHIN
 | WITHOUT
@@ -13680,6 +13618,7 @@ reserved_keyword:
 | USER
 | USING
 | VARIADIC
+| VISIBLE
 | WHEN
 | WHERE
 | WINDOW

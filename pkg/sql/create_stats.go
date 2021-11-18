@@ -62,26 +62,6 @@ var featureStatsEnabled = settings.RegisterBoolSetting(
 const defaultHistogramBuckets = 200
 const nonIndexColHistogramBuckets = 2
 
-// StubTableStats generates "stub" statistics for a table which are missing
-// histograms and have 0 for all values.
-func StubTableStats(
-	desc catalog.TableDescriptor, name string, multiColEnabled bool,
-) ([]*stats.TableStatisticProto, error) {
-	colStats, err := createStatsDefaultColumns(desc, multiColEnabled)
-	if err != nil {
-		return nil, err
-	}
-	statistics := make([]*stats.TableStatisticProto, len(colStats))
-	for i, colStat := range colStats {
-		statistics[i] = &stats.TableStatisticProto{
-			TableID:   desc.GetID(),
-			Name:      name,
-			ColumnIDs: colStat.ColumnIDs,
-		}
-	}
-	return statistics, nil
-}
-
 // createStatsNode is a planNode implemented in terms of a function. The
 // startJob function starts a Job during Start, and the remainder of the
 // CREATE STATISTICS planning and execution is performed within the jobs
@@ -247,6 +227,13 @@ func (n *createStatsNode) makeJobRecord(ctx context.Context) (*jobs.Record, erro
 
 		columnIDs := make([]descpb.ColumnID, len(columns))
 		for i := range columns {
+			if columns[i].IsVirtual() {
+				return nil, pgerror.Newf(
+					pgcode.InvalidColumnReference,
+					"cannot create statistics on virtual column %q",
+					columns[i].ColName(),
+				)
+			}
 			columnIDs[i] = columns[i].GetID()
 		}
 		col, err := tableDesc.FindColumnWithID(columnIDs[0])
@@ -441,9 +428,16 @@ func createStatsDefaultColumns(
 				continue
 			}
 
-			colIDs := make([]descpb.ColumnID, j+1)
+			colIDs := make([]descpb.ColumnID, 0, j+1)
 			for k := 0; k <= j; k++ {
-				colIDs[k] = idx.GetKeyColumnID(k)
+				col, err := desc.FindColumnWithID(idx.GetKeyColumnID(k))
+				if err != nil {
+					return nil, err
+				}
+				if col.IsVirtual() {
+					continue
+				}
+				colIDs = append(colIDs, col.GetID())
 			}
 
 			// Check for existing stats and remember the requested stats.

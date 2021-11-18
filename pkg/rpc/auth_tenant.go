@@ -24,6 +24,8 @@ import (
 // server, that is, it ensures that the request only accesses resources
 // available to the tenant.
 type tenantAuthorizer struct {
+	// tenantID is the tenant ID for the current node.
+	// Equals SystemTenantID when running a KV node.
 	tenantID roachpb.TenantID
 }
 
@@ -87,6 +89,18 @@ func (a tenantAuthorizer) authorize(
 		return a.authTenant(tenID)
 
 	case "/cockroach.server.serverpb.Status/IndexUsageStatistics":
+		return a.authTenant(tenID)
+
+	case "/cockroach.server.serverpb.Status/CancelSession":
+		return a.authTenant(tenID)
+
+	case "/cockroach.server.serverpb.Status/CancelLocalSession":
+		return a.authTenant(tenID)
+
+	case "/cockroach.server.serverpb.Status/CancelQuery":
+		return a.authTenant(tenID)
+
+	case "/cockroach.server.serverpb.Status/CancelLocalQuery":
 		return a.authTenant(tenID)
 
 	case "/cockroach.roachpb.Internal/GetSpanConfigs":

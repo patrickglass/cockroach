@@ -300,12 +300,6 @@ func (s *jobScheduler) executeSchedules(
 			continue
 		}
 
-		if !s.env.IsExecutorEnabled(schedule.ExecutorType()) {
-			log.Infof(ctx, "Ignoring schedule %d: %s executor disabled",
-				schedule.ScheduleID(), schedule.ExecutorType())
-			continue
-		}
-
 		if processErr := withSavePoint(ctx, txn, func() error {
 			return s.processSchedule(ctx, schedule, numRunning, stats, txn)
 		}); processErr != nil {

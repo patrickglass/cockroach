@@ -114,7 +114,7 @@ type col struct {
 // Ops implements the Opser interface.
 func (w *random) Ops(
 	ctx context.Context, urls []string, reg *histogram.Registry,
-) (ql workload.QueryLoad, retErr error) {
+) (workload.QueryLoad, error) {
 	sqlDatabase, err := workload.SanitizeUrls(w, w.connFlags.DBOverride, urls)
 	if err != nil {
 		return workload.QueryLoad{}, err
@@ -147,10 +147,11 @@ WHERE attrelid=$1`, relid)
 	if err != nil {
 		return workload.QueryLoad{}, err
 	}
-	defer func() { retErr = errors.CombineErrors(retErr, rows.Close()) }()
+
 	var cols []col
 	var numCols = 0
 
+	defer rows.Close()
 	for rows.Next() {
 		var c col
 		c.dataPrecision = 0
@@ -176,10 +177,6 @@ WHERE attrelid=$1`, relid)
 		return workload.QueryLoad{}, errors.New("no columns detected")
 	}
 
-	if err = rows.Err(); err != nil {
-		return workload.QueryLoad{}, err
-	}
-
 	// insert on conflict requires the primary key. check information_schema if not specified on the command line
 	if strings.HasPrefix(w.method, "ioc") && w.primaryKey == "" {
 		rows, err := db.Query(
@@ -193,7 +190,7 @@ AND    i.indisprimary`, relid)
 		if err != nil {
 			return workload.QueryLoad{}, err
 		}
-		defer func() { retErr = errors.CombineErrors(retErr, rows.Close()) }()
+		defer rows.Close()
 		for rows.Next() {
 			var colname string
 
@@ -205,9 +202,6 @@ AND    i.indisprimary`, relid)
 			} else {
 				w.primaryKey += colname
 			}
-		}
-		if err = rows.Err(); err != nil {
-			return workload.QueryLoad{}, err
 		}
 	}
 
@@ -282,7 +276,7 @@ AND    i.indisprimary`, relid)
 		return workload.QueryLoad{}, err
 	}
 
-	ql = workload.QueryLoad{SQLDatabase: sqlDatabase}
+	ql := workload.QueryLoad{SQLDatabase: sqlDatabase}
 
 	for i := 0; i < w.connFlags.Concurrency; i++ {
 		op := randOp{

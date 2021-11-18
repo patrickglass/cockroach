@@ -83,8 +83,9 @@ func TestMessageToJSONBRoundTrip(t *testing.T) {
 			// nested inside other message; with maps
 			pbname: "cockroach.util.tracing.tracingpb.RecordedSpan",
 			message: &tracingpb.RecordedSpan{
-				TraceID: 123,
-				Tags:    map[string]string{"one": "1", "two": "2", "three": "3"},
+				TraceID:                      123,
+				Tags:                         map[string]string{"one": "1", "two": "2", "three": "3"},
+				DeprecatedInternalStructured: []*pbtypes.Any{makeAny(t, &descpb.ColumnDescriptor{Name: "bogus stats"})},
 				StructuredRecords: []tracingpb.StructuredRecord{{
 					Time:    timeutil.Now(),
 					Payload: makeAny(t, &descpb.ColumnDescriptor{Name: "bogus stats"})}},

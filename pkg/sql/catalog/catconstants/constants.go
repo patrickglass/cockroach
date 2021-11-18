@@ -341,11 +341,7 @@ const (
 	PgCatalogStatioUserIndexesTableID
 	PgCatalogStatioUserSequencesTableID
 	PgCatalogStatioUserTablesTableID
-	PgCatalogStatisticExtDataTableID
 	PgCatalogStatisticExtTableID
-	PgCatalogStatisticTableID
-	PgCatalogStatsExtTableID
-	PgCatalogStatsTableID
 	PgCatalogSubscriptionRelTableID
 	PgCatalogSubscriptionTableID
 	PgCatalogTablesTableID

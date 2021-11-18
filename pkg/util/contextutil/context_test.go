@@ -18,7 +18,6 @@ import (
 
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestRunWithTimeout(t *testing.T) {
@@ -32,13 +31,14 @@ func TestRunWithTimeout(t *testing.T) {
 	}
 
 	err = RunWithTimeout(ctx, "foo", 1, func(ctx context.Context) error {
-		time.Sleep(15 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 		return ctx.Err()
 	})
-	require.Error(t, err)
-	baseExpectedMsg := "operation \"foo\" timed out after 1ns \\(took ..ms\\)"
+	baseExpectedMsg := "operation \"foo\" timed out after 1ns"
 	expectedMsg := baseExpectedMsg + ": context deadline exceeded"
-	require.Regexp(t, expectedMsg, err.Error())
+	if err.Error() != expectedMsg {
+		t.Fatalf("expected %s, actual %s", expectedMsg, err.Error())
+	}
 	var netError net.Error
 	if !errors.As(err, &netError) {
 		t.Fatal("RunWithTimeout should return a net.Error")
@@ -51,12 +51,13 @@ func TestRunWithTimeout(t *testing.T) {
 	}
 
 	err = RunWithTimeout(ctx, "foo", 1, func(ctx context.Context) error {
-		time.Sleep(15 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 		return errors.Wrap(ctx.Err(), "custom error")
 	})
-	require.Error(t, err)
 	expExtended := baseExpectedMsg + ": custom error: context deadline exceeded"
-	require.Regexp(t, expExtended, err.Error())
+	if err.Error() != expExtended {
+		t.Fatalf("expected %q, actual %q", expExtended, err.Error())
+	}
 	if !errors.As(err, &netError) {
 		t.Fatal("RunWithTimeout should return a net.Error")
 	}

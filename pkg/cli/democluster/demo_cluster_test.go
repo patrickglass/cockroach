@@ -126,7 +126,6 @@ func TestTestServerArgsForTransientCluster(t *testing.T) {
 			// We cannot compare these.
 			actual.Stopper = nil
 			actual.StoreSpecs = nil
-			actual.Knobs.JobsTestingKnobs = nil
 
 			assert.Equal(t, tc.expected, actual)
 		})

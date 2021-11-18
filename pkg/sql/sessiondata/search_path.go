@@ -177,11 +177,7 @@ func (s SearchPath) Contains(target string) bool {
 }
 
 // GetTemporarySchemaName returns the temporary schema specific to the current
-// session, or an empty string if the current session has not yet created a
-// temporary schema.
-//
-// Note that even after the current session has created a temporary schema, a
-// schema with that name may not exist in the session's current database.
+// session.
 func (s SearchPath) GetTemporarySchemaName() string {
 	return s.tempSchemaName
 }

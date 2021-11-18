@@ -192,6 +192,10 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
       numerator: 36958,
       denominator: 36958,
     },
+    opt: {
+      numerator: 36958,
+      denominator: 36958,
+    },
     implicit_txn: {
       numerator: 36958,
       denominator: 36958,

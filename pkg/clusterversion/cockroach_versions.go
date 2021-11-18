@@ -156,6 +156,8 @@ const (
 
 	// v21.1 versions.
 	//
+	// Start21_1 demarcates work towards CockroachDB v21.1.
+	Start21_1
 	// replacedTruncatedAndRangeAppliedStateMigration stands in for
 	// TruncatedAndRangeAppliedStateMigration which was	re-introduced after the
 	// migration job was introduced. This is necessary because the jobs
@@ -183,9 +185,6 @@ const (
 	// that no replicated truncated state representation is found.
 	PostTruncatedAndRangeAppliedStateMigration
 	// V21_1 is CockroachDB v21.1. It's used for all v21.1.x patch releases.
-	//
-	// TODO(irfansharif): This can be removed as part of #69828 (bumping the min
-	// cluster version).
 	V21_1
 
 	// v21.1PLUS release. This is a special v21.1.x release with extra changes,
@@ -212,9 +211,6 @@ const (
 	DeleteDeprecatedNamespaceTableDescriptorMigration
 	// FixDescriptors is for the migration to fix all descriptors.
 	FixDescriptors
-	// SQLStatsTable adds the system tables for storing persisted SQL statistics
-	// for statements and transactions.
-	SQLStatsTable
 	// DatabaseRoleSettings adds the system table for storing per-user and
 	// per-role default session settings.
 	DatabaseRoleSettings
@@ -269,10 +265,6 @@ const (
 	SpanConfigurationsTable
 	// BoundedStaleness adds capabilities to perform bounded staleness reads.
 	BoundedStaleness
-	// SQLStatsCompactionScheduledJob creates a ScheduledJob for SQL Stats
-	// compaction on cluster startup and ensures that there is only one entry for
-	// the schedule.
-	SQLStatsCompactionScheduledJob
 	// DateAndIntervalStyle enables DateStyle and IntervalStyle to be changed.
 	DateAndIntervalStyle
 	// PebbleFormatVersioned ratchets Pebble's format major version to
@@ -289,6 +281,13 @@ const (
 	// TenantUsageSingleConsumptionColumn changes the tenant_usage system table to
 	// use a single consumption column (encoding a proto).
 	TenantUsageSingleConsumptionColumn
+	// SQLStatsTables adds the system table for storing persisted SQL statistics
+	// for statements.
+	SQLStatsTables
+	// SQLStatsCompactionScheduledJob creates a ScheduledJob for SQL Stats
+	// compaction on cluster startup and ensures that there is only one entry for
+	// the schedule.
+	SQLStatsCompactionScheduledJob
 	// V21_2 is CockroachDB v21.2. It's used for all v21.2.x patch releases.
 	V21_2
 
@@ -316,7 +315,12 @@ const (
 // minor version until we are absolutely sure that no new migrations will need
 // to be added (i.e., when cutting the final release candidate).
 var versionsSingleton = keyedVersions{
-	// v21.1 versions.
+
+	// v21.1 versions. Internal versions defined here-on-forth must be even.
+	{
+		Key:     Start21_1,
+		Version: roachpb.Version{Major: 20, Minor: 2, Internal: 2},
+	},
 	{
 		Key:     replacedTruncatedAndRangeAppliedStateMigration,
 		Version: roachpb.Version{Major: 20, Minor: 2, Internal: 14},
@@ -338,8 +342,6 @@ var versionsSingleton = keyedVersions{
 		Key:     V21_1,
 		Version: roachpb.Version{Major: 21, Minor: 1},
 	},
-
-	// Internal versions must be even.
 
 	// v21.1PLUS version. This is a special v21.1.x release with extra changes,
 	// used internally for the 2021 Serverless offering.
@@ -381,10 +383,6 @@ var versionsSingleton = keyedVersions{
 	{
 		Key:     FixDescriptors,
 		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 1114},
-	},
-	{
-		Key:     SQLStatsTable,
-		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 1116},
 	},
 	{
 		Key:     DatabaseRoleSettings,
@@ -466,10 +464,6 @@ var versionsSingleton = keyedVersions{
 		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 1156},
 	},
 	{
-		Key:     SQLStatsCompactionScheduledJob,
-		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 1158},
-	},
-	{
 		Key:     DateAndIntervalStyle,
 		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 1160},
 	},
@@ -490,6 +484,14 @@ var versionsSingleton = keyedVersions{
 		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 1168},
 	},
 	{
+		Key:     SQLStatsTables,
+		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 1170},
+	},
+	{
+		Key:     SQLStatsCompactionScheduledJob,
+		Version: roachpb.Version{Major: 21, Minor: 1, Internal: 1172},
+	},
+	{
 		// V21_2 is CockroachDB v21.2. It's used for all v21.2.x patch releases.
 		Key:     V21_2,
 		Version: roachpb.Version{Major: 21, Minor: 2},
@@ -507,8 +509,7 @@ var (
 	// binaryMinSupportedVersion is the earliest version of data supported by
 	// this binary. If this binary is started using a store marked with an older
 	// version than binaryMinSupportedVersion, then the binary will exit with
-	// an error. This typically trails the current release by one (see top-level
-	// comment).
+	// an error.
 	binaryMinSupportedVersion = ByKey(V21_1)
 
 	// binaryVersion is the version of this binary.

@@ -34,9 +34,6 @@ type JobSchedulerEnv interface {
 	// NowExpr returns expression representing current time when
 	// used in the database queries.
 	NowExpr() string
-	// IsExecutorEnabled returns true if the scheduled jobs for the
-	// specified executor type are allowed to run.
-	IsExecutorEnabled(name string) bool
 }
 
 // JobExecutionConfig encapsulates external components needed for scheduled job execution.
@@ -75,10 +72,6 @@ func (e *prodJobSchedulerEnvImpl) Now() time.Time {
 
 func (e *prodJobSchedulerEnvImpl) NowExpr() string {
 	return "current_timestamp()"
-}
-
-func (e *prodJobSchedulerEnvImpl) IsExecutorEnabled(name string) bool {
-	return true
 }
 
 // ScheduleControllerEnv is an environment for controlling (DROP, PAUSE)

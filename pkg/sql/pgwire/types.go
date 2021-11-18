@@ -483,13 +483,7 @@ func writeBinaryBytes(b *writeBuffer, v []byte) {
 }
 
 func writeBinaryString(b *writeBuffer, v string, t *types.T) {
-	s := tree.ResolveBlankPaddedChar(v, t)
-	if t.Oid() == oid.T_char && s == "" {
-		// Match Postgres and always explicitly include a null byte if we have
-		// an empty string for the "char" type in the binary format.
-		s = string([]byte{0})
-	}
-	b.writeLengthPrefixedString(s)
+	b.writeLengthPrefixedString(tree.ResolveBlankPaddedChar(v, t))
 }
 
 func writeBinaryTimestamp(b *writeBuffer, v time.Time) {

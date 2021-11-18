@@ -134,11 +134,6 @@ func (n *dropDatabaseNode) startExec(params runParams) error {
 	ctx := params.ctx
 	p := params.p
 
-	// Drop all of the collected objects.
-	if err := n.d.dropAllCollectedObjects(ctx, p); err != nil {
-		return err
-	}
-
 	var schemasIDsToDelete []descpb.ID
 	for _, schemaWithDbDesc := range n.d.schemasToDelete {
 		schemaToDelete := schemaWithDbDesc.schema
@@ -171,6 +166,11 @@ func (n *dropDatabaseNode) startExec(params runParams) error {
 		n.d.typesToDelete,
 		tree.AsStringWithFQNames(n.n, params.Ann()),
 	); err != nil {
+		return err
+	}
+
+	// Drop all of the collected objects.
+	if err := n.d.dropAllCollectedObjects(ctx, p); err != nil {
 		return err
 	}
 

@@ -123,7 +123,7 @@ const (
 	// (RejectAggregates notwithstanding).
 	RejectNestedAggregates
 
-	// RejectNestedWindowFunctions rejects any use of window functions inside the
+	// RejectNestedWindows rejects any use of window functions inside the
 	// argument list of another window function.
 	RejectNestedWindowFunctions
 
@@ -698,13 +698,8 @@ func (expr *ColumnAccessExpr) TypeCheck(
 	expr.Expr = subExpr
 	resolvedType := subExpr.ResolvedType()
 
-	if resolvedType.Family() != types.TupleFamily {
+	if resolvedType.Family() != types.TupleFamily || (!expr.ByIndex && len(resolvedType.TupleLabels()) == 0) {
 		return nil, NewTypeIsNotCompositeError(resolvedType)
-	}
-
-	if !expr.ByIndex && len(resolvedType.TupleLabels()) == 0 {
-		return nil, pgerror.Newf(pgcode.UndefinedColumn, "could not identify column %q in record data type",
-			expr.ColName)
 	}
 
 	if expr.ByIndex {
@@ -725,7 +720,7 @@ func (expr *ColumnAccessExpr) TypeCheck(
 			}
 		}
 		if expr.ColIndex < 0 {
-			return nil, pgerror.Newf(pgcode.UndefinedColumn,
+			return nil, pgerror.Newf(pgcode.DatatypeMismatch,
 				"could not identify column %q in %s",
 				ErrString(&expr.ColName), resolvedType,
 			)
@@ -1979,7 +1974,7 @@ func typeCheckSubqueryWithIn(left, right *types.T) error {
 			return pgerror.Newf(pgcode.InvalidParameterValue,
 				unsupportedCompErrFmt, fmt.Sprintf(compSignatureFmt, left, In, right))
 		}
-		if !left.EquivalentOrNull(right.TupleContents()[0], false /* allowNullTupleEquivalence */) {
+		if !left.EquivalentOrNull(right.TupleContents()[0]) {
 			return pgerror.Newf(pgcode.InvalidParameterValue,
 				unsupportedCompErrFmt, fmt.Sprintf(compSignatureFmt, left, In, right))
 		}
@@ -2403,8 +2398,8 @@ func typeCheckTupleComparison(
 		leftSubExprTyped, rightSubExprTyped, _, _, err := typeCheckComparisonOp(ctx, semaCtx, op, leftSubExpr, rightSubExpr)
 		if err != nil {
 			exps := Exprs([]Expr{left, right})
-			return nil, nil, pgerror.Wrapf(err, pgcode.DatatypeMismatch, "tuples %s are not comparable at index %d",
-				&exps, elemIdx+1)
+			return nil, nil, pgerror.Newf(pgcode.DatatypeMismatch, "tuples %s are not comparable at index %d: %s",
+				&exps, elemIdx+1, err)
 		}
 		left.Exprs[elemIdx] = leftSubExprTyped
 		left.typ.TupleContents()[elemIdx] = leftSubExprTyped.ResolvedType()
@@ -2462,7 +2457,7 @@ func typeCheckSameTypedTupleExprs(
 		}
 		typedSubExprs, resType, err := TypeCheckSameTypedExprs(ctx, semaCtx, desiredElem, sameTypeExprs...)
 		if err != nil {
-			return nil, nil, pgerror.Wrapf(err, pgcode.DatatypeMismatch, "tuples %s are not the same type", Exprs(exprs))
+			return nil, nil, pgerror.Newf(pgcode.DatatypeMismatch, "tuples %s are not the same type: %v", Exprs(exprs), err)
 		}
 		for j, typedExpr := range typedSubExprs {
 			tupleIdx := sameTypeExprsIndices[j]

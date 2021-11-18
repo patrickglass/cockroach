@@ -13,6 +13,7 @@ package rowexec
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"testing"
 
@@ -94,8 +95,8 @@ func TestSorter(t *testing.T) {
 						{ColIdx: 1, Direction: asc},
 						{ColIdx: 2, Direction: asc},
 					}),
-				Limit: 4,
 			},
+			post:  execinfrapb.PostProcessSpec{Limit: 4},
 			types: types.ThreeIntCols,
 			input: rowenc.EncDatumRows{
 				{v[3], v[3], v[0]},
@@ -122,9 +123,8 @@ func TestSorter(t *testing.T) {
 						{ColIdx: 1, Direction: asc},
 						{ColIdx: 2, Direction: asc},
 					}),
-				Limit: 4,
 			},
-			post:  execinfrapb.PostProcessSpec{Offset: 2},
+			post:  execinfrapb.PostProcessSpec{Offset: 2, Limit: 2},
 			types: types.ThreeIntCols,
 			input: rowenc.EncDatumRows{
 				{v[3], v[3], v[0]},
@@ -261,74 +261,88 @@ func TestSorter(t *testing.T) {
 	for _, c := range testCases {
 		t.Run(c.name, func(t *testing.T) {
 			for _, memLimit := range memLimits {
-				name := fmt.Sprintf("MemLimit=%d", memLimit.bytes)
-				t.Run(name, func(t *testing.T) {
-					ctx := context.Background()
-					st := cluster.MakeTestingClusterSettings()
-					tempEngine, _, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
-					if err != nil {
-						t.Fatal(err)
-					}
-					defer tempEngine.Close()
-
-					evalCtx := tree.MakeTestingEvalContext(st)
-					defer evalCtx.Stop(ctx)
-					diskMonitor := execinfra.NewTestDiskMonitor(ctx, st)
-					defer diskMonitor.Stop(ctx)
-					flowCtx := execinfra.FlowCtx{
-						EvalCtx: &evalCtx,
-						Cfg: &execinfra.ServerConfig{
-							Settings:    cluster.MakeTestingClusterSettings(),
-							TempStorage: tempEngine,
-						},
-						DiskMonitor: diskMonitor,
-					}
-					// Override the default memory limit. This will result in using
-					// a memory row container which will hit this limit and fall
-					// back to using a disk row container.
-					flowCtx.Cfg.TestingKnobs.MemoryLimitBytes = memLimit.bytes
-
-					in := distsqlutils.NewRowBuffer(c.types, c.input, distsqlutils.RowBufferArgs{})
-					out := &distsqlutils.RowBuffer{}
-
-					s, err := newSorter(context.Background(), &flowCtx, 0 /* processorID */, &c.spec, in, &c.post, out)
-					if err != nil {
-						t.Fatal(err)
-					}
-					s.Run(context.Background())
-					if !out.ProducerClosed() {
-						t.Fatalf("output RowReceiver not closed")
-					}
-
-					var retRows rowenc.EncDatumRows
-					for {
-						row := out.NextNoMeta(t)
-						if row == nil {
-							break
+				// In theory, SortAllProcessor should be able to handle all sorting
+				// strategies, as the other processors are optimizations.
+				for _, forceSortAll := range []bool{false, true} {
+					name := fmt.Sprintf("MemLimit=%d/ForceSort=%t", memLimit.bytes, forceSortAll)
+					t.Run(name, func(t *testing.T) {
+						ctx := context.Background()
+						st := cluster.MakeTestingClusterSettings()
+						tempEngine, _, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
+						if err != nil {
+							t.Fatal(err)
 						}
-						retRows = append(retRows, row)
-					}
+						defer tempEngine.Close()
 
-					expStr := c.expected.String(c.types)
-					retStr := retRows.String(c.types)
-					if expStr != retStr {
-						t.Errorf("invalid results; expected:\n   %s\ngot:\n   %s",
-							expStr, retStr)
-					}
+						evalCtx := tree.MakeTestingEvalContext(st)
+						defer evalCtx.Stop(ctx)
+						diskMonitor := execinfra.NewTestDiskMonitor(ctx, st)
+						defer diskMonitor.Stop(ctx)
+						flowCtx := execinfra.FlowCtx{
+							EvalCtx: &evalCtx,
+							Cfg: &execinfra.ServerConfig{
+								Settings:    cluster.MakeTestingClusterSettings(),
+								TempStorage: tempEngine,
+							},
+							DiskMonitor: diskMonitor,
+						}
+						// Override the default memory limit. This will result in using
+						// a memory row container which will hit this limit and fall
+						// back to using a disk row container.
+						flowCtx.Cfg.TestingKnobs.MemoryLimitBytes = memLimit.bytes
 
-					// Check whether the DiskBackedRowContainer spilled to disk.
-					spilled := s.(rowsAccessor).getRows().Spilled()
-					if memLimit.expSpill != spilled {
-						t.Errorf("expected spill to disk=%t, found %t", memLimit.expSpill, spilled)
-					}
-					if spilled {
-						if scp, ok := s.(*sortChunksProcessor); ok {
-							if scp.rows.(*rowcontainer.DiskBackedRowContainer).UsingDisk() {
-								t.Errorf("expected chunks processor to reset to use memory")
+						in := distsqlutils.NewRowBuffer(c.types, c.input, distsqlutils.RowBufferArgs{})
+						out := &distsqlutils.RowBuffer{}
+
+						var s execinfra.Processor
+						if !forceSortAll {
+							var err error
+							s, err = newSorter(context.Background(), &flowCtx, 0 /* processorID */, &c.spec, in, &c.post, out)
+							if err != nil {
+								t.Fatal(err)
+							}
+						} else {
+							var err error
+							s, err = newSortAllProcessor(context.Background(), &flowCtx, 0 /* procedssorID */, &c.spec, in, &c.post, out)
+							if err != nil {
+								t.Fatal(err)
 							}
 						}
-					}
-				})
+						s.Run(context.Background())
+						if !out.ProducerClosed() {
+							t.Fatalf("output RowReceiver not closed")
+						}
+
+						var retRows rowenc.EncDatumRows
+						for {
+							row := out.NextNoMeta(t)
+							if row == nil {
+								break
+							}
+							retRows = append(retRows, row)
+						}
+
+						expStr := c.expected.String(c.types)
+						retStr := retRows.String(c.types)
+						if expStr != retStr {
+							t.Errorf("invalid results; expected:\n   %s\ngot:\n   %s",
+								expStr, retStr)
+						}
+
+						// Check whether the DiskBackedRowContainer spilled to disk.
+						spilled := s.(rowsAccessor).getRows().Spilled()
+						if memLimit.expSpill != spilled {
+							t.Errorf("expected spill to disk=%t, found %t", memLimit.expSpill, spilled)
+						}
+						if spilled {
+							if scp, ok := s.(*sortChunksProcessor); ok {
+								if scp.rows.(*rowcontainer.DiskBackedRowContainer).UsingDisk() {
+									t.Errorf("expected chunks processor to reset to use memory")
+								}
+							}
+						}
+					})
+				}
 			}
 		})
 	}
@@ -340,9 +354,8 @@ func TestSortInvalidLimit(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	spec := execinfrapb.SorterSpec{}
-	spec.Limit = 0
 
-	t.Run("KZeroNoTopK", func(t *testing.T) {
+	t.Run("KTooLarge", func(t *testing.T) {
 		ctx := context.Background()
 		st := cluster.MakeTestingClusterSettings()
 		evalCtx := tree.MakeTestingEvalContext(st)
@@ -358,6 +371,8 @@ func TestSortInvalidLimit(t *testing.T) {
 		}
 
 		post := execinfrapb.PostProcessSpec{}
+		post.Limit = math.MaxUint64 - 1000
+		post.Offset = 2000
 		in := distsqlutils.NewRowBuffer([]*types.T{types.Int}, rowenc.EncDatumRows{}, distsqlutils.RowBufferArgs{})
 		out := &distsqlutils.RowBuffer{}
 		proc, err := newSorter(

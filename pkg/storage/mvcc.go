@@ -32,9 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/pebble"
 )
 
 const (
@@ -898,10 +896,6 @@ func mvccGet(
 
 	mvccScanner.init(opts.Txn, opts.LocalUncertaintyLimit)
 	mvccScanner.get(ctx)
-
-	// If we have a trace, emit the scan stats that we produced.
-	traceSpan := tracing.SpanFromContext(ctx)
-	recordIteratorStats(traceSpan, mvccScanner.stats())
 
 	if mvccScanner.err != nil {
 		return optionalValue{}, nil, mvccScanner.err
@@ -2411,22 +2405,6 @@ func MVCCDeleteRange(
 	return keys, res.ResumeSpan, res.NumKeys, nil
 }
 
-func recordIteratorStats(traceSpan *tracing.Span, iteratorStats IteratorStats) {
-	stats := iteratorStats.Stats
-	if traceSpan != nil {
-		steps := stats.ReverseStepCount[pebble.InterfaceCall] + stats.ForwardStepCount[pebble.InterfaceCall]
-		seeks := stats.ReverseSeekCount[pebble.InterfaceCall] + stats.ForwardSeekCount[pebble.InterfaceCall]
-		internalSteps := stats.ReverseStepCount[pebble.InternalIterCall] + stats.ForwardStepCount[pebble.InternalIterCall]
-		internalSeeks := stats.ReverseSeekCount[pebble.InternalIterCall] + stats.ForwardSeekCount[pebble.InternalIterCall]
-		traceSpan.RecordStructured(&roachpb.ScanStats{
-			NumInterfaceSeeks: uint64(seeks),
-			NumInternalSeeks:  uint64(internalSeeks),
-			NumInterfaceSteps: uint64(steps),
-			NumInternalSteps:  uint64(internalSteps),
-		})
-	}
-}
-
 func mvccScanToBytes(
 	ctx context.Context,
 	iter MVCCIterator,
@@ -2440,17 +2418,9 @@ func mvccScanToBytes(
 	if err := opts.validate(); err != nil {
 		return MVCCScanResult{}, err
 	}
-	if opts.MaxKeys < 0 {
-		return MVCCScanResult{
-			ResumeSpan:   &roachpb.Span{Key: key, EndKey: endKey},
-			ResumeReason: roachpb.RESUME_KEY_LIMIT,
-		}, nil
-	}
-	if opts.TargetBytes < 0 {
-		return MVCCScanResult{
-			ResumeSpan:   &roachpb.Span{Key: key, EndKey: endKey},
-			ResumeReason: roachpb.RESUME_BYTE_LIMIT,
-		}, nil
+	if opts.MaxKeys < 0 || opts.TargetBytes < 0 {
+		resumeSpan := &roachpb.Span{Key: key, EndKey: endKey}
+		return MVCCScanResult{ResumeSpan: resumeSpan}, nil
 	}
 
 	mvccScanner := pebbleMVCCScannerPool.Get().(*pebbleMVCCScanner)
@@ -2476,7 +2446,7 @@ func mvccScanToBytes(
 
 	var res MVCCScanResult
 	var err error
-	res.ResumeSpan, res.ResumeReason, err = mvccScanner.scan(ctx)
+	res.ResumeSpan, err = mvccScanner.scan(ctx)
 
 	if err != nil {
 		return MVCCScanResult{}, err
@@ -2485,11 +2455,6 @@ func mvccScanToBytes(
 	res.KVData = mvccScanner.results.finish()
 	res.NumKeys = mvccScanner.results.count
 	res.NumBytes = mvccScanner.results.bytes
-
-	// If we have a trace, emit the scan stats that we produced.
-	traceSpan := tracing.SpanFromContext(ctx)
-
-	recordIteratorStats(traceSpan, mvccScanner.stats())
 
 	res.Intents, err = buildScanIntents(mvccScanner.intentsRepr())
 	if err != nil {
@@ -2638,9 +2603,8 @@ type MVCCScanResult struct {
 	// used for encoding the uncompressed kv pairs contained in the result.
 	NumBytes int64
 
-	ResumeSpan   *roachpb.Span
-	ResumeReason roachpb.ResumeReason
-	Intents      []roachpb.Intent
+	ResumeSpan *roachpb.Span
+	Intents    []roachpb.Intent
 }
 
 // MVCCScan scans the key range [key, endKey) in the provided reader up to some
@@ -4164,9 +4128,10 @@ func ComputeStatsForRange(
 // is not considered a collision and we continue iteration from the next key in
 // the existing data.
 func checkForKeyCollisionsGo(
-	existingIter MVCCIterator, sstData []byte, start, end roachpb.Key,
+	existingIter MVCCIterator, sstData []byte, start, end roachpb.Key, maxIntents int64,
 ) (enginepb.MVCCStats, error) {
 	var skippedKVStats enginepb.MVCCStats
+	var intents []roachpb.Intent
 	sstIter, err := NewMemSSTIterator(sstData, false)
 	if err != nil {
 		return enginepb.MVCCStats{}, err
@@ -4200,20 +4165,17 @@ func checkForKeyCollisionsGo(
 			if len(mvccMeta.RawBytes) > 0 {
 				return enginepb.MVCCStats{}, errors.Errorf("inline values are unsupported when checking for key collisions")
 			} else if mvccMeta.Txn != nil {
-				// Check for a write intent.
-				//
-				// TODO(adityamaru): Currently, we raise a WriteIntentError on
-				// encountering all intents. This is because, we do not expect to
-				// encounter many intents during IMPORT INTO as we lock the key space we
-				// are importing into. Older write intents could however be found in the
-				// target key space, which will require appropriate resolution logic.
-				writeIntentErr := roachpb.WriteIntentError{
-					Intents: []roachpb.Intent{
-						roachpb.MakeIntent(mvccMeta.Txn, existingIter.Key().Key),
-					},
+				// Check for a write intent. We keep looking for additional intents to
+				// return a large batch for intent resolution. The caller will likely
+				// resolve the returned intents and retry the call, which would be
+				// quadratic, so this significantly reduces the overall number of scans.
+				intents = append(intents, roachpb.MakeIntent(mvccMeta.Txn, existingIter.Key().Key))
+				if int64(len(intents)) >= maxIntents {
+					return enginepb.MVCCStats{}, &roachpb.WriteIntentError{Intents: intents}
 				}
-
-				return enginepb.MVCCStats{}, &writeIntentErr
+				existingIter.NextKey()
+				ok, extErr = existingIter.Valid()
+				continue
 			} else {
 				return enginepb.MVCCStats{}, errors.Errorf("intent without transaction")
 			}
@@ -4289,6 +4251,9 @@ func checkForKeyCollisionsGo(
 	}
 	if sstErr != nil {
 		return enginepb.MVCCStats{}, sstErr
+	}
+	if len(intents) > 0 {
+		return enginepb.MVCCStats{}, &roachpb.WriteIntentError{Intents: intents}
 	}
 
 	return skippedKVStats, nil

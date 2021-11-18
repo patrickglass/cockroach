@@ -651,11 +651,7 @@ pg_catalog          pg_statio_sys_tables
 pg_catalog          pg_statio_user_indexes
 pg_catalog          pg_statio_user_sequences
 pg_catalog          pg_statio_user_tables
-pg_catalog          pg_statistic
 pg_catalog          pg_statistic_ext
-pg_catalog          pg_statistic_ext_data
-pg_catalog          pg_stats
-pg_catalog          pg_stats_ext
 pg_catalog          pg_subscription
 pg_catalog          pg_subscription_rel
 pg_catalog          pg_tables
@@ -967,11 +963,7 @@ pg_statio_sys_tables
 pg_statio_user_indexes
 pg_statio_user_sequences
 pg_statio_user_tables
-pg_statistic
 pg_statistic_ext
-pg_statistic_ext_data
-pg_stats
-pg_stats_ext
 pg_subscription
 pg_subscription_rel
 pg_tables
@@ -1320,11 +1312,7 @@ system         pg_catalog          pg_statio_sys_tables                   SYSTEM
 system         pg_catalog          pg_statio_user_indexes                 SYSTEM VIEW  NO                  1
 system         pg_catalog          pg_statio_user_sequences               SYSTEM VIEW  NO                  1
 system         pg_catalog          pg_statio_user_tables                  SYSTEM VIEW  NO                  1
-system         pg_catalog          pg_statistic                           SYSTEM VIEW  NO                  1
 system         pg_catalog          pg_statistic_ext                       SYSTEM VIEW  NO                  1
-system         pg_catalog          pg_statistic_ext_data                  SYSTEM VIEW  NO                  1
-system         pg_catalog          pg_stats                               SYSTEM VIEW  NO                  1
-system         pg_catalog          pg_stats_ext                           SYSTEM VIEW  NO                  1
 system         pg_catalog          pg_subscription                        SYSTEM VIEW  NO                  1
 system         pg_catalog          pg_subscription_rel                    SYSTEM VIEW  NO                  1
 system         pg_catalog          pg_tables                              SYSTEM VIEW  NO                  1
@@ -2888,11 +2876,7 @@ NULL     public   system         pg_catalog          pg_statio_sys_tables       
 NULL     public   system         pg_catalog          pg_statio_user_indexes                 SELECT          NULL          YES
 NULL     public   system         pg_catalog          pg_statio_user_sequences               SELECT          NULL          YES
 NULL     public   system         pg_catalog          pg_statio_user_tables                  SELECT          NULL          YES
-NULL     public   system         pg_catalog          pg_statistic                           SELECT          NULL          YES
 NULL     public   system         pg_catalog          pg_statistic_ext                       SELECT          NULL          YES
-NULL     public   system         pg_catalog          pg_statistic_ext_data                  SELECT          NULL          YES
-NULL     public   system         pg_catalog          pg_stats                               SELECT          NULL          YES
-NULL     public   system         pg_catalog          pg_stats_ext                           SELECT          NULL          YES
 NULL     public   system         pg_catalog          pg_subscription                        SELECT          NULL          YES
 NULL     public   system         pg_catalog          pg_subscription_rel                    SELECT          NULL          YES
 NULL     public   system         pg_catalog          pg_tables                              SELECT          NULL          YES
@@ -3493,11 +3477,7 @@ NULL     public   system         pg_catalog          pg_statio_sys_tables       
 NULL     public   system         pg_catalog          pg_statio_user_indexes                 SELECT          NULL          YES
 NULL     public   system         pg_catalog          pg_statio_user_sequences               SELECT          NULL          YES
 NULL     public   system         pg_catalog          pg_statio_user_tables                  SELECT          NULL          YES
-NULL     public   system         pg_catalog          pg_statistic                           SELECT          NULL          YES
 NULL     public   system         pg_catalog          pg_statistic_ext                       SELECT          NULL          YES
-NULL     public   system         pg_catalog          pg_statistic_ext_data                  SELECT          NULL          YES
-NULL     public   system         pg_catalog          pg_stats                               SELECT          NULL          YES
-NULL     public   system         pg_catalog          pg_stats_ext                           SELECT          NULL          YES
 NULL     public   system         pg_catalog          pg_subscription                        SELECT          NULL          YES
 NULL     public   system         pg_catalog          pg_subscription_rel                    SELECT          NULL          YES
 NULL     public   system         pg_catalog          pg_tables                              SELECT          NULL          YES
@@ -4623,7 +4603,7 @@ disable_partially_distributed_plans                    off
 disallow_full_table_scans                              off
 distsql_workmem                                        64 MiB
 enable_copying_partitioning_when_deinterleaving_table  off
-enable_drop_enum_value                                 on
+enable_drop_enum_value                                 off
 enable_experimental_alter_column_type_general          off
 enable_experimental_stream_replication                 off
 enable_implicit_select_for_update                      on
@@ -4649,6 +4629,12 @@ intervalstyle                                          postgres
 intervalstyle_enabled                                  off
 is_superuser                                           on
 large_full_scan_rows                                   1000
+lc_collate                                             C.UTF-8
+lc_ctype                                               C.UTF-8
+lc_messages                                            C.UTF-8
+lc_monetary                                            C.UTF-8
+lc_numeric                                             C.UTF-8
+lc_time                                                C.UTF-8
 locality                                               region=test,dc=dc1
 locality_optimized_partitioned_index_scan              on
 lock_timeout                                           0

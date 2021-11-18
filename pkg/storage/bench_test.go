@@ -653,11 +653,10 @@ func loadTestData(dir string, numKeys, numBatches, batchTimeSpan, valueBytes int
 
 	var batch Batch
 	var minWallTime int64
-	batchSize := len(keys) / numBatches
 	for i, key := range keys {
-		if (i % batchSize) == 0 {
+		if scaled := len(keys) / numBatches; (i % scaled) == 0 {
 			if i > 0 {
-				log.Infof(ctx, "committing (%d/~%d)", i/batchSize, numBatches)
+				log.Infof(ctx, "committing (%d/~%d)", i/scaled, numBatches)
 				if err := batch.Commit(false /* sync */); err != nil {
 					return nil, err
 				}
@@ -667,7 +666,7 @@ func loadTestData(dir string, numKeys, numBatches, batchTimeSpan, valueBytes int
 				}
 			}
 			batch = eng.NewBatch()
-			minWallTime = sstTimestamps[i/batchSize]
+			minWallTime = sstTimestamps[i/scaled]
 		}
 		timestamp := hlc.Timestamp{WallTime: minWallTime + rand.Int63n(int64(batchTimeSpan))}
 		value := roachpb.MakeValueFromBytes(randutil.RandBytes(rng, valueBytes))
@@ -1522,17 +1521,8 @@ func runExportToSst(
 	for i := 0; i < b.N; i++ {
 		startTS := hlc.Timestamp{WallTime: int64(numRevisions / 2)}
 		endTS := hlc.Timestamp{WallTime: int64(numRevisions + 2)}
-		_, _, _, err := engine.ExportMVCCToSst(context.Background(), ExportOptions{
-			StartKey:           MVCCKey{Key: keys.LocalMax},
-			EndKey:             roachpb.KeyMax,
-			StartTS:            startTS,
-			EndTS:              endTS,
-			ExportAllRevisions: exportAllRevisions,
-			TargetSize:         0,
-			MaxSize:            0,
-			StopMidKey:         false,
-			UseTBI:             useTBI,
-		}, noopWriter{})
+		_, _, _, err := engine.ExportMVCCToSst(context.Background(), keys.LocalMax, roachpb.KeyMax, startTS, endTS, hlc.Timestamp{},
+			exportAllRevisions, 0 /* targetSize */, 0 /* maxSize */, false, useTBI, noopWriter{})
 		if err != nil {
 			b.Fatal(err)
 		}

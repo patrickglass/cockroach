@@ -207,7 +207,6 @@ export class CustomChart extends React.Component<
         key={index}
         setTimeRange={this.props.setTimeRange}
         setTimeScale={this.props.setTimeScale}
-        history={this.props.history}
       >
         <LineGraph>
           <Axis units={units}>

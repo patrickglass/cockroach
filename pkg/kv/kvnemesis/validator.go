@@ -984,10 +984,6 @@ func printObserved(observedOps ...observedOp) string {
 		}
 		switch o := observed.(type) {
 		case *observedWrite:
-			opCode := "w"
-			if o.isDelete() {
-				opCode = "d"
-			}
 			ts := `missing`
 			if o.Materialized {
 				if o.isDelete() && o.Timestamp.IsEmpty() {
@@ -996,8 +992,8 @@ func printObserved(observedOps ...observedOp) string {
 					ts = o.Timestamp.String()
 				}
 			}
-			fmt.Fprintf(&buf, "[%s]%s:%s->%s",
-				opCode, o.Key, ts, mustGetStringValue(o.Value.RawBytes))
+			fmt.Fprintf(&buf, "[w]%s:%s->%s",
+				o.Key, ts, mustGetStringValue(o.Value.RawBytes))
 		case *observedRead:
 			fmt.Fprintf(&buf, "[r]%s:", o.Key)
 			validTimes := o.ValidTimes

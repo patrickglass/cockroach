@@ -95,10 +95,6 @@ var retiredSettings = map[string]struct{}{
 	"storage.sst_export.max_intents_per_error":                       {},
 	"jobs.registry.leniency":                                         {},
 	"sql.defaults.experimental_expression_based_indexes.enabled":     {},
-	"kv.tenant_rate_limiter.read_request_cost":                       {},
-	"kv.tenant_rate_limiter.read_cost_per_megabyte":                  {},
-	"kv.tenant_rate_limiter.write_request_cost":                      {},
-	"kv.tenant_rate_limiter.write_cost_per_megabyte":                 {},
 	"kv.transaction.write_pipelining_max_outstanding_size":           {},
 	"sql.defaults.optimizer_improve_disjunction_selectivity.enabled": {},
 	"bulkio.backup.proxy_file_writes.enabled":                        {},
@@ -107,12 +103,6 @@ var retiredSettings = map[string]struct{}{
 	"kv.closed_timestamp.close_fraction":                             {},
 	"sql.telemetry.query_sampling.qps_threshold":                     {},
 	"sql.telemetry.query_sampling.sample_rate":                       {},
-
-	// removed as of 22.1.
-	"sql.defaults.drop_enum_value.enabled": {},
-	"trace.lightstep.token":                {},
-	"trace.datadog.agent":                  {},
-	"trace.datadog.project":                {},
 }
 
 // register adds a setting to the registry.

@@ -16,6 +16,7 @@ import (
 	"math/rand"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -224,8 +225,14 @@ func runTestImport(t *testing.T, batchSizeValue int64) {
 				}
 			}
 			var splitRetries int
-			for _, sp := range getRec() {
-				splitRetries += tracing.CountLogMessages(sp, "SSTable cannot be added spanning range bounds")
+			for _, rec := range getRec() {
+				for _, l := range rec.Logs {
+					for _, line := range l.Fields {
+						if strings.Contains(line.Value, "SSTable cannot be added spanning range bounds") {
+							splitRetries++
+						}
+					}
+				}
 			}
 			if splitRetries != expectedSplitRetries {
 				t.Fatalf("expected %d split-caused retries, got %d", expectedSplitRetries, splitRetries)

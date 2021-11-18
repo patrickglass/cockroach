@@ -80,14 +80,14 @@
 // configured). This then lets us short-circuit work that would be discarded
 // anyway.
 //
-// The tracing package internally makes use of OpenTelemetry[2]. This gives us
-// the ability to configure external collectors for tracing information,
-// like Jaeger, DataDog, Lightstep or Zipkin.
+// The tracing package internally makes use of an opentracing[2]-compatible
+// library. This gives us the ability to configure external collectors for
+// tracing information[14], like lightstep or zipkin.
 //
 // -----------------------------------------------------------------------------
 //
 // [1]: https://research.google/pubs/pub36356/
-// [2]: https://opentelemetry.io
+// [2]: https://opentracing.io/specification/
 // [3]: `Recording.String`
 // [4]: `ChildSpan`
 // [5]: `ForkSpan`. "forking" a Span is the same as creating a new one
@@ -102,4 +102,5 @@
 // [11]: `SpanFromContext`
 // [12]: WithForceRealSpan
 // [13]: `Span.isNoop`
+// [14]: `shadowTracer`
 package tracing

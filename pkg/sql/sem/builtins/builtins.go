@@ -25,7 +25,6 @@ import (
 	"hash/fnv"
 	"io/ioutil"
 	"math"
-	"math/bits"
 	"math/rand"
 	"net"
 	"regexp/syntax"
@@ -2014,25 +2013,6 @@ var builtins = map[string]builtinDefinition{
 		},
 	),
 
-	"unordered_unique_rowid": makeBuiltin(
-		tree.FunctionProperties{
-			Category: categoryIDGeneration,
-		},
-		tree.Overload{
-			Types:      tree.ArgTypes{},
-			ReturnType: tree.FixedReturnType(types.Int),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				v := GenerateUniqueUnorderedID(ctx.NodeID.SQLInstanceID())
-				return tree.NewDInt(v), nil
-			},
-			Info: "Returns a unique ID. The value is a combination of the " +
-				"insert timestamp and the ID of the node executing the statement, which " +
-				"guarantees this combination is globally unique. The way it is generated " +
-				"there is no ordering",
-			Volatility: tree.VolatilityVolatile,
-		},
-	),
-
 	// Sequence functions.
 
 	"nextval": makeBuiltin(
@@ -2046,11 +2026,11 @@ var builtins = map[string]builtinDefinition{
 			ReturnType: tree.FixedReturnType(types.Int),
 			Fn: func(evalCtx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				name := tree.MustBeDString(args[0])
-				dOid, err := tree.ParseDOid(evalCtx, string(name), types.RegClass)
+				qualifiedName, err := parser.ParseQualifiedTableName(string(name))
 				if err != nil {
 					return nil, err
 				}
-				res, err := evalCtx.Sequence.IncrementSequenceByID(evalCtx.Ctx(), int64(dOid.DInt))
+				res, err := evalCtx.Sequence.IncrementSequence(evalCtx.Ctx(), qualifiedName)
 				if err != nil {
 					return nil, err
 				}
@@ -2086,11 +2066,11 @@ var builtins = map[string]builtinDefinition{
 			ReturnType: tree.FixedReturnType(types.Int),
 			Fn: func(evalCtx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				name := tree.MustBeDString(args[0])
-				dOid, err := tree.ParseDOid(evalCtx, string(name), types.RegClass)
+				qualifiedName, err := parser.ParseQualifiedTableName(string(name))
 				if err != nil {
 					return nil, err
 				}
-				res, err := evalCtx.Sequence.GetLatestValueInSessionForSequenceByID(evalCtx.Ctx(), int64(dOid.DInt))
+				res, err := evalCtx.Sequence.GetLatestValueInSessionForSequence(evalCtx.Ctx(), qualifiedName)
 				if err != nil {
 					return nil, err
 				}
@@ -2112,6 +2092,35 @@ var builtins = map[string]builtinDefinition{
 			},
 			Info:       "Returns the latest value obtained with nextval for this sequence in this session.",
 			Volatility: tree.VolatilityVolatile,
+		},
+	),
+
+	"pg_get_serial_sequence": makeBuiltin(
+		tree.FunctionProperties{
+			Category: categorySequences,
+		},
+		tree.Overload{
+			Types:      tree.ArgTypes{{"table_name", types.String}, {"column_name", types.String}},
+			ReturnType: tree.FixedReturnType(types.String),
+			Fn: func(evalCtx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
+				tableName := tree.MustBeDString(args[0])
+				columnName := tree.MustBeDString(args[1])
+				qualifiedName, err := parser.ParseQualifiedTableName(string(tableName))
+				if err != nil {
+					return nil, err
+				}
+				res, err := evalCtx.Sequence.GetSerialSequenceNameFromColumn(evalCtx.Ctx(), qualifiedName, tree.Name(columnName))
+				if err != nil {
+					return nil, err
+				}
+				if res == nil {
+					return tree.DNull, nil
+				}
+				res.ExplicitCatalog = false
+				return tree.NewDString(fmt.Sprintf(`%s.%s`, res.Schema(), res.Object())), nil
+			},
+			Info:       "Returns the name of the sequence used by the given column_name in the table table_name.",
+			Volatility: tree.VolatilityStable,
 		},
 	),
 
@@ -2147,14 +2156,14 @@ var builtins = map[string]builtinDefinition{
 			ReturnType: tree.FixedReturnType(types.Int),
 			Fn: func(evalCtx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				name := tree.MustBeDString(args[0])
-				dOid, err := tree.ParseDOid(evalCtx, string(name), types.RegClass)
+				qualifiedName, err := parser.ParseQualifiedTableName(string(name))
 				if err != nil {
 					return nil, err
 				}
 
 				newVal := tree.MustBeDInt(args[1])
-				if err := evalCtx.Sequence.SetSequenceValueByID(
-					evalCtx.Ctx(), int64(dOid.DInt), int64(newVal), true); err != nil {
+				if err := evalCtx.Sequence.SetSequenceValue(
+					evalCtx.Ctx(), qualifiedName, int64(newVal), true); err != nil {
 					return nil, err
 				}
 				return args[1], nil
@@ -2186,15 +2195,16 @@ var builtins = map[string]builtinDefinition{
 			ReturnType: tree.FixedReturnType(types.Int),
 			Fn: func(evalCtx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				name := tree.MustBeDString(args[0])
-				dOid, err := tree.ParseDOid(evalCtx, string(name), types.RegClass)
+				qualifiedName, err := parser.ParseQualifiedTableName(string(name))
 				if err != nil {
 					return nil, err
 				}
+
 				isCalled := bool(tree.MustBeDBool(args[2]))
 
 				newVal := tree.MustBeDInt(args[1])
-				if err := evalCtx.Sequence.SetSequenceValueByID(
-					evalCtx.Ctx(), int64(dOid.DInt), int64(newVal), isCalled); err != nil {
+				if err := evalCtx.Sequence.SetSequenceValue(
+					evalCtx.Ctx(), qualifiedName, int64(newVal), isCalled); err != nil {
 					return nil, err
 				}
 				return args[1], nil
@@ -3452,15 +3462,8 @@ value if you rely on the HLC for accuracy.`,
 
 	"array_append": setProps(arrayPropsNullableArgs(), arrayBuiltin(func(typ *types.T) tree.Overload {
 		return tree.Overload{
-			Types: tree.ArgTypes{{"array", types.MakeArray(typ)}, {"elem", typ}},
-			ReturnType: func(args []tree.TypedExpr) *types.T {
-				if len(args) > 0 {
-					if argTyp := args[0].ResolvedType(); argTyp.Family() != types.UnknownFamily {
-						return argTyp
-					}
-				}
-				return types.MakeArray(typ)
-			},
+			Types:      tree.ArgTypes{{"array", types.MakeArray(typ)}, {"elem", typ}},
+			ReturnType: tree.FixedReturnType(types.MakeArray(typ)),
 			Fn: func(_ *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				return tree.AppendToMaybeNullArray(typ, args[0], args[1])
 			},
@@ -3471,15 +3474,8 @@ value if you rely on the HLC for accuracy.`,
 
 	"array_prepend": setProps(arrayPropsNullableArgs(), arrayBuiltin(func(typ *types.T) tree.Overload {
 		return tree.Overload{
-			Types: tree.ArgTypes{{"elem", typ}, {"array", types.MakeArray(typ)}},
-			ReturnType: func(args []tree.TypedExpr) *types.T {
-				if len(args) > 1 {
-					if argTyp := args[1].ResolvedType(); argTyp.Family() != types.UnknownFamily {
-						return argTyp
-					}
-				}
-				return types.MakeArray(typ)
-			},
+			Types:      tree.ArgTypes{{"elem", typ}, {"array", types.MakeArray(typ)}},
+			ReturnType: tree.FixedReturnType(types.MakeArray(typ)),
 			Fn: func(_ *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				return tree.PrependToMaybeNullArray(typ, args[0], args[1])
 			},
@@ -3503,18 +3499,14 @@ value if you rely on the HLC for accuracy.`,
 	"array_remove": setProps(arrayPropsNullableArgs(), arrayBuiltin(func(typ *types.T) tree.Overload {
 		return tree.Overload{
 			Types:      tree.ArgTypes{{"array", types.MakeArray(typ)}, {"elem", typ}},
-			ReturnType: tree.IdentityReturnType(0),
+			ReturnType: tree.FixedReturnType(types.MakeArray(typ)),
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				if args[0] == tree.DNull {
 					return tree.DNull, nil
 				}
 				result := tree.NewDArray(typ)
 				for _, e := range tree.MustBeDArray(args[0]).Array {
-					cmp, err := e.CompareError(ctx, args[1])
-					if err != nil {
-						return nil, err
-					}
-					if cmp != 0 {
+					if e.Compare(ctx, args[1]) != 0 {
 						if err := result.Append(e); err != nil {
 							return nil, err
 						}
@@ -3530,18 +3522,14 @@ value if you rely on the HLC for accuracy.`,
 	"array_replace": setProps(arrayPropsNullableArgs(), arrayBuiltin(func(typ *types.T) tree.Overload {
 		return tree.Overload{
 			Types:      tree.ArgTypes{{"array", types.MakeArray(typ)}, {"toreplace", typ}, {"replacewith", typ}},
-			ReturnType: tree.IdentityReturnType(0),
+			ReturnType: tree.FixedReturnType(types.MakeArray(typ)),
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
 				if args[0] == tree.DNull {
 					return tree.DNull, nil
 				}
 				result := tree.NewDArray(typ)
 				for _, e := range tree.MustBeDArray(args[0]).Array {
-					cmp, err := e.CompareError(ctx, args[1])
-					if err != nil {
-						return nil, err
-					}
-					if cmp == 0 {
+					if e.Compare(ctx, args[1]) == 0 {
 						if err := result.Append(args[2]); err != nil {
 							return nil, err
 						}
@@ -3567,11 +3555,7 @@ value if you rely on the HLC for accuracy.`,
 					return tree.DNull, nil
 				}
 				for i, e := range tree.MustBeDArray(args[0]).Array {
-					cmp, err := e.CompareError(ctx, args[1])
-					if err != nil {
-						return nil, err
-					}
-					if cmp == 0 {
+					if e.Compare(ctx, args[1]) == 0 {
 						return tree.NewDInt(tree.DInt(i + 1)), nil
 					}
 				}
@@ -3592,11 +3576,7 @@ value if you rely on the HLC for accuracy.`,
 				}
 				result := tree.NewDArray(types.Int)
 				for i, e := range tree.MustBeDArray(args[0]).Array {
-					cmp, err := e.CompareError(ctx, args[1])
-					if err != nil {
-						return nil, err
-					}
-					if cmp == 0 {
+					if e.Compare(ctx, args[1]) == 0 {
 						if err := result.Append(tree.NewDInt(tree.DInt(i + 1))); err != nil {
 							return nil, err
 						}
@@ -3724,8 +3704,10 @@ value if you rely on the HLC for accuracy.`,
 	// The behavior of both the JSON and JSONB data types in CockroachDB is
 	// similar to the behavior of the JSONB data type in Postgres.
 
-	"json_to_recordset":  makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 33285, Category: categoryJSON}),
-	"jsonb_to_recordset": makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 33285, Category: categoryJSON}),
+	"json_to_recordset":        makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 33285, Category: categoryJSON}),
+	"jsonb_to_recordset":       makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 33285, Category: categoryJSON}),
+	"json_populate_recordset":  makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 33285, Category: categoryJSON}),
+	"jsonb_populate_recordset": makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 33285, Category: categoryJSON}),
 
 	"jsonb_path_exists":      makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 22513, Category: categoryJSON}),
 	"jsonb_path_exists_opr":  makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 22513, Category: categoryJSON}),
@@ -4266,6 +4248,30 @@ value if you rely on the HLC for accuracy.`,
 			},
 			Info: "Returns the session user. This function is provided for " +
 				"compatibility with PostgreSQL.",
+			Volatility: tree.VolatilityStable,
+		},
+	),
+
+	// https://www.postgresql.org/docs/10/functions-info.html#FUNCTIONS-INFO-CATALOG-TABLE
+	"pg_collation_for": makeBuiltin(
+		tree.FunctionProperties{Category: categoryString},
+		tree.Overload{
+			Types:      tree.ArgTypes{{"str", types.Any}},
+			ReturnType: tree.FixedReturnType(types.String),
+			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
+				var collation string
+				switch t := args[0].(type) {
+				case *tree.DString:
+					collation = "default"
+				case *tree.DCollatedString:
+					collation = t.Locale
+				default:
+					return tree.DNull, pgerror.Newf(pgcode.DatatypeMismatch,
+						"collations are not supported by type: %s", t.ResolvedType())
+				}
+				return tree.NewDString(fmt.Sprintf(`"%s"`, collation)), nil
+			},
+			Info:       "Returns the collation of the argument",
 			Volatility: tree.VolatilityStable,
 		},
 	),
@@ -7098,16 +7104,12 @@ var similarOverloads = []tree.Overload{
 }
 
 func arrayBuiltin(impl func(*types.T) tree.Overload) builtinDefinition {
-	overloads := make([]tree.Overload, 0, len(types.Scalar)+1)
+	overloads := make([]tree.Overload, 0, len(types.Scalar))
 	for _, typ := range types.Scalar {
 		if ok, _ := types.IsValidArrayElementType(typ); ok {
 			overloads = append(overloads, impl(typ))
 		}
 	}
-	// Prevent usage in DistSQL because it cannot handle arrays of untyped tuples.
-	tupleOverload := impl(types.AnyTuple)
-	tupleOverload.DistsqlBlocklist = true
-	overloads = append(overloads, tupleOverload)
 	return builtinDefinition{
 		props:     tree.FunctionProperties{Category: categoryArray},
 		overloads: overloads,
@@ -7616,26 +7618,6 @@ func overlay(s, to string, pos, size int) (tree.Datum, error) {
 // NodeIDBits is the number of bits stored in the lower portion of
 // GenerateUniqueInt.
 const NodeIDBits = 15
-
-// GenerateUniqueUnorderedID creates a unique int64 composed of the current time
-// at a 10-microsecond granularity and the instance-id. The top-bit is left
-// empty so that negative values are not returned. The 48 bits following after
-// represent the reversed timestamp and then 15 bits of the node id.
-func GenerateUniqueUnorderedID(instanceID base.SQLInstanceID) tree.DInt {
-	orig := uint64(GenerateUniqueInt(instanceID))
-	uniqueUnorderedID := mapToUnorderedUniqueInt(orig)
-	return tree.DInt(uniqueUnorderedID)
-}
-
-// mapToUnorderedUniqueInt is used by GenerateUniqueUnorderedID to convert a
-// serial unique uint64 to an unordered unique int64. The bit manipulation
-// should preserve the number of 1-bits.
-func mapToUnorderedUniqueInt(val uint64) uint64 {
-	// val is [0][48 bits of ts][15 bits of node id]
-	ts := (val & ((uint64(math.MaxUint64) >> 16) << 15)) >> 15
-	v := (bits.Reverse64(ts) >> 1) | (val & (1<<15 - 1))
-	return v
-}
 
 // GenerateUniqueInt creates a unique int composed of the current time at a
 // 10-microsecond granularity and the instance-id. The instance-id is stored in the
@@ -8210,7 +8192,7 @@ func truncateTimestamp(fromTime time.Time, timeSpan string) (*tree.DTimestampTZ,
 		// and force it to use the same location as the incoming time.
 		// If using the fixed offset in the given location gives us a timestamp that is the
 		// same as the original time offset, use that timestamp instead.
-		fixedOffsetLoc := timeutil.FixedTimeZoneOffsetToLocation(origZoneOffset, "date_trunc")
+		fixedOffsetLoc := timeutil.FixedOffsetTimeZoneToLocation(origZoneOffset, "date_trunc")
 		fixedOffsetTime := time.Date(year, month, day, hour, min, sec, nsec, fixedOffsetLoc)
 		locCorrectedOffsetTime := fixedOffsetTime.In(loc)
 

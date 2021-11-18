@@ -28,9 +28,6 @@ type JobID int64
 // InvalidJobID is the zero value for JobID corresponding to no job.
 const InvalidJobID JobID = 0
 
-// SafeValue implements the redact.SafeValue interface.
-func (j JobID) SafeValue() {}
-
 // Details is a marker interface for job details proto structs.
 type Details interface{}
 
@@ -44,7 +41,6 @@ var _ Details = StreamIngestionDetails{}
 var _ Details = NewSchemaChangeDetails{}
 var _ Details = MigrationDetails{}
 var _ Details = AutoSpanConfigReconciliationDetails{}
-var _ Details = ImportDetails{}
 
 // ProgressDetails is a marker interface for job progress details proto structs.
 type ProgressDetails interface{}
@@ -73,10 +69,6 @@ var _ base.SQLInstanceID
 // The name is chosen to be something that users are unlikely to choose when
 // running CREATE STATISTICS manually.
 const AutoStatsName = "__auto__"
-
-// ImportStatsName is the name to use for statistics created automatically
-// during import.
-const ImportStatsName = "__import__"
 
 // AutomaticJobTypes is a list of automatic job types that currently exist.
 var AutomaticJobTypes = [...]Type{

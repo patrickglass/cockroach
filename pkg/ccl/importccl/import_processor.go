@@ -273,7 +273,7 @@ func makeInputConverter(
 			}
 		}
 		if isWorkload {
-			return newWorkloadReader(semaCtx, evalCtx, singleTable, kvCh), nil
+			return newWorkloadReader(kvCh, singleTable, evalCtx), nil
 		}
 		return newCSVInputReader(
 			semaCtx, kvCh, spec.Format.Csv, spec.WalltimeNanos, int(spec.ReaderParallelism),

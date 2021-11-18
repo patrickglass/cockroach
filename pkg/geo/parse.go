@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
+	"github.com/cockroachdb/cockroach/pkg/geo/wkt"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
 	"github.com/pierrre/geohash"
@@ -25,7 +26,6 @@ import (
 	"github.com/twpayne/go-geom/encoding/geojson"
 	"github.com/twpayne/go-geom/encoding/wkb"
 	"github.com/twpayne/go-geom/encoding/wkbcommon"
-	"github.com/twpayne/go-geom/encoding/wkt"
 )
 
 // parseEWKBRaw creates a geopb.SpatialObject from an EWKB
@@ -114,6 +114,9 @@ func parseGeoJSON(
 	var t geom.T
 	if err := geojson.Unmarshal(b, &t); err != nil {
 		return geopb.SpatialObject{}, err
+	}
+	if t == nil {
+		return geopb.SpatialObject{}, errors.Newf("invalid GeoJSON input")
 	}
 	if defaultSRID != 0 && t.SRID() == 0 {
 		AdjustGeomTSRID(t, defaultSRID)

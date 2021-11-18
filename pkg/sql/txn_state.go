@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 // txnState contains state associated with an ongoing SQL txn; it constitutes
@@ -175,7 +174,7 @@ func (ts *txnState) resetForNewSQLTxn(
 		txnCtx, sp = createRootOrChildSpan(connCtx, opName, tranCtx.tracer)
 	}
 	if txnType == implicitTxn {
-		sp.SetTag("implicit", attribute.StringValue("true"))
+		sp.SetTag("implicit", "true")
 	}
 
 	if !alreadyRecording && (duration > 0) {

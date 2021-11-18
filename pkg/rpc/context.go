@@ -41,7 +41,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
-	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/syncmap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -70,6 +69,10 @@ const (
 	initialWindowSize     = defaultWindowSize * 32 // for an RPC
 	initialConnWindowSize = initialWindowSize * 16 // for a connection
 )
+
+// GRPC Dialer connection timeout. 20s matches default value that is
+// suppressed when backoff config is provided.
+const minConnectionTimeout = 20 * time.Second
 
 // sourceAddr is the environment-provided local address for outgoing
 // connections.
@@ -729,7 +732,7 @@ func (ctx *Context) grpcDialOptions(
 		if ctx.tenID == roachpb.SystemTenantID {
 			tlsConfig, err = ctx.GetClientTLSConfig()
 		} else {
-			tlsConfig, err = ctx.GetTenantClientTLSConfig()
+			tlsConfig, err = ctx.GetTenantTLSConfig()
 		}
 		if err != nil {
 			return nil, err
@@ -777,7 +780,7 @@ func (ctx *Context) grpcDialOptions(
 		// is in setupSpanForIncomingRPC().
 		//
 		tagger := func(span *tracing.Span) {
-			span.SetTag("node", attribute.IntValue(int(ctx.NodeID.Get())))
+			span.SetTag("node", ctx.NodeID.Get().String())
 		}
 		unaryInterceptors = append(unaryInterceptors,
 			tracing.ClientInterceptor(tracer, tagger))
@@ -1009,7 +1012,9 @@ func (ctx *Context) grpcDialRaw(
 	// ~second range.
 	backoffConfig := backoff.DefaultConfig
 	backoffConfig.MaxDelay = maxBackoff
-	dialOpts = append(dialOpts, grpc.WithConnectParams(grpc.ConnectParams{Backoff: backoffConfig}))
+	dialOpts = append(dialOpts, grpc.WithConnectParams(grpc.ConnectParams{
+		Backoff:           backoffConfig,
+		MinConnectTimeout: minConnectionTimeout}))
 	dialOpts = append(dialOpts, grpc.WithKeepaliveParams(clientKeepalive))
 	dialOpts = append(dialOpts,
 		grpc.WithInitialWindowSize(initialWindowSize),

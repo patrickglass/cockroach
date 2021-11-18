@@ -22,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/docs"
+	"github.com/cockroachdb/cockroach/pkg/gossip/resolver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
@@ -33,7 +34,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/netutil"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble"
@@ -150,8 +150,6 @@ type BaseConfig struct {
 	StorageEngine enginepb.EngineType
 
 	// Enables the use of the (experimental) span configs infrastructure.
-	//
-	// Environment Variable: COCKROACH_EXPERIMENTAL_SPAN_CONFIGS
 	SpanConfigsEnabled bool
 
 	// TestingKnobs is used for internal test controls only.
@@ -220,9 +218,9 @@ type KVConfig struct {
 	// NodeAttributes is the parsed representation of Attrs.
 	NodeAttributes roachpb.Attributes
 
-	// GossipBootstrapAddresses is a list of gossip addresses used
+	// GossipBootstrapResolvers is a list of gossip resolvers used
 	// to find bootstrap nodes for connecting to the gossip network.
-	GossipBootstrapAddresses []util.UnresolvedAddr
+	GossipBootstrapResolvers []resolver.Resolver
 
 	// The following values can only be set via environment variables and are
 	// for testing only. They are not meant to be set by the end user.
@@ -601,46 +599,47 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 	return enginesCopy, nil
 }
 
-// InitNode parses node attributes and bootstrap addresses.
+// InitNode parses node attributes and initializes the gossip bootstrap
+// resolvers.
 func (cfg *Config) InitNode(ctx context.Context) error {
 	cfg.readEnvironmentVariables()
 
 	// Initialize attributes.
 	cfg.NodeAttributes = parseAttributes(cfg.Attrs)
 
-	// Get the gossip bootstrap addresses.
-	addresses, err := cfg.parseGossipBootstrapAddresses(ctx)
+	// Get the gossip bootstrap resolvers.
+	resolvers, err := cfg.parseGossipBootstrapResolvers(ctx)
 	if err != nil {
 		return err
 	}
-	if len(addresses) > 0 {
-		cfg.GossipBootstrapAddresses = addresses
+	if len(resolvers) > 0 {
+		cfg.GossipBootstrapResolvers = resolvers
 	}
 
 	return nil
 }
 
-// FilterGossipBootstrapAddresses removes any gossip bootstrap addresses which
+// FilterGossipBootstrapResolvers removes any gossip bootstrap resolvers which
 // match either this node's listen address or its advertised host address.
-func (cfg *Config) FilterGossipBootstrapAddresses(ctx context.Context) []util.UnresolvedAddr {
+func (cfg *Config) FilterGossipBootstrapResolvers(ctx context.Context) []resolver.Resolver {
 	var listen, advert net.Addr
 	listen = util.NewUnresolvedAddr("tcp", cfg.Addr)
 	advert = util.NewUnresolvedAddr("tcp", cfg.AdvertiseAddr)
-	filtered := make([]util.UnresolvedAddr, 0, len(cfg.GossipBootstrapAddresses))
-	addrs := make([]string, 0, len(cfg.GossipBootstrapAddresses))
+	filtered := make([]resolver.Resolver, 0, len(cfg.GossipBootstrapResolvers))
+	addrs := make([]string, 0, len(cfg.GossipBootstrapResolvers))
 
-	for _, addr := range cfg.GossipBootstrapAddresses {
-		if addr.String() == advert.String() || addr.String() == listen.String() {
+	for _, r := range cfg.GossipBootstrapResolvers {
+		if r.Addr() == advert.String() || r.Addr() == listen.String() {
 			if log.V(1) {
-				log.Infof(ctx, "skipping -join address %q, because a node cannot join itself", addr)
+				log.Infof(ctx, "skipping -join address %q, because a node cannot join itself", r.Addr())
 			}
 		} else {
-			filtered = append(filtered, addr)
-			addrs = append(addrs, addr.String())
+			filtered = append(filtered, r)
+			addrs = append(addrs, r.Addr())
 		}
 	}
 	if log.V(1) {
-		log.Infof(ctx, "initial addresses: %v", addrs)
+		log.Infof(ctx, "initial resolvers: %v", addrs)
 	}
 	return filtered
 }
@@ -655,53 +654,53 @@ func (cfg *Config) RequireWebSession() bool {
 // variable based. Note that this only happens when initializing a node and not
 // when NewContext is called.
 func (cfg *Config) readEnvironmentVariables() {
-	cfg.SpanConfigsEnabled = envutil.EnvOrDefaultBool("COCKROACH_EXPERIMENTAL_SPAN_CONFIGS", cfg.SpanConfigsEnabled)
 	cfg.Linearizable = envutil.EnvOrDefaultBool("COCKROACH_EXPERIMENTAL_LINEARIZABLE", cfg.Linearizable)
 	cfg.ScanInterval = envutil.EnvOrDefaultDuration("COCKROACH_SCAN_INTERVAL", cfg.ScanInterval)
 	cfg.ScanMinIdleTime = envutil.EnvOrDefaultDuration("COCKROACH_SCAN_MIN_IDLE_TIME", cfg.ScanMinIdleTime)
 	cfg.ScanMaxIdleTime = envutil.EnvOrDefaultDuration("COCKROACH_SCAN_MAX_IDLE_TIME", cfg.ScanMaxIdleTime)
 }
 
-// parseGossipBootstrapAddresses parses list of gossip bootstrap addresses.
-func (cfg *Config) parseGossipBootstrapAddresses(
-	ctx context.Context,
-) ([]util.UnresolvedAddr, error) {
-	var bootstrapAddresses []util.UnresolvedAddr
+// parseGossipBootstrapResolvers parses list of gossip bootstrap resolvers.
+func (cfg *Config) parseGossipBootstrapResolvers(ctx context.Context) ([]resolver.Resolver, error) {
+	var bootstrapResolvers []resolver.Resolver
 	for _, address := range cfg.JoinList {
-		if address == "" {
-			continue
-		}
-
 		if cfg.JoinPreferSRVRecords {
 			// The following code substitutes the entry in --join by the
 			// result of SRV resolution, if suitable SRV records are found
 			// for that name.
 			//
-			// TODO(knz): Delay this lookup. The logic for "regular" addresses
+			// TODO(knz): Delay this lookup. The logic for "regular" resolvers
 			// is delayed until the point the connection is attempted, so that
 			// fresh DNS records are used for a new connection. This makes
 			// it possible to update DNS records without restarting the node.
 			// The SRV logic here does not have this property (yet).
-			srvAddrs, err := netutil.SRV(ctx, address)
+			srvAddrs, err := resolver.SRV(ctx, address)
 			if err != nil {
 				return nil, err
 			}
 
 			if len(srvAddrs) > 0 {
 				for _, sa := range srvAddrs {
-					bootstrapAddresses = append(bootstrapAddresses,
-						util.MakeUnresolvedAddrWithDefaults("tcp", sa, base.DefaultPort))
+					resolver, err := resolver.NewResolver(sa)
+					if err != nil {
+						return nil, err
+					}
+					bootstrapResolvers = append(bootstrapResolvers, resolver)
 				}
+
 				continue
 			}
 		}
 
 		// Otherwise, use the address.
-		bootstrapAddresses = append(bootstrapAddresses,
-			util.MakeUnresolvedAddrWithDefaults("tcp", address, base.DefaultPort))
+		resolver, err := resolver.NewResolver(address)
+		if err != nil {
+			return nil, err
+		}
+		bootstrapResolvers = append(bootstrapResolvers, resolver)
 	}
 
-	return bootstrapAddresses, nil
+	return bootstrapResolvers, nil
 }
 
 // parseAttributes parses a colon-separated list of strings,

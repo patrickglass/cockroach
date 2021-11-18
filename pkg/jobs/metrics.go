@@ -48,9 +48,7 @@ type JobTypeMetrics struct {
 	ResumeFailed           *metric.Counter
 	FailOrCancelCompleted  *metric.Counter
 	FailOrCancelRetryError *metric.Counter
-	// TODO (sajjad): FailOrCancelFailed metric is not updated after the modification
-	// of retrying all reverting jobs. Remove this metric in v22.1.
-	FailOrCancelFailed *metric.Counter
+	FailOrCancelFailed     *metric.Counter
 }
 
 // MetricStruct implements the metric.Struct interface.

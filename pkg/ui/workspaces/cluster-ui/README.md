@@ -132,7 +132,7 @@ and install it from a local tarball. To view a local change to cluster-ui in Coc
 # in the root of cockroachdb/cockroach
 $ make pkg/ui/yarn.protobuf.installed -B
 $ make pkg/ui/yarn.cluster-ui.installed -B
-# in pkg/ui/workspaces/cluster-ui
+# in pkg/ui/cluster-ui
 $ yarn run build
 $ yarn pack --prod
 ```
@@ -220,7 +220,8 @@ directory of CockroachDB.
 
 ```shell
 $ make ui-maintainer-clean
-$ make ui-generate -B
+$ make pkg/ui/yarn.protobuf.installed -B
+$ make pkg/ui/yarn.cluster-ui.installed -B
 ```
 
 ### 4. Publish

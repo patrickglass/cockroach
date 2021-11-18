@@ -34,7 +34,7 @@ import { PrintTime } from "src/views/reports/containers/range/print";
 import { selectDiagnosticsReportsPerStatement } from "src/redux/statements/statementsSelectors";
 import { createStatementDiagnosticsAlertLocalSetting } from "src/redux/alerts";
 import { statementsDateRangeLocalSetting } from "src/redux/statementsDateRange";
-import { getMatchParamByName } from "src/util/query";
+import { queryByName } from "src/util/query";
 
 import { StatementsPage, AggregateStatistics } from "@cockroachlabs/cluster-ui";
 import {
@@ -79,22 +79,29 @@ export const selectStatements = createSelector(
       return null;
     }
     let statements = flattenStatementStats(state.data.statements);
-    const app = getMatchParamByName(props.match, appAttr);
+    const app = queryByName(props.location, appAttr);
     const isInternal = (statement: ExecutionStatistics) =>
       statement.app.startsWith(state.data.internal_app_name_prefix);
 
     if (app && app !== "All") {
-      let criteria = decodeURIComponent(app);
+      const criteria = decodeURIComponent(app).split(",");
       let showInternal = false;
-      if (criteria === "(unset)") {
-        criteria = "";
-      } else if (criteria === "(internal)") {
+      if (criteria.includes(state.data.internal_app_name_prefix)) {
         showInternal = true;
+      }
+      if (criteria.includes("(unset)")) {
+        criteria.push("");
       }
 
       statements = statements.filter(
         (statement: ExecutionStatistics) =>
-          (showInternal && isInternal(statement)) || statement.app === criteria,
+          (showInternal && isInternal(statement)) ||
+          criteria.includes(statement.app),
+      );
+    } else {
+      // We don't want to show internal statements by default.
+      statements = statements.filter(
+        (statement: ExecutionStatistics) => !isInternal(statement),
       );
     }
 
@@ -160,7 +167,7 @@ export const selectApps = createSelector(
       },
     );
     return []
-      .concat(sawInternal ? ["(internal)"] : [])
+      .concat(sawInternal ? [state.data.internal_app_name_prefix] : [])
       .concat(sawBlank ? ["(unset)"] : [])
       .concat(Object.keys(apps));
   },
@@ -175,7 +182,11 @@ export const selectDatabases = createSelector(
       return [];
     }
     return Array.from(
-      new Set(state.data.statements.map(s => s.key.key_data.database)),
+      new Set(
+        state.data.statements.map(s =>
+          s.key.key_data.database ? s.key.key_data.database : "(unset)",
+        ),
+      ),
     ).filter((dbName: string) => dbName !== null && dbName.length > 0);
   },
 );

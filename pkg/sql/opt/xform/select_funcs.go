@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
 )
 
@@ -981,15 +980,6 @@ func (c *CustomFuncs) GenerateZigzagJoins(
 		iter2.Init(c.e.evalCtx, c.e.f, c.e.mem, &c.im, scanPrivate, outerFilters, rejectPrimaryIndex|rejectInvertedIndexes)
 		iter2.SetOriginalFilters(filters)
 		iter2.ForEachStartingAfter(leftIndex.Ordinal(), func(rightIndex cat.Index, innerFilters memo.FiltersExpr, rightCols opt.ColSet, _ bool, _ memo.ProjectionsExpr) {
-			// Check if we have zigzag hints.
-			if scanPrivate.Flags.ForceZigzag {
-				indexes := util.MakeFastIntSet(leftIndex.Ordinal(), rightIndex.Ordinal())
-				forceIndexes := scanPrivate.Flags.ZigzagIndexes
-				if !forceIndexes.SubsetOf(indexes) {
-					return
-				}
-			}
-
 			rightFixed := c.indexConstrainedCols(rightIndex, scanPrivate.Table, fixedCols)
 			// If neither side contributes a fixed column not contributed by the
 			// other, then there's no reason to zigzag on this pair of indexes.
@@ -1203,26 +1193,32 @@ func eqColsForZigzag(
 		i++
 		j++
 
+		// If the columns are not equated in their filters, but they have the
+		// same ID, then they are assumed to be implicitly equal. This is only
+		// true if they are non-nullable because NULL != NULL. See issue #71655.
 		if leftColID == rightColID {
-			leftEqPrefix = append(leftEqPrefix, leftColID)
-			rightEqPrefix = append(rightEqPrefix, rightColID)
-			continue
+			col := tab.Column(tabID.ColumnOrdinal(leftColID))
+			if !col.IsNullable() {
+				leftEqPrefix = append(leftEqPrefix, leftColID)
+				rightEqPrefix = append(rightEqPrefix, rightColID)
+				continue
+			}
 		}
+
+		// If both columns are at the same index in their respective EqCols
+		// lists, they were explicitly equated in the filters.
 		leftIdx, leftOk := leftEqCols.Find(leftColID)
 		rightIdx, rightOk := rightEqCols.Find(rightColID)
-		// If both columns are at the same index in their respective
-		// EqCols lists, they were equated in the filters.
 		if leftOk && rightOk && leftIdx == rightIdx {
 			leftEqPrefix = append(leftEqPrefix, leftColID)
 			rightEqPrefix = append(rightEqPrefix, rightColID)
 			continue
-		} else {
-			// We've reached the first non-equal column; the zigzag
-			// joiner does not support non-contiguous/non-prefix equal
-			// columns.
-			break
 		}
 
+		// We've reached the first non-equal column; the zigzag
+		// joiner does not support non-contiguous/non-prefix equal
+		// columns.
+		break
 	}
 
 	return leftEqPrefix, rightEqPrefix
@@ -1291,11 +1287,6 @@ func (c *CustomFuncs) GenerateInvertedIndexZigzagJoins(
 	var iter scanIndexIter
 	iter.Init(c.e.evalCtx, c.e.f, c.e.mem, &c.im, scanPrivate, filters, rejectNonInvertedIndexes)
 	iter.ForEach(func(index cat.Index, filters memo.FiltersExpr, indexCols opt.ColSet, _ bool, _ memo.ProjectionsExpr) {
-		// Check if we have zigzag hints.
-		if !scanPrivate.Flags.ZigzagIndexes.Empty() && !scanPrivate.Flags.ZigzagIndexes.Contains(index.Ordinal()) {
-			return
-		}
-
 		if index.NonInvertedPrefixColumnCount() > 0 {
 			// TODO(mgartner): We don't yet support using multi-column inverted
 			//  indexes with zigzag joins.

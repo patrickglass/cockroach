@@ -207,7 +207,7 @@ func StartTenant(
 
 	if err := args.stopper.RunAsyncTask(ctx, "serve-http", func(ctx context.Context) {
 		mux := http.NewServeMux()
-		debugServer := debug.NewServer(args.Settings, s.pgServer.HBADebugFn(), s.execCfg.SQLStatusServer)
+		debugServer := debug.NewServer(args.Settings, s.pgServer.HBADebugFn())
 		mux.Handle("/", debugServer)
 		mux.Handle("/_status/", gwMux)
 		mux.HandleFunc("/health", func(w http.ResponseWriter, req *http.Request) {
@@ -285,8 +285,8 @@ func StartTenant(
 			log.Ops.Errorf(ctx, "unable to get cpu usage: %v", err)
 		}
 		return multitenant.ExternalUsage{
-			CPUSecs:     float64(userTimeMillis) * 1e-3,
-			PGWireBytes: s.pgServer.BytesInAndOut(),
+			CPUSecs:           float64(userTimeMillis) * 1e-3,
+			PGWireEgressBytes: s.pgServer.BytesOut(),
 		}
 	}
 

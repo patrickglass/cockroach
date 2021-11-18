@@ -10,8 +10,7 @@
 
 import React from "react";
 import { RouteComponentProps } from "react-router-dom";
-import { isNil, merge, forIn } from "lodash";
-import Helmet from "react-helmet";
+import { isNil, merge } from "lodash";
 import moment, { Moment } from "moment";
 import classNames from "classnames/bind";
 import { Loading } from "src/loading";
@@ -32,11 +31,11 @@ import {
 
 import {
   appAttr,
-  getMatchParamByName,
   calculateTotalWorkload,
   unique,
   containAny,
   queryByName,
+  syncHistory,
 } from "src/util";
 import {
   AggregateStatistics,
@@ -64,6 +63,8 @@ import { SelectOption } from "../multiSelectCheckbox/multiSelectCheckbox";
 import { UIConfigState } from "../store";
 import { StatementsRequest } from "src/api/statementsApi";
 import Long from "long";
+import ClearStats from "../sqlActivity/clearStats";
+import { commonStyles } from "../common";
 
 const cx = classNames.bind(styles);
 const sortableTableCx = classNames.bind(sortableTableStyles);
@@ -179,31 +180,18 @@ export class StatementsPage extends React.Component<
     };
   };
 
-  syncHistory = (params: Record<string, string | undefined>) => {
-    const { history } = this.props;
-    const currentSearchParams = new URLSearchParams(history.location.search);
-
-    forIn(params, (value, key) => {
-      if (!value) {
-        currentSearchParams.delete(key);
-      } else {
-        currentSearchParams.set(key, value);
-      }
-    });
-
-    history.location.search = currentSearchParams.toString();
-    history.replace(history.location);
-  };
-
   changeSortSetting = (ss: SortSetting): void => {
     this.setState({
       sortSetting: ss,
     });
 
-    this.syncHistory({
-      ascending: ss.ascending.toString(),
-      columnTitle: ss.columnTitle,
-    });
+    syncHistory(
+      {
+        ascending: ss.ascending.toString(),
+        columnTitle: ss.columnTitle,
+      },
+      this.props.history,
+    );
     if (this.props.onSortingChange) {
       this.props.onSortingChange("Statements", ss.columnTitle, ss.ascending);
     }
@@ -221,17 +209,6 @@ export class StatementsPage extends React.Component<
       moment.utc().subtract(1, "hours"),
       moment.utc().add(1, "minute"),
     );
-  };
-
-  selectApp = (value: string): void => {
-    if (value == "All") value = "";
-    const { history, onFilterChange } = this.props;
-    history.location.pathname = `/statements/${encodeURIComponent(value)}`;
-    history.replace(history.location);
-    this.resetPagination();
-    if (onFilterChange) {
-      onFilterChange(value);
-    }
   };
 
   resetPagination = (): void => {
@@ -283,9 +260,12 @@ export class StatementsPage extends React.Component<
   onSubmitSearchField = (search: string): void => {
     this.setState({ search });
     this.resetPagination();
-    this.syncHistory({
-      q: search,
-    });
+    syncHistory(
+      {
+        q: search,
+      },
+      this.props.history,
+    );
   };
 
   onSubmitFilters = (filters: Filters): void => {
@@ -298,23 +278,28 @@ export class StatementsPage extends React.Component<
     });
 
     this.resetPagination();
-    this.syncHistory({
-      app: filters.app,
-      timeNumber: filters.timeNumber,
-      timeUnit: filters.timeUnit,
-      sqlType: filters.sqlType,
-      database: filters.database,
-      regions: filters.regions,
-      nodes: filters.nodes,
-    });
-    this.selectApp(filters.app);
+    syncHistory(
+      {
+        app: filters.app,
+        timeNumber: filters.timeNumber,
+        timeUnit: filters.timeUnit,
+        sqlType: filters.sqlType,
+        database: filters.database,
+        regions: filters.regions,
+        nodes: filters.nodes,
+      },
+      this.props.history,
+    );
   };
 
   onClearSearchField = (): void => {
     this.setState({ search: "" });
-    this.syncHistory({
-      q: undefined,
-    });
+    syncHistory(
+      {
+        q: undefined,
+      },
+      this.props.history,
+    );
   };
 
   onClearFilters = (): void => {
@@ -325,16 +310,18 @@ export class StatementsPage extends React.Component<
       activeFilters: 0,
     });
     this.resetPagination();
-    this.syncHistory({
-      app: undefined,
-      timeNumber: undefined,
-      timeUnit: undefined,
-      sqlType: undefined,
-      database: undefined,
-      regions: undefined,
-      nodes: undefined,
-    });
-    this.selectApp("");
+    syncHistory(
+      {
+        app: undefined,
+        timeNumber: undefined,
+        timeUnit: undefined,
+        sqlType: undefined,
+        database: undefined,
+        regions: undefined,
+        nodes: undefined,
+      },
+      this.props.history,
+    );
   };
 
   filteredStatementsData = (): AggregateStatistics[] => {
@@ -351,6 +338,9 @@ export class StatementsPage extends React.Component<
         : [];
     const databases =
       filters.database.length > 0 ? filters.database.split(",") : [];
+    if (databases.includes("(unset)")) {
+      databases.push("");
+    }
     const regions =
       filters.regions.length > 0 ? filters.regions.split(",") : [];
     const nodes = filters.nodes.length > 0 ? filters.nodes.split(",") : [];
@@ -417,13 +407,13 @@ export class StatementsPage extends React.Component<
       );
   };
 
-  renderStatements = () => {
+  renderStatements = (): React.ReactElement => {
     const { pagination, search, filters, activeFilters } = this.state;
     const {
       statements,
+      apps,
       databases,
-      match,
-      lastReset,
+      location,
       onDiagnosticsReportDownload,
       onStatementClick,
       resetSQLStats,
@@ -432,10 +422,8 @@ export class StatementsPage extends React.Component<
       nodeRegions,
       isTenant,
     } = this.props;
-    const appAttrValue = getMatchParamByName(match, appAttr);
+    const appAttrValue = queryByName(location, appAttr);
     const selectedApp = appAttrValue || "";
-    const appOptions = [{ value: "all", label: "All" }];
-    this.props.apps.forEach(app => appOptions.push({ value: app, label: app }));
     const data = this.filteredStatementsData();
     const totalWorkload = calculateTotalWorkload(data);
     const totalCount = data.length;
@@ -508,7 +496,7 @@ export class StatementsPage extends React.Component<
           <PageConfigItem>
             <Filter
               onSubmitFilters={this.onSubmitFilters}
-              appNames={appOptions}
+              appNames={apps}
               dbNames={databases}
               regions={regions}
               nodes={nodes.map(n => "n" + n)}
@@ -533,6 +521,9 @@ export class StatementsPage extends React.Component<
               reset time
             </button>
           </PageConfigItem>
+          <PageConfigItem className={commonStyles("separator")}>
+            <ClearStats resetSQLStats={resetSQLStats} tooltipType="statement" />
+          </PageConfigItem>
         </PageConfig>
         <section className={sortableTableCx("cl-table-container")}>
           <div>
@@ -542,14 +533,11 @@ export class StatementsPage extends React.Component<
             />
             <TableStatistics
               pagination={pagination}
-              lastReset={lastReset}
               search={search}
               totalCount={totalCount}
               arrayItemName="statements"
-              tooltipType="statement"
               activeFilters={activeFilters}
               onClearFilters={this.onClearFilters}
-              resetSQLStats={resetSQLStats}
             />
           </div>
           <StatementsSortedTable
@@ -576,18 +564,14 @@ export class StatementsPage extends React.Component<
     );
   };
 
-  render() {
+  render(): React.ReactElement {
     const {
-      location,
       refreshStatementDiagnosticsRequests,
       onActivateStatementDiagnostics,
       onDiagnosticsModalOpen,
     } = this.props;
-    const app = queryByName(location, appAttr);
     return (
       <div className={cx("root", "table-area")}>
-        <Helmet title={app ? `${app} App | Statements` : "Statements"} />
-        <h3 className={cx("base-heading")}>Statements</h3>
         <Loading
           loading={isNil(this.props.statements)}
           error={this.props.statementsError}

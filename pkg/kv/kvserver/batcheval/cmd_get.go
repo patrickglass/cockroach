@@ -41,11 +41,7 @@ func Get(
 		// This mirrors the logic in MVCCScan, though the logic in MVCCScan is
 		// slightly lower in the stack.
 		reply.ResumeSpan = &roachpb.Span{Key: args.Key}
-		if h.MaxSpanRequestKeys < 0 {
-			reply.ResumeReason = roachpb.RESUME_KEY_LIMIT
-		} else if h.TargetBytes < 0 {
-			reply.ResumeReason = roachpb.RESUME_BYTE_LIMIT
-		}
+		reply.ResumeReason = roachpb.RESUME_KEY_LIMIT
 		return result.Result{}, nil
 	}
 	var val *roachpb.Value

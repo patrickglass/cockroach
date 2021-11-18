@@ -168,14 +168,6 @@ var allowCrossDatabaseSeqOwner = settings.RegisterBoolSetting(
 	false,
 ).WithPublic()
 
-const allowCrossDatabaseSeqReferencesSetting = "sql.cross_db_sequence_references.enabled"
-
-var allowCrossDatabaseSeqReferences = settings.RegisterBoolSetting(
-	allowCrossDatabaseSeqReferencesSetting,
-	"if true, sequences referenced by tables from other databases are allowed",
-	false,
-).WithPublic()
-
 const secondaryTenantsZoneConfigsEnabledSettingName = "sql.zone_configs.experimental_allow_for_secondary_tenant.enabled"
 
 // secondaryTenantZoneConfigsEnabled controls if secondary tenants are allowed
@@ -284,6 +276,12 @@ var temporaryTablesEnabledClusterMode = settings.RegisterBoolSetting(
 var implicitColumnPartitioningEnabledClusterMode = settings.RegisterBoolSetting(
 	"sql.defaults.experimental_implicit_column_partitioning.enabled",
 	"default value for experimental_enable_temp_tables; allows for the use of implicit column partitioning",
+	false,
+).WithPublic()
+
+var dropEnumValueEnabledClusterMode = settings.RegisterBoolSetting(
+	"sql.defaults.drop_enum_value.enabled",
+	"default value for enable_drop_enum_value; allows for dropping enum values",
 	false,
 ).WithPublic()
 
@@ -542,7 +540,6 @@ var SerialNormalizationMode = settings.RegisterEnumSetting(
 	"rowid",
 	map[int64]string{
 		int64(sessiondatapb.SerialUsesRowID):              "rowid",
-		int64(sessiondatapb.SerialUsesUnorderedRowID):     "unordered_rowid",
 		int64(sessiondatapb.SerialUsesVirtualSequences):   "virtual_sequence",
 		int64(sessiondatapb.SerialUsesSQLSequences):       "sql_sequence",
 		int64(sessiondatapb.SerialUsesCachedSQLSequences): "sql_sequence_cached",
@@ -1309,6 +1306,11 @@ type ExecutorTestingKnobs struct {
 
 	// OnTxnRetry, if set, will be called if there is a transaction retry.
 	OnTxnRetry func(autoRetryReason error, evalCtx *tree.EvalContext)
+
+	// AllowDeclarativeSchemaChanger is used to allow enabling the new,
+	// declarative schema changer. It cannot be enabled without this testing knob
+	// in 21.2.
+	AllowDeclarativeSchemaChanger bool
 }
 
 // PGWireTestingKnobs contains knobs for the pgwire module.
@@ -1435,7 +1437,7 @@ func getPlanDistribution(
 		return physicalplan.LocalPlan
 	}
 
-	rec, err := checkSupportForPlanNode(plan.planNode)
+	rec, err := checkSupportForPlanNode(plan.planNode, false /* outputNodeHasLimit */)
 	if err != nil {
 		// Don't use distSQL for this request.
 		log.VEventf(ctx, 1, "query not supported for distSQL: %s", err)
@@ -2465,7 +2467,7 @@ func getMessagesForSubtrace(
 			allLogs = append(allLogs,
 				logRecordRow{
 					timestamp: logTime,
-					msg:       span.Logs[i].Msg().StripMarkers(),
+					msg:       span.Logs[i].Msg(),
 					span:      span,
 					// Add 1 to the index to account for the first dummy message in a
 					// span.
@@ -2849,6 +2851,10 @@ func (m *sessionDataMutator) SetTempTablesEnabled(val bool) {
 
 func (m *sessionDataMutator) SetImplicitColumnPartitioningEnabled(val bool) {
 	m.data.ImplicitColumnPartitioningEnabled = val
+}
+
+func (m *sessionDataMutator) SetDropEnumValueEnabled(val bool) {
+	m.data.DropEnumValueEnabled = val
 }
 
 func (m *sessionDataMutator) SetOverrideMultiRegionZoneConfigEnabled(val bool) {

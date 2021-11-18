@@ -461,6 +461,7 @@ func TestLint(t *testing.T) {
 					":!util/log/tracebacks.go",
 					":!util/sdnotify/sdnotify_unix.go",
 					":!util/grpcutil", // GRPC_GO_* variables
+					":!roachprod",     // roachprod requires AWS environment variables
 				},
 			},
 		} {
@@ -762,7 +763,6 @@ func TestLint(t *testing.T) {
 			`\bos\.Is(Exist|NotExist|Timeout|Permission)`,
 			"--",
 			"*.go",
-			":!cmd/dev/**",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -802,6 +802,7 @@ func TestLint(t *testing.T) {
 			":!*_test.go",
 			":!cli/debug_synctest.go",
 			":!cmd/**",
+			":!roachprod", // TODO: switch to contextutil
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -1514,6 +1515,7 @@ func TestLint(t *testing.T) {
 			stream.GrepNot(`cockroach/pkg/cmd/`),
 			stream.GrepNot(`cockroach/pkg/testutils/lint: log$`),
 			stream.GrepNot(`cockroach/pkg/util/sysutil: syscall$`),
+			stream.GrepNot(`cockroach/pkg/roachprod/install: syscall$`), // TODO: switch to sysutil
 			stream.GrepNot(`cockroach/pkg/util/log: github\.com/pkg/errors$`),
 			stream.GrepNot(`cockroach/pkg/(base|release|security|util/(log|randutil|stop)): log$`),
 			stream.GrepNot(`cockroach/pkg/(server/serverpb|ts/tspb): github\.com/golang/protobuf/proto$`),
@@ -1632,7 +1634,6 @@ func TestLint(t *testing.T) {
 				stream.GrepNot("pkg/sql/oidext/oidext.go.*don't use underscores in Go names; const T_"),
 				stream.GrepNot("server/api_v2.go.*package comment should be of the form"),
 				stream.GrepNot("type name will be used as row.RowLimit by other packages, and that stutters; consider calling this Limit"),
-				stream.GrepNot("pkg/util/timeutil/time_zone_util.go.*error strings should not be capitalized or end with punctuation or a newline"),
 			), func(s string) {
 				t.Errorf("\n%s", s)
 			}); err != nil {

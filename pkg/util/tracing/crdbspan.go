@@ -22,9 +22,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/logtags"
-	"github.com/cockroachdb/redact"
 	"github.com/gogo/protobuf/types"
-	"go.opentelemetry.io/otel/attribute"
+	"github.com/opentracing/opentracing-go"
 )
 
 // crdbSpan is a span for internal crdb usage. This is used to power SQL session
@@ -90,16 +89,16 @@ type crdbSpanMu struct {
 		remoteSpans []tracingpb.RecordedSpan
 	}
 
-	// The Span's associated baggage.
-	baggage map[string]string
-
 	// tags are only captured when recording. These are tags that have been
 	// added to this Span, and will be appended to the tags in logTags when
 	// someone needs to actually observe the total set of tags that is a part of
 	// this Span.
 	// TODO(radu): perhaps we want a recording to capture all the tags (even
 	// those that were set before recording started)?
-	tags []attribute.KeyValue
+	tags opentracing.Tags
+
+	// The Span's associated baggage.
+	baggage map[string]string
 }
 
 type childSpanRefs struct {
@@ -273,18 +272,19 @@ func (s *crdbSpan) importRemoteSpans(remoteSpans []tracingpb.RecordedSpan) {
 	s.mu.recording.remoteSpans = append(s.mu.recording.remoteSpans, remoteSpans...)
 }
 
-func (s *crdbSpan) setTagLocked(key string, value attribute.Value) {
-	k := attribute.Key(key)
-	for i := range s.mu.tags {
-		if s.mu.tags[i].Key == k {
-			s.mu.tags[i].Value = value
-			return
-		}
+func (s *crdbSpan) setTagLocked(key string, value interface{}) {
+	if s.recordingType() != RecordingVerbose {
+		// Don't bother storing tags if we're unlikely to retrieve them.
+		return
 	}
-	s.mu.tags = append(s.mu.tags, attribute.KeyValue{Key: k, Value: value})
+
+	if s.mu.tags == nil {
+		s.mu.tags = make(opentracing.Tags)
+	}
+	s.mu.tags[key] = value
 }
 
-func (s *crdbSpan) record(msg redact.RedactableString) {
+func (s *crdbSpan) record(msg string) {
 	if s.recordingType() != RecordingVerbose {
 		return
 	}
@@ -296,10 +296,8 @@ func (s *crdbSpan) record(msg redact.RedactableString) {
 		now = time.Now()
 	}
 	logRecord := &tracingpb.LogRecord{
-		Time:    now,
-		Message: msg,
-		// Compatibility with 21.2.
-		DeprecatedFields: []tracingpb.LogRecord_Field{
+		Time: now,
+		Fields: []tracingpb.LogRecord_Field{
 			{Key: tracingpb.LogMessageField, Value: msg},
 		},
 	}
@@ -371,7 +369,7 @@ func (s *crdbSpan) setBaggageItemAndTag(restrictedKey, value string) {
 	// span verbosity, as it is named nondescriptly and the recording knows
 	// how to display its verbosity independently.
 	if restrictedKey != verboseTracingBaggageKey {
-		s.setTagLocked(restrictedKey, attribute.StringValue(value))
+		s.setTagLocked(restrictedKey, value)
 	}
 }
 
@@ -393,14 +391,13 @@ func (s *crdbSpan) setBaggageItemLocked(restrictedKey, value string) {
 // optimization as stringifying the tag values can be expensive.
 func (s *crdbSpan) getRecordingLocked(wantTags bool) tracingpb.RecordedSpan {
 	rs := tracingpb.RecordedSpan{
-		TraceID:        s.traceID,
-		SpanID:         s.spanID,
-		ParentSpanID:   s.parentSpanID,
-		GoroutineID:    s.goroutineID,
-		Operation:      s.mu.operation,
-		StartTime:      s.startTime,
-		Duration:       s.mu.duration,
-		RedactableLogs: true,
+		TraceID:      s.traceID,
+		SpanID:       s.spanID,
+		ParentSpanID: s.parentSpanID,
+		GoroutineID:  s.goroutineID,
+		Operation:    s.mu.operation,
+		StartTime:    s.startTime,
+		Duration:     s.mu.duration,
 	}
 
 	if rs.Duration == -1 {
@@ -433,10 +430,16 @@ func (s *crdbSpan) getRecordingLocked(wantTags bool) tracingpb.RecordedSpan {
 	}
 
 	if numEvents := s.mu.recording.structured.Len(); numEvents != 0 {
+		// TODO(adityamaru): Stop writing to DeprecatedInternalStructured in 22.1.
+		rs.DeprecatedInternalStructured = make([]*types.Any, numEvents)
 		rs.StructuredRecords = make([]tracingpb.StructuredRecord, numEvents)
 		for i := 0; i < numEvents; i++ {
 			event := s.mu.recording.structured.Get(i).(*tracingpb.StructuredRecord)
 			rs.StructuredRecords[i] = *event
+			// Write the Structured payload stored in the StructuredRecord, since
+			// nodes older than 21.2 expect a Structured event when they fetch
+			// recordings.
+			rs.DeprecatedInternalStructured[i] = event.Payload
 		}
 	}
 
@@ -452,9 +455,11 @@ func (s *crdbSpan) getRecordingLocked(wantTags bool) tracingpb.RecordedSpan {
 				addTag(remappedKey, tag.ValueStr())
 			})
 		}
-		for _, kv := range s.mu.tags {
-			// We encode the tag values as strings.
-			addTag(string(kv.Key), kv.Value.Emit())
+		if len(s.mu.tags) > 0 {
+			for k, v := range s.mu.tags {
+				// We encode the tag values as strings.
+				addTag(k, fmt.Sprint(v))
+			}
 		}
 	}
 

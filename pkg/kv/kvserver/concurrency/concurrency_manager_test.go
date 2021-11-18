@@ -1018,14 +1018,16 @@ func (m *monitor) collectRecordings() string {
 		rec := g.collect()
 		for _, span := range rec {
 			for _, log := range span.Logs {
-				if prev > 0 {
-					prev--
-					continue
+				for _, field := range log.Fields {
+					if prev > 0 {
+						prev--
+						continue
+					}
+					logs = append(logs, logRecord{
+						g: g, value: field.Value,
+					})
+					g.prevEvents++
 				}
-				logs = append(logs, logRecord{
-					g: g, value: log.Msg().StripMarkers(),
-				})
-				g.prevEvents++
 			}
 		}
 		if atomic.LoadInt32(&g.finished) == 1 {
@@ -1066,7 +1068,11 @@ func (m *monitor) hasNewEvents(g *monitoredGoroutine) bool {
 	events := 0
 	rec := g.collect()
 	for _, span := range rec {
-		events += len(span.Logs)
+		for _, log := range span.Logs {
+			for range log.Fields {
+				events++
+			}
+		}
 	}
 	return events > g.prevEvents
 }

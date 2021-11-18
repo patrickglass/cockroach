@@ -56,11 +56,8 @@ const (
 type State interface{}
 
 // InterestingFn returns true if the string triggers the target test failure. It
-// should be context-aware and stop work if the context is canceled. It can
-// return a function which will be called if the original test case is not
-// interesting. The function should log a hint that will help the user
-// understand why the original test case is not interesting.
-type InterestingFn func(context.Context, string) (_ bool, logOriginalHint func())
+// should be context-aware and stop work if the context is canceled.
+type InterestingFn func(context.Context, string) bool
 
 // Mode is an enum specifying how to determine if forward progress was made.
 type Mode int
@@ -92,10 +89,7 @@ func Reduce(
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if interesting, logHint := isInteresting(ctx, originalTestCase); !interesting {
-		if logHint != nil {
-			logHint()
-		}
+	if !isInteresting(ctx, originalTestCase) {
 		return "", errors.New("original test case not interesting")
 	}
 
@@ -168,7 +162,7 @@ func Reduce(
 		for i := 0; i < numGoroutines; i++ {
 			g.GoCtx(func(ctx context.Context) error {
 				for vs := range variants {
-					if interesting, _ := isInteresting(ctx, vs.file); interesting {
+					if isInteresting(ctx, vs.file) {
 						// Wait for the previous test to finish.
 						select {
 						case <-ctx.Done():
@@ -333,7 +327,7 @@ func attemptChunkReduction(
 		end := rand.Intn(chunkReducer.NumSegments()-start) + start + 1
 
 		localReduced := chunkReducer.DeleteSegments(start, end)
-		if interesting, _ := isInteresting(ctx, localReduced); interesting {
+		if isInteresting(ctx, localReduced) {
 			reduced = localReduced
 			log(logger, "\tchunk reduction: %d bytes\n", len(reduced))
 			failedAttempts = 0

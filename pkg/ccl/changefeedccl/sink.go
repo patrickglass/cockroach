@@ -172,13 +172,6 @@ func (u *sinkURL) consumeParam(p string) string {
 	return v
 }
 
-func (u *sinkURL) addParam(p string, value string) {
-	if u.q == nil {
-		u.q = u.Query()
-	}
-	u.q.Add(p, value)
-}
-
 func (u *sinkURL) consumeBool(param string, dest *bool) (wasSet bool, err error) {
 	if paramVal := u.consumeParam(param); paramVal != "" {
 		wasSet, err := strToBool(paramVal, dest)

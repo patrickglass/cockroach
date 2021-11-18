@@ -44,7 +44,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
 	"github.com/cockroachdb/cockroach/pkg/util/fsm"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -92,7 +91,7 @@ func (ex *connExecutor) execStmt(
 	// Run observer statements in a separate code path; their execution does not
 	// depend on the current transaction state.
 	if _, ok := ast.(tree.ObserverStatement); ok {
-		ex.statsCollector.Reset(ex.applicationStats, ex.phaseTimes)
+		ex.statsCollector.Reset(ex.statsWriter, ex.phaseTimes)
 		err := ex.runObserverStatement(ctx, ast, res)
 		// Note that regardless of res.Err(), these observer statements don't
 		// generate error events; transactions are always allowed to continue.
@@ -262,8 +261,7 @@ func (ex *connExecutor) execStmtInOpenState(
 	// Update the deadline on the transaction based on the collections.
 	err := ex.extraTxnState.descCollection.MaybeUpdateDeadline(ctx, ex.state.mu.txn)
 	if err != nil {
-		ev, pl := ex.makeErrEvent(err, ast)
-		return ev, pl, nil
+		return nil, nil, err
 	}
 
 	if prepared != nil {
@@ -365,7 +363,7 @@ func (ex *connExecutor) execStmtInOpenState(
 
 	p := &ex.planner
 	stmtTS := ex.server.cfg.Clock.PhysicalTime()
-	ex.statsCollector.Reset(ex.applicationStats, ex.phaseTimes)
+	ex.statsCollector.Reset(ex.statsWriter, ex.phaseTimes)
 	ex.resetPlanner(ctx, p, ex.state.mu.txn, stmtTS)
 	p.sessionDataMutatorIterator.paramStatusUpdater = res
 	p.noticeSender = res
@@ -375,9 +373,6 @@ func (ex *connExecutor) execStmtInOpenState(
 	if e, ok := ast.(*tree.ExplainAnalyze); ok {
 		switch e.Mode {
 		case tree.ExplainDebug:
-			if !p.ExecCfg().Codec.ForSystemTenant() {
-				return makeErrEvent(errorutil.UnsupportedWithMultiTenancy(70931))
-			}
 			telemetry.Inc(sqltelemetry.ExplainAnalyzeDebugUseCounter)
 			ih.SetOutputMode(explainAnalyzeDebugOutput, explain.Flags{})
 
@@ -1429,7 +1424,7 @@ func (ex *connExecutor) beginTransactionTimestampsAndReadMode(
 		rwMode = ex.readWriteModeWithSessionDefault(modes.ReadWriteMode)
 		return rwMode, now, nil, nil
 	}
-	ex.statsCollector.Reset(ex.applicationStats, ex.phaseTimes)
+	ex.statsCollector.Reset(ex.statsWriter, ex.phaseTimes)
 	p := &ex.planner
 
 	// NB: this use of p.txn is totally bogus. The planner's txn should
@@ -1837,12 +1832,8 @@ func (ex *connExecutor) handleAutoCommit(
 		}
 	}
 
-	// Attempt to refresh the deadline before the autocommit.
-	err := ex.extraTxnState.descCollection.MaybeUpdateDeadline(ctx, ex.state.mu.txn)
-	if err != nil {
-		return ex.makeErrEvent(err, stmt)
-	}
 	ev, payload := ex.commitSQLTransaction(ctx, stmt, ex.commitSQLTransactionInternal)
+	var err error
 	if perr, ok := payload.(payloadWithError); ok {
 		err = perr.errorCause()
 	}

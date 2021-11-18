@@ -22,18 +22,22 @@ vectorized: true
 └── • project
     │ columns: (k, v, v)
     │
-    └── • top-k
+    └── • limit
         │ columns: (k, v)
-        │ ordering: -v
         │ estimated row count: 2 (missing stats)
-        │ order: -v
-        │ k: 2
+        │ count: 2
         │
-        └── • scan
-              columns: (k, v)
-              estimated row count: 1,000 (missing stats)
-              table: kv@primary
-              spans: FULL SCAN
+        └── • sort
+            │ columns: (k, v)
+            │ ordering: -v
+            │ estimated row count: 1,000 (missing stats)
+            │ order: -v
+            │
+            └── • scan
+                  columns: (k, v)
+                  estimated row count: 1,000 (missing stats)
+                  table: kv@primary
+                  spans: FULL SCAN
 
 # Use explicit target columns (which can use blind KV Put).
 query T
@@ -51,18 +55,22 @@ vectorized: true
 └── • project
     │ columns: (k, v, v)
     │
-    └── • top-k
+    └── • limit
         │ columns: (k, v)
-        │ ordering: -v
         │ estimated row count: 2 (missing stats)
-        │ order: -v
-        │ k: 2
+        │ count: 2
         │
-        └── • scan
-              columns: (k, v)
-              estimated row count: 1,000 (missing stats)
-              table: kv@primary
-              spans: FULL SCAN
+        └── • sort
+            │ columns: (k, v)
+            │ ordering: -v
+            │ estimated row count: 1,000 (missing stats)
+            │ order: -v
+            │
+            └── • scan
+                  columns: (k, v)
+                  estimated row count: 1,000 (missing stats)
+                  table: kv@primary
+                  spans: FULL SCAN
 
 # Add RETURNING clause (should still use blind KV Put).
 query T
@@ -80,18 +88,22 @@ vectorized: true
 └── • project
     │ columns: (k, v, v)
     │
-    └── • top-k
+    └── • limit
         │ columns: (k, v)
-        │ ordering: -v
         │ estimated row count: 2 (missing stats)
-        │ order: -v
-        │ k: 2
+        │ count: 2
         │
-        └── • scan
-              columns: (k, v)
-              estimated row count: 1,000 (missing stats)
-              table: kv@primary
-              spans: FULL SCAN
+        └── • sort
+            │ columns: (k, v)
+            │ ordering: -v
+            │ estimated row count: 1,000 (missing stats)
+            │ order: -v
+            │
+            └── • scan
+                  columns: (k, v)
+                  estimated row count: 1,000 (missing stats)
+                  table: kv@primary
+                  spans: FULL SCAN
 
 # Use subset of explicit target columns (which cannot use blind KV Put).
 query T
@@ -127,18 +139,22 @@ vectorized: true
             │ render v_default: CAST(NULL AS INT8)
             │ render k: k
             │
-            └── • top-k
+            └── • limit
                 │ columns: (k, v)
-                │ ordering: -v
                 │ estimated row count: 2 (missing stats)
-                │ order: -v
-                │ k: 2
+                │ count: 2
                 │
-                └── • scan
-                      columns: (k, v)
-                      estimated row count: 1,000 (missing stats)
-                      table: kv@primary
-                      spans: FULL SCAN
+                └── • sort
+                    │ columns: (k, v)
+                    │ ordering: -v
+                    │ estimated row count: 1,000 (missing stats)
+                    │ order: -v
+                    │
+                    └── • scan
+                          columns: (k, v)
+                          estimated row count: 1,000 (missing stats)
+                          table: kv@primary
+                          spans: FULL SCAN
 
 # Use Upsert with indexed table, default columns, computed columns, and check
 # columns.

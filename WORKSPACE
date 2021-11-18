@@ -2,14 +2,12 @@
 # `@cockroach//...`.
 workspace(
     name = "cockroach",
-    managed_directories = {
-       "@npm": ["pkg/ui/node_modules"],
-    },
+    managed_directories = {"@npm": ["node_modules"]},
 )
 
 # Load the things that let us load other things.
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository", "new_git_repository")
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
 # Load go bazel tools. This gives us access to the go bazel SDK/toolchains.
 git_repository(
@@ -21,8 +19,8 @@ git_repository(
 # Like the above, but for nodeJS.
 http_archive(
     name = "build_bazel_rules_nodejs",
-    sha256 = "b32a4713b45095e9e1921a7fcb1adf584bc05959f3336e7351bcf77f015a2d7c",
-    urls = ["https://github.com/bazelbuild/rules_nodejs/releases/download/4.1.0/rules_nodejs-4.1.0.tar.gz"],
+    sha256 = "6142e9586162b179fdd570a55e50d1332e7d9c030efd853453438d607569721d",
+    urls = ["https://github.com/bazelbuild/rules_nodejs/releases/download/3.0.0/rules_nodejs-3.0.0.tar.gz"],
 )
 
 # Load gazelle. This lets us auto-generate BUILD.bazel files throughout the
@@ -54,20 +52,12 @@ go_rules_dependencies()
 go_register_toolchains(go_version = "1.16.6")
 
 # Configure nodeJS.
-load("@build_bazel_rules_nodejs//:index.bzl", "yarn_install", "node_repositories")
+load("@build_bazel_rules_nodejs//:index.bzl", "yarn_install")
 
-node_repositories(package_json = ["//pkg/ui:package.json"])
-
-# install external dependencies for pkg/ui package
 yarn_install(
     name = "npm",
     package_json = "//pkg/ui:package.json",
     yarn_lock = "//pkg/ui:yarn.lock",
-    strict_visibility = False,
-    args = [
-        "--ignore-optional",
-        "--offline",
-    ],
 )
 
 # Load gazelle dependencies.
@@ -130,16 +120,4 @@ http_archive(
     urls = [
         "https://github.com/jmhodges/bazel_gomock/archive/fde78c91cf1783cc1e33ba278922ba67a6ee2a84.tar.gz",
     ],
-)
-
-new_git_repository(
-    name = "com_github_cockroachdb_sqllogictest",
-    build_file_content = """
-filegroup(
-    name = "testfiles",
-    srcs = glob(["test/**/*.test"]),
-    visibility = ["//visibility:public"],
-)""",
-    commit = "96138842571462ed9a697bff590828d8f6356a2f",
-    remote = "https://github.com/cockroachdb/sqllogictest",
 )

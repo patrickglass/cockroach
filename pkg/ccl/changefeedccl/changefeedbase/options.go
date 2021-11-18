@@ -112,7 +112,6 @@ const (
 	SinkParamClientCert             = `client_cert`
 	SinkParamClientKey              = `client_key`
 	SinkParamFileSize               = `file_size`
-	SinkParamPartitionFormat        = `partition_format`
 	SinkParamSchemaTopic            = `schema_topic`
 	SinkParamTLSEnabled             = `tls_enabled`
 	SinkParamSkipTLSVerify          = `insecure_tls_skip_verify`

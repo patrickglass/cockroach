@@ -349,7 +349,7 @@ func doCreateBackupSchedules(
 		if err != nil {
 			return errors.Wrapf(err, "failed to evaluate backup encryption_passphrase")
 		}
-		backupNode.Options.EncryptionPassphrase = tree.NewStrVal(pw)
+		backupNode.Options.EncryptionPassphrase = tree.NewDString(pw)
 	}
 
 	// Evaluate encryption KMS URIs if set.
@@ -363,7 +363,7 @@ func doCreateBackupSchedules(
 		}
 		for _, kmsURI := range kmsURIs {
 			backupNode.Options.EncryptionKMSURI = append(backupNode.Options.EncryptionKMSURI,
-				tree.NewStrVal(kmsURI))
+				tree.NewDString(kmsURI))
 		}
 	}
 
@@ -374,7 +374,7 @@ func doCreateBackupSchedules(
 	}
 
 	for _, dest := range destinations {
-		backupNode.To = append(backupNode.To, tree.NewStrVal(dest))
+		backupNode.To = append(backupNode.To, tree.NewDString(dest))
 	}
 
 	backupNode.Targets = eval.Targets
@@ -603,7 +603,10 @@ func makeBackupSchedule(
 
 	// We do not set backupNode.AsOf: this is done when the scheduler kicks off the backup.
 	// Serialize backup statement and set schedule executor and its args.
-	args.BackupStatement = tree.AsStringWithFlags(backupNode, tree.FmtParsable|tree.FmtShowPasswords)
+	//
+	// TODO(bulkio): this serialization is erroneous, see issue
+	// https://github.com/cockroachdb/cockroach/issues/63216
+	args.BackupStatement = tree.AsStringWithFlags(backupNode, tree.FmtSimple|tree.FmtShowPasswords)
 	any, err := pbtypes.MarshalAny(args)
 	if err != nil {
 		return nil, nil, err

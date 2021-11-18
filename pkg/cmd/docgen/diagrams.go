@@ -382,6 +382,11 @@ var specs = []stmtSpec{
 		stmt: "alter_database_drop_region_stmt",
 	},
 	{
+		name:    "alter_default_privileges_stmt",
+		inline:  []string{"opt_for_roles", "role_or_group_or_user", "name_list", "opt_in_schemas", "schema_name_list", "abbreviated_grant_stmt", "opt_with_grant_option", "alter_default_privileges_target_object", "abbreviated_revoke_stmt", "opt_drop_behavior"},
+		nosplit: true,
+	},
+	{
 		name:   "alter_primary_key",
 		stmt:   "alter_onetable_stmt",
 		inline: []string{"alter_table_cmds", "alter_table_cmd", "opt_hash_sharded"},
@@ -397,12 +402,13 @@ var specs = []stmtSpec{
 	},
 	{
 		name:   "alter_role_stmt",
-		inline: []string{"role_or_group_or_user", "opt_role_options", "opt_in_database", "set_or_reset_clause", "opt_with", "role_options", "set_rest", "generic_set", "var_list", "to_or_eq"},
+		inline: []string{"role_or_group_or_user", "opt_role_options"},
 		replace: map[string]string{
-			"'ROLE_ALL'":            "'ROLE'",
-			"'USER_ALL'":            "'USER'",
-			"string_or_placeholder": "'role_name'",
-		},
+			"string_or_placeholder":             "name",
+			"opt_role_options":                  "OPTIONS",
+			"string_or_placeholder  'PASSWORD'": "name 'PASSWORD'",
+			"'PASSWORD' string_or_placeholder":  "'PASSWORD' password"},
+		unlink: []string{"name", "password"},
 	},
 	{
 		name:    "alter_schema",
@@ -1263,6 +1269,10 @@ var specs = []stmtSpec{
 	{
 		name:   "show_databases_stmt",
 		inline: []string{"with_comment"},
+	},
+	{
+		name:   "show_default_privileges_stmt",
+		inline: []string{"opt_for_roles", "role_or_group_or_user", "name_list"},
 	},
 	{
 		name: "show_enums",
