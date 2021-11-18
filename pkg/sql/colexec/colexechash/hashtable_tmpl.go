@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for hashtable.eg.go. It's formatted in a
 // special way, so it's both valid Go and a valid text/template input. This
@@ -36,7 +34,7 @@ import (
 // pick up the right packages when run within the bazel sandbox.
 var (
 	_ = typeconv.DatumVecCanonicalTypeFamily
-	_ = coldataext.CompareDatum
+	_ coldataext.Datum
 	_ tree.AggType
 )
 
@@ -67,6 +65,8 @@ func _ASSIGN_NE(_, _, _, _, _, _ interface{}) int {
 // probe vector might have NULL values.
 // _BUILD_HAS_NULLS - a boolean as .BuildHasNulls that determines whether the
 // build vector might have NULL values.
+// _ALLOW_NULL_EQUALITY - a boolean as .AllowNullEquality that determines
+// whether NULL values should be treated as equal.
 // _SELECT_DISTINCT - a boolean as .SelectDistinct that determines whether a
 // probe tuple should be marked as "distinct" if its GroupID is zero (meaning
 // that there is no tuple in the hash table with the same hash code).
@@ -84,6 +84,7 @@ func _ASSIGN_NE(_, _, _, _, _, _ interface{}) int {
 func _CHECK_COL_BODY(
 	_PROBE_HAS_NULLS bool,
 	_BUILD_HAS_NULLS bool,
+	_ALLOW_NULL_EQUALITY bool,
 	_SELECT_DISTINCT bool,
 	_USE_PROBE_SEL bool,
 	_PROBING_AGAINST_ITSELF bool,
@@ -137,39 +138,23 @@ func _CHECK_COL_BODY(
 			// {{if .BuildHasNulls}}
 			buildIsNull = buildVec.Nulls().NullAt(buildIdx)
 			// {{end}}
-			if ht.allowNullEquality {
-				if probeIsNull && buildIsNull {
-					// Both values are NULLs, and since we're allowing null equality, we
-					// proceed to the next value to check.
-					continue
-				} else if probeIsNull {
-					// Only probing value is NULL, so it is different from the build value
-					// (which is non-NULL). We mark it as "different" and proceed to the
-					// next value to check. This behavior is special in case of allowing
-					// null equality because we don't want to reset the GroupID of the
-					// current probing tuple.
-					ht.ProbeScratch.differs[toCheck] = true
-					continue
-				}
+			// {{if .AllowNullEquality}}
+			if probeIsNull && buildIsNull {
+				// Both values are NULLs, and since we're allowing null equality, we
+				// proceed to the next value to check.
+				continue
+			} else if probeIsNull {
+				// Only probing value is NULL, so it is different from the build value
+				// (which is non-NULL). We mark it as "different" and proceed to the
+				// next value to check. This behavior is special in case of allowing
+				// null equality because we don't want to reset the GroupID of the
+				// current probing tuple.
+				ht.ProbeScratch.differs[toCheck] = true
+				continue
 			}
+			// {{end}}
 			if probeIsNull {
-				// {{if or (.SelectDistinct) (.ProbingAgainstItself)}}
-				// {{/*
-				//     We know that nulls are distinct (because
-				//     allowNullEquality case is handled above) and our probing
-				//     tuple has a NULL value in the current column, so the
-				//     probing tuple is distinct from the build table. Both
-				//     parts of the template condition above are only 'true' if
-				//     the hash table is used for the unordered distinct
-				//     operator, and in that scenario we want to mark the
-				//     current probing tuple as distinct but also set its
-				//     GroupID such that it (the probing tuple) matches itself.
-				// */}}
-				ht.ProbeScratch.distinct[toCheck] = true
-				ht.ProbeScratch.GroupID[toCheck] = toCheck + 1
-				// {{else}}
 				ht.ProbeScratch.GroupID[toCheck] = 0
-				// {{end}}
 			} else if buildIsNull {
 				ht.ProbeScratch.differs[toCheck] = true
 			} else {
@@ -198,15 +183,23 @@ func _CHECK_COL_WITH_NULLS(
 	// {{$deletingProbeMode := .DeletingProbeMode}}
 	if probeVec.MaybeHasNulls() {
 		if buildVec.MaybeHasNulls() {
-			_CHECK_COL_BODY(true, true, false, _USE_PROBE_SEL, _PROBING_AGAINST_ITSELF, _DELETING_PROBE_MODE)
+			if ht.allowNullEquality {
+				// {{/*
+				// The allowNullEquality flag only matters if both vectors have nulls.
+				// This lets us avoid writing all 2^3 conditional branches.
+				// */}}
+				_CHECK_COL_BODY(true, true, true, false, _USE_PROBE_SEL, _PROBING_AGAINST_ITSELF, _DELETING_PROBE_MODE)
+			} else {
+				_CHECK_COL_BODY(true, true, false, false, _USE_PROBE_SEL, _PROBING_AGAINST_ITSELF, _DELETING_PROBE_MODE)
+			}
 		} else {
-			_CHECK_COL_BODY(true, false, false, _USE_PROBE_SEL, _PROBING_AGAINST_ITSELF, _DELETING_PROBE_MODE)
+			_CHECK_COL_BODY(true, false, false, false, _USE_PROBE_SEL, _PROBING_AGAINST_ITSELF, _DELETING_PROBE_MODE)
 		}
 	} else {
 		if buildVec.MaybeHasNulls() {
-			_CHECK_COL_BODY(false, true, false, _USE_PROBE_SEL, _PROBING_AGAINST_ITSELF, _DELETING_PROBE_MODE)
+			_CHECK_COL_BODY(false, true, false, false, _USE_PROBE_SEL, _PROBING_AGAINST_ITSELF, _DELETING_PROBE_MODE)
 		} else {
-			_CHECK_COL_BODY(false, false, false, _USE_PROBE_SEL, _PROBING_AGAINST_ITSELF, _DELETING_PROBE_MODE)
+			_CHECK_COL_BODY(false, false, false, false, _USE_PROBE_SEL, _PROBING_AGAINST_ITSELF, _DELETING_PROBE_MODE)
 		}
 	}
 	// {{end}}
@@ -224,7 +217,6 @@ func _CHECK_COL_FUNCTION_TEMPLATE(_PROBING_AGAINST_ITSELF bool, _DELETING_PROBE_
 	case _LEFT_CANONICAL_TYPE_FAMILY:
 		switch probeVec.Type().Width() {
 		// {{range .LeftWidths}}
-		// {{$leftWidth := .Width}}
 		case _LEFT_TYPE_WIDTH:
 			switch buildVec.CanonicalTypeFamily() {
 			// {{range .RightFamilies}}
@@ -240,14 +232,6 @@ func _CHECK_COL_FUNCTION_TEMPLATE(_PROBING_AGAINST_ITSELF bool, _DELETING_PROBE_
 			case _RIGHT_CANONICAL_TYPE_FAMILY:
 				switch buildVec.Type().Width() {
 				// {{range .RightWidths}}
-				// {{$rightWidth := .Width}}
-				// {{if or (not $probingAgainstItself) (eq $leftWidth $rightWidth)}}
-				// {{/*
-				//     In a special case of probing against itself, we know that
-				//     the vectors have the same width (because probeVec and
-				//     buildVec are the same object), so we don't generate code
-				//     if the width are different.
-				// */}}
 				case _RIGHT_TYPE_WIDTH:
 					probeKeys := probeVec._ProbeType()
 					buildKeys := buildVec._BuildType()
@@ -256,7 +240,6 @@ func _CHECK_COL_FUNCTION_TEMPLATE(_PROBING_AGAINST_ITSELF bool, _DELETING_PROBE_
 					} else {
 						_CHECK_COL_WITH_NULLS(false, _PROBING_AGAINST_ITSELF, _DELETING_PROBE_MODE)
 					}
-					// {{end}}
 					// {{end}}
 				}
 				// {{end}}
@@ -327,15 +310,15 @@ func _CHECK_COL_FOR_DISTINCT_WITH_NULLS(_USE_PROBE_SEL bool) { // */}}
 	// {{define "checkColForDistinctWithNulls" -}}
 	if probeVec.MaybeHasNulls() {
 		if buildVec.MaybeHasNulls() {
-			_CHECK_COL_BODY(true, true, true, _USE_PROBE_SEL, false, false)
+			_CHECK_COL_BODY(true, true, true, true, _USE_PROBE_SEL, false, false)
 		} else {
-			_CHECK_COL_BODY(true, false, true, _USE_PROBE_SEL, false, false)
+			_CHECK_COL_BODY(true, false, true, true, _USE_PROBE_SEL, false, false)
 		}
 	} else {
 		if buildVec.MaybeHasNulls() {
-			_CHECK_COL_BODY(false, true, true, _USE_PROBE_SEL, false, false)
+			_CHECK_COL_BODY(false, true, true, true, _USE_PROBE_SEL, false, false)
 		} else {
-			_CHECK_COL_BODY(false, false, true, _USE_PROBE_SEL, false, false)
+			_CHECK_COL_BODY(false, false, true, true, _USE_PROBE_SEL, false, false)
 		}
 	}
 
@@ -396,19 +379,13 @@ func (ht *HashTable) checkColForDistinctTuples(
 // {{end}}
 
 // {{/*
-func _CHECK_BODY(_SELECT_SAME_TUPLES bool, _DELETING_PROBE_MODE bool, _SELECT_DISTINCT bool) { // */}}
+func _CHECK_BODY(_SELECT_SAME_TUPLES bool, _DELETING_PROBE_MODE bool) { // */}}
 	// {{define "checkBody" -}}
 	toCheckSlice := ht.ProbeScratch.ToCheck
 	_ = toCheckSlice[nToCheck-1]
 	for toCheckPos := uint64(0); toCheckPos < nToCheck && nDiffers < nToCheck; toCheckPos++ {
 		//gcassert:bce
 		toCheck := toCheckSlice[toCheckPos]
-		// {{if .SelectDistinct}}
-		if ht.ProbeScratch.distinct[toCheck] {
-			ht.ProbeScratch.HeadID[toCheck] = ht.ProbeScratch.GroupID[toCheck]
-			continue
-		}
-		// {{end}}
 		if !ht.ProbeScratch.differs[toCheck] {
 			// If the current key matches with the probe key, we want to update HeadID
 			// with the current key if it has not been set yet.
@@ -490,15 +467,15 @@ func (ht *HashTable) Check(probeVecs []coldata.Vec, nToCheck uint64, probeSel []
 	switch ht.probeMode {
 	case HashTableDefaultProbeMode:
 		if ht.Same != nil {
-			_CHECK_BODY(true, false, false)
+			_CHECK_BODY(true, false)
 		} else {
-			_CHECK_BODY(false, false, false)
+			_CHECK_BODY(false, false)
 		}
 	case HashTableDeletingProbeMode:
 		if ht.Same != nil {
-			_CHECK_BODY(true, true, false)
+			_CHECK_BODY(true, true)
 		} else {
-			_CHECK_BODY(false, true, false)
+			_CHECK_BODY(false, true)
 		}
 	default:
 		colexecerror.InternalError(errors.AssertionFailedf("unsupported hash table probe mode"))
@@ -517,7 +494,7 @@ func (ht *HashTable) CheckProbeForDistinct(vecs []coldata.Vec, nToCheck uint64, 
 		ht.checkColAgainstItself(vecs[i], nToCheck, sel)
 	}
 	nDiffers := uint64(0)
-	_CHECK_BODY(false, false, true)
+	_CHECK_BODY(false, false)
 	return nDiffers
 }
 

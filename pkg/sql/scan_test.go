@@ -20,7 +20,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
+	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -142,21 +142,16 @@ func TestScanBatches(t *testing.T) {
 
 	// The table will have one key for the even rows, and two keys for the odd rows.
 	numKeys := 3 * numAs * numBs / 2
-	batchByteSizes := []int{1, 2, 5, 13, 100, numKeys, numKeys * 5, numKeys * 100}
+	batchSizes := []int{1, 2, 5, 13, 100, numKeys - 1, numKeys, numKeys + 1}
 
-	for _, batchBytesSize := range batchByteSizes {
+	for _, batch := range batchSizes {
 		// We must set up a separate server for each batch size, as we cannot change
-		// it while the server is running.
-		t.Run(fmt.Sprintf("%d", batchBytesSize), func(t *testing.T) {
+		// it while the server is running (#53002).
+		t.Run(fmt.Sprintf("%d", batch), func(t *testing.T) {
+			restore := row.TestingSetKVBatchSize(int64(batch))
+			defer restore()
 			s, db, _ := serverutils.StartServer(
-				t, base.TestServerArgs{
-					UseDatabase: "test",
-					Knobs: base.TestingKnobs{
-						DistSQL: &execinfra.TestingKnobs{
-							TableReaderBatchBytesLimit: int64(batchBytesSize),
-						},
-					},
-				})
+				t, base.TestServerArgs{UseDatabase: "test"})
 			defer s.Stopper().Stop(context.Background())
 
 			if _, err := db.Exec(schema); err != nil {

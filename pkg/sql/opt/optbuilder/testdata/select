@@ -76,17 +76,17 @@ SELECT * FROM abc
 project
  ├── columns: a:1!null b:2 c:3
  └── scan abc
-      └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4
 
 build
 SELECT NULL AS r, * FROM abc
 ----
 project
- ├── columns: r:6 a:1!null b:2 c:3
+ ├── columns: r:5 a:1!null b:2 c:3
  ├── scan abc
- │    └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+ │    └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4
  └── projections
-      └── NULL [as=r:6]
+      └── NULL [as=r:5]
 
 
 # synonym for SELECT * FROM abc
@@ -96,7 +96,7 @@ TABLE abc
 project
  ├── columns: a:1!null b:2 c:3
  └── scan abc
-      └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4
 
 build
 SELECT * FROM abc WHERE NULL
@@ -104,9 +104,9 @@ SELECT * FROM abc WHERE NULL
 project
  ├── columns: a:1!null b:2 c:3
  └── select
-      ├── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      ├── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4
       ├── scan abc
-      │    └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      │    └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4
       └── filters
            └── NULL::BOOL
 
@@ -116,9 +116,9 @@ SELECT * FROM abc WHERE a = NULL
 project
  ├── columns: a:1!null b:2 c:3
  └── select
-      ├── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      ├── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4
       ├── scan abc
-      │    └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      │    └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4
       └── filters
            └── NULL::BOOL
 
@@ -128,7 +128,7 @@ SELECT *,* FROM abc
 project
  ├── columns: a:1!null b:2 c:3 a:1!null b:2 c:3
  └── scan abc
-      └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4
 
 build
 SELECT a,a,a,a FROM abc
@@ -136,7 +136,7 @@ SELECT a,a,a,a FROM abc
 project
  ├── columns: a:1!null a:1!null a:1!null a:1!null
  └── scan abc
-      └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4
 
 build
 SELECT a,c FROM abc
@@ -144,17 +144,17 @@ SELECT a,c FROM abc
 project
  ├── columns: a:1!null c:3
  └── scan abc
-      └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4
 
 build
 SELECT a+b+c AS foo FROM abc
 ----
 project
- ├── columns: foo:6
+ ├── columns: foo:5
  ├── scan abc
- │    └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+ │    └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4
  └── projections
-      └── (a:1 + b:2) + c:3 [as=foo:6]
+      └── (a:1 + b:2) + c:3 [as=foo:5]
 
 build
 SELECT a,b FROM abc WHERE CASE WHEN a != 0 THEN b/a > 1.5 ELSE false END
@@ -162,9 +162,9 @@ SELECT a,b FROM abc WHERE CASE WHEN a != 0 THEN b/a > 1.5 ELSE false END
 project
  ├── columns: a:1!null b:2
  └── select
-      ├── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      ├── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4
       ├── scan abc
-      │    └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+      │    └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4
       └── filters
            └── CASE WHEN a:1 != 0 THEN (b:2 / a:1) > 1.5 ELSE false END
 
@@ -180,7 +180,7 @@ SELECT * FROM kv
 project
  ├── columns: k:1!null v:2
  └── scan kv
-      └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3
 
 build
 SELECT k,v FROM kv
@@ -188,27 +188,27 @@ SELECT k,v FROM kv
 project
  ├── columns: k:1!null v:2
  └── scan kv
-      └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3
 
 build
 SELECT v||'foo' AS r FROM kv
 ----
 project
- ├── columns: r:5
+ ├── columns: r:4
  ├── scan kv
- │    └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+ │    └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3
  └── projections
-      └── v:2::STRING || 'foo' [as=r:5]
+      └── v:2::STRING || 'foo' [as=r:4]
 
 build
 SELECT lower(v) FROM kv
 ----
 project
- ├── columns: lower:5
+ ├── columns: lower:4
  ├── scan kv
- │    └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+ │    └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3
  └── projections
-      └── lower(v:2) [as=lower:5]
+      └── lower(v:2) [as=lower:4]
 
 build
 SELECT k FROM kv
@@ -216,7 +216,7 @@ SELECT k FROM kv
 project
  ├── columns: k:1!null
  └── scan kv
-      └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3
 
 build
 SELECT kv.K,KV.v FROM kv
@@ -224,7 +224,7 @@ SELECT kv.K,KV.v FROM kv
 project
  ├── columns: k:1!null v:2
  └── scan kv
-      └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3
 
 build
 SELECT kv.* FROM kv
@@ -232,42 +232,17 @@ SELECT kv.* FROM kv
 project
  ├── columns: k:1!null v:2
  └── scan kv
-      └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
-
-build
-SELECT row_to_json(kv) FROM kv
-----
-project
- ├── columns: row_to_json:5
- ├── scan kv
- │    └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
- └── projections
-      └── row_to_json(((k:1, v:2) AS k, v)) [as=row_to_json:5]
-
-build
-SELECT kv FROM kv
-----
-project
- ├── columns: kv:5
- ├── scan kv
- │    └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
- └── projections
-      └── ((k:1, v:2) AS k, v) [as=kv:5]
-
-build
-SELECT log(kv) FROM kv
-----
-error (42883): unknown signature: log(tuple{char AS k, char AS v})
+      └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3
 
 build
 SELECT (kv.*) AS r FROM kv
 ----
 project
- ├── columns: r:5
+ ├── columns: r:4
  ├── scan kv
- │    └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+ │    └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3
  └── projections
-      └── ((k:1, v:2) AS k, v) [as=r:5]
+      └── ((k:1, v:2) AS k, v) [as=r:4]
 
 build
 SELECT (SELECT t.*) FROM (VALUES (1)) AS t(x)
@@ -325,9 +300,9 @@ SELECT FOO.k FROM kv AS foo WHERE foo.k = 'a'
 project
  ├── columns: k:1!null
  └── select
-      ├── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      ├── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3
       ├── scan kv [as=foo]
-      │    └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      │    └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3
       └── filters
            └── k:1 = 'a'
 
@@ -337,9 +312,9 @@ SELECT "foo"."v" FROM kv AS foo WHERE foo.k = 'a'
 project
  ├── columns: v:2
  └── select
-      ├── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      ├── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3
       ├── scan kv [as=foo]
-      │    └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      │    └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3
       └── filters
            └── k:1 = 'a'
 
@@ -353,7 +328,7 @@ SELECT *, "from", kw."from" FROM kw
 project
  ├── columns: from:1!null from:1!null from:1!null
  └── scan kw
-      └── columns: from:1!null crdb_internal_mvcc_timestamp:2 tableoid:3
+      └── columns: from:1!null crdb_internal_mvcc_timestamp:2
 
 exec-ddl
 CREATE TABLE xyzw (
@@ -368,13 +343,13 @@ CREATE TABLE xyzw (
 # SELECT with index hints.
 
 build
-SELECT * FROM xyzw@xyzw_pkey
+SELECT * FROM xyzw@primary
 ----
 project
  ├── columns: x:1!null y:2 z:3 w:4
  └── scan xyzw
-      ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
-      └── flags: force-index=xyzw_pkey
+      ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
+      └── flags: force-index=primary
 
 build
 SELECT * FROM xyzw@foo
@@ -382,7 +357,7 @@ SELECT * FROM xyzw@foo
 project
  ├── columns: x:1!null y:2 z:3 w:4
  └── scan xyzw
-      ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
       └── flags: force-index=foo
 
 build
@@ -391,7 +366,7 @@ SELECT * FROM xyzw@{FORCE_INDEX=foo,ASC}
 project
  ├── columns: x:1!null y:2 z:3 w:4
  └── scan xyzw
-      ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
       └── flags: force-index=foo,fwd
 
 build
@@ -400,7 +375,7 @@ SELECT * FROM xyzw@{FORCE_INDEX=foo,DESC}
 project
  ├── columns: x:1!null y:2 z:3 w:4
  └── scan xyzw,rev
-      ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
       └── flags: force-index=foo,rev
 
 build
@@ -409,7 +384,7 @@ SELECT * FROM xyzw@{NO_INDEX_JOIN}
 project
  ├── columns: x:1!null y:2 z:3 w:4
  └── scan xyzw
-      ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
       └── flags: no-index-join
 
 build
@@ -439,7 +414,7 @@ limit
  │    ├── ordering: +1
  │    ├── limit hint: 1.00
  │    └── scan xyzw
- │         ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │         ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
  │         ├── ordering: +1
  │         └── limit hint: 1.00
  └── 1
@@ -459,7 +434,7 @@ limit
  │    ├── columns: x:1!null y:2 z:3 w:4
  │    ├── limit hint: 1.00
  │    └── scan xyzw
- │         ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │         ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
  │         └── limit hint: 1.00
  └── -100
 
@@ -472,7 +447,7 @@ offset
  ├── project
  │    ├── columns: x:1!null y:2 z:3 w:4
  │    └── scan xyzw
- │         └── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │         └── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
  └── -100
 
 build
@@ -486,7 +461,7 @@ offset
  │    ├── columns: x:1!null y:2 z:3 w:4
  │    ├── ordering: +1
  │    └── scan xyzw
- │         ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │         ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
  │         └── ordering: +1
  └── 1 + 0
 
@@ -494,11 +469,11 @@ build
 SELECT (x,y) AS r FROM xyzw
 ----
 project
- ├── columns: r:7
+ ├── columns: r:6
  ├── scan xyzw
- │    └── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │    └── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
  └── projections
-      └── (x:1, y:2) [as=r:7]
+      └── (x:1, y:2) [as=r:6]
 
 build
 SELECT * FROM xyzw LIMIT 0
@@ -509,7 +484,7 @@ limit
  │    ├── columns: x:1!null y:2 z:3 w:4
  │    ├── limit hint: 1.00
  │    └── scan xyzw
- │         ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │         ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
  │         └── limit hint: 1.00
  └── 0
 
@@ -525,7 +500,7 @@ limit
  │    ├── ordering: +1
  │    ├── limit hint: 1.00
  │    └── scan xyzw
- │         ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │         ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
  │         ├── ordering: +1
  │         └── limit hint: 1.00
  └── 1
@@ -547,7 +522,7 @@ limit
  │    │    ├── ordering: +1
  │    │    ├── limit hint: 2.00
  │    │    └── scan xyzw
- │    │         ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │    │         ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
  │    │         ├── ordering: +1
  │    │         └── limit hint: 2.00
  │    └── 1
@@ -566,7 +541,7 @@ offset
  │    └── project
  │         ├── columns: x:1!null y:2 z:3 w:4
  │         └── scan xyzw
- │              └── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │              └── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
  └── 1
 
 build
@@ -588,7 +563,7 @@ limit
  │    │    └── project
  │    │         ├── columns: x:1!null y:2 z:3 w:4
  │    │         └── scan xyzw
- │    │              └── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │    │              └── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
  │    └── 1
  └── 1
 
@@ -602,30 +577,30 @@ limit
  │    ├── project
  │    │    ├── columns: x:1!null y:2 z:3 w:4
  │    │    └── scan xyzw
- │    │         └── columns: x:1!null y:2 z:3 w:4 xyzw.crdb_internal_mvcc_timestamp:5 xyzw.tableoid:6
+ │    │         └── columns: x:1!null y:2 z:3 w:4 xyzw.crdb_internal_mvcc_timestamp:5
  │    └── mult
  │         ├── subquery
  │         │    └── max1-row
- │         │         ├── columns: count_rows:12!null
+ │         │         ├── columns: count_rows:10!null
  │         │         └── scalar-group-by
- │         │              ├── columns: count_rows:12!null
+ │         │              ├── columns: count_rows:10!null
  │         │              ├── project
  │         │              │    └── scan abc
- │         │              │         └── columns: a:7!null b:8 c:9 abc.crdb_internal_mvcc_timestamp:10 abc.tableoid:11
+ │         │              │         └── columns: a:6!null b:7 c:8 abc.crdb_internal_mvcc_timestamp:9
  │         │              └── aggregations
- │         │                   └── count-rows [as=count_rows:12]
+ │         │                   └── count-rows [as=count_rows:10]
  │         └── 3
  └── mult
       ├── subquery
       │    └── max1-row
-      │         ├── columns: count_rows:18!null
+      │         ├── columns: count_rows:15!null
       │         └── scalar-group-by
-      │              ├── columns: count_rows:18!null
+      │              ├── columns: count_rows:15!null
       │              ├── project
       │              │    └── scan abc
-      │              │         └── columns: a:13!null b:14 c:15 abc.crdb_internal_mvcc_timestamp:16 abc.tableoid:17
+      │              │         └── columns: a:11!null b:12 c:13 abc.crdb_internal_mvcc_timestamp:14
       │              └── aggregations
-      │                   └── count-rows [as=count_rows:18]
+      │                   └── count-rows [as=count_rows:15]
       └── 2
 
 build
@@ -644,7 +619,7 @@ offset
  │    │    ├── columns: x:1!null y:2 z:3 w:4
  │    │    ├── limit hint: 5.00
  │    │    └── scan xyzw
- │    │         ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+ │    │         ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
  │    │         └── limit hint: 5.00
  │    └── 5
  └── 5
@@ -655,7 +630,7 @@ SELECT * FROM xyzw@foo
 project
  ├── columns: x:1!null y:2 z:3 w:4
  └── scan xyzw
-      ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      ├── columns: x:1!null y:2 z:3 w:4 crdb_internal_mvcc_timestamp:5
       └── flags: force-index=foo
 
 exec-ddl
@@ -671,7 +646,7 @@ SELECT value FROM boolean_table
 project
  ├── columns: value:2
  └── scan boolean_table
-      └── columns: id:1!null value:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      └── columns: id:1!null value:2 crdb_internal_mvcc_timestamp:3
 
 build
 SELECT CASE WHEN NULL THEN 1 ELSE 2 END
@@ -687,13 +662,13 @@ build
 SELECT 0 * b AS r, b % 1 AS s, 0 % b AS t from abc
 ----
 project
- ├── columns: r:6 s:7 t:8
+ ├── columns: r:5 s:6 t:7
  ├── scan abc
- │    └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+ │    └── columns: a:1!null b:2 c:3 crdb_internal_mvcc_timestamp:4
  └── projections
-      ├── 0 * b:2 [as=r:6]
-      ├── b:2 % 1 [as=s:7]
-      └── 0 % b:2 [as=t:8]
+      ├── 0 * b:2 [as=r:5]
+      ├── b:2 % 1 [as=s:6]
+      └── 0 % b:2 [as=t:7]
 
 # Regression tests for #22670.
 build
@@ -980,7 +955,7 @@ SELECT * FROM a
 project
  ├── columns: x:1!null y:2
  └── scan a
-      └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
 
 build
 SELECT * FROM a WHERE x > 10
@@ -988,9 +963,9 @@ SELECT * FROM a WHERE x > 10
 project
  ├── columns: x:1!null y:2
  └── select
-      ├── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      ├── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
       ├── scan a
-      │    └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      │    └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
       └── filters
            └── x:1 > 10
 
@@ -1000,9 +975,9 @@ SELECT * FROM a WHERE (x > 10 AND (x < 20 AND x != 13))
 project
  ├── columns: x:1!null y:2
  └── select
-      ├── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      ├── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
       ├── scan a
-      │    └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      │    └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
       └── filters
            └── (x:1 > 10) AND ((x:1 < 20) AND (x:1 != 13))
 
@@ -1012,9 +987,9 @@ SELECT * FROM a WHERE x IN (1, 2, 3)
 project
  ├── columns: x:1!null y:2
  └── select
-      ├── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      ├── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
       ├── scan a
-      │    └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      │    └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
       └── filters
            └── x:1 IN (1, 2, 3)
 
@@ -1024,18 +999,18 @@ SELECT * FROM a AS A(X, Y)
 project
  ├── columns: x:1!null y:2
  └── scan a
-      └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
 
 build
 SELECT @1 AS r, @2 AS s FROM a
 ----
 project
- ├── columns: r:5!null s:6
+ ├── columns: r:4!null s:5
  ├── scan a
- │    └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+ │    └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
  └── projections
-      ├── x:1 [as=r:5]
-      └── y:2 [as=s:6]
+      ├── x:1 [as=r:4]
+      └── y:2 [as=s:5]
 
 build
 SELECT * FROM a WHERE (x > 10)::bool
@@ -1043,9 +1018,9 @@ SELECT * FROM a WHERE (x > 10)::bool
 project
  ├── columns: x:1!null y:2
  └── select
-      ├── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      ├── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
       ├── scan a
-      │    └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      │    └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
       └── filters
            └── x:1 > 10
 
@@ -1060,9 +1035,9 @@ SELECT * FROM a WHERE x = $1
 project
  ├── columns: x:1!null y:2
  └── select
-      ├── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      ├── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
       ├── scan a
-      │    └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      │    └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
       └── filters
            └── x:1 = $1
 
@@ -1103,7 +1078,7 @@ SELECT (((x, y) AS x, y)).x FROM a
 project
  ├── columns: x:1!null
  └── scan a
-      └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
 
 
 # Numeric Reference Tests
@@ -1117,7 +1092,7 @@ SELECT * FROM [53 AS t]
 project
  ├── columns: a:1!null y:2 b:3 c:4
  └── scan tab53 [as=t]
-      └── columns: a:1!null y:2 b:3 c:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      └── columns: a:1!null y:2 b:3 c:4 crdb_internal_mvcc_timestamp:5
 
 build
 SELECT * FROM [53(1) AS t]
@@ -1168,7 +1143,7 @@ SELECT * FROM [54 AS t]
 project
  ├── columns: x:1 y:2
  └── scan tab54 [as=t]
-      └── columns: x:1 y:2 rowid:3!null crdb_internal_mvcc_timestamp:4 tableoid:5
+      └── columns: x:1 y:2 rowid:3!null crdb_internal_mvcc_timestamp:4
 
 # Verify that we force the given index.
 build
@@ -1177,8 +1152,8 @@ SELECT * FROM [53 AS t]@[1]
 project
  ├── columns: a:1!null y:2 b:3 c:4
  └── scan tab53 [as=t]
-      ├── columns: a:1!null y:2 b:3 c:4 crdb_internal_mvcc_timestamp:5 tableoid:6
-      └── flags: force-index=tab53_pkey
+      ├── columns: a:1!null y:2 b:3 c:4 crdb_internal_mvcc_timestamp:5
+      └── flags: force-index=primary
 
 build
 SELECT * FROM [53 AS t]@[2]
@@ -1186,7 +1161,7 @@ SELECT * FROM [53 AS t]@[2]
 project
  ├── columns: a:1!null y:2 b:3 c:4
  └── scan tab53 [as=t]
-      ├── columns: a:1!null y:2 b:3 c:4 crdb_internal_mvcc_timestamp:5 tableoid:6
+      ├── columns: a:1!null y:2 b:3 c:4 crdb_internal_mvcc_timestamp:5
       └── flags: force-index=bc
 
 # Test that hidden columns are not presented.
@@ -1242,7 +1217,7 @@ SELECT * FROM no_cols_table
 ----
 project
  └── scan no_cols_table
-      └── columns: rowid:1!null crdb_internal_mvcc_timestamp:2 tableoid:3
+      └── columns: rowid:1!null crdb_internal_mvcc_timestamp:2
 
 build
 SELECT * FROM [54(3) as t]
@@ -1256,77 +1231,77 @@ build
 WITH cte AS (SELECT b FROM [INSERT INTO abc VALUES (1) RETURNING *] LIMIT 1) SELECT * FROM abc
 ----
 with &1
- ├── columns: a:11!null b:12 c:13
+ ├── columns: a:10!null b:11 c:12
  ├── insert abc
  │    ├── columns: abc.a:1!null abc.b:2 abc.c:3
  │    ├── insert-mapping:
- │    │    ├── column1:6 => abc.a:1
- │    │    ├── b_default:7 => abc.b:2
- │    │    └── b_default:7 => abc.c:3
+ │    │    ├── column1:5 => abc.a:1
+ │    │    ├── column6:6 => abc.b:2
+ │    │    └── column6:6 => abc.c:3
  │    └── project
- │         ├── columns: b_default:7 column1:6!null
+ │         ├── columns: column6:6 column1:5!null
  │         ├── values
- │         │    ├── columns: column1:6!null
+ │         │    ├── columns: column1:5!null
  │         │    └── (1,)
  │         └── projections
- │              └── NULL::INT8 [as=b_default:7]
+ │              └── NULL::INT8 [as=column6:6]
  └── with &2 (cte)
-      ├── columns: abc.a:11!null abc.b:12 abc.c:13
+      ├── columns: abc.a:10!null abc.b:11 abc.c:12
       ├── limit
-      │    ├── columns: b:9
+      │    ├── columns: b:8
       │    ├── project
-      │    │    ├── columns: b:9
+      │    │    ├── columns: b:8
       │    │    ├── limit hint: 1.00
       │    │    └── with-scan &1
-      │    │         ├── columns: a:8!null b:9 c:10
+      │    │         ├── columns: a:7!null b:8 c:9
       │    │         ├── mapping:
-      │    │         │    ├──  abc.a:1 => a:8
-      │    │         │    ├──  abc.b:2 => b:9
-      │    │         │    └──  abc.c:3 => c:10
+      │    │         │    ├──  abc.a:1 => a:7
+      │    │         │    ├──  abc.b:2 => b:8
+      │    │         │    └──  abc.c:3 => c:9
       │    │         └── limit hint: 1.00
       │    └── 1
       └── project
-           ├── columns: abc.a:11!null abc.b:12 abc.c:13
+           ├── columns: abc.a:10!null abc.b:11 abc.c:12
            └── scan abc
-                └── columns: abc.a:11!null abc.b:12 abc.c:13 crdb_internal_mvcc_timestamp:14 tableoid:15
+                └── columns: abc.a:10!null abc.b:11 abc.c:12 crdb_internal_mvcc_timestamp:13
 
 # Tests for the square bracket syntax.
 build
 SELECT * FROM [SELECT * FROM abc]
 ----
 with &1
- ├── columns: a:6!null b:7 c:8
+ ├── columns: a:5!null b:6 c:7
  ├── project
  │    ├── columns: abc.a:1!null abc.b:2 abc.c:3
  │    └── scan abc
- │         └── columns: abc.a:1!null abc.b:2 abc.c:3 crdb_internal_mvcc_timestamp:4 tableoid:5
+ │         └── columns: abc.a:1!null abc.b:2 abc.c:3 crdb_internal_mvcc_timestamp:4
  └── with-scan &1
-      ├── columns: a:6!null b:7 c:8
+      ├── columns: a:5!null b:6 c:7
       └── mapping:
-           ├──  abc.a:1 => a:6
-           ├──  abc.b:2 => b:7
-           └──  abc.c:3 => c:8
+           ├──  abc.a:1 => a:5
+           ├──  abc.b:2 => b:6
+           └──  abc.c:3 => c:7
 
 build
 SELECT * FROM [INSERT INTO abc VALUES (1, 2, 3) RETURNING a]
 ----
 with &1
- ├── columns: a:9!null
+ ├── columns: a:8!null
  ├── project
  │    ├── columns: abc.a:1!null
  │    └── insert abc
  │         ├── columns: abc.a:1!null b:2!null c:3!null
  │         ├── insert-mapping:
- │         │    ├── column1:6 => abc.a:1
- │         │    ├── column2:7 => b:2
- │         │    └── column3:8 => c:3
+ │         │    ├── column1:5 => abc.a:1
+ │         │    ├── column2:6 => b:2
+ │         │    └── column3:7 => c:3
  │         └── values
- │              ├── columns: column1:6!null column2:7!null column3:8!null
+ │              ├── columns: column1:5!null column2:6!null column3:7!null
  │              └── (1, 2, 3)
  └── with-scan &1
-      ├── columns: a:9!null
+      ├── columns: a:8!null
       └── mapping:
-           └──  abc.a:1 => a:9
+           └──  abc.a:1 => a:8
 
 # Statement inside brackets cannot refer to outer column.
 build
@@ -1351,7 +1326,7 @@ build
 WITH cte AS (SELECT 1) SELECT 1 + (SELECT * FROM cte) FROM [SELECT * from xyzw]
 ----
 with &1 (cte)
- ├── columns: "?column?":13
+ ├── columns: "?column?":12
  ├── project
  │    ├── columns: "?column?":1!null
  │    ├── values
@@ -1359,59 +1334,59 @@ with &1 (cte)
  │    └── projections
  │         └── 1 [as="?column?":1]
  └── with &2
-      ├── columns: "?column?":13
+      ├── columns: "?column?":12
       ├── project
       │    ├── columns: xyzw.x:2!null xyzw.y:3 xyzw.z:4 xyzw.w:5
       │    └── scan xyzw
-      │         └── columns: xyzw.x:2!null xyzw.y:3 xyzw.z:4 xyzw.w:5 crdb_internal_mvcc_timestamp:6 tableoid:7
+      │         └── columns: xyzw.x:2!null xyzw.y:3 xyzw.z:4 xyzw.w:5 crdb_internal_mvcc_timestamp:6
       └── project
-           ├── columns: "?column?":13
+           ├── columns: "?column?":12
            ├── with-scan &2
-           │    ├── columns: x:8!null y:9 z:10 w:11
+           │    ├── columns: x:7!null y:8 z:9 w:10
            │    └── mapping:
-           │         ├──  xyzw.x:2 => x:8
-           │         ├──  xyzw.y:3 => y:9
-           │         ├──  xyzw.z:4 => z:10
-           │         └──  xyzw.w:5 => w:11
+           │         ├──  xyzw.x:2 => x:7
+           │         ├──  xyzw.y:3 => y:8
+           │         ├──  xyzw.z:4 => z:9
+           │         └──  xyzw.w:5 => w:10
            └── projections
-                └── plus [as="?column?":13]
+                └── plus [as="?column?":12]
                      ├── 1
                      └── subquery
                           └── max1-row
-                               ├── columns: "?column?":12!null
+                               ├── columns: "?column?":11!null
                                └── with-scan &1 (cte)
-                                    ├── columns: "?column?":12!null
+                                    ├── columns: "?column?":11!null
                                     └── mapping:
-                                         └──  "?column?":1 => "?column?":12
+                                         └──  "?column?":1 => "?column?":11
 
 build
 SELECT a, (SELECT a+x FROM [SELECT * from xyzw]) FROM abc
 ----
 with &1
- ├── columns: a:1!null "?column?":17
+ ├── columns: a:1!null "?column?":15
  ├── project
- │    ├── columns: xyzw.x:6!null xyzw.y:7 xyzw.z:8 xyzw.w:9
+ │    ├── columns: xyzw.x:5!null xyzw.y:6 xyzw.z:7 xyzw.w:8
  │    └── scan xyzw
- │         └── columns: xyzw.x:6!null xyzw.y:7 xyzw.z:8 xyzw.w:9 xyzw.crdb_internal_mvcc_timestamp:10 xyzw.tableoid:11
+ │         └── columns: xyzw.x:5!null xyzw.y:6 xyzw.z:7 xyzw.w:8 xyzw.crdb_internal_mvcc_timestamp:9
  └── project
-      ├── columns: "?column?":17 a:1!null
+      ├── columns: "?column?":15 a:1!null
       ├── scan abc
-      │    └── columns: a:1!null b:2 c:3 abc.crdb_internal_mvcc_timestamp:4 abc.tableoid:5
+      │    └── columns: a:1!null b:2 c:3 abc.crdb_internal_mvcc_timestamp:4
       └── projections
-           └── subquery [as="?column?":17]
+           └── subquery [as="?column?":15]
                 └── max1-row
-                     ├── columns: "?column?":16
+                     ├── columns: "?column?":14
                      └── project
-                          ├── columns: "?column?":16
+                          ├── columns: "?column?":14
                           ├── with-scan &1
-                          │    ├── columns: x:12!null y:13 z:14 w:15
+                          │    ├── columns: x:10!null y:11 z:12 w:13
                           │    └── mapping:
-                          │         ├──  xyzw.x:6 => x:12
-                          │         ├──  xyzw.y:7 => y:13
-                          │         ├──  xyzw.z:8 => z:14
-                          │         └──  xyzw.w:9 => w:15
+                          │         ├──  xyzw.x:5 => x:10
+                          │         ├──  xyzw.y:6 => y:11
+                          │         ├──  xyzw.z:7 => z:12
+                          │         └──  xyzw.w:8 => w:13
                           └── projections
-                               └── a:1 + x:12 [as="?column?":16]
+                               └── a:1 + x:10 [as="?column?":14]
 
 exec-ddl
 CREATE TABLE inaccessible (
@@ -1426,7 +1401,7 @@ SELECT * FROM inaccessible
 project
  ├── columns: k:1!null
  └── scan inaccessible
-      └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+      └── columns: k:1!null v:2 crdb_internal_mvcc_timestamp:3
 
 build
 SELECT v FROM inaccessible
@@ -1439,15 +1414,15 @@ INSERT INTO inaccessible VALUES (1)
 insert inaccessible
  ├── columns: <none>
  ├── insert-mapping:
- │    ├── column1:5 => k:1
- │    └── v_default:6 => v:2
+ │    ├── column1:4 => k:1
+ │    └── column5:5 => v:2
  └── project
-      ├── columns: v_default:6 column1:5!null
+      ├── columns: column5:5 column1:4!null
       ├── values
-      │    ├── columns: column1:5!null
+      │    ├── columns: column1:4!null
       │    └── (1,)
       └── projections
-           └── NULL::INT8 [as=v_default:6]
+           └── NULL::INT8 [as=column5:5]
 
 build
 INSERT INTO inaccessible VALUES (1) RETURNING v
@@ -1469,15 +1444,15 @@ UPDATE inaccessible SET k=k+1
 ----
 update inaccessible
  ├── columns: <none>
- ├── fetch columns: k:5 v:6
+ ├── fetch columns: k:4 v:5
  ├── update-mapping:
- │    └── k_new:9 => k:1
+ │    └── k_new:7 => k:1
  └── project
-      ├── columns: k_new:9!null k:5!null v:6 crdb_internal_mvcc_timestamp:7 tableoid:8
+      ├── columns: k_new:7!null k:4!null v:5 crdb_internal_mvcc_timestamp:6
       ├── scan inaccessible
-      │    └── columns: k:5!null v:6 crdb_internal_mvcc_timestamp:7 tableoid:8
+      │    └── columns: k:4!null v:5 crdb_internal_mvcc_timestamp:6
       └── projections
-           └── k:5 + 1 [as=k_new:9]
+           └── k:4 + 1 [as=k_new:7]
 
 build
 UPDATE inaccessible SET k=k+1 WHERE v=1
@@ -1503,40 +1478,3 @@ build
 DELETE FROM inaccessible RETURNING v
 ----
 error (42703): column "v" does not exist
-
-exec-ddl
-CREATE TABLE same_name (
-  same_name TEXT PRIMARY KEY,
-  b INT
-)
-----
-
-build
-SELECT same_name FROM same_name
-----
-project
- ├── columns: same_name:1!null
- └── scan same_name
-      └── columns: same_name:1!null b:2 crdb_internal_mvcc_timestamp:3 tableoid:4
-
-build
-SELECT row_to_json(same_name) FROM same_name
-----
-error (42883): unknown signature: row_to_json(string)
-
-build
-SELECT log(same_name) FROM same_name
-----
-error (42883): unknown signature: log(string)
-
-build
-SELECT t FROM (VALUES (1,2), (3,4)) t(x, y);
-----
-project
- ├── columns: t:3!null
- ├── values
- │    ├── columns: column1:1!null column2:2!null
- │    ├── (1, 2)
- │    └── (3, 4)
- └── projections
-      └── ((column1:1, column2:2) AS x, y) [as=t:3]

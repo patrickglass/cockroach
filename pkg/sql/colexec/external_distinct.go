@@ -13,6 +13,7 @@ package colexec
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
@@ -43,8 +44,7 @@ func NewExternalDistinct(
 		// limit, so we use an unlimited allocator.
 		// TODO(yuzefovich): it might be worth increasing the number of buckets.
 		return NewUnorderedDistinct(
-			unlimitedAllocator, partitionedInputs[0], distinctCols,
-			inputTypes, distinctSpec.NullsAreDistinct, distinctSpec.ErrorOnDup,
+			unlimitedAllocator, partitionedInputs[0], distinctCols, inputTypes,
 		)
 	}
 	diskBackedFallbackOpConstructor := func(
@@ -73,17 +73,18 @@ func NewExternalDistinct(
 			projection[i] = uint32(i)
 		}
 		diskBackedWithoutOrdinality := colexecbase.NewSimpleProjectOp(diskBackedSorter, len(sortTypes), projection)
-		return colexecbase.NewOrderedDistinct(
-			diskBackedWithoutOrdinality, distinctCols, inputTypes,
-			distinctSpec.NullsAreDistinct, distinctSpec.ErrorOnDup,
-		)
+		diskBackedFallbackOp, err := colexecbase.NewOrderedDistinct(diskBackedWithoutOrdinality, distinctCols, inputTypes)
+		if err != nil {
+			colexecerror.InternalError(err)
+		}
+		return diskBackedFallbackOp
 	}
 	// We have to be careful to not emit duplicates of already emitted by the
 	// in-memory operator tuples, so we plan a special filterer operator to
 	// remove all such tuples.
 	input = &unorderedDistinctFilterer{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
-		ud:             inMemUnorderedDistinct.(*unorderedDistinct),
+		OneInputNode: colexecop.NewOneInputNode(input),
+		ht:           inMemUnorderedDistinct.(*unorderedDistinct).ht,
 	}
 	numRequiredActivePartitions := colexecop.ExternalSorterMinPartitions
 	ed := newHashBasedPartitioner(

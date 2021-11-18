@@ -12,7 +12,6 @@ package rowexec
 
 import (
 	"context"
-	"math"
 	"time"
 
 	"github.com/axiomhq/hyperloglog"
@@ -64,7 +63,6 @@ type sampleAggregator struct {
 	sketchIdxCol int
 	numRowsCol   int
 	numNullsCol  int
-	sumSizeCol   int
 	sketchCol    int
 	invColIdxCol int
 	invIdxKeyCol int
@@ -87,6 +85,7 @@ func newSampleAggregator(
 	flowCtx *execinfra.FlowCtx,
 	processorID int32,
 	spec *execinfrapb.SampleAggregatorSpec,
+	minSampleSize int,
 	input execinfra.RowSource,
 	post *execinfrapb.PostProcessSpec,
 	output execinfra.RowReceiver,
@@ -110,8 +109,8 @@ func newSampleAggregator(
 	// Limit the memory use by creating a child monitor with a hard limit.
 	// The processor will disable histogram collection if this limit is not
 	// enough.
-	memMonitor := execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx, "sample-aggregator-mem")
-	rankCol := len(input.OutputTypes()) - 8
+	memMonitor := execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx.Cfg, "sample-aggregator-mem")
+	rankCol := len(input.OutputTypes()) - 7
 	s := &sampleAggregator{
 		spec:         spec,
 		input:        input,
@@ -125,10 +124,9 @@ func newSampleAggregator(
 		sketchIdxCol: rankCol + 1,
 		numRowsCol:   rankCol + 2,
 		numNullsCol:  rankCol + 3,
-		sumSizeCol:   rankCol + 4,
-		sketchCol:    rankCol + 5,
-		invColIdxCol: rankCol + 6,
-		invIdxKeyCol: rankCol + 7,
+		sketchCol:    rankCol + 4,
+		invColIdxCol: rankCol + 5,
+		invIdxKeyCol: rankCol + 6,
 		invSr:        make(map[uint32]*stats.SampleReservoir, len(spec.InvertedSketches)),
 		invSketch:    make(map[uint32]*sketchInfo, len(spec.InvertedSketches)),
 	}
@@ -147,7 +145,7 @@ func newSampleAggregator(
 	}
 
 	s.sr.Init(
-		int(spec.SampleSize), int(spec.MinSampleSize), input.OutputTypes()[:rankCol], &s.memAcc,
+		int(spec.SampleSize), minSampleSize, input.OutputTypes()[:rankCol], &s.memAcc,
 		sampleCols,
 	)
 	for i := range spec.InvertedSketches {
@@ -156,7 +154,7 @@ func newSampleAggregator(
 		// sent as a single DBytes column.
 		var srCols util.FastIntSet
 		srCols.Add(0)
-		sr.Init(int(spec.SampleSize), int(spec.MinSampleSize), bytesRowType, &s.memAcc, srCols)
+		sr.Init(int(spec.SampleSize), minSampleSize, bytesRowType, &s.memAcc, srCols)
 		col := spec.InvertedSketches[i].Columns[0]
 		s.invSr[col] = &sr
 		s.invSketch[col] = &sketchInfo{
@@ -182,7 +180,7 @@ func newSampleAggregator(
 }
 
 func (s *sampleAggregator) pushTrailingMeta(ctx context.Context) {
-	execinfra.SendTraceData(ctx, s.Output)
+	execinfra.SendTraceData(ctx, s.Out.Output())
 }
 
 // Run is part of the Processor interface.
@@ -192,11 +190,11 @@ func (s *sampleAggregator) Run(ctx context.Context) {
 
 	earlyExit, err := s.mainLoop(ctx)
 	if err != nil {
-		execinfra.DrainAndClose(ctx, s.Output, err, s.pushTrailingMeta, s.input)
+		execinfra.DrainAndClose(ctx, s.Out.Output(), err, s.pushTrailingMeta, s.input)
 	} else if !earlyExit {
 		s.pushTrailingMeta(ctx)
 		s.input.ConsumerClosed()
-		s.Output.ProducerDone()
+		s.Out.Close()
 	}
 	s.MoveToDraining(nil /* err */)
 }
@@ -270,7 +268,7 @@ func (s *sampleAggregator) mainLoop(ctx context.Context) (earlyExit bool, err er
 						sr.Disable()
 					}
 				}
-			} else if !emitHelper(ctx, s.Output, &s.OutputHelper, nil /* row */, meta, s.pushTrailingMeta, s.input) {
+			} else if !emitHelper(ctx, &s.Out, nil /* row */, meta, s.pushTrailingMeta, s.input) {
 				// No cleanup required; emitHelper() took care of it.
 				return true, nil
 			}
@@ -355,12 +353,6 @@ func (s *sampleAggregator) processSketchRow(
 	}
 	sketch.numNulls += numNulls
 
-	size, err := row[s.sumSizeCol].GetInt()
-	if err != nil {
-		return err
-	}
-	sketch.size += size
-
 	// Decode the sketch.
 	if err := row[s.sketchCol].EnsureDecoded(s.inTypes[s.sketchCol], da); err != nil {
 		return err
@@ -433,6 +425,7 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 	// closure.
 	if err := s.FlowCtx.Cfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		for _, si := range s.sketches {
+			distinctCount := int64(si.sketch.Estimate())
 			var histogram *stats.HistogramData
 			if si.spec.GenerateHistogram && len(s.sr.Get()) != 0 {
 				colIdx := int(si.spec.Columns[0])
@@ -445,7 +438,7 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 					colIdx,
 					typ,
 					si.numRows-si.numNulls,
-					s.getDistinctCount(&si, false /* includeNulls */),
+					distinctCount,
 					int(si.spec.HistogramMaxBuckets),
 				)
 				if err != nil {
@@ -463,7 +456,7 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 				// by the existence of an inverted sketch on
 				// the column.
 
-				invDistinctCount := s.getDistinctCount(invSketch, false /* includeNulls */)
+				invDistinctCount := int64(invSketch.sketch.Estimate())
 				// Use 0 for the colIdx here because it refers
 				// to the column index of the samples, which
 				// only has a single bytes column with the
@@ -509,10 +502,10 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 				si.spec.StatName,
 				columnIDs,
 				si.numRows,
-				s.getDistinctCount(&si, true /* includeNulls */),
+				distinctCount,
 				si.numNulls,
-				s.getAvgSize(&si),
-				histogram); err != nil {
+				histogram,
+			); err != nil {
 				return err
 			}
 
@@ -525,40 +518,11 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 		return err
 	}
 
+	if g, ok := s.FlowCtx.Cfg.Gossip.Optional(47925); ok {
+		// Gossip refresh of the stat caches for this table.
+		return stats.GossipTableStatAdded(g, s.tableID)
+	}
 	return nil
-}
-
-// getAvgSize returns the average number of bytes per row in the given
-// sketch.
-func (s *sampleAggregator) getAvgSize(si *sketchInfo) int64 {
-	if si.numRows == 0 {
-		return 0
-	}
-	return int64(math.Ceil(float64(si.size) / float64(si.numRows)))
-}
-
-// getDistinctCount returns the number of distinct values in the given sketch,
-// optionally including null values.
-func (s *sampleAggregator) getDistinctCount(si *sketchInfo, includeNulls bool) int64 {
-	distinctCount := int64(si.sketch.Estimate())
-	if si.numNulls > 0 && !includeNulls {
-		// Nulls are included in the estimate, so reduce the count by 1 if nulls are
-		// not requested.
-		distinctCount--
-	}
-
-	// The maximum number of distinct values is the number of non-null rows plus 1
-	// if there are any nulls. It's possible that distinctCount was calculated to
-	// be greater than this number due to the approximate nature of HyperLogLog.
-	// If this is the case, set it equal to the max.
-	maxDistinctCount := si.numRows - si.numNulls
-	if si.numNulls > 0 && includeNulls {
-		maxDistinctCount++
-	}
-	if distinctCount > maxDistinctCount {
-		distinctCount = maxDistinctCount
-	}
-	return distinctCount
 }
 
 // generateHistogram returns a histogram (on a given column) from a set of

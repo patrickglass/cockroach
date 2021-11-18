@@ -82,20 +82,31 @@ func TestRowFetcherMVCCMetadata(t *testing.T) {
 		a STRING PRIMARY KEY, b STRING, c STRING, d STRING,
 		FAMILY (a, b, c), FAMILY (d)
 	)`)
-	desc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, `d`, `parent`)
-	var colIdxMap catalog.TableColMap
-	var valNeededForCol util.FastIntSet
-	for i, col := range desc.PublicColumns() {
-		colIdxMap.Set(col.GetID(), i)
-		valNeededForCol.Add(i)
-	}
-	table := row.FetcherTableArgs{
-		Desc:             desc,
-		Index:            desc.GetPrimaryIndex(),
-		ColIdxMap:        colIdxMap,
-		IsSecondaryIndex: false,
-		Cols:             desc.PublicColumns(),
-		ValNeededForCol:  valNeededForCol,
+	sqlDB.Exec(t, `CREATE TABLE child (
+		e STRING, f STRING, PRIMARY KEY (e, f)
+	) INTERLEAVE IN PARENT parent (e)`)
+
+	parentDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, `d`, `parent`)
+	childDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, `d`, `child`)
+	var args []row.FetcherTableArgs
+	for _, desc := range []catalog.TableDescriptor{parentDesc, childDesc} {
+		var colIdxMap catalog.TableColMap
+		var valNeededForCol util.FastIntSet
+		colDescs := make([]descpb.ColumnDescriptor, len(desc.PublicColumns()))
+		for i, col := range desc.PublicColumns() {
+			colIdxMap.Set(col.GetID(), i)
+			valNeededForCol.Add(i)
+			colDescs[i] = *col.ColumnDesc()
+		}
+		args = append(args, row.FetcherTableArgs{
+			Spans:            desc.AllIndexSpans(keys.SystemSQLCodec),
+			Desc:             desc,
+			Index:            desc.GetPrimaryIndex().IndexDesc(),
+			ColIdxMap:        colIdxMap,
+			IsSecondaryIndex: false,
+			Cols:             colDescs,
+			ValNeededForCol:  valNeededForCol,
+		})
 	}
 	var rf row.Fetcher
 	if err := rf.Init(
@@ -104,11 +115,10 @@ func TestRowFetcherMVCCMetadata(t *testing.T) {
 		false, /* reverse */
 		descpb.ScanLockingStrength_FOR_NONE,
 		descpb.ScanLockingWaitPolicy_BLOCK,
-		0,    /* lockTimeout */
 		true, /* isCheck */
 		&rowenc.DatumAlloc{},
 		nil, /* memMonitor */
-		table,
+		args...,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -154,12 +164,15 @@ func TestRowFetcherMVCCMetadata(t *testing.T) {
 	var ts1 string
 	sqlDB.QueryRow(t, `BEGIN;
 		INSERT INTO parent VALUES ('1', 'a', 'a', 'a'), ('2', 'b', 'b', 'b');
+		INSERT INTO child VALUES ('1', '10'), ('2', '20');
 		SELECT cluster_logical_timestamp();
 	END;`).Scan(&ts1)
 
 	if actual, expected := kvsToRows(slurpUserDataKVs(t, store.Engine())), []rowWithMVCCMetadata{
 		{[]string{`1`, `a`, `a`, `a`}, false, ts1},
+		{[]string{`1`, `10`}, false, ts1},
 		{[]string{`2`, `b`, `b`, `b`}, false, ts1},
+		{[]string{`2`, `20`}, false, ts1},
 	}; !reflect.DeepEqual(expected, actual) {
 		t.Errorf(`expected %v got %v`, expected, actual)
 	}
@@ -168,12 +181,16 @@ func TestRowFetcherMVCCMetadata(t *testing.T) {
 	sqlDB.QueryRow(t, `BEGIN;
 		UPDATE parent SET b = NULL, c = NULL, d = NULL WHERE a = '1';
 		UPDATE parent SET d = NULL WHERE a = '2';
+		UPDATE child SET f = '21' WHERE e = '2';
 		SELECT cluster_logical_timestamp();
 	END;`).Scan(&ts2)
 
 	if actual, expected := kvsToRows(slurpUserDataKVs(t, store.Engine())), []rowWithMVCCMetadata{
 		{[]string{`1`, `NULL`, `NULL`, `NULL`}, false, ts2},
+		{[]string{`1`, `10`}, false, ts1},
 		{[]string{`2`, `b`, `b`, `NULL`}, false, ts2},
+		{[]string{`2`, `20`}, true, ts2},
+		{[]string{`2`, `21`}, false, ts2},
 	}; !reflect.DeepEqual(expected, actual) {
 		t.Errorf(`expected %v got %v`, expected, actual)
 	}
@@ -181,11 +198,15 @@ func TestRowFetcherMVCCMetadata(t *testing.T) {
 	var ts3 string
 	sqlDB.QueryRow(t, `BEGIN;
 		DELETE FROM parent WHERE a = '1';
+		DELETE FROM child WHERE e = '2';
 		SELECT cluster_logical_timestamp();
 	END;`).Scan(&ts3)
 	if actual, expected := kvsToRows(slurpUserDataKVs(t, store.Engine())), []rowWithMVCCMetadata{
 		{[]string{`1`, `NULL`, `NULL`, `NULL`}, true, ts3},
+		{[]string{`1`, `10`}, false, ts1},
 		{[]string{`2`, `b`, `b`, `NULL`}, false, ts2},
+		{[]string{`2`, `20`}, true, ts2}, // ignore me: artifact of how the test is written
+		{[]string{`2`, `21`}, true, ts3},
 	}; !reflect.DeepEqual(expected, actual) {
 		t.Errorf(`expected %v got %v`, expected, actual)
 	}

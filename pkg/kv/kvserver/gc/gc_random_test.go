@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -97,10 +98,10 @@ func TestRunNewVsOld(t *testing.T) {
 			snap := eng.NewSnapshot()
 
 			oldGCer := makeFakeGCer()
-			ttl := time.Duration(tc.ttl) * time.Second
-			newThreshold := CalculateThreshold(tc.now, ttl)
+			policy := zonepb.GCPolicy{TTLSeconds: tc.ttl}
+			newThreshold := CalculateThreshold(tc.now, policy)
 			gcInfoOld, err := runGCOld(ctx, tc.ds.desc(), snap, tc.now,
-				newThreshold, RunOptions{IntentAgeThreshold: intentAgeThreshold}, ttl,
+				newThreshold, RunOptions{IntentAgeThreshold: intentAgeThreshold}, policy,
 				&oldGCer,
 				oldGCer.resolveIntents,
 				oldGCer.resolveIntentsAsync)
@@ -108,7 +109,7 @@ func TestRunNewVsOld(t *testing.T) {
 
 			newGCer := makeFakeGCer()
 			gcInfoNew, err := Run(ctx, tc.ds.desc(), snap, tc.now,
-				newThreshold, RunOptions{IntentAgeThreshold: intentAgeThreshold}, ttl,
+				newThreshold, RunOptions{IntentAgeThreshold: intentAgeThreshold}, policy,
 				&newGCer,
 				newGCer.resolveIntents,
 				newGCer.resolveIntentsAsync)
@@ -133,10 +134,10 @@ func BenchmarkRun(b *testing.B) {
 			runGCFunc = runGCOld
 		}
 		snap := eng.NewSnapshot()
-		ttl := time.Duration(spec.ttl) * time.Second
+		policy := zonepb.GCPolicy{TTLSeconds: spec.ttl}
 		return runGCFunc(ctx, spec.ds.desc(), snap, spec.now,
-			CalculateThreshold(spec.now, ttl), RunOptions{IntentAgeThreshold: intentAgeThreshold},
-			ttl,
+			CalculateThreshold(spec.now, policy), RunOptions{IntentAgeThreshold: intentAgeThreshold},
+			policy,
 			NoopGCer{},
 			func(ctx context.Context, intents []roachpb.Intent) error {
 				return nil

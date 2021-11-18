@@ -19,12 +19,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/geo/geoindex"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/protoreflect"
-	protoreflecttest "github.com/cockroachdb/cockroach/pkg/sql/protoreflect/test"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	jsonb "github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/gogo/protobuf/jsonpb"
 	pbtypes "github.com/gogo/protobuf/types"
@@ -64,11 +61,11 @@ func TestMessageToJSONBRoundTrip(t *testing.T) {
 		{ // Message with an array and other embedded descriptors
 			pbname: "cockroach.sql.sqlbase.IndexDescriptor",
 			message: &descpb.IndexDescriptor{
-				Name:                "myidx",
-				ID:                  500,
-				Unique:              true,
-				KeyColumnNames:      []string{"foo", "bar", "buz"},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+				Name:             "myidx",
+				ID:               500,
+				Unique:           true,
+				ColumnNames:      []string{"foo", "bar", "buz"},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
 				GeoConfig: geoindex.Config{
 					S2Geography: &geoindex.S2GeographyConfig{S2Config: &geoindex.S2Config{
 						MinLevel: 123,
@@ -85,11 +82,9 @@ func TestMessageToJSONBRoundTrip(t *testing.T) {
 			// nested inside other message; with maps
 			pbname: "cockroach.util.tracing.tracingpb.RecordedSpan",
 			message: &tracingpb.RecordedSpan{
-				TraceID: 123,
-				Tags:    map[string]string{"one": "1", "two": "2", "three": "3"},
-				StructuredRecords: []tracingpb.StructuredRecord{{
-					Time:    timeutil.Now(),
-					Payload: makeAny(t, &descpb.ColumnDescriptor{Name: "bogus stats"})}},
+				TraceID:            123,
+				Tags:               map[string]string{"one": "1", "two": "2", "three": "3"},
+				InternalStructured: []*pbtypes.Any{makeAny(t, &descpb.ColumnDescriptor{Name: "bogus stats"})},
 			},
 		},
 		{ // Message deeply nested inside other message
@@ -122,7 +117,7 @@ func TestMessageToJSONBRoundTrip(t *testing.T) {
 				require.Equal(t, tc.message, decoded)
 
 				// Encode message as json
-				jsonb, err := protoreflect.MessageToJSON(decoded, protoreflect.FmtFlags{EmitDefaults: false})
+				jsonb, err := protoreflect.MessageToJSON(decoded, false /* emitDefaults */)
 				require.NoError(t, err)
 
 				// Recreate message from json
@@ -139,7 +134,7 @@ func TestMessageToJSONBRoundTrip(t *testing.T) {
 	t.Run("identity-round-trip", func(t *testing.T) {
 		for _, tc := range testCases {
 			t.Run(tc.pbname, func(t *testing.T) {
-				jsonb, err := protoreflect.MessageToJSON(tc.message, protoreflect.FmtFlags{EmitDefaults: false})
+				jsonb, err := protoreflect.MessageToJSON(tc.message, false /* emitDefaults */)
 				require.NoError(t, err)
 
 				fromJSON, err := protoreflect.NewMessage(tc.pbname)
@@ -156,74 +151,6 @@ func TestMessageToJSONBRoundTrip(t *testing.T) {
 		}
 	})
 
-	t.Run("redacted-pb-to-json-does-not-round-trip", func(t *testing.T) {
-		for _, tc := range testCases {
-			t.Run(tc.pbname, func(t *testing.T) {
-				jsonb, err := protoreflect.MessageToJSON(tc.message, protoreflect.FmtFlags{EmitRedacted: true})
-				require.NoError(t, err)
-
-				fromJSON, err := protoreflect.NewMessage(tc.pbname)
-				require.NoError(t, err)
-
-				_, err = protoreflect.JSONBMarshalToMessage(jsonb, fromJSON)
-				require.Error(t, err)
-			})
-		}
-	})
-}
-
-func fetchPath(t *testing.T, j jsonb.JSON, path ...string) string {
-	t.Helper()
-	var err error
-	for _, p := range path {
-		require.NotNil(t, j)
-		j, err = j.FetchValKey(p)
-		require.NoError(t, err)
-	}
-
-	text, err := j.AsText()
-	require.NoError(t, err)
-	require.NotNil(t, text)
-	return *text
-}
-
-func TestRedactedMessages(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	const redactionMarker = "__redacted__"
-	const outerValue = "not redacted"
-
-	m := protoreflecttest.Outer{
-		Value: outerValue,
-		Inner: &protoreflecttest.Inner{Value: protoreflecttest.SecretMessage},
-	}
-
-	unredacted, err := protoreflect.MessageToJSON(&m, protoreflect.FmtFlags{EmitRedacted: false})
-	require.NoError(t, err)
-
-	markerSet, err := unredacted.Exists(redactionMarker)
-	require.NoError(t, err)
-	require.False(t, markerSet)
-
-	// Un-redacted message are round trippable.
-	var fromJSON protoreflecttest.Outer
-	_, err = protoreflect.JSONBMarshalToMessage(unredacted, &fromJSON)
-	require.NoError(t, err)
-	require.Equal(t, m, fromJSON)
-
-	// Now, try w/ redaction
-	redacted, err := protoreflect.MessageToJSON(&m, protoreflect.FmtFlags{EmitRedacted: true})
-	require.NoError(t, err)
-
-	markerSet, err = redacted.Exists(redactionMarker)
-	require.NoError(t, err)
-	require.True(t, markerSet)
-
-	// Redacted message no longer round trip-able.
-	_, err = protoreflect.JSONBMarshalToMessage(redacted, &fromJSON)
-	require.Error(t, err)
-	require.Equal(t, outerValue, fetchPath(t, redacted, "value"))
-	require.Equal(t, protoreflecttest.RedactedMessage, fetchPath(t, redacted, "inner", "value"))
 }
 
 // Ensure we don't blow up when asking to convert invalid
@@ -231,7 +158,7 @@ func TestRedactedMessages(t *testing.T) {
 func TestInvalidConversions(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	t.Run("no such message", func(t *testing.T) {
+	t.Run("no such messagge", func(t *testing.T) {
 		_, err := protoreflect.DecodeMessage("no.such.message", nil)
 		require.Error(t, err)
 	})

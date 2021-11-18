@@ -22,15 +22,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecagg"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecwindow"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/stretchr/testify/require"
 )
@@ -99,13 +96,12 @@ func TestAggregateFuncToNumArguments(t *testing.T) {
 
 func TestAggregatorAgainstProcessor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	st := cluster.MakeTestingClusterSettings()
 	evalCtx := tree.MakeTestingEvalContext(st)
 	defer evalCtx.Stop(context.Background())
 
-	rng, seed := randutil.NewTestRand()
+	rng, seed := randutil.NewPseudoRand()
 	nRuns := 20
 	nRows := 100
 	nAggFnsToTest := 5
@@ -202,11 +198,10 @@ func TestAggregatorAgainstProcessor(t *testing.T) {
 							aggFnInputTypes := make([]*types.T, len(aggregations[i].ColIdx))
 							for {
 								for j := range aggFnInputTypes {
-									aggFnInputTypes[j] = randgen.RandType(rng)
+									aggFnInputTypes[j] = rowenc.RandType(rng)
 								}
 								// There is a special case for some functions when at
-								// least one argument is a tuple or an array of
-								// tuples.
+								// least one argument is a tuple.
 								// Such cases pass GetAggregateInfo check below,
 								// but they are actually invalid, and during normal
 								// execution it is caught during type-checking.
@@ -221,7 +216,7 @@ func TestAggregatorAgainstProcessor(t *testing.T) {
 									execinfrapb.StUnion,
 									execinfrapb.StCollect:
 									for _, typ := range aggFnInputTypes {
-										if typ.Family() == types.TupleFamily || (typ.Family() == types.ArrayFamily && typ.ArrayContents().Family() == types.TupleFamily) {
+										if typ.Family() == types.TupleFamily {
 											invalid = true
 											break
 										}
@@ -240,7 +235,7 @@ func TestAggregatorAgainstProcessor(t *testing.T) {
 							}
 							inputTypes = append(inputTypes, aggFnInputTypes...)
 						}
-						rows = randgen.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
+						rows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
 						groupIdx := 0
 						for _, row := range rows {
 							for i := 0; i < numGroupingCols; i++ {
@@ -340,12 +335,11 @@ func TestAggregatorAgainstProcessor(t *testing.T) {
 
 func TestDistinctAgainstProcessor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	var da rowenc.DatumAlloc
 	evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 	defer evalCtx.Stop(context.Background())
 
-	rng, seed := randutil.NewTestRand()
+	rng, seed := randutil.NewPseudoRand()
 	nRuns := 10
 	nRows := 10
 	maxCols := 3
@@ -373,13 +367,11 @@ func TestDistinctAgainstProcessor(t *testing.T) {
 							ordCols    []execinfrapb.Ordering_Column
 						)
 						if rng.Float64() < randTypesProbability {
-							// If we're spilling, don't generate un-key-encodable types, since
-							// the row engine can't handle them.
-							inputTypes = generateRandomSupportedTypesWithUnencodable(rng, nCols, !spillForced)
-							rows = randgen.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
+							inputTypes = generateRandomSupportedTypes(rng, nCols)
+							rows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
 						} else {
 							inputTypes = intTyps[:nCols]
-							rows = randgen.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+							rows = rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
 						}
 						distinctCols := make([]uint32, nDistinctCols)
 						for i, distinctCol := range rng.Perm(nCols)[:nDistinctCols] {
@@ -469,12 +461,11 @@ func TestDistinctAgainstProcessor(t *testing.T) {
 
 func TestSorterAgainstProcessor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	st := cluster.MakeTestingClusterSettings()
 	evalCtx := tree.MakeTestingEvalContext(st)
 	defer evalCtx.Stop(context.Background())
 
-	rng, seed := randutil.NewTestRand()
+	rng, seed := randutil.NewPseudoRand()
 	nRuns := 5
 	nRows := 8 * coldata.BatchSize()
 	maxCols := 5
@@ -494,11 +485,11 @@ func TestSorterAgainstProcessor(t *testing.T) {
 						inputTypes []*types.T
 					)
 					if rng.Float64() < randTypesProbability {
-						inputTypes = generateRandomSupportedTypesWithUnencodable(rng, nCols, !spillForced)
-						rows = randgen.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
+						inputTypes = generateRandomSupportedTypes(rng, nCols)
+						rows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
 					} else {
 						inputTypes = intTyps[:nCols]
-						rows = randgen.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+						rows = rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
 					}
 
 					// Note: we're only generating column orderings on all nCols columns since
@@ -543,13 +534,12 @@ func TestSorterAgainstProcessor(t *testing.T) {
 
 func TestSortChunksAgainstProcessor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	var da rowenc.DatumAlloc
 	st := cluster.MakeTestingClusterSettings()
 	evalCtx := tree.MakeTestingEvalContext(st)
 	defer evalCtx.Stop(context.Background())
 
-	rng, seed := randutil.NewTestRand()
+	rng, seed := randutil.NewPseudoRand()
 	nRuns := 5
 	nRows := 5 * coldata.BatchSize() / 4
 	maxCols := 3
@@ -568,11 +558,11 @@ func TestSortChunksAgainstProcessor(t *testing.T) {
 						inputTypes []*types.T
 					)
 					if rng.Float64() < randTypesProbability {
-						inputTypes = generateRandomSupportedTypesWithUnencodable(rng, nCols, !spillForced)
-						rows = randgen.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
+						inputTypes = generateRandomSupportedTypes(rng, nCols)
+						rows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
 					} else {
 						inputTypes = intTyps[:nCols]
-						rows = randgen.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+						rows = rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
 					}
 
 					// Note: we're only generating column orderings on all nCols columns since
@@ -619,7 +609,6 @@ func TestSortChunksAgainstProcessor(t *testing.T) {
 
 func TestHashJoinerAgainstProcessor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 	defer evalCtx.Stop(context.Background())
 
@@ -661,7 +650,7 @@ func TestHashJoinerAgainstProcessor(t *testing.T) {
 		},
 	}
 
-	rng, seed := randutil.NewTestRand()
+	rng, seed := randutil.NewPseudoRand()
 	nRuns := 3
 	nRows := 10
 	maxCols := 3
@@ -688,8 +677,7 @@ func TestHashJoinerAgainstProcessor(t *testing.T) {
 								usingRandomTypes         bool
 							)
 							if rng.Float64() < randTypesProbability {
-								// HashRowContainers can't deal with non-keyencodable types.
-								lInputTypes = generateRandomSupportedTypesWithUnencodable(rng, nCols, false /* withUnencodable */)
+								lInputTypes = generateRandomSupportedTypes(rng, nCols)
 								lEqCols = generateEqualityColumns(rng, nCols, nEqCols)
 								rInputTypes = append(rInputTypes[:0], lInputTypes...)
 								rEqCols = append(rEqCols[:0], lEqCols...)
@@ -699,14 +687,14 @@ func TestHashJoinerAgainstProcessor(t *testing.T) {
 									rEqCols[i], rEqCols[j] = rEqCols[j], rEqCols[i]
 								})
 								rInputTypes = randomizeJoinRightTypes(rng, rInputTypes)
-								lRows = randgen.RandEncDatumRowsOfTypes(rng, nRows, lInputTypes)
-								rRows = randgen.RandEncDatumRowsOfTypes(rng, nRows, rInputTypes)
+								lRows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, lInputTypes)
+								rRows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, rInputTypes)
 								usingRandomTypes = true
 							} else {
 								lInputTypes = intTyps[:nCols]
 								rInputTypes = lInputTypes
-								lRows = randgen.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
-								rRows = randgen.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+								lRows = rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+								rRows = rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
 								lEqCols = generateEqualityColumns(rng, nCols, nEqCols)
 								rEqCols = generateEqualityColumns(rng, nCols, nEqCols)
 							}
@@ -813,7 +801,6 @@ func generateEqualityColumns(rng *rand.Rand, nCols int, nEqCols int) []uint32 {
 
 func TestMergeJoinerAgainstProcessor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 	var da rowenc.DatumAlloc
 	evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 	defer evalCtx.Stop(context.Background())
@@ -860,7 +847,7 @@ func TestMergeJoinerAgainstProcessor(t *testing.T) {
 		},
 	}
 
-	rng, seed := randutil.NewTestRand()
+	rng, seed := randutil.NewPseudoRand()
 	nRuns := 3
 	nRows := 10
 	maxCols := 3
@@ -896,14 +883,14 @@ func TestMergeJoinerAgainstProcessor(t *testing.T) {
 								rOrderingCols[i], rOrderingCols[j] = rOrderingCols[j], rOrderingCols[i]
 							})
 							rInputTypes = randomizeJoinRightTypes(rng, rInputTypes)
-							lRows = randgen.RandEncDatumRowsOfTypes(rng, nRows, lInputTypes)
-							rRows = randgen.RandEncDatumRowsOfTypes(rng, nRows, rInputTypes)
+							lRows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, lInputTypes)
+							rRows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, rInputTypes)
 							usingRandomTypes = true
 						} else {
 							lInputTypes = intTyps[:nCols]
 							rInputTypes = lInputTypes
-							lRows = randgen.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
-							rRows = randgen.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+							lRows = rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+							rRows = rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
 							lOrderingCols = generateColumnOrdering(rng, nCols, nOrderingCols)
 							rOrderingCols = generateColumnOrdering(rng, nCols, nOrderingCols)
 						}
@@ -1031,32 +1018,28 @@ func generateFilterExpr(
 	forceConstComparison bool,
 	forceSingleSide bool,
 ) execinfrapb.Expression {
-	var colIdx int
+	var comparison string
+	r := rng.Float64()
+	if r < 0.25 {
+		comparison = "<"
+	} else if r < 0.5 {
+		comparison = ">"
+	} else if r < 0.75 {
+		comparison = "="
+	} else {
+		comparison = "<>"
+	}
 	// When all columns are used in equality comparison between inputs, there is
 	// only one interesting case when a column from either side is compared
 	// against a constant. The second conditional is us choosing to compare
 	// against a constant.
-	singleSideComparison := nCols == nEqCols || rng.Float64() < 0.33 || forceConstComparison || forceSingleSide
-	colIdx = rng.Intn(nCols)
-	if singleSideComparison {
+	if nCols == nEqCols || rng.Float64() < 0.33 || forceConstComparison || forceSingleSide {
+		colIdx := rng.Intn(nCols)
 		if !forceSingleSide && rng.Float64() >= 0.5 {
 			// Use right side.
 			colIdx += nCols
 		}
-	}
-	colType := colTypes[colIdx]
-
-	var comparison string
-	comparisons := []string{"=", "<>", "<", ">"}
-	n := len(comparisons)
-	if colType.Family() == types.JsonFamily {
-		// JSON can't be sorted, only != and = compared. Pick from the first half
-		// of the list
-		n = 2
-	}
-	comparison = comparisons[rng.Intn(n)]
-	if singleSideComparison {
-		constDatum := randgen.RandDatum(rng, colTypes[colIdx], true /* nullOk */)
+		constDatum := rowenc.RandDatum(rng, colTypes[colIdx], true /* nullOk */)
 		constDatumString := constDatum.String()
 		switch colTypes[colIdx].Family() {
 		case types.FloatFamily, types.DecimalFamily:
@@ -1065,45 +1048,29 @@ func generateFilterExpr(
 				// We need to surround special numerical values with quotes.
 				constDatumString = fmt.Sprintf("'%s'", constDatumString)
 			}
-		case types.JsonFamily:
-			constDatumString = fmt.Sprintf("%s::json", constDatumString)
 		}
 		return execinfrapb.Expression{Expr: fmt.Sprintf("@%d %s %s", colIdx+1, comparison, constDatumString)}
 	}
 	// We will compare a column from the left against a column from the right.
-	rightColIdx := rng.Intn(nCols) + nCols
-	return execinfrapb.Expression{Expr: fmt.Sprintf("@%d %s @%d", colIdx+1, comparison, rightColIdx+1)}
+	leftColIdx := rng.Intn(nCols) + 1
+	rightColIdx := rng.Intn(nCols) + nCols + 1
+	return execinfrapb.Expression{Expr: fmt.Sprintf("@%d %s @%d", leftColIdx, comparison, rightColIdx)}
 }
 
 func TestWindowFunctionsAgainstProcessor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
-	rng, seed := randutil.NewTestRand()
-
-	const manyRowsProbability = 0.05
-	const fewRows = 10
-	var manyRows = 2*coldata.BatchSize() + rng.Intn(coldata.BatchSize())
-	var usedManyRows bool
-
+	rng, seed := randutil.NewPseudoRand()
+	nRows := 2 * coldata.BatchSize()
 	maxCols := 4
-	maxArgs := 3
-	typs := make([]*types.T, maxCols, maxCols+maxArgs)
+	maxNum := 10
+	typs := make([]*types.T, maxCols)
 	for i := range typs {
+		// TODO(yuzefovich): randomize the types of the columns once we support
+		// window functions that take in arguments.
 		typs[i] = types.Int
 	}
-
-	runTests := func(
-		fun execinfrapb.WindowerSpec_Func,
-		funcName string,
-		argTypes []*types.T,
-		orderNonPartitionCols bool,
-	) {
-		nRows := fewRows
-		if !usedManyRows && rng.Float64() < manyRowsProbability {
-			nRows = manyRows
-			usedManyRows = true
-		}
+	for windowFn := range colexecwindow.SupportedWindowFns {
 		for _, partitionBy := range [][]uint32{
 			{},     // No PARTITION BY clause.
 			{0},    // Partitioning on the first input column.
@@ -1118,49 +1085,31 @@ func TestWindowFunctionsAgainstProcessor(t *testing.T) {
 					if len(partitionBy) > nCols || nOrderingCols > nCols {
 						continue
 					}
+					inputTypes := typs[:nCols:nCols]
+					rows := rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
 
-					var argsIdxs []uint32
-					inputTypes := make([]*types.T, nCols, nCols+len(argTypes))
-					copy(inputTypes, typs[:nCols])
-					inputTypes = append(inputTypes, argTypes...)
-					for i := range argTypes {
-						// The arg columns will be appended to the end of the other columns.
-						argsIdxs = append(argsIdxs, uint32(nCols+i))
-					}
-
-					rows := randgen.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
-					for _, row := range rows {
-						for i := 0; i < len(inputTypes); i++ {
-							if rng.Float64() < nullProbability {
-								row[i] = rowenc.EncDatum{Datum: tree.DNull}
-							}
-						}
-					}
-
-					if orderNonPartitionCols {
-						// The output of this window function is not deterministic if there
-						// are columns that are not present in either PARTITION BY or
-						// ORDER BY clauses, so we require that all non-partitioning columns
-						// are ordering columns.
-						nOrderingCols = len(inputTypes)
-					}
-
-					ordering := generateOrderingGivenPartitionBy(rng, len(inputTypes), nOrderingCols, partitionBy)
 					windowerSpec := &execinfrapb.WindowerSpec{
 						PartitionBy: partitionBy,
 						WindowFns: []execinfrapb.WindowerSpec_WindowFn{
 							{
-								Func:         fun,
-								ArgsIdxs:     argsIdxs,
-								Ordering:     ordering,
-								OutputColIdx: uint32(len(inputTypes)),
+								Func:         execinfrapb.WindowerSpec_Func{WindowFunc: &windowFn},
+								Ordering:     generateOrderingGivenPartitionBy(rng, nCols, nOrderingCols, partitionBy),
+								OutputColIdx: uint32(nCols),
 								FilterColIdx: tree.NoColumnIdx,
 							},
 						},
 					}
-					windowerSpec.WindowFns[0].Frame = generateWindowFrame(t, rng, &ordering, inputTypes)
+					if windowFn == execinfrapb.WindowerSpec_ROW_NUMBER &&
+						len(partitionBy)+len(windowerSpec.WindowFns[0].Ordering.Columns) < nCols {
+						// The output of row_number is not deterministic if there are
+						// columns that are not present in either PARTITION BY or ORDER BY
+						// clauses, so we skip such a configuration.
+						continue
+					}
 
-					_, outputType, err := execinfrapb.GetWindowFunctionInfo(fun, argTypes...)
+					// Currently, we only support window functions that take no
+					// arguments, so we leave the second argument empty.
+					_, outputType, err := execinfrapb.GetWindowFunctionInfo(execinfrapb.WindowerSpec_Func{WindowFunc: &windowFn})
 					require.NoError(t, err)
 					pspec := &execinfrapb.ProcessorSpec{
 						Input:       []execinfrapb.InputSyncSpec{{ColumnTypes: inputTypes}},
@@ -1174,33 +1123,6 @@ func TestWindowFunctionsAgainstProcessor(t *testing.T) {
 						pspec:      pspec,
 					}
 					if err := verifyColOperator(t, args); err != nil {
-						if strings.Contains(err.Error(), "different errors returned") {
-							// Columnar and row-based windowers are likely to hit
-							// different errors, and we will swallow those and move
-							// on.
-							continue
-						}
-						if strings.Contains(err.Error(), "integer out of range") &&
-							fun.AggregateFunc != nil && *fun.AggregateFunc == execinfrapb.SumInt {
-							// The columnar implementation of this window function uses the
-							// sliding window optimization, but the row engine version
-							// doesn't. As a result, in some cases the row engine will
-							// overflow while the vectorized engine doesn't.
-							continue
-						}
-						fmt.Printf("window function: %s\n", funcName)
-						fmt.Printf("partitionCols: %v\n", partitionBy)
-						fmt.Print("ordering: ")
-						for i := range ordering.Columns {
-							fmt.Printf("%v %v, ", ordering.Columns[i].ColIdx, ordering.Columns[i].Direction)
-						}
-						fmt.Println()
-						fmt.Printf("argIdxs: %v\n", argsIdxs)
-						frame := windowerSpec.WindowFns[0].Frame
-						fmt.Printf("frame mode: %v\n", frame.Mode)
-						fmt.Printf("start bound: %v\n", frame.Bounds.Start)
-						fmt.Printf("end bound: %v\n", *frame.Bounds.End)
-						fmt.Printf("frame exclusion: %v\n", frame.Exclusion)
 						fmt.Printf("seed = %d\n", seed)
 						prettyPrintTypes(inputTypes, "t" /* tableName */)
 						prettyPrintInput(rows, inputTypes, "t" /* tableName */)
@@ -1210,85 +1132,17 @@ func TestWindowFunctionsAgainstProcessor(t *testing.T) {
 			}
 		}
 	}
-
-	for windowFnIdx := 0; windowFnIdx < len(execinfrapb.WindowerSpec_WindowFunc_name); windowFnIdx++ {
-		windowFn := execinfrapb.WindowerSpec_WindowFunc(windowFnIdx)
-		var argTypes []*types.T
-		randArgType := types.Int
-		if rand.Float64() < randTypesProbability {
-			randArgType = generateRandomSupportedTypes(rng, 1 /* nCols */)[0]
-		}
-		switch windowFn {
-		case execinfrapb.WindowerSpec_NTILE:
-			argTypes = []*types.T{types.Int}
-		case execinfrapb.WindowerSpec_LAG, execinfrapb.WindowerSpec_LEAD:
-			argTypes = []*types.T{randArgType, types.Int, randArgType}
-		case execinfrapb.WindowerSpec_FIRST_VALUE, execinfrapb.WindowerSpec_LAST_VALUE:
-			argTypes = []*types.T{randArgType}
-		case execinfrapb.WindowerSpec_NTH_VALUE:
-			argTypes = []*types.T{randArgType, types.Int}
-		}
-		orderNonPartitionCols := windowFn == execinfrapb.WindowerSpec_ROW_NUMBER ||
-			windowFn == execinfrapb.WindowerSpec_NTILE ||
-			windowFn == execinfrapb.WindowerSpec_LAG ||
-			windowFn == execinfrapb.WindowerSpec_LEAD ||
-			windowFn == execinfrapb.WindowerSpec_FIRST_VALUE ||
-			windowFn == execinfrapb.WindowerSpec_LAST_VALUE ||
-			windowFn == execinfrapb.WindowerSpec_NTH_VALUE
-		runTests(execinfrapb.WindowerSpec_Func{WindowFunc: &windowFn},
-			windowFn.String(), argTypes, orderNonPartitionCols)
-	}
-
-	for aggFnIdx := 0; aggFnIdx < len(execinfrapb.AggregatorSpec_Func_name); aggFnIdx++ {
-		aggFn := execinfrapb.AggregatorSpec_Func(aggFnIdx)
-		if !colexecagg.IsAggOptimized(aggFn) || aggFn == execinfrapb.AnyNotNull {
-			// any_not_null is an internal function.
-			continue
-		}
-		var argTypes []*types.T
-		switch aggFn {
-		case execinfrapb.CountRows:
-			// count_rows takes no arguments.
-		case execinfrapb.BoolOr, execinfrapb.BoolAnd:
-			argTypes = []*types.T{types.Bool}
-		case execinfrapb.ConcatAgg:
-			argTypes = []*types.T{types.String}
-		default:
-			argTypes = []*types.T{types.Int}
-			if rand.Float64() < randTypesProbability &&
-				(aggFn == execinfrapb.Min || aggFn == execinfrapb.Max) {
-				argTypes[0] = generateRandomSupportedTypes(rng, 1 /* nCols */)[0]
-			}
-		}
-		runTests(execinfrapb.WindowerSpec_Func{AggregateFunc: &aggFn},
-			aggFn.String(), argTypes, true /* orderNonPartitionCols */)
-	}
 }
 
 // generateRandomSupportedTypes generates nCols random types that are supported
 // by the vectorized engine.
 func generateRandomSupportedTypes(rng *rand.Rand, nCols int) []*types.T {
-	return generateRandomSupportedTypesWithUnencodable(rng, nCols, true /* withUnencodable */)
-}
-
-// generateRandomSupportedTypesWithUnencodable generates nCols random types that
-// are supported by the vectorized engine. If withUnencodable is false, it won't
-// generate types that aren't key-encodable.
-func generateRandomSupportedTypesWithUnencodable(
-	rng *rand.Rand, nCols int, withUnencodable bool,
-) []*types.T {
 	typs := make([]*types.T, 0, nCols)
 	for len(typs) < nCols {
-		typ := randgen.RandType(rng)
-		family := typeconv.TypeFamilyToCanonicalTypeFamily(typ.Family())
-		if family == typeconv.DatumVecCanonicalTypeFamily {
+		typ := rowenc.RandType(rng)
+		if typeconv.TypeFamilyToCanonicalTypeFamily(typ.Family()) == typeconv.DatumVecCanonicalTypeFamily {
 			// At the moment, we disallow datum-backed types.
 			// TODO(yuzefovich): remove this.
-			continue
-		}
-		if !withUnencodable && (family == types.JsonFamily || family == types.ArrayFamily) {
-			// This is so that the row engine, which has to spill using key encoding,
-			// can avoid running tests with types that don't have a key encoding.
 			continue
 		}
 		typs = append(typs, typ)
@@ -1352,101 +1206,6 @@ func generateOrderingGivenPartitionBy(
 		}
 	}
 	return ordering
-}
-
-func generateWindowFrame(
-	t *testing.T, rng *rand.Rand, ordering *execinfrapb.Ordering, inputTypes []*types.T,
-) *execinfrapb.WindowerSpec_Frame {
-	var modes = []execinfrapb.WindowerSpec_Frame_Mode{
-		execinfrapb.WindowerSpec_Frame_RANGE,
-		execinfrapb.WindowerSpec_Frame_ROWS,
-		execinfrapb.WindowerSpec_Frame_GROUPS,
-	}
-	var boundTypes = []execinfrapb.WindowerSpec_Frame_BoundType{
-		execinfrapb.WindowerSpec_Frame_UNBOUNDED_PRECEDING,
-		execinfrapb.WindowerSpec_Frame_OFFSET_PRECEDING,
-		execinfrapb.WindowerSpec_Frame_CURRENT_ROW,
-		execinfrapb.WindowerSpec_Frame_OFFSET_FOLLOWING,
-		execinfrapb.WindowerSpec_Frame_UNBOUNDED_FOLLOWING,
-	}
-	var exclusionTypes = []execinfrapb.WindowerSpec_Frame_Exclusion{
-		execinfrapb.WindowerSpec_Frame_NO_EXCLUSION,
-		execinfrapb.WindowerSpec_Frame_EXCLUDE_CURRENT_ROW,
-		execinfrapb.WindowerSpec_Frame_EXCLUDE_GROUP,
-		execinfrapb.WindowerSpec_Frame_EXCLUDE_TIES,
-	}
-
-	mode := modes[rng.Intn(len(modes))]
-
-	// Ensure that start and end bound types are syntactically valid.
-	startBoundIdx := rng.Intn(len(boundTypes) - 1)
-	var endBoundIdx int
-	for {
-		endBoundIdx = rng.Intn(len(boundTypes)-1) + 1
-		if endBoundIdx >= startBoundIdx {
-			break
-		}
-	}
-	startBoundType := boundTypes[startBoundIdx]
-	endBoundType := boundTypes[endBoundIdx]
-
-	windowFrameBoundIsOffset := func(boundType execinfrapb.WindowerSpec_Frame_BoundType) bool {
-		return boundType == execinfrapb.WindowerSpec_Frame_OFFSET_PRECEDING ||
-			boundType == execinfrapb.WindowerSpec_Frame_OFFSET_FOLLOWING
-	}
-
-	if len(ordering.Columns) == 0 {
-		// RANGE and GROUPS modes require at least one ordering column.
-		mode = execinfrapb.WindowerSpec_Frame_ROWS
-	}
-	if mode == execinfrapb.WindowerSpec_Frame_RANGE &&
-		(len(ordering.Columns) != 1 || !types.IsAdditiveType(inputTypes[ordering.Columns[0].ColIdx])) {
-		// RANGE mode with OFFSET PRECEDING or OFFSET FOLLOWING requires there to
-		// be exactly one ordering column that is numeric or datetime.
-		if windowFrameBoundIsOffset(startBoundType) {
-			startBoundType = execinfrapb.WindowerSpec_Frame_UNBOUNDED_PRECEDING
-		}
-		if windowFrameBoundIsOffset(endBoundType) {
-			endBoundType = execinfrapb.WindowerSpec_Frame_UNBOUNDED_FOLLOWING
-		}
-	}
-
-	exclusion := exclusionTypes[rng.Intn(len(exclusionTypes))]
-
-	frame := &execinfrapb.WindowerSpec_Frame{
-		Mode: mode,
-		Bounds: execinfrapb.WindowerSpec_Frame_Bounds{
-			Start: execinfrapb.WindowerSpec_Frame_Bound{BoundType: startBoundType},
-			End:   &execinfrapb.WindowerSpec_Frame_Bound{BoundType: endBoundType},
-		},
-		Exclusion: exclusion,
-	}
-
-	const maxUInt64Offset = 10
-	if windowFrameBoundIsOffset(startBoundType) || windowFrameBoundIsOffset(endBoundType) {
-		if frame.Mode == execinfrapb.WindowerSpec_Frame_ROWS ||
-			frame.Mode == execinfrapb.WindowerSpec_Frame_GROUPS {
-			frame.Bounds.Start.IntOffset = rng.Uint64() % maxUInt64Offset
-			frame.Bounds.End.IntOffset = rng.Uint64() % maxUInt64Offset
-		} else {
-			// We can assume that there is exactly one ordering column of an additive
-			// type, since we checked above.
-			colIdx := ordering.Columns[0].ColIdx
-			colEncoding := descpb.DatumEncoding_ASCENDING_KEY
-			if ordering.Columns[0].Direction == execinfrapb.Ordering_Column_DESC {
-				colEncoding = descpb.DatumEncoding_DESCENDING_KEY
-			}
-			offsetType := colexecwindow.GetOffsetTypeFromOrderColType(t, inputTypes[colIdx])
-			startOffset := colexecwindow.MakeRandWindowFrameRangeOffset(t, rng, offsetType)
-			endOffset := colexecwindow.MakeRandWindowFrameRangeOffset(t, rng, offsetType)
-			frame.Bounds.Start.TypedOffset = colexecwindow.EncodeWindowFrameOffset(t, startOffset)
-			frame.Bounds.End.TypedOffset = colexecwindow.EncodeWindowFrameOffset(t, endOffset)
-			frame.Bounds.Start.OffsetType = execinfrapb.DatumInfo{Encoding: colEncoding, Type: offsetType}
-			frame.Bounds.End.OffsetType = execinfrapb.DatumInfo{Encoding: colEncoding, Type: offsetType}
-		}
-	}
-
-	return frame
 }
 
 // prettyPrintTypes prints out typs as a CREATE TABLE statement.

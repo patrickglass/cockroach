@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for proj_const_{left,right}_ops.eg.go.
 // It's formatted in a special way, so it's both valid Go and a valid
@@ -22,6 +20,8 @@
 package colexecproj
 
 import (
+	"context"
+
 	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
@@ -38,7 +38,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/errors"
 )
 
@@ -49,8 +48,6 @@ var (
 	_ duration.Duration
 	_ sqltelemetry.EnumTelemetryType
 	_ telemetry.Counter
-	_ json.JSON
-	_ = coldataext.CompareDatum
 )
 
 // {{/*
@@ -90,14 +87,14 @@ type _OP_CONST_NAME struct {
 	// {{end}}
 }
 
-func (p _OP_CONST_NAME) Next() coldata.Batch {
+func (p _OP_CONST_NAME) Next(ctx context.Context) coldata.Batch {
 	// In order to inline the templated code of overloads, we need to have a
 	// `_overloadHelper` local variable of type `execgen.OverloadHelper`.
 	_overloadHelper := p.overloadHelper
 	// However, the scratch is not used in all of the projection operators, so
 	// we add this to go around "unused" error.
 	_ = _overloadHelper
-	batch := p.Input.Next()
+	batch := p.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -135,6 +132,10 @@ func (p _OP_CONST_NAME) Next() coldata.Batch {
 		batch.SetLength(n)
 	})
 	return batch
+}
+
+func (p _OP_CONST_NAME) Init() {
+	p.Input.Init()
 }
 
 // {{end}}
@@ -265,7 +266,7 @@ func GetProjection_CONST_SIDEConstOperator(
 ) (colexecop.Operator, error) {
 	input = colexecutils.NewVectorTypeEnforcer(allocator, input, outputType, outputIdx)
 	projConstOpBase := projConstOpBase{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
+		OneInputNode:   colexecop.NewOneInputNode(input),
 		allocator:      allocator,
 		colIdx:         colIdx,
 		outputIdx:      outputIdx,
@@ -277,9 +278,9 @@ func GetProjection_CONST_SIDEConstOperator(
 	// {{else}}
 	leftType, rightType := inputTypes[colIdx], constType
 	// {{end}}
-	switch op := op.(type) {
+	switch op.(type) {
 	case tree.BinaryOperator:
-		switch op.Symbol {
+		switch op {
 		// {{range .BinOps}}
 		case tree._NAME:
 			switch typeconv.TypeFamilyToCanonicalTypeFamily(leftType.Family()) {
@@ -291,7 +292,6 @@ func GetProjection_CONST_SIDEConstOperator(
 				case _LEFT_TYPE_WIDTH:
 					switch typeconv.TypeFamilyToCanonicalTypeFamily(rightType.Family()) {
 					// {{range .RightFamilies}}
-					// {{$rightFamilyStr := .RightCanonicalFamilyStr}}
 					case _RIGHT_CANONICAL_TYPE_FAMILY:
 						switch rightType.Width() {
 						// {{range .RightWidths}}
@@ -300,16 +300,21 @@ func GetProjection_CONST_SIDEConstOperator(
 								projConstOpBase: projConstOpBase,
 								// {{if _IS_CONST_LEFT}}
 								// {{if eq $leftFamilyStr "typeconv.DatumVecCanonicalTypeFamily"}}
-								constArg: constArg,
+								// {{/*
+								//     Binary operations are evaluated using coldataext.Datum.BinFn
+								//     method which requires that we have *coldataext.Datum on the
+								//     left, so we create that at the operator construction time to
+								//     avoid runtime conversion. Note that when the constant is on
+								//     the right side, then the left element necessarily comes from
+								//     the vector and will be of the desired type, so no additional
+								//     work is needed.
+								// */}}
+								constArg: &coldataext.Datum{Datum: c.(tree.Datum)},
 								// {{else}}
 								constArg: c.(_L_GO_TYPE),
 								// {{end}}
 								// {{else}}
-								// {{if eq $rightFamilyStr "typeconv.DatumVecCanonicalTypeFamily"}}
-								constArg: constArg,
-								// {{else}}
 								constArg: c.(_R_GO_TYPE),
-								// {{end}}
 								// {{end}}
 							}, nil
 							// {{end}}
@@ -333,7 +338,7 @@ func GetProjection_CONST_SIDEConstOperator(
 			// Tuple comparison has special null-handling semantics, so we will
 			// fallback to the default comparison operator if either of the
 			// input vectors is of a tuple type.
-			switch op.Symbol {
+			switch op {
 			// {{range .CmpOps}}
 			case tree._NAME:
 				switch typeconv.TypeFamilyToCanonicalTypeFamily(leftType.Family()) {
@@ -368,7 +373,7 @@ func GetProjection_CONST_SIDEConstOperator(
 			projConstOpBase:     projConstOpBase,
 			adapter:             colexeccmp.NewComparisonExprAdapter(cmpExpr, evalCtx),
 			constArg:            constArg,
-			toDatumConverter:    colconv.NewVecToDatumConverter(len(inputTypes), []int{colIdx}, true /* willRelease */),
+			toDatumConverter:    colconv.NewVecToDatumConverter(len(inputTypes), []int{colIdx}),
 			datumToVecConverter: colconv.GetDatumToPhysicalFn(outputType),
 		}, nil
 		// {{end}}

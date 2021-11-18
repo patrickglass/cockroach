@@ -25,9 +25,11 @@ func CopyBatch(
 	b := coldata.NewMemBatchWithCapacity(typs, original.Length(), factory)
 	b.SetLength(original.Length())
 	for colIdx, col := range original.ColVecs() {
-		b.ColVec(colIdx).Copy(coldata.SliceArgs{
-			Src:       col,
-			SrcEndIdx: original.Length(),
+		b.ColVec(colIdx).Copy(coldata.CopySliceArgs{
+			SliceArgs: coldata.SliceArgs{
+				Src:       col,
+				SrcEndIdx: original.Length(),
+			},
 		})
 	}
 	return b

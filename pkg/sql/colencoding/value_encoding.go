@@ -23,74 +23,77 @@ import (
 )
 
 // DecodeTableValueToCol decodes a value encoded by EncodeTableValue, writing
-// the result to the rowIdx'th position of the vecIdx'th vector in
-// coldata.TypedVecs.
-// See the analog in rowenc/column_type_encoding.go.
+// the result to the idx'th position of the input exec.Vec.
+// See the analog in sqlbase/column_type_encoding.go.
 func DecodeTableValueToCol(
 	da *rowenc.DatumAlloc,
-	vecs *coldata.TypedVecs,
-	vecIdx int,
-	rowIdx int,
+	vec coldata.Vec,
+	idx int,
 	typ encoding.Type,
 	dataOffset int,
 	valTyp *types.T,
-	buf []byte,
+	b []byte,
 ) ([]byte, error) {
 	// NULL is special because it is a valid value for any type.
 	if typ == encoding.Null {
-		vecs.Nulls[vecIdx].SetNull(rowIdx)
-		return buf[dataOffset:], nil
+		vec.Nulls().SetNull(idx)
+		return b[dataOffset:], nil
 	}
+	// Bool is special because the value is stored in the value tag.
+	if valTyp.Family() != types.BoolFamily {
+		b = b[dataOffset:]
+	}
+	return decodeUntaggedDatumToCol(da, vec, idx, valTyp, b)
+}
 
-	// Bool is special because the value is stored in the value tag, so we have
-	// to keep the reference to the original slice.
-	origBuf := buf
-	buf = buf[dataOffset:]
-
-	// Find the position of the target vector among the typed columns of its
-	// type.
-	colIdx := vecs.ColsMap[vecIdx]
-
+// decodeUntaggedDatum is used to decode a Datum whose type is known,
+// and which doesn't have a value tag (either due to it having been
+// consumed already or not having one in the first place). It writes the result
+// to the idx'th position of the input coldata.Vec.
+//
+// This is used to decode datums encoded using value encoding.
+//
+// If t is types.Bool, the value tag must be present, as its value is encoded in
+// the tag directly.
+// See the analog in sqlbase/column_type_encoding.go.
+func decodeUntaggedDatumToCol(
+	da *rowenc.DatumAlloc, vec coldata.Vec, idx int, t *types.T, buf []byte,
+) ([]byte, error) {
 	var err error
-	switch valTyp.Family() {
+	switch t.Family() {
 	case types.BoolFamily:
 		var b bool
 		// A boolean's value is encoded in its tag directly, so we don't have an
-		// "Untagged" version of this function. Note that we also use the
-		// original buffer.
-		buf, b, err = encoding.DecodeBoolValue(origBuf)
-		vecs.BoolCols[colIdx][rowIdx] = b
+		// "Untagged" version of this function.
+		buf, b, err = encoding.DecodeBoolValue(buf)
+		vec.Bool()[idx] = b
 	case types.BytesFamily, types.StringFamily:
 		var data []byte
 		buf, data, err = encoding.DecodeUntaggedBytesValue(buf)
-		vecs.BytesCols[colIdx].Set(rowIdx, data)
+		vec.Bytes().Set(idx, data)
 	case types.DateFamily:
 		var i int64
 		buf, i, err = encoding.DecodeUntaggedIntValue(buf)
-		vecs.Int64Cols[colIdx][rowIdx] = i
+		vec.Int64()[idx] = i
 	case types.DecimalFamily:
-		buf, err = encoding.DecodeIntoUntaggedDecimalValue(&vecs.DecimalCols[colIdx][rowIdx], buf)
+		buf, err = encoding.DecodeIntoUntaggedDecimalValue(&vec.Decimal()[idx], buf)
 	case types.FloatFamily:
 		var f float64
 		buf, f, err = encoding.DecodeUntaggedFloatValue(buf)
-		vecs.Float64Cols[colIdx][rowIdx] = f
+		vec.Float64()[idx] = f
 	case types.IntFamily:
 		var i int64
 		buf, i, err = encoding.DecodeUntaggedIntValue(buf)
-		switch valTyp.Width() {
+		switch t.Width() {
 		case 16:
-			vecs.Int16Cols[colIdx][rowIdx] = int16(i)
+			vec.Int16()[idx] = int16(i)
 		case 32:
-			vecs.Int32Cols[colIdx][rowIdx] = int32(i)
+			vec.Int32()[idx] = int32(i)
 		default:
 			// Pre-2.1 BIT was using INT encoding with arbitrary sizes.
 			// We map these to 64-bit INT now. See #34161.
-			vecs.Int64Cols[colIdx][rowIdx] = i
+			vec.Int64()[idx] = i
 		}
-	case types.JsonFamily:
-		var data []byte
-		buf, data, err = encoding.DecodeUntaggedBytesValue(buf)
-		vecs.JSONCols[colIdx].Bytes.Set(rowIdx, data)
 	case types.UuidFamily:
 		var data uuid.UUID
 		buf, data, err = encoding.DecodeUntaggedUUIDValue(buf)
@@ -99,23 +102,23 @@ func DecodeTableValueToCol(
 		if err != nil {
 			return buf, err
 		}
-		vecs.BytesCols[colIdx].Set(rowIdx, data.GetBytes())
+		vec.Bytes().Set(idx, data.GetBytes())
 	case types.TimestampFamily, types.TimestampTZFamily:
 		var t time.Time
 		buf, t, err = encoding.DecodeUntaggedTimeValue(buf)
-		vecs.TimestampCols[colIdx][rowIdx] = t
+		vec.Timestamp()[idx] = t
 	case types.IntervalFamily:
 		var d duration.Duration
 		buf, d, err = encoding.DecodeUntaggedDurationValue(buf)
-		vecs.IntervalCols[colIdx][rowIdx] = d
+		vec.Interval()[idx] = d
 	// Types backed by tree.Datums.
 	default:
 		var d tree.Datum
-		d, buf, err = rowenc.DecodeUntaggedDatum(da, valTyp, buf)
+		d, buf, err = rowenc.DecodeUntaggedDatum(da, t, buf)
 		if err != nil {
 			return buf, err
 		}
-		vecs.DatumCols[colIdx].Set(rowIdx, d)
+		vec.Datum().Set(idx, d)
 	}
 	return buf, err
 }

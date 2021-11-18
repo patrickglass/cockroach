@@ -31,7 +31,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/logtags"
 )
 
 // CreatedByScheduledJobs identifies the job that was created
@@ -84,14 +83,14 @@ SELECT
    FROM %s J
    WHERE
       J.created_by_type = '%s' AND J.created_by_id = S.schedule_id AND
-      J.status NOT IN ('%s', '%s', '%s', '%s')
+      J.status NOT IN ('%s', '%s', '%s')
   ) AS num_running, S.*
 FROM %s S
 WHERE next_run < %s
 ORDER BY random()
 %s
 FOR UPDATE`, env.SystemJobsTableName(), CreatedByScheduledJobs,
-		StatusSucceeded, StatusCanceled, StatusFailed, StatusRevertFailed,
+		StatusSucceeded, StatusCanceled, StatusFailed,
 		env.ScheduledJobsTableName(), env.NowExpr(), limitClause)
 }
 
@@ -181,8 +180,7 @@ func (s *jobScheduler) processSchedule(
 		schedule.ScheduleID(), schedule.ScheduleLabel(),
 		schedule.ScheduledRunTime(), schedule.NextRun())
 
-	execCtx := logtags.AddTag(ctx, "schedule", schedule.ScheduleID())
-	if err := executor.ExecuteJob(execCtx, s.JobExecutionConfig, s.env, schedule, txn); err != nil {
+	if err := executor.ExecuteJob(ctx, s.JobExecutionConfig, s.env, schedule, txn); err != nil {
 		return errors.Wrapf(err, "executing schedule %d", schedule.ScheduleID())
 	}
 
@@ -197,9 +195,9 @@ func newLoopStats(
 	ctx context.Context, env scheduledjobs.JobSchedulerEnv, ex sqlutil.InternalExecutor, txn *kv.Txn,
 ) (*loopStats, error) {
 	numRunningJobsStmt := fmt.Sprintf(
-		"SELECT count(*) FROM %s WHERE created_by_type = '%s' AND status NOT IN ('%s', '%s', '%s', '%s')",
+		"SELECT count(*) FROM %s WHERE created_by_type = '%s' AND status NOT IN ('%s', '%s', '%s')",
 		env.SystemJobsTableName(), CreatedByScheduledJobs,
-		StatusSucceeded, StatusCanceled, StatusFailed, StatusRevertFailed)
+		StatusSucceeded, StatusCanceled, StatusFailed)
 	readyToRunStmt := fmt.Sprintf(
 		"SELECT count(*) FROM %s WHERE next_run < %s",
 		env.ScheduledJobsTableName(), env.NowExpr())
@@ -300,12 +298,6 @@ func (s *jobScheduler) executeSchedules(
 			continue
 		}
 
-		if !s.env.IsExecutorEnabled(schedule.ExecutorType()) {
-			log.Infof(ctx, "Ignoring schedule %d: %s executor disabled",
-				schedule.ScheduleID(), schedule.ExecutorType())
-			continue
-		}
-
 		if processErr := withSavePoint(ctx, txn, func() error {
 			return s.processSchedule(ctx, schedule, numRunning, stats, txn)
 		}); processErr != nil {
@@ -361,7 +353,7 @@ func (s *jobScheduler) runDaemon(ctx context.Context, stopper *stop.Stopper) {
 		}
 
 		for timer := time.NewTimer(initialDelay); ; timer.Reset(
-			getWaitPeriod(ctx, &s.Settings.SV, s.TestingKnobs)) {
+			getWaitPeriod(&s.Settings.SV, s.TestingKnobs)) {
 			select {
 			case <-stopper.ShouldQuiesce():
 				return
@@ -421,9 +413,7 @@ const recheckEnabledAfterPeriod = 5 * time.Minute
 var warnIfPaceTooLow = log.Every(time.Minute)
 
 // Returns duration to wait before scanning system.scheduled_jobs.
-func getWaitPeriod(
-	ctx context.Context, sv *settings.Values, knobs base.ModuleTestingKnobs,
-) time.Duration {
+func getWaitPeriod(sv *settings.Values, knobs base.ModuleTestingKnobs) time.Duration {
 	if k, ok := knobs.(*TestingKnobs); ok && k.SchedulerDaemonScanDelay != nil {
 		return k.SchedulerDaemonScanDelay()
 	}
@@ -435,7 +425,7 @@ func getWaitPeriod(
 	pace := schedulerPaceSetting.Get(sv)
 	if pace < minPacePeriod {
 		if warnIfPaceTooLow.ShouldLog() {
-			log.Warningf(ctx,
+			log.Warningf(context.Background(),
 				"job.scheduler.pace setting too low (%s < %s)", pace, minPacePeriod)
 		}
 		pace = minPacePeriod

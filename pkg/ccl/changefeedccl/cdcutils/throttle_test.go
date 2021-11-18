@@ -11,7 +11,6 @@ package cdcutils
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -25,8 +24,8 @@ func TestNodeLevelThrottler(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	sv := &cluster.MakeTestingClusterSettings().SV
-	m := MakeMetrics(time.Minute)
-	throttler := NodeLevelThrottler(sv, &m)
+
+	throttler := NodeLevelThrottler(sv)
 
 	// Default: no throttling
 	require.True(t, throttler.messageLimiter.AdmitN(10000000))
@@ -41,7 +40,7 @@ func TestNodeLevelThrottler(t *testing.T) {
 
 	// Update config and verify throttler been updated.
 	changefeedbase.NodeSinkThrottleConfig.Override(
-		ctx, sv, `{"MessageRate": 1, "ByteRate": 1, "FlushRate": 1}`,
+		sv, `{"MessageRate": 1, "ByteRate": 1, "FlushRate": 1}`,
 	)
 	require.True(t, throttler.messageLimiter.AdmitN(1))
 	require.False(t, throttler.messageLimiter.AdmitN(1))

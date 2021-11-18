@@ -105,16 +105,15 @@ func ingestionPlanHook(
 		prefix := keys.MakeTenantPrefix(ingestionStmt.Targets.Tenant)
 		startTime := hlc.Timestamp{WallTime: timeutil.Now().UnixNano()}
 		if ingestionStmt.AsOf.Expr != nil {
-			asOf, err := p.EvalAsOfTimestamp(ctx, ingestionStmt.AsOf)
+			var err error
+			startTime, err = p.EvalAsOfTimestamp(ctx, ingestionStmt.AsOf)
 			if err != nil {
 				return err
 			}
-			startTime = asOf.Timestamp
 		}
 
 		streamIngestionDetails := jobspb.StreamIngestionDetails{
 			StreamAddress: string(streamAddress),
-			TenantID:      ingestionStmt.Targets.Tenant.ToUint64(),
 			Span:          roachpb.Span{Key: prefix, EndKey: prefix.PrefixEnd()},
 			StartTime:     startTime,
 		}

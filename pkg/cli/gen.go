@@ -11,7 +11,6 @@
 package cli
 
 import (
-	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -19,12 +18,10 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/build"
-	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlexec"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/startupmigrations"
+	"github.com/cockroachdb/cockroach/pkg/sqlmigrations"
 	"github.com/cockroachdb/errors/oserror"
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
@@ -43,7 +40,7 @@ example, to install man pages globally on many Unix-like systems,
 use "--path=/usr/local/share/man/man1".
 `,
 	Args: cobra.NoArgs,
-	RunE: clierrorplus.MaybeDecorateError(runGenManCmd),
+	RunE: MaybeDecorateGRPCError(runGenManCmd),
 }
 
 func runGenManCmd(cmd *cobra.Command, args []string) error {
@@ -88,8 +85,7 @@ var genAutocompleteCmd = &cobra.Command{
 	Long: `Generate autocompletion script for CockroachDB.
 
 If no arguments are passed, or if 'bash' is passed, a bash completion file is
-written to ./cockroach.bash. If 'fish' is passed, a fish completion file
-is written to ./cockroach.fish. If 'zsh' is passed, a zsh completion file is written
+written to ./cockroach.bash. If 'zsh' is passed, a zsh completion file is written
 to ./_cockroach. Use "--out=/path/to/file" to override the output file location.
 
 Note that for the generated file to work on OS X with bash, you'll need to install
@@ -97,8 +93,8 @@ Homebrew's bash-completion package (or an equivalent) and follow the post-instal
 instructions.
 `,
 	Args:      cobra.OnlyValidArgs,
-	ValidArgs: []string{"bash", "zsh", "fish"},
-	RunE:      clierrorplus.MaybeDecorateError(runGenAutocompleteCmd),
+	ValidArgs: []string{"bash", "zsh"},
+	RunE:      MaybeDecorateGRPCError(runGenAutocompleteCmd),
 }
 
 func runGenAutocompleteCmd(cmd *cobra.Command, args []string) error {
@@ -116,11 +112,6 @@ func runGenAutocompleteCmd(cmd *cobra.Command, args []string) error {
 			autoCompletePath = "cockroach.bash"
 		}
 		err = cmd.Root().GenBashCompletionFile(autoCompletePath)
-	case "fish":
-		if autoCompletePath == "" {
-			autoCompletePath = "cockroach.fish"
-		}
-		err = cmd.Root().GenFishCompletionFile(autoCompletePath, true /* include description */)
 	case "zsh":
 		if autoCompletePath == "" {
 			autoCompletePath = "_cockroach"
@@ -200,7 +191,7 @@ Output the list of cluster settings known to this binary.
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		wrapCode := func(s string) string {
-			if sqlExecCtx.TableDisplayFormat == clisqlexec.TableDisplayRawHTML {
+			if cliCtx.tableDisplayFormat == tableDisplayHTML {
 				return fmt.Sprintf("<code>%s</code>", s)
 			}
 			return s
@@ -208,7 +199,7 @@ Output the list of cluster settings known to this binary.
 
 		// Fill a Values struct with the defaults.
 		s := cluster.MakeTestingClusterSettings()
-		settings.NewUpdater(&s.SV).ResetRemaining(context.Background())
+		settings.NewUpdater(&s.SV).ResetRemaining()
 
 		var rows [][]string
 		for _, name := range settings.Keys() {
@@ -235,7 +226,7 @@ Output the list of cluster settings known to this binary.
 				defaultVal = sm.SettingsListDefault()
 			} else {
 				defaultVal = setting.String(&s.SV)
-				if override, ok := startupmigrations.SettingsDefaultOverrides[name]; ok {
+				if override, ok := sqlmigrations.SettingsDefaultOverrides[name]; ok {
 					defaultVal = override
 				}
 			}
@@ -243,9 +234,20 @@ Output the list of cluster settings known to this binary.
 			rows = append(rows, row)
 		}
 
-		sliceIter := clisqlexec.NewRowSliceIter(rows, "dddd")
+		reporter, cleanup, err := makeReporter(os.Stdout)
+		if err != nil {
+			return err
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+		if hr, ok := reporter.(*htmlReporter); ok {
+			hr.escape = false
+			hr.rowStats = false
+		}
 		cols := []string{"Setting", "Type", "Default", "Description"}
-		return sqlExecCtx.PrintQueryOutput(os.Stdout, stderr, cols, sliceIter)
+		return render(reporter, os.Stdout,
+			cols, newRowSliceIter(rows, "dddd"), nil /* completedHook */, nil /* noRowsHook*/)
 	},
 }
 
@@ -253,7 +255,7 @@ var genCmd = &cobra.Command{
 	Use:   "gen [command]",
 	Short: "generate auxiliary files",
 	Long:  "Generate manpages, example shell settings, example databases, etc.",
-	RunE:  UsageAndErr,
+	RunE:  usageAndErr,
 }
 
 var genCmds = []*cobra.Command{

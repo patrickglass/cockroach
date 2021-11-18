@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
@@ -143,12 +144,10 @@ func expectedSCJobCount(scName string, isClusterRestore, after bool) int {
 		numBackgroundSCJobs = 1
 	}
 
-	// We drop defaultdb and postgres for full cluster restores
-	numBackgroundDropDatabaseSCJobs := 2
 	// Since we're doing a cluster restore, we need to account for all of
 	// the schema change jobs that existed in the backup.
 	if isClusterRestore {
-		expNumSCJobs += numBackgroundSCJobs + numBackgroundDropDatabaseSCJobs
+		expNumSCJobs += numBackgroundSCJobs
 
 		// If we're performing a cluster restore, we also need to include the drop
 		// crdb_temp_system job.
@@ -230,13 +229,11 @@ func restoreMidSchemaChange(
 ) func(t *testing.T) {
 	return func(t *testing.T) {
 		ctx := context.Background()
+		defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 		dir, dirCleanupFn := testutils.TempDir(t)
 		params := base.TestClusterArgs{
-			ServerArgs: base.TestServerArgs{
-				ExternalIODir: dir,
-				Knobs:         base.TestingKnobs{JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals()},
-			},
+			ServerArgs: base.TestServerArgs{ExternalIODir: dir},
 		}
 		tc := testcluster.StartTestCluster(t, singleNode, params)
 		defer func() {

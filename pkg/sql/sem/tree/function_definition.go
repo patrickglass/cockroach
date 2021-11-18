@@ -51,17 +51,10 @@ type FunctionProperties struct {
 	// considered undocumented.
 	Private bool
 
-	// NullableArgs is set to true when a function's definition can handle NULL
-	// arguments. When set to true, the function will be given the chance to see NULL
-	// arguments.
-	//
-	// When set to false, the function will directly result in NULL in the
-	// presence of any NULL arguments without evaluating the function's
-	// implementation defined in Overload.Fn. Therefore, if the function is
-	// expected to produce side-effects with a NULL argument, NullableArgs must
-	// be true. Note that if this behavior changes so that NullableArgs=false
-	// functions can produce side-effects, the FoldFunctionWithNullArg optimizer
-	// rule must be changed to avoid folding those functions.
+	// NullableArgs is set to true when a function's definition can
+	// handle NULL arguments. When set, the function will be given the
+	// chance to see NULL arguments. When not, the function will
+	// evaluate directly to NULL in the presence of any NULL arguments.
 	//
 	// NOTE: when set, a function should be prepared for any of its arguments to
 	// be NULL and should act accordingly.
@@ -104,15 +97,6 @@ type FunctionProperties struct {
 	// should take RegClass as the arg type for the sequence name instead of
 	// string, we will add a dependency on all RegClass types used in a view.
 	HasSequenceArguments bool
-
-	// CompositeInsensitive indicates that this function returns equal results
-	// when evaluated on equal inputs. This is a non-trivial property for
-	// composite types which can be equal but not identical
-	// (e.g. decimals 1.0 and 1.00). For example, converting a decimal to string
-	// is not CompositeInsensitive.
-	//
-	// See memo.CanBeCompositeSensitive.
-	CompositeInsensitive bool
 }
 
 // ShouldDocument returns whether the built-in function should be included in

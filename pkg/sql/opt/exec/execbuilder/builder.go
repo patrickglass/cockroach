@@ -92,8 +92,8 @@ type Builder struct {
 	ContainsFullTableScan bool
 
 	// ContainsFullIndexScan is set to true if the statement contains an
-	// unconstrained non-partial secondary index scan. This could be a full scan
-	// of any cardinality.
+	// unconstrained secondary index scan. This could be a full scan of any
+	// cardinality.
 	ContainsFullIndexScan bool
 
 	// ContainsLargeFullTableScan is set to true if the statement contains an
@@ -102,16 +102,9 @@ type Builder struct {
 	ContainsLargeFullTableScan bool
 
 	// ContainsLargeFullIndexScan is set to true if the statement contains an
-	// unconstrained non-partial secondary index scan estimated to read more than
+	// unconstrained secondary index scan estimated to read more than
 	// large_full_scan_rows (or without without available stats).
 	ContainsLargeFullIndexScan bool
-
-	// containsBoundedStalenessScan is true if the query uses bounded
-	// staleness and contains a scan.
-	containsBoundedStalenessScan bool
-
-	// ContainsMutation is set to true if the whole plan contains any mutations.
-	ContainsMutation bool
 }
 
 // New constructs an instance of the execution node builder using the
@@ -144,7 +137,7 @@ func New(
 		initialAllowAutoCommit: allowAutoCommit,
 	}
 	if evalCtx != nil {
-		sd := evalCtx.SessionData()
+		sd := evalCtx.SessionData
 		if sd.SaveTablesPrefix != "" {
 			b.nameGen = memo.NewExprNameGenerator(sd.SaveTablesPrefix)
 		}
@@ -172,9 +165,7 @@ func (b *Builder) Build() (_ exec.Plan, err error) {
 	if err != nil {
 		return nil, err
 	}
-
-	rootRowCount := int64(b.e.(memo.RelExpr).Relational().Stats.RowCountIfAvailable())
-	return b.factory.ConstructPlan(plan.root, b.subqueries, b.cascades, b.checks, rootRowCount)
+	return b.factory.ConstructPlan(plan.root, b.subqueries, b.cascades, b.checks)
 }
 
 func (b *Builder) build(e opt.Expr) (_ execPlan, err error) {
@@ -255,12 +246,6 @@ func (b *Builder) findBuiltWithExpr(id opt.WithID) *builtWithExpr {
 		}
 	}
 	return nil
-}
-
-// boundedStaleness returns true if this query uses bounded staleness.
-func (b *Builder) boundedStaleness() bool {
-	return b.evalCtx != nil && b.evalCtx.AsOfSystemTime != nil &&
-		b.evalCtx.AsOfSystemTime.BoundedStaleness
 }
 
 // mdVarContainer is an IndexedVarContainer implementation used by BuildScalar -

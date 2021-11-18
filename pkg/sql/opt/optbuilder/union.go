@@ -57,19 +57,14 @@ func (b *Builder) buildSetOp(
 	}
 
 	// For UNION, we have to synthesize new output columns (because they contain
-	// values from both the left and right relations).
-	//
-	// This is not usually necessary for INTERSECT or EXCEPT, since these
-	// operations are basically filters on the left relation. The exception is if
-	// the left input projects the same column twice, since having the same column
-	// ID for multiple output columns would make it too complicated to represent
-	// the merge ordering for streaming operations (the merge ordering must
-	// include all output columns for the streaming operation to work correctly).
-	if unionType == tree.UnionOp || leftScope.colSet().Len() < len(leftScope.cols) {
+	// values from both the left and right relations). This is not necessary for
+	// INTERSECT or EXCEPT, since these operations are basically filters on the
+	// left relation.
+	if unionType == tree.UnionOp {
 		outScope.cols = make([]scopeColumn, 0, len(leftScope.cols))
 		for i := range leftScope.cols {
 			c := &leftScope.cols[i]
-			b.synthesizeColumn(outScope, c.name, c.typ, nil, nil /* scalar */)
+			b.synthesizeColumn(outScope, string(c.name), c.typ, nil, nil /* scalar */)
 		}
 	} else {
 		outScope.appendColumnsFromScope(leftScope)
@@ -210,7 +205,7 @@ func (b *Builder) addCasts(dst *scope, outTypes []*types.T) *scope {
 		if !dstCols[i].typ.Identical(outTypes[i]) {
 			// Create a new column which casts the old column to the correct type.
 			castExpr := b.factory.ConstructCast(b.factory.ConstructVariable(dstCols[i].id), outTypes[i])
-			b.synthesizeColumn(dst, dstCols[i].name, outTypes[i], nil /* expr */, castExpr)
+			b.synthesizeColumn(dst, string(dstCols[i].name), outTypes[i], nil /* expr */, castExpr)
 		} else {
 			// The column is already the correct type, so add it as a passthrough
 			// column.

@@ -16,6 +16,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 )
 
 func TestTrimProvided(t *testing.T) {
@@ -52,8 +53,8 @@ func TestTrimProvided(t *testing.T) {
 	}
 	for tcIdx, tc := range testCases {
 		t.Run(fmt.Sprintf("case%d", tcIdx+1), func(t *testing.T) {
-			req := props.ParseOrderingChoice(tc.req)
-			prov := props.ParseOrdering(tc.prov)
+			req := physical.ParseOrderingChoice(tc.req)
+			prov := physical.ParseOrdering(tc.prov)
 			res := trimProvided(prov, &req, &tc.fds).String()
 			if res != tc.exp {
 				t.Errorf("expected %s, got %s", tc.exp, res)
@@ -106,7 +107,7 @@ func TestRemapProvided(t *testing.T) {
 	}
 	for tcIdx, tc := range testCases {
 		t.Run(fmt.Sprintf("case%d", tcIdx+1), func(t *testing.T) {
-			prov := props.ParseOrdering(tc.prov)
+			prov := physical.ParseOrdering(tc.prov)
 			res := remapProvided(prov, &tc.fds, tc.cols).String()
 			if res != tc.exp {
 				t.Errorf("expected %s, got %s", tc.exp, res)

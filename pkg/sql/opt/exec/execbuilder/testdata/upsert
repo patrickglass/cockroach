@@ -22,18 +22,22 @@ vectorized: true
 └── • project
     │ columns: (k, v, v)
     │
-    └── • top-k
+    └── • limit
         │ columns: (k, v)
-        │ ordering: -v
         │ estimated row count: 2 (missing stats)
-        │ order: -v
-        │ k: 2
+        │ count: 2
         │
-        └── • scan
-              columns: (k, v)
-              estimated row count: 1,000 (missing stats)
-              table: kv@kv_pkey
-              spans: FULL SCAN
+        └── • sort
+            │ columns: (k, v)
+            │ ordering: -v
+            │ estimated row count: 1,000 (missing stats)
+            │ order: -v
+            │
+            └── • scan
+                  columns: (k, v)
+                  estimated row count: 1,000 (missing stats)
+                  table: kv@primary
+                  spans: FULL SCAN
 
 # Use explicit target columns (which can use blind KV Put).
 query T
@@ -51,18 +55,22 @@ vectorized: true
 └── • project
     │ columns: (k, v, v)
     │
-    └── • top-k
+    └── • limit
         │ columns: (k, v)
-        │ ordering: -v
         │ estimated row count: 2 (missing stats)
-        │ order: -v
-        │ k: 2
+        │ count: 2
         │
-        └── • scan
-              columns: (k, v)
-              estimated row count: 1,000 (missing stats)
-              table: kv@kv_pkey
-              spans: FULL SCAN
+        └── • sort
+            │ columns: (k, v)
+            │ ordering: -v
+            │ estimated row count: 1,000 (missing stats)
+            │ order: -v
+            │
+            └── • scan
+                  columns: (k, v)
+                  estimated row count: 1,000 (missing stats)
+                  table: kv@primary
+                  spans: FULL SCAN
 
 # Add RETURNING clause (should still use blind KV Put).
 query T
@@ -80,18 +88,22 @@ vectorized: true
 └── • project
     │ columns: (k, v, v)
     │
-    └── • top-k
+    └── • limit
         │ columns: (k, v)
-        │ ordering: -v
         │ estimated row count: 2 (missing stats)
-        │ order: -v
-        │ k: 2
+        │ count: 2
         │
-        └── • scan
-              columns: (k, v)
-              estimated row count: 1,000 (missing stats)
-              table: kv@kv_pkey
-              spans: FULL SCAN
+        └── • sort
+            │ columns: (k, v)
+            │ ordering: -v
+            │ estimated row count: 1,000 (missing stats)
+            │ order: -v
+            │
+            └── • scan
+                  columns: (k, v)
+                  estimated row count: 1,000 (missing stats)
+                  table: kv@primary
+                  spans: FULL SCAN
 
 # Use subset of explicit target columns (which cannot use blind KV Put).
 query T
@@ -105,40 +117,44 @@ vectorized: true
 │ estimated row count: 0 (missing stats)
 │ into: kv(k, v)
 │ auto commit
-│ arbiter indexes: kv_pkey
+│ arbiter indexes: primary
 │
 └── • lookup join (inner)
-    │ columns: (k, v_default, k)
+    │ columns: (k, column9, k)
     │ estimated row count: 2 (missing stats)
-    │ table: kv@kv_pkey
+    │ table: kv@primary
     │ equality: (k) = (k)
     │ equality cols are key
     │
     └── • distinct
-        │ columns: (v_default, k)
+        │ columns: (column9, k)
         │ estimated row count: 2 (missing stats)
         │ distinct on: k
         │ nulls are distinct
         │ error on duplicate
         │
         └── • render
-            │ columns: (v_default, k)
+            │ columns: (column9, k)
             │ estimated row count: 2 (missing stats)
-            │ render v_default: CAST(NULL AS INT8)
+            │ render column9: CAST(NULL AS INT8)
             │ render k: k
             │
-            └── • top-k
+            └── • limit
                 │ columns: (k, v)
-                │ ordering: -v
                 │ estimated row count: 2 (missing stats)
-                │ order: -v
-                │ k: 2
+                │ count: 2
                 │
-                └── • scan
-                      columns: (k, v)
-                      estimated row count: 1,000 (missing stats)
-                      table: kv@kv_pkey
-                      spans: FULL SCAN
+                └── • sort
+                    │ columns: (k, v)
+                    │ ordering: -v
+                    │ estimated row count: 1,000 (missing stats)
+                    │ order: -v
+                    │
+                    └── • scan
+                          columns: (k, v)
+                          estimated row count: 1,000 (missing stats)
+                          table: kv@primary
+                          spans: FULL SCAN
 
 # Use Upsert with indexed table, default columns, computed columns, and check
 # columns.
@@ -165,30 +181,30 @@ vectorized: true
 │ estimated row count: 0 (missing stats)
 │ into: indexed(a, b, c, d)
 │ auto commit
-│ arbiter indexes: indexed_pkey
+│ arbiter indexes: primary
 │
 └── • project
-    │ columns: (column1, b_default, c_default, d_comp, a, b, c, d, b_default, c_default, d_comp, a, check1)
+    │ columns: (column1, column8, column9, column10, a, b, c, d, column8, column9, column10, a, check1)
     │
     └── • render
-        │ columns: (check1, column1, b_default, c_default, d_comp, a, b, c, d)
+        │ columns: (check1, column1, column8, column9, column10, a, b, c, d)
         │ estimated row count: 1 (missing stats)
-        │ render check1: c_default > 0
+        │ render check1: column9 > 0
         │ render column1: column1
-        │ render b_default: b_default
-        │ render c_default: c_default
-        │ render d_comp: d_comp
+        │ render column8: column8
+        │ render column9: column9
+        │ render column10: column10
         │ render a: a
         │ render b: b
         │ render c: c
         │ render d: d
         │
         └── • cross join (left outer)
-            │ columns: (column1, b_default, c_default, d_comp, a, b, c, d)
+            │ columns: (column1, column8, column9, column10, a, b, c, d)
             │ estimated row count: 1 (missing stats)
             │
             ├── • values
-            │     columns: (column1, b_default, c_default, d_comp)
+            │     columns: (column1, column8, column9, column10)
             │     size: 4 columns, 1 row
             │     row 0, expr 0: 1
             │     row 0, expr 1: CAST(NULL AS INT8)
@@ -198,8 +214,8 @@ vectorized: true
             └── • scan
                   columns: (a, b, c, d)
                   estimated row count: 1 (missing stats)
-                  table: indexed@indexed_pkey
-                  spans: /1/0
+                  table: indexed@primary
+                  spans: /1-/1/#
                   locking strength: for update
 
 query T
@@ -213,38 +229,38 @@ vectorized: true
 │ estimated row count: 0 (missing stats)
 │ into: indexed(a, b, c, d)
 │ auto commit
-│ arbiter indexes: indexed_pkey
+│ arbiter indexes: primary
 │
 └── • project
-    │ columns: (column1, b_default, c_default, d_comp, a, b, c, d, b_default, c_default, d_comp, a, check1)
+    │ columns: (column1, column8, column9, column10, a, b, c, d, column8, column9, column10, a, check1)
     │
     └── • render
-        │ columns: (check1, column1, b_default, c_default, d_comp, a, b, c, d)
+        │ columns: (check1, column1, column8, column9, column10, a, b, c, d)
         │ estimated row count: 4 (missing stats)
-        │ render check1: c_default > 0
+        │ render check1: column9 > 0
         │ render column1: column1
-        │ render b_default: b_default
-        │ render c_default: c_default
-        │ render d_comp: d_comp
+        │ render column8: column8
+        │ render column9: column9
+        │ render column10: column10
         │ render a: a
         │ render b: b
         │ render c: c
         │ render d: d
         │
         └── • lookup join (left outer)
-            │ columns: (d_comp, b_default, c_default, column1, a, b, c, d)
+            │ columns: (column10, column8, column9, column1, a, b, c, d)
             │ estimated row count: 4 (missing stats)
-            │ table: indexed@indexed_pkey
+            │ table: indexed@primary
             │ equality: (column1) = (a)
             │ equality cols are key
             │ locking strength: for update
             │
             └── • render
-                │ columns: (d_comp, b_default, c_default, column1)
+                │ columns: (column10, column8, column9, column1)
                 │ estimated row count: 4
-                │ render d_comp: column1 + 10
-                │ render b_default: CAST(NULL AS INT8)
-                │ render c_default: 10
+                │ render column10: column1 + 10
+                │ render column8: CAST(NULL AS INT8)
+                │ render column9: 10
                 │ render column1: column1
                 │
                 └── • values
@@ -270,19 +286,19 @@ vectorized: true
 │ estimated row count: 0 (missing stats)
 │ into: indexed(a, b, c, d)
 │ auto commit
-│ arbiter indexes: indexed_pkey
+│ arbiter indexes: primary
 │
 └── • project
-    │ columns: (column1, column2, column3, d_comp, a, b, c, d, upsert_b, upsert_c, upsert_d, a, check1)
+    │ columns: (column1, column2, column3, column10, a, b, c, d, upsert_b, upsert_c, upsert_d, a, check1)
     │
     └── • render
-        │ columns: (check1, column1, column2, column3, d_comp, a, b, c, d, upsert_b, upsert_c, upsert_d)
+        │ columns: (check1, column1, column2, column3, column10, a, b, c, d, upsert_b, upsert_c, upsert_d)
         │ estimated row count: 1 (missing stats)
         │ render check1: upsert_c > 0
         │ render column1: column1
         │ render column2: column2
         │ render column3: column3
-        │ render d_comp: d_comp
+        │ render column10: column10
         │ render a: a
         │ render b: b
         │ render c: c
@@ -292,26 +308,26 @@ vectorized: true
         │ render upsert_d: upsert_d
         │
         └── • render
-            │ columns: (upsert_b, upsert_c, upsert_d, column1, column2, column3, d_comp, a, b, c, d)
+            │ columns: (upsert_b, upsert_c, upsert_d, column1, column2, column3, column10, a, b, c, d)
             │ estimated row count: 1 (missing stats)
             │ render upsert_b: CASE WHEN a IS NULL THEN column2 ELSE 2 END
             │ render upsert_c: CASE WHEN a IS NULL THEN column3 ELSE 3 END
-            │ render upsert_d: CASE WHEN a IS NULL THEN d_comp ELSE a + 3 END
+            │ render upsert_d: CASE WHEN a IS NULL THEN column10 ELSE a + 3 END
             │ render column1: column1
             │ render column2: column2
             │ render column3: column3
-            │ render d_comp: d_comp
+            │ render column10: column10
             │ render a: a
             │ render b: b
             │ render c: c
             │ render d: d
             │
             └── • cross join (left outer)
-                │ columns: (column1, column2, column3, d_comp, a, b, c, d)
+                │ columns: (column1, column2, column3, column10, a, b, c, d)
                 │ estimated row count: 1 (missing stats)
                 │
                 ├── • values
-                │     columns: (column1, column2, column3, d_comp)
+                │     columns: (column1, column2, column3, column10)
                 │     size: 4 columns, 1 row
                 │     row 0, expr 0: 1
                 │     row 0, expr 1: 2
@@ -321,8 +337,8 @@ vectorized: true
                 └── • scan
                       columns: (a, b, c, d)
                       estimated row count: 1 (missing stats)
-                      table: indexed@indexed_pkey
-                      spans: /1/0
+                      table: indexed@primary
+                      spans: /1-/1/#
                       locking strength: for update
 
 # Drop index and verify that existing values no longer need to be fetched.
@@ -342,10 +358,10 @@ vectorized: true
 │ auto commit
 │
 └── • project
-    │ columns: (column1, b_default, c_default, d_comp, b_default, c_default, d_comp, check1)
+    │ columns: (column1, column8, column9, column10, column8, column9, column10, check1)
     │
     └── • values
-          columns: (column1, b_default, c_default, d_comp, check1)
+          columns: (column1, column8, column9, column10, check1)
           size: 5 columns, 1 row
           row 0, expr 0: 1
           row 0, expr 1: CAST(NULL AS INT8)
@@ -448,12 +464,12 @@ vectorized: true
                 │ into: xyz(x, y, z, rowid)
                 │
                 └── • project
-                    │ columns: (a, b, c, rowid_default, a, b, c)
+                    │ columns: (a, b, c, column13, a, b, c)
                     │
                     └── • render
-                        │ columns: (rowid_default, a, b, c)
+                        │ columns: (column13, a, b, c)
                         │ estimated row count: 1,000 (missing stats)
-                        │ render rowid_default: unique_rowid()
+                        │ render column13: unique_rowid()
                         │ render a: a
                         │ render b: b
                         │ render c: c
@@ -461,7 +477,7 @@ vectorized: true
                         └── • scan
                               columns: (a, b, c)
                               estimated row count: 1,000 (missing stats)
-                              table: abc@abc_pkey
+                              table: abc@primary
                               spans: FULL SCAN
 
 # ------------------------------------------------------------------------------
@@ -517,7 +533,7 @@ vectorized: true
 │ columns: ()
 │ estimated row count: 0 (missing stats)
 │ into: table38627(a, b)
-│ arbiter indexes: table38627_pkey
+│ arbiter indexes: primary
 │
 └── • project
     │ columns: (a, b, a, b, c, b, a)
@@ -525,15 +541,15 @@ vectorized: true
     └── • lookup join (inner)
         │ columns: (a, b, a, b, c)
         │ estimated row count: 1 (missing stats)
-        │ table: table38627@table38627_pkey
+        │ table: table38627@primary
         │ equality: (a) = (a)
         │ equality cols are key
         │
         └── • scan
               columns: (a, b)
               estimated row count: 1 (missing stats)
-              table: table38627@table38627_pkey
-              spans: /1/0
+              table: table38627@primary
+              spans: /1-/1/#
 
 statement ok
 COMMIT

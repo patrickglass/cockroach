@@ -14,6 +14,7 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/transform"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -25,9 +26,10 @@ import (
 // The length of the result slice matches the length of the input column descriptors.
 // For every column that has no default expression, a NULL expression is reported
 // as default.
+// TODO(mgartner): Move this to the schemaexpr package.
 func MakeDefaultExprs(
 	ctx context.Context,
-	cols []catalog.Column,
+	cols []descpb.ColumnDescriptor,
 	txCtx *transform.ExprTransformContext,
 	evalCtx *tree.EvalContext,
 	semaCtx *tree.SemaContext,
@@ -36,8 +38,8 @@ func MakeDefaultExprs(
 	// are no DEFAULT expressions, we don't bother with constructing the
 	// defaults map as the defaults are all NULL.
 	haveDefaults := false
-	for _, col := range cols {
-		if col.HasDefault() {
+	for i := range cols {
+		if cols[i].DefaultExpr != nil {
 			haveDefaults = true
 			break
 		}
@@ -49,9 +51,10 @@ func MakeDefaultExprs(
 	// Build the default expressions map from the parsed SELECT statement.
 	defaultExprs := make([]tree.TypedExpr, 0, len(cols))
 	exprStrings := make([]string, 0, len(cols))
-	for _, col := range cols {
-		if col.HasDefault() {
-			exprStrings = append(exprStrings, col.GetDefaultExpr())
+	for i := range cols {
+		col := &cols[i]
+		if col.DefaultExpr != nil {
+			exprStrings = append(exprStrings, *col.DefaultExpr)
 		}
 	}
 	exprs, err := parser.ParseExprs(exprStrings)
@@ -60,13 +63,14 @@ func MakeDefaultExprs(
 	}
 
 	defExprIdx := 0
-	for _, col := range cols {
-		if !col.HasDefault() {
+	for i := range cols {
+		col := &cols[i]
+		if col.DefaultExpr == nil {
 			defaultExprs = append(defaultExprs, tree.DNull)
 			continue
 		}
 		expr := exprs[defExprIdx]
-		typedExpr, err := tree.TypeCheck(ctx, expr, semaCtx, col.GetType())
+		typedExpr, err := tree.TypeCheck(ctx, expr, semaCtx, col.Type)
 		if err != nil {
 			return nil, err
 		}
@@ -82,24 +86,24 @@ func MakeDefaultExprs(
 // ProcessColumnSet returns columns in cols, and other writable
 // columns in tableDesc that fulfills a given criteria in inSet.
 func ProcessColumnSet(
-	cols []catalog.Column, tableDesc catalog.TableDescriptor, inSet func(column catalog.Column) bool,
-) []catalog.Column {
+	cols []descpb.ColumnDescriptor,
+	tableDesc catalog.TableDescriptor,
+	inSet func(*descpb.ColumnDescriptor) bool,
+) []descpb.ColumnDescriptor {
 	var colIDSet catalog.TableColSet
 	for i := range cols {
-		colIDSet.Add(cols[i].GetID())
+		colIDSet.Add(cols[i].ID)
 	}
 
 	// Add all public or columns in DELETE_AND_WRITE_ONLY state
 	// that satisfy the condition.
-	ret := make([]catalog.Column, 0, len(tableDesc.AllColumns()))
-	ret = append(ret, cols...)
 	for _, col := range tableDesc.WritableColumns() {
-		if inSet(col) {
+		if inSet(col.ColumnDesc()) {
 			if !colIDSet.Contains(col.GetID()) {
 				colIDSet.Add(col.GetID())
-				ret = append(ret, col)
+				cols = append(cols, *col.ColumnDesc())
 			}
 		}
 	}
-	return ret
+	return cols
 }

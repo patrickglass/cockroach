@@ -7,7 +7,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/base",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/sql/execinfrapb",
         "//pkg/util",
         "//pkg/util/tracing/tracingpb",
@@ -26,7 +26,7 @@ go_test(
     embed = [":execstats"],
     deps = [
         "//pkg/base",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/security",
         "//pkg/security/securitytest",
         "//pkg/server",

@@ -192,13 +192,7 @@ func (b *Builder) analyzeDistinctOnArgs(
 	inScope.context = exprKindDistinctOn
 
 	for i := range distinctOn {
-		b.analyzeExtraArgument(
-			distinctOn[i],
-			inScope,
-			projectionsScope,
-			distinctOnScope,
-			true, /* nullsDefaultOrder */
-		)
+		b.analyzeExtraArgument(distinctOn[i], inScope, projectionsScope, distinctOnScope)
 	}
 	return distinctOnScope
 }

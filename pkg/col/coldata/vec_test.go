@@ -25,7 +25,7 @@ import (
 func TestMemColumnWindow(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	c := coldata.NewMemColumn(types.Int, coldata.BatchSize(), coldata.StandardColumnFactory)
 
@@ -248,31 +248,35 @@ func TestCopy(t *testing.T) {
 
 	testCases := []struct {
 		name        string
-		args        coldata.SliceArgs
+		args        coldata.CopySliceArgs
 		expectedSum int
 	}{
 		{
 			name:        "CopyNothing",
-			args:        coldata.SliceArgs{},
+			args:        coldata.CopySliceArgs{},
 			expectedSum: 0,
 		},
 		{
 			name: "CopyBatchSizeMinus1WithOffset1",
-			args: coldata.SliceArgs{
-				// Use DestIdx 1 to make sure that it is respected.
-				DestIdx:   1,
-				SrcEndIdx: coldata.BatchSize() - 1,
+			args: coldata.CopySliceArgs{
+				SliceArgs: coldata.SliceArgs{
+					// Use DestIdx 1 to make sure that it is respected.
+					DestIdx:   1,
+					SrcEndIdx: coldata.BatchSize() - 1,
+				},
 			},
 			// expectedSum uses sum of positive integers formula.
 			expectedSum: (coldata.BatchSize() - 1) * coldata.BatchSize() / 2,
 		},
 		{
 			name: "CopyWithSel",
-			args: coldata.SliceArgs{
-				Sel:         sel[1:],
-				DestIdx:     25,
-				SrcStartIdx: 1,
-				SrcEndIdx:   2,
+			args: coldata.CopySliceArgs{
+				SliceArgs: coldata.SliceArgs{
+					Sel:         sel[1:],
+					DestIdx:     25,
+					SrcStartIdx: 1,
+					SrcEndIdx:   2,
+				},
 			},
 			// We'll have just the third element in the resulting slice.
 			expectedSum: 3,
@@ -330,11 +334,13 @@ func TestCopyNulls(t *testing.T) {
 		src.Nulls().SetNull(i)
 	}
 
-	copyArgs := coldata.SliceArgs{
-		Src:         src,
-		DestIdx:     3,
-		SrcStartIdx: 3,
-		SrcEndIdx:   10,
+	copyArgs := coldata.CopySliceArgs{
+		SliceArgs: coldata.SliceArgs{
+			Src:         src,
+			DestIdx:     3,
+			SrcStartIdx: 3,
+			SrcEndIdx:   10,
+		},
 	}
 
 	dst.Copy(copyArgs)
@@ -358,46 +364,59 @@ func TestCopyNulls(t *testing.T) {
 	}
 }
 
-func TestCopyWithReorderedSource(t *testing.T) {
-	rng, _ := randutil.NewTestRand()
+func TestCopySelOnDestDoesNotUnsetOldNulls(t *testing.T) {
+	if coldata.BatchSize() < 5 {
+		return
+	}
 	var typ = types.Int
 
-	for _, hasNulls := range []bool{false, true} {
-		src := coldata.NewMemColumn(typ, coldata.BatchSize(), coldata.StandardColumnFactory)
-		srcInts := src.Int64()
-		sel := make([]int, 0, coldata.BatchSize())
-		for i := range srcInts {
-			srcInts[i] = rng.Int63()
-			if rng.Float64() < 0.5 {
-				sel = append(sel, i)
-			}
-			if hasNulls && rng.Float64() < 0.1 {
-				src.Nulls().SetNull(i)
-			}
-		}
-
-		order := make([]int, coldata.BatchSize())
-		for i, o := range rng.Perm(len(sel)) {
-			order[sel[i]] = o
-		}
-
-		dest := coldata.NewMemColumn(typ, coldata.BatchSize(), coldata.StandardColumnFactory)
-		dest.CopyWithReorderedSource(src, sel, order)
-		destInts := dest.Int64()
-
-		for _, idx := range sel {
-			srcIdx := order[idx]
-			if hasNulls && src.Nulls().NullAt(srcIdx) {
-				require.True(t, dest.Nulls().NullAt(idx))
-				continue
-			}
-			require.Equal(t, srcInts[srcIdx], destInts[idx])
-		}
+	// Set up the destination vector. It is all nulls except for a single
+	// non-null at index 0.
+	dst := coldata.NewMemColumn(typ, coldata.BatchSize(), coldata.StandardColumnFactory)
+	dstInts := dst.Int64()
+	for i := range dstInts {
+		dstInts[i] = 1
 	}
+	dst.Nulls().SetNulls()
+	dst.Nulls().UnsetNull(0)
+
+	// Set up the source vector with two nulls.
+	src := coldata.NewMemColumn(typ, coldata.BatchSize(), coldata.StandardColumnFactory)
+	srcInts := src.Int64()
+	for i := range srcInts {
+		srcInts[i] = 2
+	}
+	src.Nulls().SetNull(0)
+	src.Nulls().SetNull(3)
+
+	// Using a small selection vector and SelOnDest, perform a copy and verify
+	// that nulls in between the selected tuples weren't unset.
+	copyArgs := coldata.CopySliceArgs{
+		SelOnDest: true,
+		SliceArgs: coldata.SliceArgs{
+			Src:         src,
+			SrcStartIdx: 1,
+			SrcEndIdx:   3,
+			Sel:         []int{0, 1, 3},
+		},
+	}
+
+	dst.Copy(copyArgs)
+
+	// 0 was not null in dest and null in source, but it wasn't selected. Not null.
+	require.False(t, dst.Nulls().NullAt(0))
+	// 1 was null in dest and not null in source: it becomes not null.
+	require.False(t, dst.Nulls().NullAt(1))
+	// 2 wasn't included in the selection vector: it stays null.
+	require.True(t, dst.Nulls().NullAt(2))
+	// 3 was null in dest and null in source: it stays null.
+	require.True(t, dst.Nulls().NullAt(3))
+	// 4 wasn't included: it stays null.
+	require.True(t, dst.Nulls().NullAt(4))
 }
 
 func BenchmarkAppend(b *testing.B) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	sel := rng.Perm(coldata.BatchSize())
 
 	benchCases := []struct {
@@ -444,21 +463,23 @@ func BenchmarkAppend(b *testing.B) {
 }
 
 func BenchmarkCopy(b *testing.B) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	sel := rng.Perm(coldata.BatchSize())
 
 	benchCases := []struct {
 		name string
-		args coldata.SliceArgs
+		args coldata.CopySliceArgs
 	}{
 		{
 			name: "CopySimple",
-			args: coldata.SliceArgs{},
+			args: coldata.CopySliceArgs{},
 		},
 		{
 			name: "CopyWithSel",
-			args: coldata.SliceArgs{
-				Sel: sel,
+			args: coldata.CopySliceArgs{
+				SliceArgs: coldata.SliceArgs{
+					Sel: sel,
+				},
 			},
 		},
 	}

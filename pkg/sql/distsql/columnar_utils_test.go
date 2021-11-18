@@ -27,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexectestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
@@ -75,7 +74,7 @@ func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
 	const floatPrecision = 0.0000001
 	rng := args.rng
 	if rng == nil {
-		rng, _ = randutil.NewTestRand()
+		rng, _ = randutil.NewPseudoRand()
 	}
 	if rng.Float64() < 0.5 {
 		randomBatchSize := 1 + rng.Intn(3)
@@ -105,8 +104,6 @@ func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
 		DiskMonitor: diskMonitor,
 	}
 	flowCtx.Cfg.TestingKnobs.ForceDiskSpill = args.forceDiskSpill
-	var monitorRegistry colexecargs.MonitorRegistry
-	defer monitorRegistry.Close(ctx)
 
 	inputsProc := make([]execinfra.RowSource, len(args.inputs))
 	inputsColOp := make([]execinfra.RowSource, len(args.inputs))
@@ -132,19 +129,22 @@ func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
 	testAllocator := colmem.NewAllocator(ctx, &acc, coldataext.NewExtendedColumnFactory(&evalCtx))
 	columnarizers := make([]colexecop.Operator, len(args.inputs))
 	for i, input := range inputsColOp {
-		columnarizers[i] = colexec.NewBufferingColumnarizer(testAllocator, flowCtx, int32(i)+1, input)
+		c, err := colexec.NewBufferingColumnarizer(ctx, testAllocator, flowCtx, int32(i)+1, input)
+		if err != nil {
+			return err
+		}
+		columnarizers[i] = c
 	}
 
 	constructorArgs := &colexecargs.NewColOperatorArgs{
 		Spec:                args.pspec,
-		Inputs:              colexectestutils.MakeInputs(columnarizers),
+		Inputs:              columnarizers,
 		StreamingMemAccount: &acc,
 		DiskQueueCfg: colcontainer.DiskQueueCfg{
 			FS:        tempFS,
 			GetPather: colcontainer.GetPatherFunc(func(context.Context) string { return "" }),
 		},
-		FDSemaphore:     colexecop.NewTestingSemaphore(256),
-		MonitorRegistry: &monitorRegistry,
+		FDSemaphore: colexecop.NewTestingSemaphore(256),
 
 		// TODO(yuzefovich): adjust expression generator to not produce
 		// mixed-type timestamp-related expressions and then disallow the
@@ -160,13 +160,29 @@ func verifyColOperator(t *testing.T, args verifyColOperatorArgs) error {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		for _, memAccount := range result.OpAccounts {
+			memAccount.Close(ctx)
+		}
+		for _, memMonitor := range result.OpMonitors {
+			memMonitor.Stop(ctx)
+		}
+	}()
 
-	outColOp := colexec.NewMaterializer(
+	outColOp, err := colexec.NewMaterializer(
 		flowCtx,
 		int32(len(args.inputs))+2,
-		result.OpWithMetaInfo,
+		result.Op,
 		args.pspec.ResultTypes,
+		nil, /* output */
+		nil, /* getStats */
+		result.MetadataSources,
+		result.ToClose,
+		nil, /* cancelFlow */
 	)
+	if err != nil {
+		return err
+	}
 
 	outProc.Start(ctx)
 	outColOp.Start(ctx)

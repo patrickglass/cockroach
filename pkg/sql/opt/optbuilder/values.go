@@ -78,15 +78,6 @@ func (b *Builder) buildValuesClause(
 			if typ := texpr.ResolvedType(); typ.Family() != types.UnknownFamily {
 				if colTypes[colIdx].Family() == types.UnknownFamily {
 					colTypes[colIdx] = typ
-				} else if colTypes[colIdx].Family() == types.ArrayFamily &&
-					colTypes[colIdx].ArrayContents() == types.AnyTuple &&
-					typ.Family() == types.ArrayFamily &&
-					typ.ArrayContents().Family() == types.TupleFamily &&
-					typ.ArrayContents() != types.AnyTuple {
-					// This more complicated condition handles the case when an earlier
-					// expression in the VALUES clause is an array of AnyTuple, but a
-					// later expression is an array of a more specific tuple type.
-					colTypes[colIdx] = typ
 				} else if !typ.Equivalent(colTypes[colIdx]) {
 					panic(pgerror.Newf(pgcode.DatatypeMismatch,
 						"VALUES types %s and %s cannot be matched", typ, colTypes[colIdx]))
@@ -123,8 +114,8 @@ func (b *Builder) buildValuesClause(
 	outScope = inScope.push()
 	for colIdx := 0; colIdx < numCols; colIdx++ {
 		// The column names for VALUES are column1, column2, etc.
-		colName := scopeColName(tree.Name(fmt.Sprintf("column%d", colIdx+1)))
-		b.synthesizeColumn(outScope, colName, colTypes[colIdx], nil, nil /* scalar */)
+		alias := fmt.Sprintf("column%d", colIdx+1)
+		b.synthesizeColumn(outScope, alias, colTypes[colIdx], nil, nil /* scalar */)
 	}
 
 	colList := colsToColList(outScope.cols)

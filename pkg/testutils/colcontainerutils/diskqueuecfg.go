@@ -14,6 +14,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/sql/colcontainer"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
@@ -44,14 +45,11 @@ func NewTestingDiskQueueCfg(t testing.TB, inMem bool) (colcontainer.DiskQueueCfg
 	} else {
 		tempPath, dirCleanup := testutils.TempDir(t)
 		path = tempPath
-		ngn, err := storage.Open(
-			context.Background(),
-			storage.Filesystem(tempPath),
-			storage.CacheSize(0))
+		ngn, err := storage.NewDefaultEngine(0 /* cacheSize */, base.StorageConfig{Dir: tempPath})
 		if err != nil {
 			t.Fatal(err)
 		}
-		testingFS = ngn
+		testingFS = ngn.(fs.FS)
 		cleanup = func() {
 			ngn.Close()
 			dirCleanup()

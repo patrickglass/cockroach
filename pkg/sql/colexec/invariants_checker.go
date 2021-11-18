@@ -17,62 +17,46 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 )
 
-// invariantsChecker is a helper Operator that will check that invariants that
+// InvariantsChecker is a helper Operator that will check that invariants that
 // are present in the vectorized engine are maintained on all batches. It
 // should be planned between other Operators in tests.
-type invariantsChecker struct {
+type InvariantsChecker struct {
 	colexecop.OneInputNode
-	colexecop.InitHelper
 	colexecop.NonExplainable
 
-	metadataSource colexecop.MetadataSource
+	initStatus     colexecop.OperatorInitStatus
+	metadataSource execinfrapb.MetadataSource
 }
 
-var _ colexecop.DrainableOperator = &invariantsChecker{}
-var _ colexecop.ClosableOperator = &invariantsChecker{}
+var _ colexecop.Operator = &InvariantsChecker{}
+var _ execinfrapb.MetadataSource
 
-// NewInvariantsChecker creates a new invariantsChecker.
-func NewInvariantsChecker(input colexecop.Operator) colexecop.DrainableOperator {
-	if !util.CrdbTestBuild {
-		colexecerror.InternalError(errors.AssertionFailedf(
-			"an invariantsChecker is attempted to be created in non-test build",
-		))
-	}
-	c := &invariantsChecker{
+// NewInvariantsChecker creates a new InvariantsChecker.
+func NewInvariantsChecker(input colexecop.Operator) *InvariantsChecker {
+	c := &InvariantsChecker{
 		OneInputNode: colexecop.OneInputNode{Input: input},
 	}
-	if ms, ok := input.(colexecop.MetadataSource); ok {
+	if ms, ok := input.(execinfrapb.MetadataSource); ok {
 		c.metadataSource = ms
 	}
 	return c
 }
 
-// MaybeUnwrapInvariantsChecker checks whether op is an invariants checker and
-// returns its input if so, otherwise op is returned.
-func MaybeUnwrapInvariantsChecker(op colexecop.Operator) colexecop.Operator {
-	if i, ok := op.(*invariantsChecker); ok {
-		return i.Input
-	}
-	return op
-}
-
 // Init implements the colexecop.Operator interface.
-func (i *invariantsChecker) Init(ctx context.Context) {
-	if !i.InitHelper.Init(ctx) {
-		return
-	}
-	i.Input.Init(i.Ctx)
+func (i *InvariantsChecker) Init() {
+	i.initStatus = colexecop.OperatorInitialized
+	i.Input.Init()
 }
 
 // assertInitWasCalled asserts that Init() has been called on the invariants
 // checker and returns a boolean indicating whether the execution should be
 // short-circuited (true means that the caller should just return right away).
-func (i *invariantsChecker) assertInitWasCalled() bool {
-	if i.Ctx == nil {
+func (i *InvariantsChecker) assertInitWasCalled() bool {
+	if i.initStatus != colexecop.OperatorInitialized {
 		if c, ok := i.Input.(*Columnarizer); ok {
 			if c.removedFromFlow {
 				// This is a special case in which we allow for the operator to
@@ -87,19 +71,19 @@ func (i *invariantsChecker) assertInitWasCalled() bool {
 }
 
 // Next implements the colexecop.Operator interface.
-func (i *invariantsChecker) Next() coldata.Batch {
+func (i *InvariantsChecker) Next(ctx context.Context) coldata.Batch {
 	if shortCircuit := i.assertInitWasCalled(); shortCircuit {
 		return coldata.ZeroBatch
 	}
-	b := i.Input.Next()
+	b := i.Input.Next(ctx)
 	n := b.Length()
 	if n == 0 {
 		return b
 	}
 	for colIdx := 0; colIdx < b.Width(); colIdx++ {
 		v := b.ColVec(colIdx)
-		if v.IsBytesLike() {
-			coldata.AssertOffsetsAreNonDecreasing(v, n)
+		if v.CanonicalTypeFamily() == types.BytesFamily {
+			v.Bytes().AssertOffsetsAreNonDecreasing(n)
 		}
 	}
 	if sel := b.Selection(); sel != nil {
@@ -115,22 +99,13 @@ func (i *invariantsChecker) Next() coldata.Batch {
 	return b
 }
 
-// DrainMeta implements the colexecop.MetadataSource interface.
-func (i *invariantsChecker) DrainMeta() []execinfrapb.ProducerMetadata {
+// DrainMeta implements the execinfrapb.MetadataSource interface.
+func (i *InvariantsChecker) DrainMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
 	if shortCircuit := i.assertInitWasCalled(); shortCircuit {
 		return nil
 	}
 	if i.metadataSource == nil {
 		return nil
 	}
-	return i.metadataSource.DrainMeta()
-}
-
-// Close is part of the colexecop.ClosableOperator interface.
-func (i *invariantsChecker) Close() error {
-	c, ok := i.Input.(colexecop.Closer)
-	if !ok {
-		return nil
-	}
-	return c.Close()
+	return i.metadataSource.DrainMeta(ctx)
 }

@@ -16,7 +16,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
@@ -36,7 +35,7 @@ command on one node (passing the same --host and certificate flags
 you would use for the sql command).
 `,
 	Args: cobra.NoArgs,
-	RunE: clierrorplus.MaybeDecorateError(runInit),
+	RunE: MaybeDecorateGRPCError(runInit),
 }
 
 func runInit(cmd *cobra.Command, args []string) error {

@@ -20,8 +20,7 @@ TABLE abc
  ├── b int
  ├── c string
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
- ├── tableoid oid [hidden] [system]
- ├── PRIMARY INDEX abc_pkey
+ ├── PRIMARY INDEX primary
  │    ├── a int not null
  │    └── ZONE
  │         └── constraints: [+region=central]
@@ -46,8 +45,7 @@ TABLE abc
  ├── b int
  ├── c string
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
- ├── tableoid oid [hidden] [system]
- ├── PRIMARY INDEX abc_pkey
+ ├── PRIMARY INDEX primary
  │    ├── a int not null
  │    └── ZONE
  │         └── constraints: [+region=central]
@@ -74,8 +72,7 @@ TABLE abc
  ├── b int
  ├── c string
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
- ├── tableoid oid [hidden] [system]
- ├── PRIMARY INDEX abc_pkey
+ ├── PRIMARY INDEX primary
  │    ├── a int not null
  │    └── ZONE
  │         └── constraints: [+region=central]
@@ -104,8 +101,7 @@ TABLE abc
  ├── b int
  ├── c string
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
- ├── tableoid oid [hidden] [system]
- ├── PRIMARY INDEX abc_pkey
+ ├── PRIMARY INDEX primary
  │    ├── a int not null
  │    └── ZONE
  │         └── constraints: [+region=us,+dc=central,+rack=1]
@@ -134,8 +130,7 @@ TABLE abc
  ├── b int
  ├── c string
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
- ├── tableoid oid [hidden] [system]
- ├── PRIMARY INDEX abc_pkey
+ ├── PRIMARY INDEX primary
  │    ├── a int not null
  │    └── ZONE
  │         └── constraints: [+region=us,+dc=central,+rack=1]
@@ -164,8 +159,7 @@ TABLE abc
  ├── b int
  ├── c string
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
- ├── tableoid oid [hidden] [system]
- ├── PRIMARY INDEX abc_pkey
+ ├── PRIMARY INDEX primary
  │    ├── a int not null
  │    └── ZONE
  │         └── constraints: [+region=us,+dc=central,+rack=1]
@@ -223,9 +217,8 @@ TABLE abc_part
  ├── b int
  ├── c string
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
- ├── tableoid oid [hidden] [system]
  ├── CHECK (r IN ('east', 'west'))
- ├── PRIMARY INDEX abc_part_pkey
+ ├── PRIMARY INDEX primary
  │    └── a int not null
  ├── UNIQUE INDEX bc_idx
  │    ├── r string not null

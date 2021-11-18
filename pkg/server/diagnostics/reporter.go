@@ -27,7 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/diagnostics/diagnosticspb"
-	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
+	"github.com/cockroachdb/cockroach/pkg/server/status"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -46,15 +46,6 @@ import (
 	"github.com/mitchellh/reflectwalk"
 	"google.golang.org/protobuf/proto"
 )
-
-// NodeStatusGenerator abstracts the status.MetricRecorder for read access.
-type NodeStatusGenerator interface {
-
-	// GenerateNodeStatus returns a status summary message for the node. The summary
-	// includes the recent values of metrics for both the node and all of its
-	// component stores. When the node isn't initialized yet, nil is returned.
-	GenerateNodeStatus(ctx context.Context) *statuspb.NodeStatus
-}
 
 var reportFrequency = settings.RegisterDurationSetting(
 	"diagnostics.reporting.interval",
@@ -81,7 +72,7 @@ type Reporter struct {
 	SQLServer     *sql.Server
 	InternalExec  *sql.InternalExecutor
 	DB            *kv.DB
-	Recorder      NodeStatusGenerator
+	Recorder      *status.MetricsRecorder
 
 	// Locality is a description of the topography of the server.
 	Locality roachpb.Locality
@@ -93,7 +84,7 @@ type Reporter struct {
 // PeriodicallyReportDiagnostics starts a background worker that periodically
 // phones home to report usage and diagnostics.
 func (r *Reporter) PeriodicallyReportDiagnostics(ctx context.Context, stopper *stop.Stopper) {
-	_ = stopper.RunAsyncTaskEx(ctx, stop.TaskOpts{TaskName: "diagnostics", SpanOpt: stop.SterileRootSpan}, func(ctx context.Context) {
+	_ = stopper.RunAsyncTask(ctx, "diagnostics", func(ctx context.Context) {
 		defer logcrash.RecoverAndReportNonfatalPanic(ctx, &r.Settings.SV)
 		nextReport := r.StartTime
 
@@ -159,7 +150,7 @@ func (r *Reporter) ReportDiagnostics(ctx context.Context) {
 			"error: %v", res.Status, b, err)
 		return
 	}
-	r.SQLServer.GetReportedSQLStatsController().ResetLocalSQLStats(ctx)
+	r.SQLServer.ResetReportedStats(ctx)
 }
 
 // CreateReport generates a new diagnostics report containing information about
@@ -169,7 +160,7 @@ func (r *Reporter) CreateReport(
 ) *diagnosticspb.DiagnosticReport {
 	info := diagnosticspb.DiagnosticReport{}
 	secret := sql.ClusterSecret.Get(&r.Settings.SV)
-	uptime := int64(timeutil.Since(r.StartTime).Seconds())
+	uptime := int64(timeutil.Now().Sub(r.StartTime).Seconds())
 
 	// Populate the hardware, OS, binary, and location of the CRDB node or SQL
 	// instance.
@@ -251,13 +242,7 @@ func (r *Reporter) CreateReport(
 		}
 	}
 
-	info.SqlStats, err = r.SQLServer.GetScrubbedReportingStats(ctx)
-	if err != nil {
-		if log.V(2 /* level */) {
-			log.Warningf(ctx, "unexpected error encountered when getting scrubbed reporting stats: %s", err)
-		}
-	}
-
+	info.SqlStats = r.SQLServer.GetScrubbedReportingStats()
 	return &info
 }
 

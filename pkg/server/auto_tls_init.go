@@ -26,7 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/netutil/addr"
+	"github.com/cockroachdb/cockroach/pkg/util/netutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
 	"github.com/cockroachdb/logtags"
@@ -90,6 +90,49 @@ func (sb *ServiceCertificateBundle) loadCACertAndKey(certPath string, keyPath st
 		return
 	}
 	return
+}
+
+// LoadUserAuthCACertAndKey loads host certificate and key from disk or fails with error.
+func (sb *ServiceCertificateBundle) loadOrCreateUserAuthCACertAndKey(
+	ctx context.Context,
+	caCertPath string,
+	caKeyPath string,
+	initLifespan time.Duration,
+	serviceName string,
+) (err error) {
+	log.Ops.Infof(ctx, "attempting to load CA cert: %s", caCertPath)
+	// Attempt to load cert into ServiceCertificateBundle.
+	sb.CACertificate, err = loadCertificateFile(caCertPath)
+	if err != nil {
+		if oserror.IsNotExist(err) {
+			log.Ops.Infof(ctx, "not found; auto-generating")
+			// Certificate not found, attempt to create both cert and key now.
+			err = sb.createServiceCA(ctx, caCertPath, caKeyPath, initLifespan, serviceName)
+			if err != nil {
+				return err
+			}
+
+			// Both key and cert should now be populated.
+			return nil
+		}
+
+		// Some error unrelated to file existence occurred.
+		return err
+	}
+
+	log.Ops.Infof(ctx, "found; loading CA key: %s", caKeyPath)
+	// Load the key only if it exists.
+	sb.CAKey, err = loadKeyFile(caKeyPath)
+	if err != nil {
+		if !oserror.IsNotExist(err) {
+			// An error returned but it was not that the file didn't exist;
+			// this is an error.
+			return err
+		}
+		log.Ops.Infof(ctx, "CA key not found")
+	}
+
+	return nil
 }
 
 // loadOrCreateServiceCertificates will attempt to load the service cert/key
@@ -160,7 +203,7 @@ func (sb *ServiceCertificateBundle) loadOrCreateServiceCertificates(
 	} else if oserror.IsNotExist(err) {
 		log.Ops.Infof(ctx, "not found; CA cert does not exist, auto-creating")
 		// CA cert does not yet exist, create it and its key.
-		if err := sb.createServiceCA(ctx, caCertPath, caKeyPath, caCertLifespan); err != nil {
+		if err := sb.createServiceCA(ctx, caCertPath, caKeyPath, caCertLifespan, serviceName); err != nil {
 			return errors.Wrap(
 				err, "failed to create Service CA",
 			)
@@ -169,22 +212,15 @@ func (sb *ServiceCertificateBundle) loadOrCreateServiceCertificates(
 	// TODO(aaron-crl, knz): missing `else` case here.
 
 	// CA cert and key should now be loaded, create service cert and key.
-	var hostCert, hostKey *pem.Block
-	caCertPEM, err := security.PEMToCertificates(sb.CACertificate)
-	if err != nil {
-		return errors.Wrap(err, "error when decoding PEM CACertificate")
-	}
-	caKeyPEM, rest := pem.Decode(sb.CAKey)
-	if len(rest) > 0 || caKeyPEM == nil {
-		return errors.New("error when decoding PEM CAKey")
-	}
-	hostCert, hostKey, err = security.CreateServiceCertAndKey(
+	sb.HostCertificate, sb.HostKey, err = security.CreateServiceCertAndKey(
 		ctx,
 		log.Ops.Infof,
 		serviceCertLifespan,
 		commonName,
+		serviceName,
 		hostnames,
-		caCertPEM[0], caKeyPEM,
+		sb.CACertificate,
+		sb.CAKey,
 		serviceCertIsAlsoValidAsClient,
 	)
 	if err != nil {
@@ -192,16 +228,14 @@ func (sb *ServiceCertificateBundle) loadOrCreateServiceCertificates(
 			err, "failed to create Service Cert and Key",
 		)
 	}
-	sb.HostCertificate = pem.EncodeToMemory(hostCert)
-	sb.HostKey = pem.EncodeToMemory(hostKey)
 
 	log.Ops.Infof(ctx, "writing service cert: %s", serviceCertPath)
-	if err := writeCertificateFile(serviceCertPath, hostCert, false); err != nil {
+	if err := writeCertificateFile(serviceCertPath, sb.HostCertificate, false); err != nil {
 		return err
 	}
 
 	log.Ops.Infof(ctx, "writing service key: %s", serviceKeyPath)
-	if err := writeKeyFile(serviceKeyPath, hostKey, false); err != nil {
+	if err := writeKeyFile(serviceKeyPath, sb.HostKey, false); err != nil {
 		return err
 	}
 
@@ -211,26 +245,27 @@ func (sb *ServiceCertificateBundle) loadOrCreateServiceCertificates(
 // createServiceCA builds CA cert and key and populates them to
 // ServiceCertificateBundle.
 func (sb *ServiceCertificateBundle) createServiceCA(
-	ctx context.Context, caCertPath string, caKeyPath string, initLifespan time.Duration,
+	ctx context.Context,
+	caCertPath string,
+	caKeyPath string,
+	initLifespan time.Duration,
+	serviceName string,
 ) error {
 	ctx = logtags.AddTag(ctx, "auto-create-ca", nil)
 
 	var err error
-	var caCert, caKey *pem.Block
-	caCert, caKey, err = security.CreateCACertAndKey(ctx, log.Ops.Infof, initLifespan, caCommonName)
+	sb.CACertificate, sb.CAKey, err = security.CreateCACertAndKey(ctx, log.Ops.Infof, initLifespan, serviceName)
 	if err != nil {
 		return err
 	}
-	sb.CACertificate = pem.EncodeToMemory(caCert)
-	sb.CAKey = pem.EncodeToMemory(caKey)
 
 	log.Ops.Infof(ctx, "writing CA cert: %s", caCertPath)
-	if err := writeCertificateFile(caCertPath, caCert, false); err != nil {
+	if err := writeCertificateFile(caCertPath, sb.CACertificate, false); err != nil {
 		return err
 	}
 
 	log.Ops.Infof(ctx, "writing CA key: %s", caKeyPath)
-	if err := writeKeyFile(caKeyPath, caKey, false); err != nil {
+	if err := writeKeyFile(caKeyPath, sb.CAKey, false); err != nil {
 		return err
 	}
 
@@ -252,32 +287,42 @@ func loadKeyFile(keyPath string) (key []byte, err error) {
 }
 
 // Simple wrapper to make it easier to store certs somewhere else later.
-// Unless overwrite is true, this function will error if a file already exists
+// Unless overwrite is true, this function will error if a file alread exists
 // at certFilePath.
 // TODO(aaron-crl): This was lifted from 'pkg/security' and modified. It might
 // make sense to refactor these calls back to 'pkg/security' rather than
 // maintain these functions.
-func writeCertificateFile(certFilePath string, certificatePEM *pem.Block, overwrite bool) error {
+func writeCertificateFile(certFilePath string, certificatePEMBytes []byte, overwrite bool) error {
 	// Validate that we are about to write a cert. And reshape for common
 	// security.WritePEMToFile().
 	// TODO(aaron-crl): Validate this is actually a cert.
+	caCert, _ := pem.Decode(certificatePEMBytes)
+	if nil == caCert {
+		return errors.New("failed to parse valid PEM from certificatePEMBytes")
+	}
 
 	// TODO(aaron-crl): Add logging here.
-	return security.WritePEMToFile(certFilePath, 0644, overwrite, certificatePEM)
+	return security.WritePEMToFile(certFilePath, 0600, overwrite, caCert)
 }
 
 // Simple wrapper to make it easier to store certs somewhere else later.
-// Unless overwrite is true, this function will error if a file already exists
+// Unless overwrite is true, this function will error if a file alread exists
 // at keyFilePath.
 // TODO(aaron-crl): This was lifted from 'pkg/security' and modified. It might
 // make sense to refactor these calls back to 'pkg/security' rather than
 // maintain these functions.
-func writeKeyFile(keyFilePath string, keyPEM *pem.Block, overwrite bool) error {
+func writeKeyFile(keyFilePath string, keyPEMBytes []byte, overwrite bool) error {
 	// Validate that we are about to write a key and reshape for common
 	// security.WritePEMToFile().
 	// TODO(aaron-crl): Validate this is actually a key.
+
+	keyBlock, _ := pem.Decode(keyPEMBytes)
+	if keyBlock == nil {
+		return errors.New("failed to parse valid PEM from certificatePEMBytes")
+	}
+
 	// TODO(aaron-crl): Add logging here.
-	return security.WritePEMToFile(keyFilePath, 0600, overwrite, keyPEM)
+	return security.WritePEMToFile(keyFilePath, 0600, overwrite, keyBlock)
 }
 
 // InitializeFromConfig is called by the node creating certificates for the
@@ -328,18 +373,12 @@ func (b *CertificateBundle) InitializeFromConfig(ctx context.Context, c base.Con
 	}
 
 	// Initialize User auth certificates.
-	if err := b.UserAuth.loadOrCreateServiceCertificates(
+	if err := b.UserAuth.loadOrCreateUserAuthCACertAndKey(
 		ctx,
-		cl.ClientNodeCertPath(),
-		cl.ClientNodeKeyPath(),
 		cl.ClientCACertPath(),
 		cl.ClientCAKeyPath(),
-		defaultCertLifetime,
 		defaultCALifetime,
-		security.NodeUser,
 		serviceNameUserAuth,
-		nil,
-		true, /* serviceCertIsAlsoValidAsClient */
 	); err != nil {
 		return errors.Wrap(err,
 			"failed to load or create User auth certificate(s)")
@@ -407,8 +446,8 @@ func (b *CertificateBundle) InitializeFromConfig(ctx context.Context, c base.Con
 func extractHosts(addrs ...string) []string {
 	res := make([]string, 0, len(addrs))
 
-	for _, a := range addrs {
-		hostname, _, err := addr.SplitHostPort(a, "0")
+	for _, addr := range addrs {
+		hostname, _, err := netutil.SplitHostPort(addr, "0")
 		if err != nil {
 			panic(err)
 		}
@@ -455,22 +494,22 @@ func (b *CertificateBundle) InitializeNodeFromBundle(ctx context.Context, c base
 	}
 
 	// Attempt to write ClientCA to disk.
-	if err := b.UserAuth.writeCAOrFail(cl.ClientCACertPath(), cl.ClientCAKeyPath()); err != nil {
+	if err := b.InterNode.writeCAOrFail(cl.ClientCACertPath(), cl.ClientCAKeyPath()); err != nil {
 		return errors.Wrap(err, "failed to write ClientCA to disk")
 	}
 
 	// Attempt to write SQLServiceCA to disk.
-	if err := b.SQLService.writeCAOrFail(cl.SQLServiceCACertPath(), cl.SQLServiceCAKeyPath()); err != nil {
+	if err := b.InterNode.writeCAOrFail(cl.SQLServiceCACertPath(), cl.SQLServiceCAKeyPath()); err != nil {
 		return errors.Wrap(err, "failed to write SQLServiceCA to disk")
 	}
 
 	// Attempt to write RPCServiceCA to disk.
-	if err := b.RPCService.writeCAOrFail(cl.RPCServiceCACertPath(), cl.RPCServiceCAKeyPath()); err != nil {
+	if err := b.InterNode.writeCAOrFail(cl.RPCServiceCACertPath(), cl.RPCServiceCAKeyPath()); err != nil {
 		return errors.Wrap(err, "failed to write RPCServiceCA to disk")
 	}
 
 	// Attempt to write AdminUIServiceCA to disk.
-	if err := b.AdminUIService.writeCAOrFail(cl.UICACertPath(), cl.UICAKeyPath()); err != nil {
+	if err := b.InterNode.writeCAOrFail(cl.UICACertPath(), cl.UICAKeyPath()); err != nil {
 		return errors.Wrap(err, "failed to write AdminUIServiceCA to disk")
 	}
 
@@ -489,17 +528,15 @@ func (b *CertificateBundle) InitializeNodeFromBundle(ctx context.Context, c base
 // specified paths on disk. It will ignore any missing certificate fields but
 // error if it fails to write a file to disk.
 func (sb *ServiceCertificateBundle) writeCAOrFail(certPath string, keyPath string) (err error) {
-	caCertPEM, _ := pem.Decode(sb.CACertificate)
 	if sb.CACertificate != nil {
-		err = writeCertificateFile(certPath, caCertPEM, false)
+		err = writeCertificateFile(certPath, sb.CACertificate, false)
 		if err != nil {
 			return
 		}
 	}
 
-	caKeyPEM, _ := pem.Decode(sb.CAKey)
 	if sb.CAKey != nil {
-		err = writeKeyFile(keyPath, caKeyPEM, false)
+		err = writeKeyFile(keyPath, sb.CAKey, false)
 		if err != nil {
 			return
 		}
@@ -523,8 +560,8 @@ func (sb *ServiceCertificateBundle) loadCACertAndKeyIfExists(
 // collectLocalCABundle will load any CA certs and keys present on disk. It
 // will skip any CA's where the certificate is not found. Any other read errors
 // including permissions result in an error.
-func collectLocalCABundle(SSLCertsDir string) (CertificateBundle, error) {
-	cl := security.MakeCertsLocator(SSLCertsDir)
+func collectLocalCABundle(c base.Config) (CertificateBundle, error) {
+	cl := security.MakeCertsLocator(c.SSLCertsDir)
 	var b CertificateBundle
 	var err error
 
@@ -577,7 +614,7 @@ func rotateGeneratedCerts(ctx context.Context, c base.Config) error {
 	cl := security.MakeCertsLocator(c.SSLCertsDir)
 
 	// Fail fast if we can't load the CAs.
-	b, err := collectLocalCABundle(c.SSLCertsDir)
+	b, err := collectLocalCABundle(c)
 	if err != nil {
 		return errors.Wrap(
 			err, "failed to load local CAs for certificate rotation")
@@ -607,22 +644,7 @@ func rotateGeneratedCerts(ctx context.Context, c base.Config) error {
 		}
 	}
 
-	// Rotate UserAuth certificate
-	if b.UserAuth.CACertificate != nil {
-		err = b.UserAuth.rotateServiceCert(
-			ctx,
-			cl.ClientNodeCertPath(),
-			cl.ClientNodeKeyPath(),
-			defaultCertLifetime,
-			security.NodeUser,
-			serviceNameUserAuth,
-			nil,
-			true, /* serviceCertIsAlsoValidAsClient */
-		)
-		if err != nil {
-			return errors.Wrap(err, "failed to rotate InterNode cert")
-		}
-	}
+	// TODO(aaron-crl): Should we rotate UserAuth Certs.
 
 	// Rotate SQLService Certs.
 	if b.SQLService.CACertificate != nil {
@@ -691,22 +713,15 @@ func (sb *ServiceCertificateBundle) rotateServiceCert(
 	serviceCertIsAlsoValidAsClient bool,
 ) error {
 	// generate
-	caCertPEM, err := security.PEMToCertificates(sb.CACertificate)
-	if err != nil {
-		return errors.Wrap(err, "error when decoding PEM CACertificate")
-	}
-	caKeyPEM, rest := pem.Decode(sb.CAKey)
-	if len(rest) > 0 || caKeyPEM == nil {
-		return errors.New("error when decoding PEM CAKey")
-	}
 	certPEM, keyPEM, err := security.CreateServiceCertAndKey(
 		ctx,
 		log.Ops.Infof,
 		serviceCertLifespan,
 		commonName,
+		serviceString,
 		hostnames,
-		caCertPEM[0],
-		caKeyPEM,
+		sb.CACertificate,
+		sb.CAKey,
 		serviceCertIsAlsoValidAsClient,
 	)
 	if err != nil {

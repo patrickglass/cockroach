@@ -33,10 +33,9 @@ func New(
 	db *kv.DB,
 	codec keys.SQLCodec,
 	settings *cluster.Settings,
-	testingKnobs *sqlliveness.TestingKnobs,
 ) sqlliveness.Provider {
 	storage := slstorage.NewStorage(stopper, clock, db, codec, settings)
-	instance := slinstance.NewSQLInstance(stopper, clock, storage, settings, testingKnobs)
+	instance := slinstance.NewSQLInstance(stopper, clock, storage, settings)
 	return &provider{
 		Storage:  storage,
 		Instance: instance,

@@ -1,4 +1,4 @@
-# LogicTest: local
+# LogicTest: 5node
 
 statement ok
 CREATE TABLE ab (a INT PRIMARY KEY, b INT); INSERT INTO ab (a, b) VALUES (1, 10)
@@ -11,7 +11,7 @@ PREPARE change_index AS SELECT * FROM [EXPLAIN SELECT * FROM ab WHERE b=10]
 query T
 EXECUTE change_index
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • filter
@@ -19,7 +19,7 @@ vectorized: true
 │
 └── • scan
       missing stats
-      table: ab@ab_pkey
+      table: ab@primary
       spans: FULL SCAN
 
 statement ok
@@ -28,7 +28,7 @@ CREATE INDEX bindex ON ab (b)
 query T
 EXECUTE change_index
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • scan
@@ -42,7 +42,7 @@ DROP INDEX bindex
 query T
 EXECUTE change_index
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • filter
@@ -50,7 +50,7 @@ vectorized: true
 │
 └── • scan
       missing stats
-      table: ab@ab_pkey
+      table: ab@primary
       spans: FULL SCAN
 
 ## Statistics change: Create statistics and ensure that the plan is recalculated.
@@ -63,7 +63,7 @@ PREPARE change_stats AS SELECT * FROM [EXPLAIN SELECT * FROM ab JOIN cd ON a=c]
 query T
 EXECUTE change_stats
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • merge join
@@ -73,12 +73,12 @@ vectorized: true
 │
 ├── • scan
 │     missing stats
-│     table: ab@ab_pkey
+│     table: ab@primary
 │     spans: FULL SCAN
 │
 └── • scan
       missing stats
-      table: cd@cd_pkey
+      table: cd@primary
       spans: FULL SCAN
 
 statement ok
@@ -90,69 +90,15 @@ CREATE STATISTICS s FROM ab
 query T retry
 EXECUTE change_stats
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • lookup join
-│ table: cd@cd_pkey
+│ table: cd@primary
 │ equality: (a) = (c)
 │ equality cols are key
 │
 └── • scan
       estimated row count: 1 (100% of the table; stats collected <hidden> ago)
-      table: ab@ab_pkey
+      table: ab@primary
       spans: FULL SCAN
-
-# Verify the plan of a very simple query which should be using the placeholder
-# fast path.
-statement ok
-PREPARE pklookup AS SELECT b FROM ab WHERE a = $1
-
-query T
-EXPLAIN ANALYZE EXECUTE pklookup(1)
-----
-planning time: 10µs
-execution time: 100µs
-distribution: <hidden>
-vectorized: <hidden>
-rows read from KV: 1 (8 B)
-maximum memory usage: <hidden>
-network usage: <hidden>
-regions: <hidden>
-·
-• scan
-  nodes: <hidden>
-  regions: <hidden>
-  actual row count: 1
-  KV time: 0µs
-  KV contention time: 0µs
-  KV rows read: 1
-  KV bytes read: 8 B
-  estimated max memory allocated: 0 B
-  estimated row count: 0
-  table: ab@ab_pkey
-  spans: [/1 - /1]
-
-query T
-EXPLAIN ANALYZE EXECUTE pklookup(2)
-----
-planning time: 10µs
-execution time: 100µs
-distribution: <hidden>
-vectorized: <hidden>
-maximum memory usage: <hidden>
-network usage: <hidden>
-regions: <hidden>
-·
-• scan
-  nodes: <hidden>
-  regions: <hidden>
-  actual row count: 0
-  KV time: 0µs
-  KV contention time: 0µs
-  KV rows read: 0
-  KV bytes read: 0 B
-  estimated max memory allocated: 0 B
-  estimated row count: 0
-  table: ab@ab_pkey
-  spans: [/2 - /2]

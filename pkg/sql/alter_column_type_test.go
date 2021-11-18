@@ -22,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqltestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -189,6 +190,8 @@ func TestVisibilityDuringAlterColumnType(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	defer sqltestutils.SetTestJobsAdoptInterval()()
+
 	ctx := context.Background()
 	swapNotification := make(chan struct{})
 	waitBeforeContinuing := make(chan struct{})
@@ -202,8 +205,6 @@ func TestVisibilityDuringAlterColumnType(t *testing.T) {
 				<-waitBeforeContinuing
 			},
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
 	s, db, _ := serverutils.StartServer(t, params)
 	sqlDB := sqlutils.MakeSQLRunner(db)
@@ -230,7 +231,7 @@ INSERT INTO t.test VALUES (1), (2), (3);
 		`CREATE TABLE public.test (
 	x INT8 NULL,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT test_pkey PRIMARY KEY (rowid ASC),
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	FAMILY "primary" (x, rowid)
 )`}}
 
@@ -244,7 +245,7 @@ INSERT INTO t.test VALUES (1), (2), (3);
 		`CREATE TABLE public.test (
 	x STRING NULL,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT test_pkey PRIMARY KEY (rowid ASC),
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	FAMILY "primary" (x, rowid)
 )`}}
 
@@ -289,10 +290,9 @@ ALTER TABLE t.test ALTER COLUMN x TYPE INT;
 func TestQueryIntToString(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 
 	params, _ := tests.CreateTestServerParams()
-	// Decrease the adopt loop interval so that retries happen quickly.
-	params.Knobs.JobsTestingKnobs = jobs.NewTestingKnobsWithShortIntervals()
 
 	s, db, _ := serverutils.StartServer(t, params)
 	sqlDB := sqlutils.MakeSQLRunner(db)
@@ -332,7 +332,7 @@ func TestSchemaChangeBeforeAlterColumnType(t *testing.T) {
 			},
 		},
 	}
-	defer close(waitBeforeContinuing)
+
 	s, db, _ := serverutils.StartServer(t, params)
 	sqlDB := sqlutils.MakeSQLRunner(db)
 	defer s.Stopper().Stop(ctx)
@@ -353,8 +353,7 @@ ALTER TABLE t.test ALTER PRIMARY KEY USING COLUMNS (x);
 
 	<-swapNotification
 
-	expected := "pq: unimplemented: ALTER COLUMN TYPE requiring rewrite of on-disk data is currently not " +
-		"supported for columns that are part of an index"
+	expected := "pq: unimplemented: table test is currently undergoing a schema change"
 	sqlDB.ExpectErr(t, expected, `
 SET enable_experimental_alter_column_type_general = true;
 ALTER TABLE t.test ALTER COLUMN y TYPE STRING;`)

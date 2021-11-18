@@ -55,7 +55,6 @@ func TestStructuredEventLogging(t *testing.T) {
 	//   setting that does not otherwise impact the test's semantics
 	//   will do.
 	const setStmt = `SET CLUSTER SETTING "sql.defaults.default_int_size" = $1`
-	const expectedStmt = `SET CLUSTER SETTING "sql.defaults.default_int_size" = $1`
 	if _, err := conn.ExecContext(ctx,
 		`PREPARE a(INT) AS `+setStmt,
 	); err != nil {
@@ -91,8 +90,8 @@ func TestStructuredEventLogging(t *testing.T) {
 		if err := json.Unmarshal(jsonPayload, &ev); err != nil {
 			t.Errorf("unmarshalling %q: %v", e.Message, err)
 		}
-		if ev.Statement != expectedStmt {
-			t.Errorf("wrong statement: expected %q, got %q", expectedStmt, ev.Statement)
+		if expected := string(redact.Sprint(setStmt)); ev.Statement != expected {
+			t.Errorf("wrong statement: expected %q, got %q", expected, ev.Statement)
 		}
 		if expected := []string{string(redact.Sprint("8"))}; !reflect.DeepEqual(expected, ev.PlaceholderValues) {
 			t.Errorf("wrong placeholders: expected %+v, got %+v", expected, ev.PlaceholderValues)
@@ -127,28 +126,28 @@ func TestPerfLogging(t *testing.T) {
 		{
 			query:       `SELECT pg_sleep(0.256)`,
 			errRe:       ``,
-			logRe:       `"EventType":"slow_query","Statement":"SELECT pg_sleep\(‹0.256›\)","Tag":"SELECT","User":"root","ExecMode":"exec","NumRows":1`,
+			logRe:       `"EventType":"slow_query","Statement":"‹SELECT pg_sleep\(0\.256\)›","Tag":"SELECT","User":"root","ExecMode":"exec","NumRows":1`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
 		{
 			query:       `INSERT INTO t VALUES (1, pg_sleep(0.256), 'x')`,
 			errRe:       ``,
-			logRe:       `"EventType":"slow_query","Statement":"INSERT INTO .*‹t› VALUES \(‹1›, pg_sleep\(‹0.256›\), ‹'x'›\)","Tag":"INSERT","User":"root"`,
+			logRe:       `"EventType":"slow_query","Statement":"‹INSERT INTO \\"\\"\.\\"\\"\.t VALUES \(1, pg_sleep\(0\.256\), 'x'\)›","Tag":"INSERT","User":"root","ExecMode":"exec","NumRows":1`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
 		{
 			query:       `INSERT INTO t VALUES (1, pg_sleep(0.256), 'x')`,
 			errRe:       `duplicate key`,
-			logRe:       `"EventType":"slow_query","Statement":"INSERT INTO .*‹t› VALUES \(‹1›, pg_sleep\(‹0.256›\), ‹'x'›\)","Tag":"INSERT","User":"root"`,
+			logRe:       `"EventType":"slow_query","Statement":"‹INSERT INTO \\"\\"\.\\"\\"\.t VALUES \(1, pg_sleep\(0\.256\), 'x'\)›","Tag":"INSERT","User":"root","ExecMode":"exec","SQLSTATE":"23505","ErrorText":"‹duplicate key value violates unique constraint`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
 		{
 			query:       `INSERT INTO t VALUES (2, pg_sleep(0.256), 'x')`,
 			errRe:       ``,
-			logRe:       `"EventType":"slow_query","Statement":"INSERT INTO .*‹t› VALUES \(‹2›, pg_sleep\(‹0.256›\), ‹'x'›\)","Tag":"INSERT","User":"root","ExecMode":"exec","NumRows":1`,
+			logRe:       `"EventType":"slow_query","Statement":"‹INSERT INTO \\"\\"\.\\"\\"\.t VALUES \(2, pg_sleep\(0\.256\), 'x'\)›","Tag":"INSERT","User":"root","ExecMode":"exec","NumRows":1`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
@@ -162,7 +161,7 @@ func TestPerfLogging(t *testing.T) {
 		{
 			query:       `INSERT INTO t VALUES (4, pg_sleep(0.256), repeat('x', 1024))`,
 			errRe:       ``,
-			logRe:       `"EventType":"slow_query","Statement":"INSERT INTO .*‹t› VALUES \(‹4›, pg_sleep\(‹0.256›\), repeat\(‹'x'›, ‹1024›\)\)","Tag":"INSERT","User":"root","ExecMode":"exec","NumRows":1`,
+			logRe:       `"EventType":"slow_query","Statement":"‹INSERT INTO \\"\\"\.\\"\\"\.t VALUES \(4, pg_sleep\(0\.256\), repeat\('x', 1024\)\)›","Tag":"INSERT","User":"root","ExecMode":"exec","NumRows":1`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
@@ -176,7 +175,7 @@ func TestPerfLogging(t *testing.T) {
 		{
 			query:       `SELECT *, pg_sleep(0.064) FROM t`,
 			errRe:       ``,
-			logRe:       `"EventType":"slow_query","Statement":"SELECT \*, pg_sleep\(‹0.064›\) FROM .*‹t›","Tag":"SELECT","User":"root","ExecMode":"exec","NumRows":4`,
+			logRe:       `"EventType":"slow_query","Statement":"‹SELECT \*, pg_sleep\(0\.064\) FROM \\"\\"\.\\"\\"\.t›","Tag":"SELECT","User":"root","ExecMode":"exec","NumRows":4`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
@@ -416,7 +415,7 @@ func TestPerfLogging(t *testing.T) {
 		{
 			query:       `INSERT INTO t(i) VALUES (7), (8), (9)`,
 			errRe:       ``,
-			logRe:       `"EventType":"txn_rows_written_limit","Statement":"INSERT INTO.*","TxnID":".*","SessionID":".*"`,
+			logRe:       `"EventType":"txn_rows_written_limit","Statement":"‹INSERT INTO.*","TxnID":".*","SessionID":".*"`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
@@ -424,7 +423,7 @@ func TestPerfLogging(t *testing.T) {
 			setup:       `INSERT INTO t(i) VALUES (-1), (-2), (-3)`,
 			query:       `UPDATE t SET i = i - 10 WHERE i < 0`,
 			errRe:       ``,
-			logRe:       `"EventType":"txn_rows_written_limit","Statement":"UPDATE.*","TxnID":".*","SessionID":".*"`,
+			logRe:       `"EventType":"txn_rows_written_limit","Statement":"‹UPDATE.*","TxnID":".*","SessionID":".*"`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
@@ -433,7 +432,7 @@ func TestPerfLogging(t *testing.T) {
 			cleanup:     `COMMIT`,
 			query:       `INSERT INTO t(i) VALUES (10); INSERT INTO t(i) VALUES (11), (12);`,
 			errRe:       ``,
-			logRe:       `"EventType":"txn_rows_written_limit","Statement":"INSERT INTO.*","TxnID":".*","SessionID":".*"`,
+			logRe:       `"EventType":"txn_rows_written_limit","Statement":"‹INSERT INTO.*","TxnID":".*","SessionID":".*"`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
@@ -442,14 +441,14 @@ func TestPerfLogging(t *testing.T) {
 			cleanup:     `RESET transaction_rows_written_log`,
 			query:       `INSERT INTO t(i) VALUES (13), (14)`,
 			errRe:       ``,
-			logRe:       `"EventType":"txn_rows_written_limit","Statement":"INSERT INTO.*","TxnID":".*","SessionID":".*"`,
+			logRe:       `"EventType":"txn_rows_written_limit","Statement":"‹INSERT INTO.*","TxnID":".*","SessionID":".*"`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
 		{
 			query:       `INSERT INTO t(i) VALUES (15), (16), (17), (18)`,
 			errRe:       `pq: txn has written 4 rows, which is above the limit: TxnID .* SessionID .*`,
-			logRe:       `"EventType":"txn_rows_written_limit","Statement":"INSERT INTO.*","TxnID":".*","SessionID":".*"`,
+			logRe:       `"EventType":"txn_rows_written_limit","Statement":"‹INSERT INTO.*","TxnID":".*","SessionID":".*"`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
@@ -458,14 +457,14 @@ func TestPerfLogging(t *testing.T) {
 			// We now have 4 negative values in the table t.
 			query:       `DELETE FROM t WHERE i < 0`,
 			errRe:       `pq: txn has written 4 rows, which is above the limit: TxnID .* SessionID .*`,
-			logRe:       `"EventType":"txn_rows_written_limit","Statement":"DELETE.*","TxnID":".*","SessionID":".*"`,
+			logRe:       `"EventType":"txn_rows_written_limit","Statement":"‹DELETE.*","TxnID":".*","SessionID":".*"`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
 		{
 			query:       `UPSERT INTO t(i) VALUES (-2), (-3), (-4), (-5)`,
 			errRe:       `pq: txn has written 4 rows, which is above the limit: TxnID .* SessionID .*`,
-			logRe:       `"EventType":"txn_rows_written_limit","Statement":"UPSERT INTO.*","TxnID":".*","SessionID":".*","NumRows":4`,
+			logRe:       `"EventType":"txn_rows_written_limit","Statement":"‹UPSERT INTO.*","TxnID":".*","SessionID":".*","NumRows":4`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
@@ -474,7 +473,7 @@ func TestPerfLogging(t *testing.T) {
 			cleanup:     `ROLLBACK`,
 			query:       `INSERT INTO t(i) VALUES (15), (16), (17); INSERT INTO t(i) VALUES (18);`,
 			errRe:       `pq: txn has written 4 rows, which is above the limit: TxnID .* SessionID .*`,
-			logRe:       `"EventType":"txn_rows_written_limit","Statement":"INSERT INTO.*","TxnID":".*","SessionID":".*","NumRows":3`,
+			logRe:       `"EventType":"txn_rows_written_limit","Statement":"‹INSERT INTO.*","TxnID":".*","SessionID":".*","NumRows":3`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
@@ -483,7 +482,7 @@ func TestPerfLogging(t *testing.T) {
 			cleanup:     `RESET transaction_rows_written_err`,
 			query:       `INSERT INTO t(i) VALUES (15), (16)`,
 			errRe:       `pq: txn has written 2 rows, which is above the limit: TxnID .* SessionID .*`,
-			logRe:       `"EventType":"txn_rows_written_limit"`,
+			logRe:       ``,
 			logExpected: false,
 			channel:     channel.SQL_PERF,
 		},
@@ -497,7 +496,7 @@ func TestPerfLogging(t *testing.T) {
 		{
 			query:       `SELECT * FROM t WHERE i IN (6, 7, 8)`,
 			errRe:       ``,
-			logRe:       `"EventType":"txn_rows_read_limit","Statement":"SELECT \* FROM .*‹t› WHERE ‹i› IN \(‹6›, ‹7›, ‹8›\)","Tag":"SELECT","User":"root","TxnID":.*,"SessionID":.*,"NumRows":3`,
+			logRe:       `"EventType":"txn_rows_read_limit","Statement":"‹SELECT.*","TxnID":".*","SessionID":".*"`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
@@ -506,7 +505,7 @@ func TestPerfLogging(t *testing.T) {
 			cleanup:     `COMMIT`,
 			query:       `SELECT * FROM t WHERE i = 6; SELECT * FROM t WHERE i = 7; SELECT * FROM t WHERE i = 8;`,
 			errRe:       ``,
-			logRe:       `"EventType":"txn_rows_read_limit","Statement":"SELECT \* FROM .*‹t› WHERE ‹i› = ‹8›","Tag":"SELECT","User":"root","TxnID":.*,"SessionID":.*,"NumRows":3`,
+			logRe:       `"EventType":"txn_rows_read_limit","Statement":"‹SELECT.*","TxnID":".*","SessionID":".*"`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
@@ -515,14 +514,14 @@ func TestPerfLogging(t *testing.T) {
 			cleanup:     `RESET transaction_rows_read_log`,
 			query:       `SELECT * FROM t WHERE i IN (6, 7)`,
 			errRe:       ``,
-			logRe:       `"EventType":"txn_rows_read_limit","Statement":"SELECT \* FROM .*‹t› WHERE ‹i› IN \(‹6›, ‹7›\)","Tag":"SELECT","User":"root","TxnID":.*,"SessionID":.*,"NumRows":2`,
+			logRe:       `"EventType":"txn_rows_read_limit","Statement":"‹SELECT.*","TxnID":".*","SessionID":".*"`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
 		{
 			query:       `SELECT * FROM t WHERE i IN (6, 7, 8, 9)`,
 			errRe:       `pq: txn has read 4 rows, which is above the limit: TxnID .* SessionID .*`,
-			logRe:       `"EventType":"txn_rows_read_limit","Statement":"SELECT \* FROM .*‹t› WHERE ‹i› IN \(‹6›, ‹7›, ‹8›, ‹9›\)","Tag":"SELECT","User":"root","TxnID":.*,"SessionID":.*,"NumRows":4`,
+			logRe:       `"EventType":"txn_rows_read_limit","Statement":"‹SELECT.*","TxnID":".*","SessionID":".*"`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
@@ -531,7 +530,7 @@ func TestPerfLogging(t *testing.T) {
 			cleanup:     `ROLLBACK`,
 			query:       `SELECT * FROM t WHERE i IN (6, 7); SELECT * FROM t WHERE i IN (8, 9)`,
 			errRe:       `pq: txn has read 4 rows, which is above the limit: TxnID .* SessionID .*`,
-			logRe:       `"EventType":"txn_rows_read_limit","Statement":"SELECT \* FROM .*‹t› WHERE ‹i› IN \(‹8›, ‹9›\)","Tag":"SELECT","User":"root","TxnID":.*,"SessionID":.*,"NumRows":4`,
+			logRe:       `"EventType":"txn_rows_read_limit","Statement":"‹SELECT.*","TxnID":".*","SessionID":".*"`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
@@ -540,7 +539,7 @@ func TestPerfLogging(t *testing.T) {
 			cleanup:     `RESET transaction_rows_read_err`,
 			query:       `SELECT * FROM t WHERE i = 6 OR i = 7`,
 			errRe:       `pq: txn has read 2 rows, which is above the limit: TxnID .* SessionID .*`,
-			logRe:       `"EventType":"txn_rows_read_limit"`,
+			logRe:       ``,
 			logExpected: false,
 			channel:     channel.SQL_PERF,
 		},
@@ -551,7 +550,7 @@ func TestPerfLogging(t *testing.T) {
 			cleanup:     `SET transaction_rows_written_log = 2; SET transaction_rows_written_err = 3;`,
 			query:       `UPDATE t SET i = i - 10 WHERE i < 0`,
 			errRe:       `pq: txn has read 4 rows, which is above the limit: TxnID .* SessionID .*`,
-			logRe:       `"EventType":"txn_rows_read_limit","Statement":"UPDATE.*","TxnID":".*","SessionID":".*"`,
+			logRe:       `"EventType":"txn_rows_read_limit","Statement":"‹UPDATE.*","TxnID":".*","SessionID":".*"`,
 			logExpected: true,
 			channel:     channel.SQL_PERF,
 		},
@@ -657,10 +656,10 @@ func TestPerfLogging(t *testing.T) {
 	auditable := true
 	cfg.Sinks.FileGroups = map[string]*logconfig.FileSinkConfig{
 		"sql-slow": {
-			FileDefaults: logconfig.FileDefaults{
-				CommonSinkConfig: logconfig.CommonSinkConfig{Auditable: &auditable},
+			CommonSinkConfig: logconfig.CommonSinkConfig{Auditable: &auditable},
+			Channels: logconfig.ChannelList{
+				Channels: []log.Channel{channel.SQL_PERF, channel.SQL_INTERNAL_PERF},
 			},
-			Channels: logconfig.SelectChannels(channel.SQL_PERF, channel.SQL_INTERNAL_PERF),
 		},
 	}
 	dir := sc.GetDirectory()

@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 )
 
 // Workaround for bazel auto-generated code. goimports does not automatically
@@ -31,7 +30,6 @@ var (
 	_ apd.Context
 	_ duration.Duration
 	_ encoding.Direction
-	_ json.JSON
 )
 
 // EncDatumRowsToColVec converts one column from EncDatumRows to a column
@@ -72,7 +70,7 @@ func EncDatumRowsToColVec(
 								v = bool(*datum.(*tree.DBool))
 								castV := v.(bool)
 								//gcassert:bce
-								col.Set(i, castV)
+								col[i] = castV
 							}
 						}
 					}
@@ -99,7 +97,7 @@ func EncDatumRowsToColVec(
 								v = int16(*datum.(*tree.DInt))
 								castV := v.(int16)
 								//gcassert:bce
-								col.Set(i, castV)
+								col[i] = castV
 							}
 						}
 					}
@@ -123,7 +121,7 @@ func EncDatumRowsToColVec(
 								v = int32(*datum.(*tree.DInt))
 								castV := v.(int32)
 								//gcassert:bce
-								col.Set(i, castV)
+								col[i] = castV
 							}
 						}
 					}
@@ -148,7 +146,7 @@ func EncDatumRowsToColVec(
 								v = int64(*datum.(*tree.DInt))
 								castV := v.(int64)
 								//gcassert:bce
-								col.Set(i, castV)
+								col[i] = castV
 							}
 						}
 					}
@@ -176,7 +174,7 @@ func EncDatumRowsToColVec(
 								v = float64(*datum.(*tree.DFloat))
 								castV := v.(float64)
 								//gcassert:bce
-								col.Set(i, castV)
+								col[i] = castV
 							}
 						}
 					}
@@ -203,7 +201,7 @@ func EncDatumRowsToColVec(
 
 								v = datum.(*tree.DDecimal).Decimal
 								castV := v.(apd.Decimal)
-								col.Set(i, castV)
+								col[i].Set(&castV)
 							}
 						}
 					}
@@ -231,7 +229,7 @@ func EncDatumRowsToColVec(
 								v = datum.(*tree.DDate).UnixEpochDaysWithOrig()
 								castV := v.(int64)
 								//gcassert:bce
-								col.Set(i, castV)
+								col[i] = castV
 							}
 						}
 					}
@@ -259,7 +257,7 @@ func EncDatumRowsToColVec(
 								v = datum.(*tree.DTimestamp).Time
 								castV := v.(time.Time)
 								//gcassert:bce
-								col.Set(i, castV)
+								col[i] = castV
 							}
 						}
 					}
@@ -287,7 +285,7 @@ func EncDatumRowsToColVec(
 								v = datum.(*tree.DInterval).Duration
 								castV := v.(duration.Duration)
 								//gcassert:bce
-								col.Set(i, castV)
+								col[i] = castV
 							}
 						}
 					}
@@ -373,7 +371,7 @@ func EncDatumRowsToColVec(
 								v = datum.(*tree.DTimestampTZ).Time
 								castV := v.(time.Time)
 								//gcassert:bce
-								col.Set(i, castV)
+								col[i] = castV
 							}
 						}
 					}
@@ -400,33 +398,6 @@ func EncDatumRowsToColVec(
 
 								v = datum.(*tree.DUuid).UUID.GetBytesMut()
 								castV := v.([]byte)
-								col.Set(i, castV)
-							}
-						}
-					}
-				}
-			case types.JsonFamily:
-				switch t.Width() {
-				case -1:
-				default:
-					col := vec.JSON()
-					if len(rows) > 0 {
-						_ = col.Get(len(rows) - 1)
-						var v interface{}
-						for i := range rows {
-							row := rows[i]
-							if row[columnIdx].Datum == nil {
-								if err = row[columnIdx].EnsureDecoded(t, alloc); err != nil {
-									return
-								}
-							}
-							datum := row[columnIdx].Datum
-							if datum == tree.DNull {
-								vec.Nulls().SetNull(i)
-							} else {
-
-								v = datum.(*tree.DJSON).JSON
-								castV := v.(json.JSON)
 								col.Set(i, castV)
 							}
 						}

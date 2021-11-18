@@ -28,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
-	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
@@ -77,11 +76,6 @@ func (tc *TestCluster) Server(idx int) serverutils.TestServerInterface {
 	return tc.Servers[idx]
 }
 
-// ServerTyped is like Server, but returns the right type.
-func (tc *TestCluster) ServerTyped(idx int) *server.TestServer {
-	return tc.Servers[idx]
-}
-
 // ServerConn is part of TestClusterInterface.
 func (tc *TestCluster) ServerConn(idx int) *gosql.DB {
 	return tc.Conns[idx]
@@ -121,12 +115,12 @@ func (tc *TestCluster) stopServers(ctx context.Context) {
 		tc.stopServerLocked(i)
 	}
 
-	// TODO(andrei): Instead of checking for empty tracing registries after
-	// shutting down each node, we're doing it after shutting down all nodes. This
-	// is because all the nodes might share the same cluster (in case the Tracer
-	// was passed in at cluster creation time). We should not allow the Tracer to
-	// be passed in like this, and we should then also added this registry
-	// draining check to individual TestServers.
+	// TODO(irfansharif): Instead of checking for empty tracing registries after
+	// shutting down each node, we're doing it after shutting down all nodes.
+	// This is because TestCluster share the same Tracer object. Perhaps a saner
+	// thing to do is to separate out individual TestServers entirely. The
+	// component sharing within TestCluster has bitten in the past as well, and
+	// it's not clear why it has to be this way.
 	for i := 0; i < tc.NumServers(); i++ {
 		// Wait until a server's span registry is emptied out. This helps us check
 		// to see that there are no un-Finish()ed spans. We need to wrap this in a
@@ -136,10 +130,10 @@ func (tc *TestCluster) stopServers(ctx context.Context) {
 		// example of this.
 		//
 		// [1]: cleanupSessionTempObjects
-		tracer := tc.Servers[i].Tracer()
+		tracer := tc.Server(i).Tracer().(*tracing.Tracer)
 		testutils.SucceedsSoon(tc.t, func() error {
-			var sps []tracing.RegistrySpan
-			_ = tracer.VisitSpans(func(span tracing.RegistrySpan) error {
+			var sps []*tracing.Span
+			_ = tracer.VisitSpans(func(span *tracing.Span) error {
 				sps = append(sps, span)
 				return nil
 			})
@@ -149,7 +143,7 @@ func (tc *TestCluster) stopServers(ctx context.Context) {
 			var buf strings.Builder
 			fmt.Fprintf(&buf, "unexpectedly found %d active spans:\n", len(sps))
 			for _, sp := range sps {
-				fmt.Fprintln(&buf, sp.GetRecording(tracing.RecordingVerbose))
+				fmt.Fprintln(&buf, sp.GetRecording())
 				fmt.Fprintln(&buf)
 			}
 			return errors.Newf("%s", buf.String())
@@ -226,17 +220,6 @@ func NewTestCluster(t testing.TB, nodes int, clusterArgs base.TestClusterArgs) *
 			serverArgs = perNodeServerArgs
 		} else {
 			serverArgs = tc.clusterArgs.ServerArgs
-		}
-
-		if len(serverArgs.StoreSpecs) == 0 {
-			serverArgs.StoreSpecs = []base.StoreSpec{base.DefaultTestStoreSpec}
-		}
-		if knobs, ok := serverArgs.Knobs.Server.(*server.TestingKnobs); ok && knobs.StickyEngineRegistry != nil {
-			for j := range serverArgs.StoreSpecs {
-				if serverArgs.StoreSpecs[j].StickyInMemoryEngineID == "" {
-					serverArgs.StoreSpecs[j].StickyInMemoryEngineID = fmt.Sprintf("auto-node%d-store%d", i+1, j+1)
-				}
-			}
 		}
 
 		// If no localities are specified in the args, we'll generate some
@@ -608,41 +591,18 @@ func (tc *TestCluster) Targets(serverIdxs ...int) []roachpb.ReplicationTarget {
 func (tc *TestCluster) changeReplicas(
 	changeType roachpb.ReplicaChangeType, startKey roachpb.RKey, targets ...roachpb.ReplicationTarget,
 ) (roachpb.RangeDescriptor, error) {
-	tc.t.Helper()
 	ctx := context.TODO()
-
-	var returnErr error
-	var desc *roachpb.RangeDescriptor
-	if err := testutils.SucceedsSoonError(func() error {
-		tc.t.Helper()
-		var beforeDesc roachpb.RangeDescriptor
-		if err := tc.Servers[0].DB().GetProto(
-			ctx, keys.RangeDescriptorKey(startKey), &beforeDesc,
-		); err != nil {
-			return errors.Wrap(err, "range descriptor lookup error")
-		}
-		var err error
-		desc, err = tc.Servers[0].DB().AdminChangeReplicas(
-			ctx, startKey.AsRawKey(), beforeDesc, roachpb.MakeReplicationChanges(changeType, targets...),
-		)
-		if kvserver.IsRetriableReplicationChangeError(err) {
-			tc.t.Logf("encountered retriable replication change error: %v", err)
-			return err
-		}
-		// Don't return blindly - if this isn't an error we think is related to a
-		// replication error that we can retry, save the error to the outer scope
-		// and return nil.
-		returnErr = err
-		return nil
-	}); err != nil {
-		returnErr = err
+	var beforeDesc roachpb.RangeDescriptor
+	if err := tc.Servers[0].DB().GetProto(
+		ctx, keys.RangeDescriptorKey(startKey), &beforeDesc,
+	); err != nil {
+		return roachpb.RangeDescriptor{}, errors.Wrap(err, "range descriptor lookup error")
 	}
-
-	if returnErr != nil {
-		// We mark the error as Handled so that tests that wanted the error in the
-		// first attempt but spent a while spinning in the retry loop above will
-		// fail. These should invoke ChangeReplicas directly.
-		return roachpb.RangeDescriptor{}, errors.Handled(errors.Wrap(returnErr, "AdminChangeReplicas error"))
+	desc, err := tc.Servers[0].DB().AdminChangeReplicas(
+		ctx, startKey.AsRawKey(), beforeDesc, roachpb.MakeReplicationChanges(changeType, targets...),
+	)
+	if err != nil {
+		return roachpb.RangeDescriptor{}, errors.Wrap(err, "AdminChangeReplicas error")
 	}
 	return *desc, nil
 }
@@ -923,7 +883,7 @@ func (tc *TestCluster) MoveRangeLeaseNonCooperatively(
 		return nil, errors.Errorf("must set StoreTestingKnobs.AllowLeaseRequestProposalsWhenNotLeader")
 	}
 
-	destServer, err := tc.FindMemberServer(dest.StoreID)
+	destServer, err := tc.findMemberServer(dest.StoreID)
 	if err != nil {
 		return nil, err
 	}
@@ -974,7 +934,7 @@ func (tc *TestCluster) MoveRangeLeaseNonCooperatively(
 		ls, err := r.TestingAcquireLease(ctx)
 		if err != nil {
 			log.Infof(ctx, "TestingAcquireLease failed: %s", err)
-			if lErr := (*roachpb.NotLeaseHolderError)(nil); errors.As(err, &lErr) && lErr.Lease != nil {
+			if lErr := (*roachpb.NotLeaseHolderError)(nil); errors.As(err, &lErr) {
 				newLease = lErr.Lease
 			} else {
 				return err
@@ -1038,7 +998,7 @@ func (tc *TestCluster) FindRangeLeaseEx(
 
 	// Find the server indicated by the hint and send a LeaseInfoRequest through
 	// it.
-	hintServer, err := tc.FindMemberServer(hint.StoreID)
+	hintServer, err := tc.findMemberServer(hint.StoreID)
 	if err != nil {
 		return server.LeaseInfo{}, hlc.ClockTimestamp{}, errors.Wrapf(err, "bad hint: %+v; no such node", hint)
 	}
@@ -1130,8 +1090,8 @@ func (tc *TestCluster) WaitForSplitAndInitialization(startKey roachpb.Key) error
 	})
 }
 
-// FindMemberServer returns the server containing a given store.
-func (tc *TestCluster) FindMemberServer(storeID roachpb.StoreID) (*server.TestServer, error) {
+// findMemberServer returns the server containing a given store.
+func (tc *TestCluster) findMemberServer(storeID roachpb.StoreID) (*server.TestServer, error) {
 	for _, server := range tc.Servers {
 		if server.Stores().HasStore(storeID) {
 			return server, nil
@@ -1142,7 +1102,7 @@ func (tc *TestCluster) FindMemberServer(storeID roachpb.StoreID) (*server.TestSe
 
 // findMemberStore returns the store with a given ID.
 func (tc *TestCluster) findMemberStore(storeID roachpb.StoreID) (*kvserver.Store, error) {
-	server, err := tc.FindMemberServer(storeID)
+	server, err := tc.findMemberServer(storeID)
 	if err != nil {
 		return nil, err
 	}
@@ -1220,10 +1180,7 @@ func (tc *TestCluster) WaitForFullReplication() error {
 // store in the cluster.
 func (tc *TestCluster) WaitForNodeStatuses(t testing.TB) {
 	testutils.SucceedsSoon(t, func() error {
-		client, err := tc.GetStatusClient(context.Background(), t, 0)
-		if err != nil {
-			return err
-		}
+		client := tc.GetStatusClient(context.Background(), t, 0)
 		response, err := client.Nodes(context.Background(), &serverpb.NodesRequest{})
 		if err != nil {
 			return err
@@ -1388,7 +1345,7 @@ func (tc *TestCluster) RestartServerWithInspect(idx int, inspect func(s *server.
 	}
 
 	for i, specs := range serverArgs.StoreSpecs {
-		if specs.InMemory && specs.StickyInMemoryEngineID == "" {
+		if specs.StickyInMemoryEngineID == "" {
 			return errors.Errorf("failed to restart Server %d, because a restart can only be used on a server with a sticky engine", i)
 		}
 	}
@@ -1448,7 +1405,7 @@ func (tc *TestCluster) RestartServerWithInspect(idx int, inspect func(s *server.
 						}
 						for i := 0; i < rpc.NumConnectionClasses; i++ {
 							class := rpc.ConnectionClass(i)
-							if _, err := s.NodeDialer().(*nodedialer.Dialer).Dial(ctx, srv.NodeID(), class); err != nil {
+							if _, err := s.NodeDialer().Dial(ctx, srv.NodeID(), class); err != nil {
 								return errors.Wrapf(err, "connecting n%d->n%d (class %v)", s.NodeID(), srv.NodeID(), class)
 							}
 						}
@@ -1520,25 +1477,25 @@ func (tc *TestCluster) GetRaftLeader(t testing.TB, key roachpb.RKey) *kvserver.R
 // GetAdminClient gets the severpb.AdminClient for the specified server.
 func (tc *TestCluster) GetAdminClient(
 	ctx context.Context, t testing.TB, serverIdx int,
-) (serverpb.AdminClient, error) {
+) serverpb.AdminClient {
 	srv := tc.Server(serverIdx)
 	cc, err := srv.RPCContext().GRPCDialNode(srv.RPCAddr(), srv.NodeID(), rpc.DefaultClass).Connect(ctx)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to create an admin client")
+		t.Fatalf("failed to create an admin client because of %s", err)
 	}
-	return serverpb.NewAdminClient(cc), nil
+	return serverpb.NewAdminClient(cc)
 }
 
 // GetStatusClient gets the severpb.StatusClient for the specified server.
 func (tc *TestCluster) GetStatusClient(
 	ctx context.Context, t testing.TB, serverIdx int,
-) (serverpb.StatusClient, error) {
+) serverpb.StatusClient {
 	srv := tc.Server(serverIdx)
 	cc, err := srv.RPCContext().GRPCDialNode(srv.RPCAddr(), srv.NodeID(), rpc.DefaultClass).Connect(ctx)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to create a status client")
+		t.Fatalf("failed to create a status client because of %s", err)
 	}
-	return serverpb.NewStatusClient(cc), nil
+	return serverpb.NewStatusClient(cc)
 }
 
 type testClusterFactoryImpl struct{}

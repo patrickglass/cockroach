@@ -12,15 +12,18 @@ package cli
 
 import "github.com/spf13/cobra"
 
+// AddMTCommand adds a subcommand to `./cockroach mt`.
+func AddMTCommand(cmd *cobra.Command) {
+	mtCmd.AddCommand(cmd)
+}
+
 func init() {
 	cockroachCmd.AddCommand(mtCmd)
 	mtCmd.AddCommand(mtStartSQLCmd)
-	mtCmd.AddCommand(mtStartSQLProxyCmd)
-	mtCmd.AddCommand(mtTestDirectorySvr)
 
 	mtCertsCmd.AddCommand(
-		mtCreateTenantCACertCmd,
-		mtCreateTenantCertCmd,
+		mtCreateTenantClientCACertCmd,
+		mtCreateTenantClientCertCmd,
 	)
 
 	mtCmd.AddCommand(mtCertsCmd)
@@ -35,7 +38,7 @@ Commands related to multi-tenancy.
 
 This functionality is **experimental** and for internal use only.
 `,
-	RunE:   UsageAndErr,
+	RunE:   usageAndErr,
 	Hidden: true,
 }
 
@@ -50,5 +53,5 @@ command.
 
 This functionality is **experimental** and for internal use only.
 `,
-	RunE: UsageAndErr,
+	RunE: usageAndErr,
 }

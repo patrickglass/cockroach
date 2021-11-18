@@ -150,8 +150,10 @@ func NewTwoInputDiskSpiller(
 	return &diskSpillerBase{
 		inputs:                 []colexecop.Operator{inputOne, inputTwo},
 		inMemoryOp:             inMemoryOp,
+		inMemoryOpInitStatus:   colexecop.OperatorNotInitialized,
 		inMemoryMemMonitorName: inMemoryMemMonitorName,
 		diskBackedOp:           diskBackedOpConstructor(diskBackedOpInputOne, diskBackedOpInputTwo),
+		distBackedOpInitStatus: colexecop.OperatorNotInitialized,
 		spillingCallbackFn:     spillingCallbackFn,
 	}
 }
@@ -160,23 +162,24 @@ func NewTwoInputDiskSpiller(
 // spillers.
 type diskSpillerBase struct {
 	colexecop.NonExplainable
-	colexecop.InitHelper
+
 	colexecop.CloserHelper
 
 	inputs  []colexecop.Operator
 	spilled bool
 
-	inMemoryOp              colexecop.BufferingInMemoryOperator
-	inMemoryMemMonitorName  string
-	diskBackedOp            colexecop.Operator
-	diskBackedOpInitialized bool
-	spillingCallbackFn      func()
+	inMemoryOp             colexecop.BufferingInMemoryOperator
+	inMemoryOpInitStatus   colexecop.OperatorInitStatus
+	inMemoryMemMonitorName string
+	diskBackedOp           colexecop.Operator
+	distBackedOpInitStatus colexecop.OperatorInitStatus
+	spillingCallbackFn     func()
 }
 
 var _ colexecop.ResettableOperator = &diskSpillerBase{}
 
-func (d *diskSpillerBase) Init(ctx context.Context) {
-	if !d.InitHelper.Init(ctx) {
+func (d *diskSpillerBase) Init() {
+	if d.inMemoryOpInitStatus == colexecop.OperatorInitialized {
 		return
 	}
 	// It is possible that Init() call below will hit an out of memory error,
@@ -184,17 +187,18 @@ func (d *diskSpillerBase) Init(ctx context.Context) {
 	//
 	// Also note that d.input is the input to d.inMemoryOp, so calling Init()
 	// only on the latter is sufficient.
-	d.inMemoryOp.Init(d.Ctx)
+	d.inMemoryOp.Init()
+	d.inMemoryOpInitStatus = colexecop.OperatorInitialized
 }
 
-func (d *diskSpillerBase) Next() coldata.Batch {
+func (d *diskSpillerBase) Next(ctx context.Context) coldata.Batch {
 	if d.spilled {
-		return d.diskBackedOp.Next()
+		return d.diskBackedOp.Next(ctx)
 	}
 	var batch coldata.Batch
 	if err := colexecerror.CatchVectorizedRuntimeError(
 		func() {
-			batch = d.inMemoryOp.Next()
+			batch = d.inMemoryOp.Next(ctx)
 		},
 	); err != nil {
 		if sqlerrors.IsOutOfMemoryError(err) &&
@@ -203,11 +207,14 @@ func (d *diskSpillerBase) Next() coldata.Batch {
 			if d.spillingCallbackFn != nil {
 				d.spillingCallbackFn()
 			}
-			// It is ok if we call Init() multiple times (once after every
-			// Reset) since all calls except for the first one are noops.
-			d.diskBackedOp.Init(d.Ctx)
-			d.diskBackedOpInitialized = true
-			return d.diskBackedOp.Next()
+			if d.distBackedOpInitStatus == colexecop.OperatorNotInitialized {
+				// The disk spiller might be reset for reuse in which case the
+				// the disk-backed operator has already been initialized and we
+				// don't want to perform the initialization again.
+				d.diskBackedOp.Init()
+				d.distBackedOpInitStatus = colexecop.OperatorInitialized
+			}
+			return d.diskBackedOp.Next(ctx)
 		}
 		// Either not an out of memory error or an OOM error coming from a
 		// different operator, so we propagate it further.
@@ -222,10 +229,12 @@ func (d *diskSpillerBase) Reset(ctx context.Context) {
 			r.Reset(ctx)
 		}
 	}
-	if r, ok := d.inMemoryOp.(colexecop.Resetter); ok {
-		r.Reset(ctx)
+	if d.inMemoryOpInitStatus == colexecop.OperatorInitialized {
+		if r, ok := d.inMemoryOp.(colexecop.Resetter); ok {
+			r.Reset(ctx)
+		}
 	}
-	if d.diskBackedOpInitialized {
+	if d.distBackedOpInitStatus == colexecop.OperatorInitialized {
 		if r, ok := d.diskBackedOp.(colexecop.Resetter); ok {
 			r.Reset(ctx)
 		}
@@ -234,16 +243,16 @@ func (d *diskSpillerBase) Reset(ctx context.Context) {
 }
 
 // Close implements the Closer interface.
-func (d *diskSpillerBase) Close() error {
+func (d *diskSpillerBase) Close(ctx context.Context) error {
 	if !d.CloserHelper.Close() {
 		return nil
 	}
 	var retErr error
 	if c, ok := d.inMemoryOp.(colexecop.Closer); ok {
-		retErr = c.Close()
+		retErr = c.Close(ctx)
 	}
 	if c, ok := d.diskBackedOp.(colexecop.Closer); ok {
-		if err := c.Close(); err != nil {
+		if err := c.Close(ctx); err != nil {
 			retErr = err
 		}
 	}
@@ -309,19 +318,19 @@ func newBufferExportingOperator(
 	}
 }
 
-func (b *bufferExportingOperator) Init(context.Context) {
+func (b *bufferExportingOperator) Init() {
 	// Init here is a noop because the operator assumes that both sources have
 	// already been initialized.
 }
 
-func (b *bufferExportingOperator) Next() coldata.Batch {
+func (b *bufferExportingOperator) Next(ctx context.Context) coldata.Batch {
 	if b.firstSourceDone {
-		return b.secondSource.Next()
+		return b.secondSource.Next(ctx)
 	}
-	batch := b.firstSource.ExportBuffered(b.secondSource)
+	batch := b.firstSource.ExportBuffered(ctx, b.secondSource)
 	if batch.Length() == 0 {
 		b.firstSourceDone = true
-		return b.secondSource.Next()
+		return b.secondSource.Next(ctx)
 	}
 	return batch
 }

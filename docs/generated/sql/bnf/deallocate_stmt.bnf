@@ -1,5 +1,0 @@
-deallocate_stmt ::=
-	'DEALLOCATE' name
-	| 'DEALLOCATE' 'PREPARE' name
-	| 'DEALLOCATE' 'ALL'
-	| 'DEALLOCATE' 'PREPARE' 'ALL'

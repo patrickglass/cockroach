@@ -20,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowinfra"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
@@ -100,7 +99,7 @@ func (cb *columnBackfiller) CurrentBufferFill() float32 {
 
 // runChunk implements the chunkBackfiller interface.
 func (cb *columnBackfiller) runChunk(
-	ctx context.Context, sp roachpb.Span, chunkSize rowinfra.RowLimit, _ hlc.Timestamp,
+	ctx context.Context, sp roachpb.Span, chunkSize int64, _ hlc.Timestamp,
 ) (roachpb.Key, error) {
 	var key roachpb.Key
 	var commitWaitFn func(context.Context) error

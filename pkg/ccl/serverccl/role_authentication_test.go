@@ -21,15 +21,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
 )
 
 func TestVerifyPassword(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
@@ -75,8 +72,6 @@ func TestVerifyPassword(t *testing.T) {
 			[]interface{}{timeutil.Now().Add(-10 * time.Minute)}},
 		{"timelord", "12345", "", "VALID UNTIL $1",
 			[]interface{}{timeutil.Now().Add(59 * time.Minute).In(shanghaiLoc)}},
-
-		{"some_admin", "12345", "LOGIN", "", nil},
 	} {
 		cmd := fmt.Sprintf(
 			"CREATE ROLE %s WITH PASSWORD '%s' %s %s",
@@ -87,48 +82,39 @@ func TestVerifyPassword(t *testing.T) {
 		}
 	}
 
-	if _, err := db.Exec("GRANT admin TO some_admin"); err != nil {
-		t.Fatalf("failed to grant admin: %s", err)
-	}
-
 	for _, tc := range []struct {
 		username           string
 		password           string
-		isSuperuser        bool
 		shouldAuthenticate bool
 		expectedErrString  string
 	}{
-		{"azure_diamond", "hunter2", false, true, ""},
-		{"Azure_Diamond", "hunter2", false, false, ""},
-		{"azure_diamond", "hunter", false, false, "crypto/bcrypt"},
-		{"azure_diamond", "", false, false, "crypto/bcrypt"},
-		{"azure_diamond", "🍦", false, false, "crypto/bcrypt"},
-		{"azure_diamond", "hunter2345", false, false, "crypto/bcrypt"},
-		{"azure_diamond", "shunter2", false, false, "crypto/bcrypt"},
-		{"azure_diamond", "12345", false, false, "crypto/bcrypt"},
-		{"azure_diamond", "*******", false, false, "crypto/bcrypt"},
-		{"druidia", "12345", false, true, ""},
-		{"druidia", "hunter2", false, false, "crypto/bcrypt"},
-		{"root", "", true, false, "crypto/bcrypt"},
-		{"some_admin", "", true, false, "crypto/bcrypt"},
-		{"", "", false, false, "does not exist"},
-		{"doesntexist", "zxcvbn", false, false, "does not exist"},
+		{"azure_diamond", "hunter2", true, ""},
+		{"Azure_Diamond", "hunter2", false, ""},
+		{"azure_diamond", "hunter", false, "crypto/bcrypt"},
+		{"azure_diamond", "", false, "crypto/bcrypt"},
+		{"azure_diamond", "🍦", false, "crypto/bcrypt"},
+		{"azure_diamond", "hunter2345", false, "crypto/bcrypt"},
+		{"azure_diamond", "shunter2", false, "crypto/bcrypt"},
+		{"azure_diamond", "12345", false, "crypto/bcrypt"},
+		{"azure_diamond", "*******", false, "crypto/bcrypt"},
+		{"druidia", "12345", true, ""},
+		{"druidia", "hunter2", false, "crypto/bcrypt"},
+		{"root", "", false, "crypto/bcrypt"},
+		{"", "", false, "does not exist"},
+		{"doesntexist", "zxcvbn", false, "does not exist"},
 
-		{"richardc", "12345", false, false,
+		{"richardc", "12345", false,
 			"richardc does not have login privilege"},
-		{"before_epoch", "12345", false, false, ""},
-		{"epoch", "12345", false, false, ""},
-		{"cockroach", "12345", false, true, ""},
-		{"toolate", "12345", false, false, ""},
-		{"timelord", "12345", false, true, ""},
-		{"cthon98", "12345", false, true, ""},
+		{"before_epoch", "12345", false, ""},
+		{"epoch", "12345", false, ""},
+		{"cockroach", "12345", true, ""},
+		{"toolate", "12345", false, ""},
+		{"timelord", "12345", true, ""},
+		{"cthon98", "12345", true, ""},
 	} {
 		t.Run("", func(t *testing.T) {
-			execCfg := s.ExecutorConfig().(sql.ExecutorConfig)
 			username := security.MakeSQLUsernameFromPreNormalizedString(tc.username)
-			exists, canLogin, isSuperuser, validUntil, _, pwRetrieveFn, err := sql.GetUserSessionInitInfo(
-				context.Background(), &execCfg, &ie, username, "", /* databaseName */
-			)
+			exists, canLogin, pwRetrieveFn, validUntilFn, err := sql.GetUserHashedPassword(context.Background(), &ie, username)
 
 			if err != nil {
 				t.Errorf(
@@ -161,6 +147,16 @@ func TestVerifyPassword(t *testing.T) {
 				valid = false
 			}
 
+			validUntil, err := validUntilFn(ctx)
+			if err != nil {
+				t.Errorf(
+					"credentials %s/%s failed with error %s, wanted no error",
+					tc.username,
+					tc.password,
+					err,
+				)
+			}
+
 			if validUntil != nil {
 				if validUntil.Time.Sub(timeutil.Now()) < 0 {
 					expired = true
@@ -176,7 +172,6 @@ func TestVerifyPassword(t *testing.T) {
 					tc.shouldAuthenticate,
 				)
 			}
-			require.Equal(t, tc.isSuperuser, isSuperuser)
 		})
 	}
 }

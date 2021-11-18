@@ -37,14 +37,10 @@ type HelpMessage struct {
 	HelpMessageBody
 }
 
-// helpHintPrefix is the special prefix on a hint payload that is
-// recognized by the CLI code.
-const helpHintPrefix = "help:"
-
 // String implements the fmt.String interface.
 func (h *HelpMessage) String() string {
 	var buf bytes.Buffer
-	buf.WriteString(helpHintPrefix + "\n")
+	buf.WriteString("help:\n")
 	h.Format(&buf)
 	return buf.String()
 }

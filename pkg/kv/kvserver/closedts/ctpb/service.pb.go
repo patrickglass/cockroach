@@ -3,22 +3,20 @@
 
 package ctpb
 
+import proto "github.com/gogo/protobuf/proto"
+import fmt "fmt"
+import math "math"
+import roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
+import hlc "github.com/cockroachdb/cockroach/pkg/util/hlc"
+
+import github_com_cockroachdb_cockroach_pkg_roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
+
 import (
 	context "context"
-	fmt "fmt"
-	github_com_cockroachdb_cockroach_pkg_roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
-	roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
-	hlc "github.com/cockroachdb/cockroach/pkg/util/hlc"
-	_ "github.com/gogo/protobuf/gogoproto"
-	proto "github.com/gogo/protobuf/proto"
-	_ "google.golang.org/genproto/googleapis/api/annotations"
 	grpc "google.golang.org/grpc"
-	codes "google.golang.org/grpc/codes"
-	status "google.golang.org/grpc/status"
-	io "io"
-	math "math"
-	math_bits "math/bits"
 )
+
+import io "io"
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
@@ -29,7 +27,7 @@ var _ = math.Inf
 // is compatible with the proto package it is being compiled against.
 // A compilation error at this line likely means your copy of the
 // proto package needs to be updated.
-const _ = proto.GoGoProtoPackageIsVersion3 // please upgrade the proto package
+const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
 
 // Update contains information about (the advancement of) closed timestamps for
 // ranges with leases on the sender node. Updates are of two types: snapshots
@@ -77,21 +75,21 @@ type Update struct {
 func (m *Update) Reset()      { *m = Update{} }
 func (*Update) ProtoMessage() {}
 func (*Update) Descriptor() ([]byte, []int) {
-	return fileDescriptor_b0044b737e1a7700, []int{0}
+	return fileDescriptor_service_d5795c998ad29498, []int{0}
 }
 func (m *Update) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *Update) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *Update) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_Update.Merge(m, src)
+func (dst *Update) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Update.Merge(dst, src)
 }
 func (m *Update) XXX_Size() int {
 	return m.Size()
@@ -120,21 +118,21 @@ func (m *Update_GroupUpdate) Reset()         { *m = Update_GroupUpdate{} }
 func (m *Update_GroupUpdate) String() string { return proto.CompactTextString(m) }
 func (*Update_GroupUpdate) ProtoMessage()    {}
 func (*Update_GroupUpdate) Descriptor() ([]byte, []int) {
-	return fileDescriptor_b0044b737e1a7700, []int{0, 0}
+	return fileDescriptor_service_d5795c998ad29498, []int{0, 0}
 }
 func (m *Update_GroupUpdate) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *Update_GroupUpdate) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *Update_GroupUpdate) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_Update_GroupUpdate.Merge(m, src)
+func (dst *Update_GroupUpdate) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Update_GroupUpdate.Merge(dst, src)
 }
 func (m *Update_GroupUpdate) XXX_Size() int {
 	return m.Size()
@@ -161,21 +159,21 @@ func (m *Update_RangeUpdate) Reset()         { *m = Update_RangeUpdate{} }
 func (m *Update_RangeUpdate) String() string { return proto.CompactTextString(m) }
 func (*Update_RangeUpdate) ProtoMessage()    {}
 func (*Update_RangeUpdate) Descriptor() ([]byte, []int) {
-	return fileDescriptor_b0044b737e1a7700, []int{0, 1}
+	return fileDescriptor_service_d5795c998ad29498, []int{0, 1}
 }
 func (m *Update_RangeUpdate) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *Update_RangeUpdate) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *Update_RangeUpdate) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_Update_RangeUpdate.Merge(m, src)
+func (dst *Update_RangeUpdate) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Update_RangeUpdate.Merge(dst, src)
 }
 func (m *Update_RangeUpdate) XXX_Size() int {
 	return m.Size()
@@ -193,21 +191,21 @@ func (m *Response) Reset()         { *m = Response{} }
 func (m *Response) String() string { return proto.CompactTextString(m) }
 func (*Response) ProtoMessage()    {}
 func (*Response) Descriptor() ([]byte, []int) {
-	return fileDescriptor_b0044b737e1a7700, []int{1}
+	return fileDescriptor_service_d5795c998ad29498, []int{1}
 }
 func (m *Response) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *Response) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *Response) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_Response.Merge(m, src)
+func (dst *Response) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Response.Merge(dst, src)
 }
 func (m *Response) XXX_Size() int {
 	return m.Size()
@@ -225,52 +223,6 @@ func init() {
 	proto.RegisterType((*Response)(nil), "cockroach.kv.kvserver.ctupdate.Response")
 }
 
-func init() {
-	proto.RegisterFile("kv/kvserver/closedts/ctpb/service.proto", fileDescriptor_b0044b737e1a7700)
-}
-
-var fileDescriptor_b0044b737e1a7700 = []byte{
-	// 599 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xa4, 0x54, 0x4f, 0x6f, 0xd3, 0x4e,
-	0x10, 0xf5, 0xfe, 0x9c, 0x3a, 0xd1, 0x46, 0xbf, 0x52, 0x56, 0x1c, 0xac, 0x08, 0xec, 0xa8, 0x48,
-	0xc5, 0x17, 0xbc, 0x28, 0xe5, 0x80, 0xb8, 0x35, 0x05, 0xa1, 0x4a, 0xa8, 0x54, 0x6e, 0xb9, 0xf4,
-	0x40, 0xb4, 0xf1, 0xae, 0x1c, 0x2b, 0xb6, 0x77, 0xeb, 0x5d, 0x5b, 0xe2, 0x5b, 0x70, 0xe4, 0xc8,
-	0x81, 0x0f, 0x53, 0x71, 0xea, 0x09, 0xf5, 0x64, 0x81, 0xfb, 0x2d, 0x72, 0x42, 0xfe, 0x93, 0x90,
-	0xf6, 0x00, 0x54, 0x3d, 0xed, 0xec, 0x4e, 0xe6, 0xcd, 0x7b, 0x6f, 0x26, 0x86, 0x4f, 0xe6, 0x39,
-	0x9e, 0xe7, 0x92, 0xa5, 0x39, 0x4b, 0xb1, 0x1f, 0x71, 0xc9, 0xa8, 0x92, 0xd8, 0x57, 0x62, 0x8a,
-	0xab, 0xc7, 0xd0, 0x67, 0xae, 0x48, 0xb9, 0xe2, 0xc8, 0xf2, 0xb9, 0x3f, 0x4f, 0x39, 0xf1, 0x67,
-	0xee, 0x3c, 0x77, 0x97, 0x25, 0xae, 0xaf, 0x32, 0x41, 0x89, 0x62, 0x03, 0x54, 0xe7, 0xc4, 0x14,
-	0x53, 0xa2, 0x48, 0x53, 0x33, 0x30, 0x33, 0x15, 0x46, 0x78, 0x16, 0xf9, 0x58, 0x85, 0x31, 0x93,
-	0x8a, 0xc4, 0xa2, 0xcd, 0x3c, 0x08, 0x78, 0xc0, 0xeb, 0x10, 0x57, 0x51, 0xfb, 0xfa, 0x30, 0xe0,
-	0x3c, 0x88, 0x18, 0x26, 0x22, 0xc4, 0x24, 0x49, 0xb8, 0x22, 0x2a, 0xe4, 0x89, 0x6c, 0xb2, 0xdb,
-	0xdf, 0x0c, 0x68, 0xbc, 0xaf, 0x9b, 0xa1, 0x53, 0xd8, 0x4d, 0x38, 0x65, 0x93, 0x90, 0x9a, 0x60,
-	0x08, 0x9c, 0x8d, 0xf1, 0x5e, 0x59, 0xd8, 0xc6, 0x21, 0xa7, 0xec, 0xe0, 0xd5, 0xa2, 0xb0, 0x77,
-	0x83, 0x50, 0xcd, 0xb2, 0xa9, 0xeb, 0xf3, 0x18, 0xaf, 0x68, 0xd3, 0xe9, 0xef, 0x18, 0x8b, 0x79,
-	0x80, 0x5b, 0xc2, 0x6e, 0x53, 0xe6, 0x19, 0x15, 0xe2, 0x01, 0x45, 0x8f, 0x61, 0x57, 0xb2, 0xb3,
-	0x49, 0x92, 0xc5, 0xe6, 0x7f, 0x43, 0xe0, 0xe8, 0x63, 0xb8, 0x28, 0x6c, 0xe3, 0x98, 0x9d, 0x1d,
-	0x66, 0xb1, 0x67, 0xc8, 0xfa, 0x44, 0x03, 0xd8, 0x93, 0x09, 0x11, 0x72, 0xc6, 0x95, 0xa9, 0x0f,
-	0x81, 0xd3, 0xf3, 0x56, 0x77, 0xc4, 0xe0, 0xfd, 0xc6, 0xc8, 0xc9, 0x4a, 0xb5, 0x34, 0x3b, 0x43,
-	0xdd, 0xe9, 0x8f, 0x46, 0xee, 0x9f, 0x5d, 0x74, 0x1b, 0x7d, 0xee, 0x9b, 0x94, 0x67, 0xa2, 0x89,
-	0xc7, 0x9d, 0xf3, 0xc2, 0xd6, 0xbc, 0xad, 0x06, 0xf2, 0x64, 0x85, 0x88, 0x3c, 0xd8, 0x4d, 0x59,
-	0xcc, 0x73, 0x46, 0xcd, 0x8d, 0xa1, 0xee, 0x6c, 0x8c, 0x5f, 0x2c, 0x0a, 0xfb, 0xf9, 0xad, 0x94,
-	0x7b, 0x24, 0x09, 0x2a, 0xe9, 0x4b, 0x20, 0x34, 0x85, 0x5b, 0x84, 0x52, 0x46, 0x27, 0x3c, 0x9d,
-	0x34, 0x8c, 0xa8, 0x69, 0xdc, 0x8a, 0x79, 0x0d, 0x79, 0x8d, 0xf9, 0x66, 0x8d, 0xf8, 0x2e, 0x6d,
-	0x1e, 0xe9, 0xe0, 0x2b, 0x80, 0xfd, 0x35, 0x7d, 0xe8, 0x35, 0x34, 0x04, 0x8f, 0x42, 0xff, 0x63,
-	0x3d, 0xca, 0xcd, 0xd1, 0xd3, 0xb5, 0x4e, 0xd7, 0x88, 0xee, 0x5f, 0x77, 0xe0, 0xa8, 0x2e, 0xf2,
-	0xda, 0x62, 0x74, 0x08, 0xb7, 0x6e, 0xba, 0x5e, 0xcf, 0xaf, 0x3f, 0x7a, 0xb4, 0x06, 0x58, 0x2d,
-	0xa4, 0x3b, 0x8b, 0x7c, 0x77, 0x05, 0xd3, 0xb2, 0xbc, 0x77, 0xc3, 0xdf, 0xc1, 0x77, 0x00, 0xfb,
-	0x6b, 0x62, 0xd0, 0x07, 0xd8, 0x4b, 0xab, 0xeb, 0x72, 0xe7, 0x3a, 0xe3, 0xfd, 0xb2, 0xb0, 0xbb,
-	0xad, 0x85, 0x77, 0xb0, 0xbe, 0x0e, 0x28, 0x1a, 0x42, 0x3d, 0x22, 0x61, 0xbb, 0x72, 0x9b, 0x65,
-	0x61, 0xeb, 0x6f, 0xf7, 0x0e, 0x16, 0xcd, 0xe1, 0x55, 0xa9, 0x35, 0xa3, 0xf4, 0x3b, 0x18, 0xf5,
-	0xb2, 0xf3, 0xf9, 0x8b, 0xad, 0x6d, 0x43, 0xd8, 0xf3, 0x98, 0x14, 0x3c, 0x91, 0x6c, 0x94, 0xc3,
-	0xff, 0x8f, 0x43, 0xca, 0x4e, 0x52, 0x92, 0x48, 0xc1, 0xd3, 0x6a, 0x83, 0xfb, 0x47, 0x99, 0x9c,
-	0x35, 0xca, 0x25, 0xda, 0xf9, 0xb7, 0xd9, 0x0f, 0x9c, 0xbf, 0xfd, 0x6e, 0xd9, 0x71, 0x5b, 0x73,
-	0xc0, 0x33, 0x30, 0xde, 0x39, 0xff, 0x69, 0x69, 0xe7, 0xa5, 0x05, 0x2e, 0x4a, 0x0b, 0x5c, 0x96,
-	0x16, 0xf8, 0x51, 0x5a, 0xe0, 0xd3, 0x95, 0xa5, 0x5d, 0x5c, 0x59, 0xda, 0xe5, 0x95, 0xa5, 0x9d,
-	0x76, 0xaa, 0x0f, 0xd1, 0xd4, 0xa8, 0xff, 0xff, 0xbb, 0xbf, 0x02, 0x00, 0x00, 0xff, 0xff, 0xbe,
-	0xe6, 0x5c, 0x73, 0xac, 0x04, 0x00, 0x00,
-}
-
 // Reference imports to suppress errors if they are not otherwise used.
 var _ context.Context
 var _ grpc.ClientConn
@@ -278,6 +230,102 @@ var _ grpc.ClientConn
 // This is a compile-time assertion to ensure that this generated file
 // is compatible with the grpc package it is being compiled against.
 const _ = grpc.SupportPackageIsVersion4
+
+// ClosedTimestampClient is the client API for ClosedTimestamp service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://godoc.org/google.golang.org/grpc#ClientConn.NewStream.
+type ClosedTimestampClient interface {
+	Get(ctx context.Context, opts ...grpc.CallOption) (ClosedTimestamp_GetClient, error)
+}
+
+type closedTimestampClient struct {
+	cc *grpc.ClientConn
+}
+
+func NewClosedTimestampClient(cc *grpc.ClientConn) ClosedTimestampClient {
+	return &closedTimestampClient{cc}
+}
+
+func (c *closedTimestampClient) Get(ctx context.Context, opts ...grpc.CallOption) (ClosedTimestamp_GetClient, error) {
+	stream, err := c.cc.NewStream(ctx, &_ClosedTimestamp_serviceDesc.Streams[0], "/cockroach.kv.kvserver.ctupdate.ClosedTimestamp/Get", opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &closedTimestampGetClient{stream}
+	return x, nil
+}
+
+type ClosedTimestamp_GetClient interface {
+	Send(*Reaction) error
+	Recv() (*Entry, error)
+	grpc.ClientStream
+}
+
+type closedTimestampGetClient struct {
+	grpc.ClientStream
+}
+
+func (x *closedTimestampGetClient) Send(m *Reaction) error {
+	return x.ClientStream.SendMsg(m)
+}
+
+func (x *closedTimestampGetClient) Recv() (*Entry, error) {
+	m := new(Entry)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// ClosedTimestampServer is the server API for ClosedTimestamp service.
+type ClosedTimestampServer interface {
+	Get(ClosedTimestamp_GetServer) error
+}
+
+func RegisterClosedTimestampServer(s *grpc.Server, srv ClosedTimestampServer) {
+	s.RegisterService(&_ClosedTimestamp_serviceDesc, srv)
+}
+
+func _ClosedTimestamp_Get_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ClosedTimestampServer).Get(&closedTimestampGetServer{stream})
+}
+
+type ClosedTimestamp_GetServer interface {
+	Send(*Entry) error
+	Recv() (*Reaction, error)
+	grpc.ServerStream
+}
+
+type closedTimestampGetServer struct {
+	grpc.ServerStream
+}
+
+func (x *closedTimestampGetServer) Send(m *Entry) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func (x *closedTimestampGetServer) Recv() (*Reaction, error) {
+	m := new(Reaction)
+	if err := x.ServerStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+var _ClosedTimestamp_serviceDesc = grpc.ServiceDesc{
+	ServiceName: "cockroach.kv.kvserver.ctupdate.ClosedTimestamp",
+	HandlerType: (*ClosedTimestampServer)(nil),
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Get",
+			Handler:       _ClosedTimestamp_Get_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
+	Metadata: "kv/kvserver/closedts/ctpb/service.proto",
+}
 
 // SideTransportClient is the client API for SideTransport service.
 //
@@ -330,14 +378,6 @@ type SideTransportServer interface {
 	PushUpdates(SideTransport_PushUpdatesServer) error
 }
 
-// UnimplementedSideTransportServer can be embedded to have forward compatible implementations.
-type UnimplementedSideTransportServer struct {
-}
-
-func (*UnimplementedSideTransportServer) PushUpdates(srv SideTransport_PushUpdatesServer) error {
-	return status.Errorf(codes.Unimplemented, "method PushUpdates not implemented")
-}
-
 func RegisterSideTransportServer(s *grpc.Server, srv SideTransportServer) {
 	s.RegisterService(&_SideTransport_serviceDesc, srv)
 }
@@ -386,7 +426,7 @@ var _SideTransport_serviceDesc = grpc.ServiceDesc{
 func (m *Update) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -394,27 +434,40 @@ func (m *Update) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *Update) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *Update) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	if len(m.AddedOrUpdated) > 0 {
-		for iNdEx := len(m.AddedOrUpdated) - 1; iNdEx >= 0; iNdEx-- {
-			{
-				size, err := m.AddedOrUpdated[iNdEx].MarshalToSizedBuffer(dAtA[:i])
-				if err != nil {
-					return 0, err
-				}
-				i -= size
-				i = encodeVarintService(dAtA, i, uint64(size))
+	if m.NodeID != 0 {
+		dAtA[i] = 0x8
+		i++
+		i = encodeVarintService(dAtA, i, uint64(m.NodeID))
+	}
+	if m.SeqNum != 0 {
+		dAtA[i] = 0x10
+		i++
+		i = encodeVarintService(dAtA, i, uint64(m.SeqNum))
+	}
+	if m.Snapshot {
+		dAtA[i] = 0x18
+		i++
+		if m.Snapshot {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i++
+	}
+	if len(m.ClosedTimestamps) > 0 {
+		for _, msg := range m.ClosedTimestamps {
+			dAtA[i] = 0x22
+			i++
+			i = encodeVarintService(dAtA, i, uint64(msg.Size()))
+			n, err := msg.MarshalTo(dAtA[i:])
+			if err != nil {
+				return 0, err
 			}
-			i--
-			dAtA[i] = 0x32
+			i += n
 		}
 	}
 	if len(m.Removed) > 0 {
@@ -430,53 +483,30 @@ func (m *Update) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 			dAtA2[j1] = uint8(num)
 			j1++
 		}
-		i -= j1
-		copy(dAtA[i:], dAtA2[:j1])
-		i = encodeVarintService(dAtA, i, uint64(j1))
-		i--
 		dAtA[i] = 0x2a
+		i++
+		i = encodeVarintService(dAtA, i, uint64(j1))
+		i += copy(dAtA[i:], dAtA2[:j1])
 	}
-	if len(m.ClosedTimestamps) > 0 {
-		for iNdEx := len(m.ClosedTimestamps) - 1; iNdEx >= 0; iNdEx-- {
-			{
-				size, err := m.ClosedTimestamps[iNdEx].MarshalToSizedBuffer(dAtA[:i])
-				if err != nil {
-					return 0, err
-				}
-				i -= size
-				i = encodeVarintService(dAtA, i, uint64(size))
+	if len(m.AddedOrUpdated) > 0 {
+		for _, msg := range m.AddedOrUpdated {
+			dAtA[i] = 0x32
+			i++
+			i = encodeVarintService(dAtA, i, uint64(msg.Size()))
+			n, err := msg.MarshalTo(dAtA[i:])
+			if err != nil {
+				return 0, err
 			}
-			i--
-			dAtA[i] = 0x22
+			i += n
 		}
 	}
-	if m.Snapshot {
-		i--
-		if m.Snapshot {
-			dAtA[i] = 1
-		} else {
-			dAtA[i] = 0
-		}
-		i--
-		dAtA[i] = 0x18
-	}
-	if m.SeqNum != 0 {
-		i = encodeVarintService(dAtA, i, uint64(m.SeqNum))
-		i--
-		dAtA[i] = 0x10
-	}
-	if m.NodeID != 0 {
-		i = encodeVarintService(dAtA, i, uint64(m.NodeID))
-		i--
-		dAtA[i] = 0x8
-	}
-	return len(dAtA) - i, nil
+	return i, nil
 }
 
 func (m *Update_GroupUpdate) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -484,37 +514,30 @@ func (m *Update_GroupUpdate) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *Update_GroupUpdate) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *Update_GroupUpdate) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	{
-		size, err := m.ClosedTimestamp.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintService(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x12
 	if m.Policy != 0 {
-		i = encodeVarintService(dAtA, i, uint64(m.Policy))
-		i--
 		dAtA[i] = 0x8
+		i++
+		i = encodeVarintService(dAtA, i, uint64(m.Policy))
 	}
-	return len(dAtA) - i, nil
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintService(dAtA, i, uint64(m.ClosedTimestamp.Size()))
+	n3, err := m.ClosedTimestamp.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n3
+	return i, nil
 }
 
 func (m *Update_RangeUpdate) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -522,37 +545,32 @@ func (m *Update_RangeUpdate) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *Update_RangeUpdate) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *Update_RangeUpdate) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	if m.Policy != 0 {
-		i = encodeVarintService(dAtA, i, uint64(m.Policy))
-		i--
-		dAtA[i] = 0x18
+	if m.RangeID != 0 {
+		dAtA[i] = 0x8
+		i++
+		i = encodeVarintService(dAtA, i, uint64(m.RangeID))
 	}
 	if m.LAI != 0 {
-		i = encodeVarintService(dAtA, i, uint64(m.LAI))
-		i--
 		dAtA[i] = 0x10
+		i++
+		i = encodeVarintService(dAtA, i, uint64(m.LAI))
 	}
-	if m.RangeID != 0 {
-		i = encodeVarintService(dAtA, i, uint64(m.RangeID))
-		i--
-		dAtA[i] = 0x8
+	if m.Policy != 0 {
+		dAtA[i] = 0x18
+		i++
+		i = encodeVarintService(dAtA, i, uint64(m.Policy))
 	}
-	return len(dAtA) - i, nil
+	return i, nil
 }
 
 func (m *Response) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -560,28 +578,21 @@ func (m *Response) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *Response) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *Response) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	return len(dAtA) - i, nil
+	return i, nil
 }
 
 func encodeVarintService(dAtA []byte, offset int, v uint64) int {
-	offset -= sovService(v)
-	base := offset
 	for v >= 1<<7 {
 		dAtA[offset] = uint8(v&0x7f | 0x80)
 		v >>= 7
 		offset++
 	}
 	dAtA[offset] = uint8(v)
-	return base
+	return offset + 1
 }
 func (m *Update) Size() (n int) {
 	if m == nil {
@@ -662,7 +673,14 @@ func (m *Response) Size() (n int) {
 }
 
 func sovService(x uint64) (n int) {
-	return (math_bits.Len64(x|1) + 6) / 7
+	for {
+		n++
+		x >>= 7
+		if x == 0 {
+			break
+		}
+	}
+	return n
 }
 func sozService(x uint64) (n int) {
 	return sovService(uint64((x << 1) ^ uint64((int64(x) >> 63))))
@@ -682,7 +700,7 @@ func (m *Update) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -710,7 +728,7 @@ func (m *Update) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.NodeID |= github_com_cockroachdb_cockroach_pkg_roachpb.NodeID(b&0x7F) << shift
+				m.NodeID |= (github_com_cockroachdb_cockroach_pkg_roachpb.NodeID(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -729,7 +747,7 @@ func (m *Update) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.SeqNum |= SeqNum(b&0x7F) << shift
+				m.SeqNum |= (SeqNum(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -748,7 +766,7 @@ func (m *Update) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				v |= int(b&0x7F) << shift
+				v |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -768,7 +786,7 @@ func (m *Update) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -777,9 +795,6 @@ func (m *Update) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthService
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthService
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -800,7 +815,7 @@ func (m *Update) Unmarshal(dAtA []byte) error {
 					}
 					b := dAtA[iNdEx]
 					iNdEx++
-					v |= github_com_cockroachdb_cockroach_pkg_roachpb.RangeID(b&0x7F) << shift
+					v |= (github_com_cockroachdb_cockroach_pkg_roachpb.RangeID(b) & 0x7F) << shift
 					if b < 0x80 {
 						break
 					}
@@ -817,7 +832,7 @@ func (m *Update) Unmarshal(dAtA []byte) error {
 					}
 					b := dAtA[iNdEx]
 					iNdEx++
-					packedLen |= int(b&0x7F) << shift
+					packedLen |= (int(b) & 0x7F) << shift
 					if b < 0x80 {
 						break
 					}
@@ -826,15 +841,12 @@ func (m *Update) Unmarshal(dAtA []byte) error {
 					return ErrInvalidLengthService
 				}
 				postIndex := iNdEx + packedLen
-				if postIndex < 0 {
-					return ErrInvalidLengthService
-				}
 				if postIndex > l {
 					return io.ErrUnexpectedEOF
 				}
 				var elementCount int
 				var count int
-				for _, integer := range dAtA[iNdEx:postIndex] {
+				for _, integer := range dAtA {
 					if integer < 128 {
 						count++
 					}
@@ -854,7 +866,7 @@ func (m *Update) Unmarshal(dAtA []byte) error {
 						}
 						b := dAtA[iNdEx]
 						iNdEx++
-						v |= github_com_cockroachdb_cockroach_pkg_roachpb.RangeID(b&0x7F) << shift
+						v |= (github_com_cockroachdb_cockroach_pkg_roachpb.RangeID(b) & 0x7F) << shift
 						if b < 0x80 {
 							break
 						}
@@ -878,7 +890,7 @@ func (m *Update) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -887,9 +899,6 @@ func (m *Update) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthService
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthService
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -934,7 +943,7 @@ func (m *Update_GroupUpdate) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -962,7 +971,7 @@ func (m *Update_GroupUpdate) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Policy |= roachpb.RangeClosedTimestampPolicy(b&0x7F) << shift
+				m.Policy |= (roachpb.RangeClosedTimestampPolicy(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -981,7 +990,7 @@ func (m *Update_GroupUpdate) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -990,9 +999,6 @@ func (m *Update_GroupUpdate) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthService
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthService
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1036,7 +1042,7 @@ func (m *Update_RangeUpdate) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -1064,7 +1070,7 @@ func (m *Update_RangeUpdate) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.RangeID |= github_com_cockroachdb_cockroach_pkg_roachpb.RangeID(b&0x7F) << shift
+				m.RangeID |= (github_com_cockroachdb_cockroach_pkg_roachpb.RangeID(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1083,7 +1089,7 @@ func (m *Update_RangeUpdate) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.LAI |= LAI(b&0x7F) << shift
+				m.LAI |= (LAI(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1102,7 +1108,7 @@ func (m *Update_RangeUpdate) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Policy |= roachpb.RangeClosedTimestampPolicy(b&0x7F) << shift
+				m.Policy |= (roachpb.RangeClosedTimestampPolicy(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1143,7 +1149,7 @@ func (m *Response) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -1181,7 +1187,6 @@ func (m *Response) Unmarshal(dAtA []byte) error {
 func skipService(dAtA []byte) (n int, err error) {
 	l := len(dAtA)
 	iNdEx := 0
-	depth := 0
 	for iNdEx < l {
 		var wire uint64
 		for shift := uint(0); ; shift += 7 {
@@ -1213,8 +1218,10 @@ func skipService(dAtA []byte) (n int, err error) {
 					break
 				}
 			}
+			return iNdEx, nil
 		case 1:
 			iNdEx += 8
+			return iNdEx, nil
 		case 2:
 			var length int
 			for shift := uint(0); ; shift += 7 {
@@ -1231,34 +1238,101 @@ func skipService(dAtA []byte) (n int, err error) {
 					break
 				}
 			}
+			iNdEx += length
 			if length < 0 {
 				return 0, ErrInvalidLengthService
 			}
-			iNdEx += length
+			return iNdEx, nil
 		case 3:
-			depth++
-		case 4:
-			if depth == 0 {
-				return 0, ErrUnexpectedEndOfGroupService
+			for {
+				var innerWire uint64
+				var start int = iNdEx
+				for shift := uint(0); ; shift += 7 {
+					if shift >= 64 {
+						return 0, ErrIntOverflowService
+					}
+					if iNdEx >= l {
+						return 0, io.ErrUnexpectedEOF
+					}
+					b := dAtA[iNdEx]
+					iNdEx++
+					innerWire |= (uint64(b) & 0x7F) << shift
+					if b < 0x80 {
+						break
+					}
+				}
+				innerWireType := int(innerWire & 0x7)
+				if innerWireType == 4 {
+					break
+				}
+				next, err := skipService(dAtA[start:])
+				if err != nil {
+					return 0, err
+				}
+				iNdEx = start + next
 			}
-			depth--
+			return iNdEx, nil
+		case 4:
+			return iNdEx, nil
 		case 5:
 			iNdEx += 4
+			return iNdEx, nil
 		default:
 			return 0, fmt.Errorf("proto: illegal wireType %d", wireType)
 		}
-		if iNdEx < 0 {
-			return 0, ErrInvalidLengthService
-		}
-		if depth == 0 {
-			return iNdEx, nil
-		}
 	}
-	return 0, io.ErrUnexpectedEOF
+	panic("unreachable")
 }
 
 var (
-	ErrInvalidLengthService        = fmt.Errorf("proto: negative length found during unmarshaling")
-	ErrIntOverflowService          = fmt.Errorf("proto: integer overflow")
-	ErrUnexpectedEndOfGroupService = fmt.Errorf("proto: unexpected end of group")
+	ErrInvalidLengthService = fmt.Errorf("proto: negative length found during unmarshaling")
+	ErrIntOverflowService   = fmt.Errorf("proto: integer overflow")
 )
+
+func init() {
+	proto.RegisterFile("kv/kvserver/closedts/ctpb/service.proto", fileDescriptor_service_d5795c998ad29498)
+}
+
+var fileDescriptor_service_d5795c998ad29498 = []byte{
+	// 638 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xa4, 0x54, 0xc1, 0x4f, 0xdb, 0x3e,
+	0x14, 0x4e, 0x7e, 0x29, 0x69, 0xe5, 0xea, 0x07, 0xcc, 0xda, 0x21, 0x8a, 0xb6, 0xa4, 0x62, 0x82,
+	0xe5, 0xb2, 0x78, 0x2a, 0x3b, 0x4c, 0xbb, 0x51, 0x86, 0x10, 0xd2, 0xc4, 0x50, 0x60, 0x17, 0x34,
+	0xad, 0x72, 0x63, 0x2b, 0x8d, 0x9a, 0xc6, 0x21, 0x76, 0x22, 0xf1, 0x5f, 0xec, 0xb8, 0xe3, 0x0e,
+	0xfb, 0x63, 0xd0, 0x4e, 0x9c, 0x26, 0x4e, 0xd1, 0x16, 0xfe, 0x8b, 0x9e, 0xa6, 0xc4, 0xa1, 0x2b,
+	0x48, 0x1b, 0x20, 0x4e, 0x79, 0x7e, 0xce, 0xfb, 0xfc, 0x7d, 0x9f, 0x9f, 0x1f, 0x78, 0x3e, 0xc9,
+	0xd1, 0x24, 0xe7, 0x34, 0xcd, 0x69, 0x8a, 0xfc, 0x88, 0x71, 0x4a, 0x04, 0x47, 0xbe, 0x48, 0x46,
+	0xa8, 0x4a, 0x86, 0x3e, 0x75, 0x93, 0x94, 0x09, 0x06, 0x2d, 0x9f, 0xf9, 0x93, 0x94, 0x61, 0x7f,
+	0xec, 0x4e, 0x72, 0xf7, 0xaa, 0xc4, 0xf5, 0x45, 0x96, 0x10, 0x2c, 0xa8, 0xb9, 0xfe, 0x77, 0x20,
+	0x1a, 0x8b, 0xf4, 0x54, 0xc2, 0x98, 0xb0, 0x86, 0x48, 0x46, 0x88, 0x60, 0x81, 0x9b, 0x9c, 0x91,
+	0x89, 0x30, 0x42, 0xe3, 0xc8, 0x47, 0x22, 0x9c, 0x52, 0x2e, 0xf0, 0x34, 0x69, 0x76, 0x1e, 0x07,
+	0x2c, 0x60, 0x75, 0x88, 0xaa, 0xa8, 0xc9, 0x3e, 0x09, 0x18, 0x0b, 0x22, 0x8a, 0x70, 0x12, 0x22,
+	0x1c, 0xc7, 0x4c, 0x60, 0x11, 0xb2, 0x98, 0xcb, 0xdd, 0xb5, 0xef, 0x3a, 0xd0, 0x3f, 0xd4, 0x9c,
+	0xe0, 0x31, 0x68, 0xc7, 0x8c, 0xd0, 0x61, 0x48, 0x0c, 0xb5, 0xa7, 0x3a, 0x4b, 0x83, 0xad, 0xb2,
+	0xb0, 0xf5, 0x7d, 0x46, 0xe8, 0xde, 0xdb, 0x59, 0x61, 0x6f, 0x06, 0xa1, 0x18, 0x67, 0x23, 0xd7,
+	0x67, 0x53, 0x34, 0x57, 0x47, 0x46, 0x7f, 0x62, 0x94, 0x4c, 0x02, 0xd4, 0x10, 0x76, 0x65, 0x99,
+	0xa7, 0x57, 0x88, 0x7b, 0x04, 0x3e, 0x03, 0x6d, 0x4e, 0x4f, 0x86, 0x71, 0x36, 0x35, 0xfe, 0xeb,
+	0xa9, 0x8e, 0x36, 0x00, 0xb3, 0xc2, 0xd6, 0x0f, 0xe9, 0xc9, 0x7e, 0x36, 0xf5, 0x74, 0x5e, 0x7f,
+	0xa1, 0x09, 0x3a, 0x3c, 0xc6, 0x09, 0x1f, 0x33, 0x61, 0x68, 0x3d, 0xd5, 0xe9, 0x78, 0xf3, 0x35,
+	0xa4, 0xe0, 0x91, 0xb4, 0x69, 0x38, 0x57, 0xcd, 0x8d, 0x56, 0x4f, 0x73, 0xba, 0xfd, 0xbe, 0xfb,
+	0x6f, 0xb3, 0x5d, 0xa9, 0xcf, 0xdd, 0x4d, 0x59, 0x96, 0xc8, 0x78, 0xd0, 0x3a, 0x2b, 0x6c, 0xc5,
+	0x5b, 0x95, 0x90, 0x47, 0x73, 0x44, 0xe8, 0x81, 0x76, 0x4a, 0xa7, 0x2c, 0xa7, 0xc4, 0x58, 0xea,
+	0x69, 0xce, 0xd2, 0xe0, 0xf5, 0xac, 0xb0, 0x5f, 0xdd, 0x4b, 0xb9, 0x87, 0xe3, 0xa0, 0x92, 0x7e,
+	0x05, 0x04, 0x47, 0x60, 0x15, 0x13, 0x42, 0xc9, 0x90, 0xa5, 0x43, 0xc9, 0x88, 0x18, 0xfa, 0xbd,
+	0x98, 0xd7, 0x90, 0xd7, 0x98, 0x2f, 0xd7, 0x88, 0xef, 0x53, 0x99, 0x24, 0xe6, 0x37, 0x15, 0x74,
+	0x17, 0xf4, 0xc1, 0x1d, 0xa0, 0x27, 0x2c, 0x0a, 0xfd, 0xd3, 0xfa, 0x2a, 0x97, 0xfb, 0x2f, 0x16,
+	0x4e, 0xba, 0x46, 0x74, 0xfb, 0xba, 0x03, 0x07, 0x75, 0x91, 0xd7, 0x14, 0xc3, 0x7d, 0xb0, 0x7a,
+	0xd3, 0xf5, 0xfa, 0xfe, 0xba, 0xfd, 0xa7, 0x0b, 0x80, 0x55, 0x43, 0xba, 0xe3, 0xc8, 0x77, 0xe7,
+	0x30, 0x0d, 0xcb, 0x95, 0x1b, 0xfe, 0x9a, 0x3f, 0x54, 0xd0, 0x5d, 0x10, 0x03, 0x3f, 0x81, 0x4e,
+	0x5a, 0x2d, 0xaf, 0x7a, 0xae, 0x35, 0xd8, 0x2e, 0x0b, 0xbb, 0xdd, 0x58, 0xf8, 0x00, 0xeb, 0xeb,
+	0x80, 0xc0, 0x1e, 0xd0, 0x22, 0x1c, 0x36, 0x2d, 0xb7, 0x5c, 0x16, 0xb6, 0xf6, 0x6e, 0x6b, 0x6f,
+	0x26, 0x3f, 0x5e, 0xb5, 0xb5, 0x60, 0x94, 0xf6, 0x00, 0xa3, 0xde, 0xb4, 0xbe, 0x7c, 0xb5, 0x95,
+	0x35, 0x00, 0x3a, 0x1e, 0xe5, 0x09, 0x8b, 0x39, 0xed, 0x33, 0xb0, 0x72, 0xa3, 0x04, 0x7e, 0x04,
+	0xda, 0x2e, 0x15, 0xd0, 0xb9, 0xed, 0xd6, 0x3d, 0x8a, 0xfd, 0xea, 0x8d, 0x9a, 0xeb, 0xb7, 0xfd,
+	0xb9, 0x53, 0xcd, 0x8a, 0x35, 0xc5, 0x51, 0x5f, 0xaa, 0xfd, 0x1c, 0xfc, 0x7f, 0x18, 0x12, 0x7a,
+	0x94, 0xe2, 0x98, 0x27, 0x2c, 0xad, 0x9e, 0x4c, 0xf7, 0x20, 0xe3, 0x63, 0x69, 0x35, 0x87, 0x1b,
+	0x77, 0x6b, 0x36, 0xf3, 0x0e, 0xf4, 0xa4, 0x44, 0x79, 0xee, 0x60, 0xe3, 0xec, 0x97, 0xa5, 0x9c,
+	0x95, 0x96, 0x7a, 0x5e, 0x5a, 0xea, 0x45, 0x69, 0xa9, 0x3f, 0x4b, 0x4b, 0xfd, 0x7c, 0x69, 0x29,
+	0xe7, 0x97, 0x96, 0x72, 0x71, 0x69, 0x29, 0xc7, 0xad, 0x6a, 0xae, 0x8d, 0xf4, 0x7a, 0xe0, 0x6c,
+	0xfe, 0x0e, 0x00, 0x00, 0xff, 0xff, 0x63, 0x05, 0x7d, 0x2c, 0x44, 0x05, 0x00, 0x00,
+}

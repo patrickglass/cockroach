@@ -21,9 +21,7 @@ go_library(
         "//pkg/sql/mutations",
         "//pkg/sql/opt",
         "//pkg/sql/opt/cat",
-        "//pkg/sql/opt/constraint",
         "//pkg/sql/opt/exec",
-        "//pkg/sql/opt/exec/explain",
         "//pkg/sql/opt/memo",
         "//pkg/sql/opt/norm",
         "//pkg/sql/opt/ordering",
@@ -49,16 +47,15 @@ go_library(
 
 go_test(
     name = "execbuilder_test",
-    size = "large",
+    size = "small",
     srcs = [
         "builder_test.go",
         "main_test.go",
         "mutation_test.go",
     ],
-    data = glob(["testdata/**"]) + [
-        "@cockroach//c-deps:libgeos",
-    ],
+    data = glob(["testdata/**"]),
     embed = [":execbuilder"],
+    tags = ["broken_in_bazel"],
     deps = [
         "//pkg/security",
         "//pkg/security/securitytest",
@@ -68,7 +65,6 @@ go_test(
         "//pkg/sql/opt",
         "//pkg/sql/sem/tree",
         "//pkg/testutils/serverutils",
-        "//pkg/testutils/skip",
         "//pkg/testutils/testcluster",
         "//pkg/util/leaktest",
         "//pkg/util/randutil",

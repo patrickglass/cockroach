@@ -15,7 +15,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -23,10 +22,9 @@ import (
 )
 
 type alterTableOwnerNode struct {
-	owner  security.SQLUsername
-	desc   *tabledesc.Mutable
-	n      *tree.AlterTableOwner
-	prefix catalog.ResolvedObjectPrefix
+	owner security.SQLUsername
+	desc  *tabledesc.Mutable
+	n     *tree.AlterTableOwner
 }
 
 // AlterTableOwner sets the owner for a table, view, or sequence.
@@ -49,7 +47,7 @@ func (p *planner) AlterTableOwner(ctx context.Context, n *tree.AlterTableOwner) 
 	} else if n.IsSequence {
 		requiredTableKind = tree.ResolveRequireSequenceDesc
 	}
-	prefix, tableDesc, err := p.ResolveMutableTableDescriptor(
+	tableDesc, err := p.ResolveMutableTableDescriptor(
 		ctx, &tn, !n.IfExists, requiredTableKind)
 	if err != nil {
 		return nil, err
@@ -63,15 +61,10 @@ func (p *planner) AlterTableOwner(ctx context.Context, n *tree.AlterTableOwner) 
 		return nil, err
 	}
 
-	owner, err := n.Owner.ToSQLUsername(p.SessionData(), security.UsernameValidation)
-	if err != nil {
-		return nil, err
-	}
 	return &alterTableOwnerNode{
-		owner:  owner,
-		desc:   tableDesc,
-		n:      n,
-		prefix: prefix,
+		owner: n.Owner,
+		desc:  tableDesc,
+		n:     n,
 	}, nil
 }
 
@@ -83,23 +76,7 @@ func (n *alterTableOwnerNode) startExec(params runParams) error {
 	newOwner := n.owner
 	oldOwner := n.desc.GetPrivileges().Owner()
 
-	if err := p.checkCanAlterToNewOwner(ctx, tableDesc, newOwner); err != nil {
-		return err
-	}
-
-	// Ensure the new owner has CREATE privilege on the table's schema.
-	if err := p.canCreateOnSchema(
-		ctx, tableDesc.GetParentSchemaID(), tableDesc.ParentID, newOwner, checkPublicSchema); err != nil {
-		return err
-	}
-
-	tbNameWithSchema := tree.MakeTableNameWithSchema(
-		tree.Name(n.prefix.Database.GetName()),
-		tree.Name(n.prefix.Schema.GetName()),
-		tree.Name(tableDesc.GetName()),
-	)
-
-	if err := p.setNewTableOwner(ctx, tableDesc, tbNameWithSchema, newOwner); err != nil {
+	if err := p.checkCanAlterTableAndSetNewOwner(ctx, tableDesc, newOwner); err != nil {
 		return err
 	}
 
@@ -117,21 +94,33 @@ func (n *alterTableOwnerNode) startExec(params runParams) error {
 	return nil
 }
 
-// setNewTableOwner handles setting a new table owner.
-// Called in ALTER SCHEMA and REASSIGN OWNED BY.
-func (p *planner) setNewTableOwner(
-	ctx context.Context,
-	desc *tabledesc.Mutable,
-	tbNameWithSchema tree.TableName,
-	newOwner security.SQLUsername,
+// checkCanAlterTableAndSetNewOwner handles privilege checking
+// and setting new owner.
+func (p *planner) checkCanAlterTableAndSetNewOwner(
+	ctx context.Context, desc *tabledesc.Mutable, newOwner security.SQLUsername,
 ) error {
+	if err := p.checkCanAlterToNewOwner(ctx, desc, newOwner); err != nil {
+		return err
+	}
+
+	// Ensure the new owner has CREATE privilege on the table's schema.
+	if err := p.canCreateOnSchema(
+		ctx, desc.GetParentSchemaID(), desc.ParentID, newOwner, checkPublicSchema); err != nil {
+		return err
+	}
+
 	privs := desc.GetPrivileges()
 	privs.SetOwner(newOwner)
+
+	tn, err := p.getQualifiedTableName(ctx, desc)
+	if err != nil {
+		return err
+	}
 
 	return p.logEvent(ctx,
 		desc.ID,
 		&eventpb.AlterTableOwner{
-			TableName: tbNameWithSchema.FQString(),
+			TableName: tn.FQString(),
 			Owner:     newOwner.Normalized(),
 		})
 }

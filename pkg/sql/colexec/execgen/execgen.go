@@ -34,8 +34,6 @@ func Generate(inputFileContents string) (string, error) {
 
 	// Produce output string.
 	var sb strings.Builder
-	if err := decorator.Fprint(&sb, f); err != nil {
-		panic(err)
-	}
+	_ = decorator.Fprint(&sb, f)
 	return sb.String(), nil
 }

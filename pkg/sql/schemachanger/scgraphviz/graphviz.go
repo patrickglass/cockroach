@@ -51,18 +51,8 @@ func drawStages(p *scplan.Plan) (*dot.Graph, error) {
 	dg := dot.NewGraph()
 	stagesSubgraph := dg.Subgraph("stages", dot.ClusterOption{})
 	targetsSubgraph := stagesSubgraph.Subgraph("targets", dot.ClusterOption{})
-	statementsSubgraph := stagesSubgraph.Subgraph("statements", dot.ClusterOption{})
-	targetNodes := make(map[*scpb.Target]dot.Node, len(p.Initial.Nodes))
-	// Add all the statements in their own section.
-	// Note: Explains can only have one statement, so we aren't
-	// going to bother adding arrows to them.
-	for idx, stmt := range p.Initial.Statements {
-		stmtNode := statementsSubgraph.Node(strconv.Itoa(idx))
-		stmtNode.Attr("label", htmlLabel(stmt))
-		stmtNode.Attr("fontsize", "9")
-		stmtNode.Attr("shape", "none")
-	}
-	for idx, n := range p.Initial.Nodes {
+	targetNodes := make(map[*scpb.Target]dot.Node, len(p.InitialNodes))
+	for idx, n := range p.InitialNodes {
 		t := n.Target
 		tn := targetsSubgraph.Node(strconv.Itoa(idx))
 		tn.Attr("label", htmlLabel(t.Element()))
@@ -71,12 +61,12 @@ func drawStages(p *scplan.Plan) (*dot.Graph, error) {
 		targetNodes[t] = tn
 	}
 
-	// Want to draw an edge to the initial target statuses with some dots
+	// Want to draw an edge to the initial target states with some dots
 	// or something.
-	curNodes := make([]dot.Node, len(p.Initial.Nodes))
-	cur := p.Initial
-	for i, n := range p.Initial.Nodes {
-		label := targetStatusID(i, n.Status)
+	curNodes := make([]dot.Node, len(p.InitialNodes))
+	cur := p.InitialNodes
+	for i, n := range p.InitialNodes {
+		label := targetStateID(i, n.State)
 		tsn := stagesSubgraph.Node(fmt.Sprintf("initial %d", i))
 		tsn.Attr("label", label)
 		tn := targetNodes[n.Target]
@@ -90,12 +80,12 @@ func drawStages(p *scplan.Plan) (*dot.Graph, error) {
 		sg := stagesSubgraph.Subgraph(stage, dot.ClusterOption{})
 		next := st.After
 		nextNodes := make([]dot.Node, len(curNodes))
-		for i, st := range next.Nodes {
+		for i, st := range next {
 			cst := sg.Node(fmt.Sprintf("stage %d: %d", id, i))
-			cst.Attr("label", targetStatusID(i, st.Status))
-			if st != cur.Nodes[i] {
+			cst.Attr("label", targetStateID(i, st.State))
+			if st != cur[i] {
 				ge := curNodes[i].Edge(cst)
-				oe, ok := p.Graph.GetOpEdgeFrom(cur.Nodes[i])
+				oe, ok := p.Graph.GetOpEdgeFrom(cur[i])
 				if ok {
 					ge.Attr("label", htmlLabel(oe.Op()))
 					ge.Attr("fontsize", "9")
@@ -117,19 +107,9 @@ func drawDeps(p *scplan.Plan) (*dot.Graph, error) {
 
 	depsSubgraph := dg.Subgraph("deps", dot.ClusterOption{})
 	targetsSubgraph := depsSubgraph.Subgraph("targets", dot.ClusterOption{})
-	statementsSubgraph := depsSubgraph.Subgraph("statements", dot.ClusterOption{})
-	targetNodes := make(map[*scpb.Target]dot.Node, len(p.Initial.Nodes))
+	targetNodes := make(map[*scpb.Target]dot.Node, len(p.InitialNodes))
 	targetIdxMap := make(map[*scpb.Target]int)
-	// Add all the statements in their own section.
-	// Note: Explains can only have one statement, so we aren't
-	// going to bother adding arrows to them.
-	for idx, stmt := range p.Initial.Statements {
-		stmtNode := statementsSubgraph.Node(strconv.Itoa(idx))
-		stmtNode.Attr("label", htmlLabel(stmt))
-		stmtNode.Attr("fontsize", "9")
-		stmtNode.Attr("shape", "none")
-	}
-	for idx, n := range p.Initial.Nodes {
+	for idx, n := range p.InitialNodes {
 		t := n.Target
 		tn := targetsSubgraph.Node(strconv.Itoa(idx))
 		tn.Attr("label", htmlLabel(t.Element()))
@@ -138,13 +118,14 @@ func drawDeps(p *scplan.Plan) (*dot.Graph, error) {
 		targetNodes[t] = tn
 		targetIdxMap[t] = idx
 	}
+
 	nodeNodes := make(map[*scpb.Node]dot.Node)
 	_ = p.Graph.ForEachNode(func(n *scpb.Node) error {
-		nodeNodes[n] = depsSubgraph.Node(targetStatusID(targetIdxMap[n.Target], n.Status))
+		nodeNodes[n] = depsSubgraph.Node(targetStateID(targetIdxMap[n.Target], n.State))
 		return nil
 	})
 
-	for _, n := range p.Initial.Nodes {
+	for _, n := range p.InitialNodes {
 		nn := nodeNodes[n]
 		tn := targetNodes[n.Target]
 		e := tn.Edge(nn)
@@ -162,15 +143,14 @@ func drawDeps(p *scplan.Plan) (*dot.Graph, error) {
 			ge.Attr("fontsize", "9")
 		case *scgraph.DepEdge:
 			ge.Attr("color", "red")
-			ge.Attr("label", e.Name())
 		}
 		return nil
 	})
 	return dg, nil
 }
 
-func targetStatusID(targetID int, status scpb.Status) string {
-	return fmt.Sprintf("%d:%s", targetID, status)
+func targetStateID(targetID int, state scpb.State) string {
+	return fmt.Sprintf("%d:%s", targetID, state)
 }
 
 func htmlLabel(o interface{}) dot.HTML {
@@ -181,11 +161,11 @@ func htmlLabel(o interface{}) dot.HTML {
 	return dot.HTML(buf.String())
 }
 
-// ToMap converts a struct to a map, field by field. If at any point a protobuf
+// toMap converts a struct to a map, field by field. If at any point a protobuf
 // message is encountered, it is converted to a map using jsonpb to marshal it
 // to json and then marshaling it back to a map. This approach allows zero
 // values to be effectively omitted.
-func ToMap(v interface{}) (interface{}, error) {
+func toMap(v interface{}) (interface{}, error) {
 	if v == nil {
 		return nil, nil
 	}
@@ -222,7 +202,7 @@ func ToMap(v interface{}) (interface{}, error) {
 			continue
 		}
 		var err error
-		if m[vt.Field(i).Name], err = ToMap(vvf.Interface()); err != nil {
+		if m[vt.Field(i).Name], err = toMap(vvf.Interface()); err != nil {
 			return nil, err
 		}
 	}
@@ -248,14 +228,7 @@ var objectTemplate = template.Must(template.New("obj").Funcs(template.FuncMap{
 		m, ok := v.(map[string]interface{})
 		return ok && len(m) == 0
 	},
-	"emptySlice": func(v interface{}) bool {
-		m, ok := v.([]interface{})
-		return ok && len(m) == 0
-	},
-	"isStruct": func(v interface{}) bool {
-		return reflect.Indirect(reflect.ValueOf(v)).Kind() == reflect.Struct
-	},
-	"toMap": ToMap,
+	"toMap": toMap,
 }).Parse(`
 {{- define "key" -}}
 <td>
@@ -269,13 +242,6 @@ var objectTemplate = template.Must(template.New("obj").Funcs(template.FuncMap{
 {{- template "mapVal" . -}}
 {{- else if (isSlice .) -}}
 {{- template "sliceVal" . -}}
-{{- else if (isStruct .) -}}
-<td>
-{{- typeOf . -}}
-</td>
-<td>
-{{- template "mapVal" (toMap .) -}}
-</td>
 {{- else -}}
 {{- . -}}
 {{- end -}}
@@ -283,13 +249,11 @@ var objectTemplate = template.Must(template.New("obj").Funcs(template.FuncMap{
 {{- end -}}
 
 {{- define "sliceVal" -}}
-{{- if not (emptySlice .) -}}
 <table class="val"><tr>
 {{- range . -}}
 {{- template "val" . -}}
 {{- end -}}
 </tr></table>
-{{- end -}}
 {{- end -}}
 
 {{- define "mapVal" -}}
@@ -298,16 +262,7 @@ var objectTemplate = template.Must(template.New("obj").Funcs(template.FuncMap{
 {{- if not (emptyMap $v) -}}
 <tr>
 {{- template "key" $k -}}
-{{- if (isStruct $v) -}}
-<td>
-{{- typeOf . -}}
-</td>
-<td>
-{{- template "mapVal" (toMap $v) -}}
-</td>
-{{- else -}}
 {{- template "val" $v -}}
-{{- end -}}
 </tr>
 {{- end -}}
 {{- end -}}

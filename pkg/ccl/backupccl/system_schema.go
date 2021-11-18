@@ -294,6 +294,9 @@ var systemTableBackupConfiguration = map[string]systemBackupConfiguration{
 	systemschema.NamespaceTable.GetName(): {
 		shouldIncludeInClusterBackup: optOutOfClusterBackup,
 	},
+	systemschema.DeprecatedNamespaceTable.GetName(): {
+		shouldIncludeInClusterBackup: optOutOfClusterBackup,
+	},
 	systemschema.ProtectedTimestampsMetaTable.GetName(): {
 		shouldIncludeInClusterBackup: optOutOfClusterBackup,
 	},
@@ -336,27 +339,6 @@ var systemTableBackupConfiguration = map[string]systemBackupConfiguration{
 	systemschema.MigrationsTable.GetName(): {
 		shouldIncludeInClusterBackup: optOutOfClusterBackup,
 	},
-	systemschema.JoinTokensTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
-	systemschema.StatementStatisticsTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
-	systemschema.TransactionStatisticsTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
-	systemschema.DatabaseRoleSettingsTable.GetName(): {
-		shouldIncludeInClusterBackup: optInToClusterBackup,
-	},
-	systemschema.TenantUsageTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
-	systemschema.SQLInstancesTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
-	systemschema.SpanConfigurationsTable.GetName(): {
-		shouldIncludeInClusterBackup: optOutOfClusterBackup,
-	},
 }
 
 // GetSystemTablesToIncludeInClusterBackup returns a set of system table names that
@@ -380,22 +362,32 @@ func GetSystemTableIDsToExcludeFromClusterBackup(
 	systemTableIDsToExclude := make(map[descpb.ID]struct{})
 	for systemTableName, backupConfig := range systemTableBackupConfiguration {
 		if backupConfig.shouldIncludeInClusterBackup == optOutOfClusterBackup {
-			err := sql.DescsTxn(ctx, execCfg, func(ctx context.Context, txn *kv.Txn, col *descs.Collection) error {
-				tn := tree.MakeTableNameWithSchema("system", tree.PublicSchemaName, tree.Name(systemTableName))
-				found, desc, err := col.GetMutableTableByName(ctx, txn, &tn, tree.ObjectLookupFlags{})
-				if err != nil {
-					return err
-				}
-				// Some system tables are not present when running inside a secondary
-				// tenant egs: `systemschema.TenantsTable`. In such situations we are
-				// print a warning and move on.
-				if !found {
-					log.Warningf(ctx, "could not find system table descriptor %s", systemTableName)
+			// In versions >20.1, resolving the table ID for the
+			// DeprecatedNamespaceTable by name, returns the ID of the "new"
+			// NamespaceTable. This results in the systemTableIDsToExclude missing an
+			// entry for table ID 2 that corresponds to the DeprecatedNamespaceTable.
+			// We explicitly add an entry for this ID as a workaround.
+			if systemTableName == systemschema.DeprecatedNamespaceTable.GetName() {
+				systemTableIDsToExclude[systemschema.DeprecatedNamespaceTable.GetID()] = struct{}{}
+				continue
+			}
+			err := descs.Txn(ctx, execCfg.Settings, execCfg.LeaseManager, execCfg.InternalExecutor, execCfg.DB,
+				func(ctx context.Context, txn *kv.Txn, col *descs.Collection) error {
+					tn := tree.MakeTableNameWithSchema("system", tree.PublicSchemaName, tree.Name(systemTableName))
+					found, desc, err := col.GetMutableTableByName(ctx, txn, &tn, tree.ObjectLookupFlags{})
+					if err != nil {
+						return err
+					}
+					// Some system tables are not present when running inside a secondary
+					// tenant egs: `systemschema.TenantsTable`. In such situations we are
+					// print a warning and move on.
+					if !found {
+						log.Warningf(ctx, "could not find system table descriptor %s", systemTableName)
+						return nil
+					}
+					systemTableIDsToExclude[desc.ID] = struct{}{}
 					return nil
-				}
-				systemTableIDsToExclude[desc.ID] = struct{}{}
-				return nil
-			})
+				})
 			if err != nil {
 				return nil, err
 			}

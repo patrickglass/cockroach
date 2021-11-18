@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for concat_agg.eg.go. It's formatted in a
 // special way, so it's both valid Go and a valid text/template input. This
@@ -40,7 +38,7 @@ type concat_AGGKINDAgg struct {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	orderedAggregateFuncBase
 	// {{else}}
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// {{end}}
 	// curAgg holds the running total.
 	curAgg []byte
@@ -55,18 +53,17 @@ func (a *concat_AGGKINDAgg) SetOutput(vec coldata.Vec) {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	a.orderedAggregateFuncBase.SetOutput(vec)
 	// {{else}}
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	// {{end}}
 	a.col = vec.Bytes()
 }
 
 func (a *concat_AGGKINDAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	execgen.SETVARIABLESIZE(oldCurAggSize, a.curAgg)
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec.Bytes(), vec.Nulls()
-	// {{if not (eq "_AGGKIND" "Window")}}
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		// {{if eq "_AGGKIND" "Ordered"}}
 		// Capture groups to force bounds check to work. See
@@ -78,20 +75,20 @@ func (a *concat_AGGKINDAgg) Compute(
 		// sel to specify the tuples to be aggregated.
 		// */}}
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
+			_ = groups[inputLen-1]
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 					_ACCUMULATE_CONCAT(a, nulls, i, true, false)
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 					_ACCUMULATE_CONCAT(a, nulls, i, false, false)
 				}
 			}
 		} else
 		// {{end}}
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 					_ACCUMULATE_CONCAT(a, nulls, i, true, true)
@@ -104,20 +101,6 @@ func (a *concat_AGGKINDAgg) Compute(
 		}
 	},
 	)
-	// {{else}}
-	// Unnecessary memory accounting can have significant overhead for window
-	// aggregate functions because Compute is called at least once for every row.
-	// For this reason, we do not use PerformOperation here.
-	if nulls.MaybeHasNulls() {
-		for i := startIdx; i < endIdx; i++ {
-			_ACCUMULATE_CONCAT(a, nulls, i, true, false)
-		}
-	} else {
-		for i := startIdx; i < endIdx; i++ {
-			_ACCUMULATE_CONCAT(a, nulls, i, false, false)
-		}
-	}
-	// {{end}}
 	execgen.SETVARIABLESIZE(newCurAggSize, a.curAgg)
 	if newCurAggSize != oldCurAggSize {
 		a.allocator.AdjustMemoryUsage(int64(newCurAggSize - oldCurAggSize))

@@ -11,7 +11,6 @@
 package pgdate
 
 import (
-	"strings"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -82,6 +81,21 @@ var (
 	TimeNegativeInfinity = timeutil.Unix(-210866803200, 0)
 )
 
+//go:generate stringer -type=ParseMode
+
+// ParseMode controls the resolution of ambiguous date formats such as
+// `01/02/03`.
+type ParseMode uint
+
+// These are the various parsing modes that determine in which order
+// we should look for years, months, and date.
+// ParseModeYMD is the default value.
+const (
+	ParseModeYMD ParseMode = iota
+	ParseModeDMY
+	ParseModeMDY
+)
+
 // ParseDate converts a string into Date.
 //
 // Any specified timezone is inconsequential. Examples:
@@ -92,12 +106,10 @@ var (
 // The dependsOnContext return value indicates if we had to consult the given
 // `now` value (either for the time or the local timezone).
 //
-func ParseDate(
-	now time.Time, dateStyle DateStyle, s string,
-) (_ Date, dependsOnContext bool, _ error) {
+func ParseDate(now time.Time, mode ParseMode, s string) (_ Date, dependsOnContext bool, _ error) {
 	fe := fieldExtract{
 		currentTime: now,
-		dateStyle:   dateStyle,
+		mode:        mode,
 		required:    dateRequiredFields,
 		// We allow time fields to be provided since they occur after
 		// the date fields that we're really looking for and for
@@ -117,7 +129,7 @@ func ParseDate(
 // The dependsOnContext return value indicates if we had to consult the given
 // `now` value (either for the time or the local timezone).
 func ParseTime(
-	now time.Time, dateStyle DateStyle, s string,
+	now time.Time, mode ParseMode, s string,
 ) (_ time.Time, dependsOnContext bool, _ error) {
 	fe := fieldExtract{
 		currentTime: now,
@@ -130,7 +142,7 @@ func ParseTime(
 		// timestamp string; let's try again, accepting more fields.
 		fe = fieldExtract{
 			currentTime: now,
-			dateStyle:   dateStyle,
+			mode:        mode,
 			required:    timeRequiredFields,
 			wanted:      dateTimeFields,
 		}
@@ -154,7 +166,7 @@ func ParseTime(
 // The dependsOnContext return value indicates if we had to consult the given
 // `now` value (either for the time or the local timezone).
 func ParseTimeWithoutTimezone(
-	now time.Time, dateStyle DateStyle, s string,
+	now time.Time, mode ParseMode, s string,
 ) (_ time.Time, dependsOnContext bool, _ error) {
 	fe := fieldExtract{
 		currentTime: now,
@@ -167,7 +179,7 @@ func ParseTimeWithoutTimezone(
 		// timestamp string; let's try again, accepting more fields.
 		fe = fieldExtract{
 			currentTime: now,
-			dateStyle:   dateStyle,
+			mode:        mode,
 			required:    timeRequiredFields,
 			wanted:      dateTimeFields,
 		}
@@ -185,10 +197,10 @@ func ParseTimeWithoutTimezone(
 // The dependsOnContext return value indicates if we had to consult the given
 // `now` value (either for the time or the local timezone).
 func ParseTimestamp(
-	now time.Time, dateStyle DateStyle, s string,
+	now time.Time, mode ParseMode, s string,
 ) (_ time.Time, dependsOnContext bool, _ error) {
 	fe := fieldExtract{
-		dateStyle:   dateStyle,
+		mode:        mode,
 		currentTime: now,
 		// A timestamp only actually needs a date component; the time
 		// would be midnight.
@@ -217,10 +229,10 @@ func ParseTimestamp(
 // The dependsOnContext return value indicates if we had to consult the given
 // `now` value (either for the time or the local timezone).
 func ParseTimestampWithoutTimezone(
-	now time.Time, dateStyle DateStyle, s string,
+	now time.Time, mode ParseMode, s string,
 ) (_ time.Time, dependsOnContext bool, _ error) {
 	fe := fieldExtract{
-		dateStyle:   dateStyle,
+		mode:        mode,
 		currentTime: now,
 		// A timestamp only actually needs a date component; the time
 		// would be midnight.
@@ -250,10 +262,7 @@ func inputErrorf(format string, args ...interface{}) error {
 // outOfRangeError returns an error with pg code DatetimeFieldOverflow.
 func outOfRangeError(field string, val int) error {
 	err := errors.Newf("field %s value %d is out of range", errors.Safe(field), errors.Safe(val))
-	return errors.WithHint(
-		pgerror.WithCandidateCode(err, pgcode.DatetimeFieldOverflow),
-		`Perhaps you need a different "datestyle" setting.`,
-	)
+	return pgerror.WithCandidateCode(err, pgcode.DatetimeFieldOverflow)
 }
 
 // parseError ensures that any error we return to the client will
@@ -262,42 +271,4 @@ func parseError(err error, kind string, s string) error {
 	return pgerror.WithCandidateCode(
 		errors.Wrapf(err, "parsing as type %s", errors.Safe(kind)),
 		pgcode.InvalidDatetimeFormat)
-}
-
-// DefaultDateStyle returns the default datestyle for Postgres.
-func DefaultDateStyle() DateStyle {
-	return DateStyle{
-		Order: Order_MDY,
-		Style: Style_ISO,
-	}
-}
-
-// ParseDateStyle parses a given DateStyle, modifying the existingDateStyle
-// as appropriate. This is because specifying just Style or Order will leave
-// the other field unchanged.
-func ParseDateStyle(s string, existingDateStyle DateStyle) (DateStyle, error) {
-	ds := existingDateStyle
-	fields := strings.Split(s, ",")
-	for _, field := range fields {
-		field = strings.ToLower(strings.TrimSpace(field))
-		switch field {
-		case "iso":
-			ds.Style = Style_ISO
-		case "german":
-			ds.Style = Style_GERMAN
-		case "sql":
-			ds.Style = Style_SQL
-		case "postgres":
-			ds.Style = Style_POSTGRES
-		case "ymd":
-			ds.Order = Order_YMD
-		case "mdy":
-			ds.Order = Order_MDY
-		case "dmy":
-			ds.Order = Order_DMY
-		default:
-			return ds, pgerror.Newf(pgcode.InvalidParameterValue, "unknown DateStyle parameter: %s", field)
-		}
-	}
-	return ds, nil
 }

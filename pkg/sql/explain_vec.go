@@ -12,14 +12,21 @@ package sql
 
 import (
 	"context"
+	"reflect"
+	"sort"
 
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colflow"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/cockroach/pkg/util/treeprinter"
 	"github.com/cockroachdb/errors"
 )
 
@@ -35,9 +42,12 @@ type explainVecNode struct {
 		lines []string
 		// The current row returned by the node.
 		values tree.Datums
-		// cleanup will be called after closing the input tree.
-		cleanup func()
 	}
+}
+
+type flowWithNode struct {
+	nodeID roachpb.NodeID
+	flow   *execinfrapb.FlowSpec
 }
 
 func (n *explainVecNode) startExec(params runParams) error {
@@ -45,8 +55,10 @@ func (n *explainVecNode) startExec(params runParams) error {
 	distSQLPlanner := params.extendedEvalCtx.DistSQLPlanner
 	distribution := getPlanDistribution(
 		params.ctx, params.p, params.extendedEvalCtx.ExecCfg.NodeID,
-		params.extendedEvalCtx.SessionData().DistSQLMode, n.plan.main,
+		params.extendedEvalCtx.SessionData.DistSQLMode,
+		&params.extendedEvalCtx.Settings.SV, n.plan.main,
 	)
+	willDistribute := distribution.WillDistribute()
 	outerSubqueries := params.p.curPlan.subqueryPlans
 	planCtx := newPlanningCtxForExplainPurposes(distSQLPlanner, params, n.plan.subqueryPlans, distribution)
 	defer func() {
@@ -61,9 +73,10 @@ func (n *explainVecNode) startExec(params runParams) error {
 		return err
 	}
 
-	distSQLPlanner.finalizePlanWithRowCount(planCtx, physPlan, n.plan.mainRowCount)
+	distSQLPlanner.FinalizePlan(planCtx, physPlan)
 	flows := physPlan.GenerateFlowSpecs()
-	flowCtx := newFlowCtxForExplainPurposes(planCtx, params.p)
+	flowCtx := newFlowCtxForExplainPurposes(planCtx, params)
+	flowCtx.Cfg.ClusterID = &distSQLPlanner.rpcCtx.ClusterID
 
 	// We want to get the vectorized plan which would be executed with the
 	// current 'vectorize' option. If 'vectorize' is set to 'off', then the
@@ -71,33 +84,51 @@ func (n *explainVecNode) startExec(params runParams) error {
 	// With all other options, we don't change the setting to the
 	// most-inclusive option as we used to because the plan can be different
 	// based on 'vectorize' setting.
-	if flowCtx.EvalCtx.SessionData().VectorizeMode == sessiondatapb.VectorizeOff {
+	if flowCtx.EvalCtx.SessionData.VectorizeMode == sessiondatapb.VectorizeOff {
 		return errors.New("vectorize is set to 'off'")
 	}
-	verbose := n.options.Flags[tree.ExplainFlagVerbose]
-	willDistribute := physPlan.Distribution.WillDistribute()
-	n.run.lines, n.run.cleanup, err = colflow.ExplainVec(
-		params.ctx, flowCtx, flows, physPlan.LocalProcessors, nil, /* opChains */
-		distSQLPlanner.gatewayNodeID, verbose, willDistribute,
-	)
-	if err != nil {
-		return err
+
+	sortedFlows := make([]flowWithNode, 0, len(flows))
+	for nodeID, flow := range flows {
+		sortedFlows = append(sortedFlows, flowWithNode{nodeID: nodeID, flow: flow})
 	}
+	// Sort backward, since the first thing you add to a treeprinter will come last.
+	sort.Slice(sortedFlows, func(i, j int) bool { return sortedFlows[i].nodeID < sortedFlows[j].nodeID })
+	tp := treeprinter.NewWithStyle(treeprinter.CompactStyle)
+	root := tp.Child("│")
+	verbose := n.options.Flags[tree.ExplainFlagVerbose]
+	for _, flow := range sortedFlows {
+		node := root.Childf("Node %d", flow.nodeID)
+		opChains, cleanup, err := colflow.ConvertToVecTree(params.ctx, flowCtx, flow.flow, physPlan.LocalProcessors, !willDistribute)
+		defer cleanup()
+		if err != nil {
+			return err
+		}
+		// It is possible that when iterating over execinfra.OpNodes we will hit
+		// a panic (an input that doesn't implement OpNode interface), so we're
+		// catching such errors.
+		if err := colexecerror.CatchVectorizedRuntimeError(func() {
+			for _, op := range opChains {
+				formatOpChain(op, node, verbose)
+			}
+		}); err != nil {
+			return err
+		}
+	}
+	n.run.lines = tp.FormattedRows()
 	return nil
 }
 
-func newFlowCtxForExplainPurposes(planCtx *PlanningCtx, p *planner) *execinfra.FlowCtx {
+func newFlowCtxForExplainPurposes(planCtx *PlanningCtx, params runParams) *execinfra.FlowCtx {
 	return &execinfra.FlowCtx{
 		NodeID:  planCtx.EvalContext().NodeID,
 		EvalCtx: planCtx.EvalContext(),
 		Cfg: &execinfra.ServerConfig{
-			Settings:       p.execCfg.Settings,
-			ClusterID:      &p.DistSQLPlanner().rpcCtx.ClusterID,
-			VecFDSemaphore: p.execCfg.DistSQLSrv.VecFDSemaphore,
-			NodeDialer:     p.DistSQLPlanner().nodeDialer,
+			Settings:       params.p.execCfg.Settings,
+			VecFDSemaphore: params.p.execCfg.DistSQLSrv.VecFDSemaphore,
 		},
 		TypeResolverFactory: &descs.DistSQLTypeResolverFactory{
-			Descriptors: p.Descriptors(),
+			Descriptors: params.p.Descriptors(),
 		},
 		DiskMonitor: &mon.BytesMonitor{},
 	}
@@ -121,6 +152,46 @@ func newPlanningCtxForExplainPurposes(
 	return planCtx
 }
 
+func shouldOutput(operator execinfra.OpNode, verbose bool) bool {
+	_, nonExplainable := operator.(colexecop.NonExplainable)
+	return !nonExplainable || verbose
+}
+
+func formatOpChain(operator execinfra.OpNode, node treeprinter.Node, verbose bool) {
+	seenOps := make(map[reflect.Value]struct{})
+	if shouldOutput(operator, verbose) {
+		doFormatOpChain(operator, node.Child(reflect.TypeOf(operator).String()), verbose, seenOps)
+	} else {
+		doFormatOpChain(operator, node, verbose, seenOps)
+	}
+}
+func doFormatOpChain(
+	operator execinfra.OpNode,
+	node treeprinter.Node,
+	verbose bool,
+	seenOps map[reflect.Value]struct{},
+) {
+	for i := 0; i < operator.ChildCount(verbose); i++ {
+		child := operator.Child(i, verbose)
+		childOpValue := reflect.ValueOf(child)
+		childOpName := reflect.TypeOf(child).String()
+		if _, seenOp := seenOps[childOpValue]; seenOp {
+			// We have already seen this operator, so in order to not repeat the full
+			// chain again, we will simply print out this operator's name and will
+			// not recurse into its children. Note that we print out the name
+			// unequivocally.
+			node.Child(childOpName)
+			continue
+		}
+		seenOps[childOpValue] = struct{}{}
+		if shouldOutput(child, verbose) {
+			doFormatOpChain(child, node.Child(childOpName), verbose, seenOps)
+		} else {
+			doFormatOpChain(child, node, verbose, seenOps)
+		}
+	}
+}
+
 func (n *explainVecNode) Next(runParams) (bool, error) {
 	if len(n.run.lines) == 0 {
 		return false, nil
@@ -133,7 +204,4 @@ func (n *explainVecNode) Next(runParams) (bool, error) {
 func (n *explainVecNode) Values() tree.Datums { return n.run.values }
 func (n *explainVecNode) Close(ctx context.Context) {
 	n.plan.close(ctx)
-	if n.run.cleanup != nil {
-		n.run.cleanup()
-	}
 }

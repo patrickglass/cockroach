@@ -61,16 +61,16 @@ func TestInboxCancellation(t *testing.T) {
 
 	typs := []*types.T{types.Int}
 	t.Run("ReaderWaitingForStreamHandler", func(t *testing.T) {
-		inbox, err := NewInbox(testAllocator, typs, execinfrapb.StreamID(0))
+		inbox, err := NewInbox(context.Background(), testAllocator, typs, execinfrapb.StreamID(0))
 		require.NoError(t, err)
 		ctx, cancelFn := context.WithCancel(context.Background())
 		// Cancel the context.
 		cancelFn()
-		// Init should encounter an error if the context is canceled.
-		err = colexecerror.CatchVectorizedRuntimeError(func() { inbox.Init(ctx) })
+		// Next should not block if the context is canceled.
+		err = colexecerror.CatchVectorizedRuntimeError(func() { inbox.Next(ctx) })
 		require.True(t, testutils.IsError(err, "context canceled"), err)
 		// Now, the remote stream arrives.
-		err = inbox.RunWithStream(context.Background(), mockFlowStreamServer{}, make(<-chan struct{}))
+		err = inbox.RunWithStream(context.Background(), mockFlowStreamServer{})
 		// We expect no error from the stream handler since we canceled it
 		// ourselves (a graceful termination).
 		require.Nil(t, err)
@@ -78,14 +78,13 @@ func TestInboxCancellation(t *testing.T) {
 
 	t.Run("DuringRecv", func(t *testing.T) {
 		rpcLayer := makeMockFlowStreamRPCLayer()
-		inbox, err := NewInbox(testAllocator, typs, execinfrapb.StreamID(0))
+		inbox, err := NewInbox(context.Background(), testAllocator, typs, execinfrapb.StreamID(0))
 		require.NoError(t, err)
 		ctx, cancelFn := context.WithCancel(context.Background())
 
 		// Setup reader and stream.
 		go func() {
-			inbox.Init(ctx)
-			inbox.Next()
+			inbox.Next(ctx)
 		}()
 		recvCalled := make(chan struct{})
 		streamHandlerErrCh := handleStream(context.Background(), inbox, callbackFlowStreamServer{
@@ -112,7 +111,7 @@ func TestInboxCancellation(t *testing.T) {
 
 	t.Run("StreamHandlerWaitingForReader", func(t *testing.T) {
 		rpcLayer := makeMockFlowStreamRPCLayer()
-		inbox, err := NewInbox(testAllocator, typs, execinfrapb.StreamID(0))
+		inbox, err := NewInbox(context.Background(), testAllocator, typs, execinfrapb.StreamID(0))
 		require.NoError(t, err)
 
 		ctx, cancelFn := context.WithCancel(context.Background())
@@ -130,7 +129,7 @@ func TestInboxCancellation(t *testing.T) {
 func TestInboxNextPanicDoesntLeakGoroutines(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	inbox, err := NewInbox(testAllocator, []*types.T{types.Int}, execinfrapb.StreamID(0))
+	inbox, err := NewInbox(context.Background(), testAllocator, []*types.T{types.Int}, execinfrapb.StreamID(0))
 	require.NoError(t, err)
 
 	rpcLayer := makeMockFlowStreamRPCLayer()
@@ -145,10 +144,7 @@ func TestInboxNextPanicDoesntLeakGoroutines(t *testing.T) {
 
 	// inbox.Next should panic given that the deserializer will encounter garbage
 	// data.
-	require.Panics(t, func() {
-		inbox.Init(context.Background())
-		inbox.Next()
-	})
+	require.Panics(t, func() { inbox.Next(context.Background()) })
 
 	// We require no error from the stream handler as nothing was canceled. The
 	// panic is bubbled up through the Next chain on the Inbox's host.
@@ -160,7 +156,7 @@ func TestInboxTimeout(t *testing.T) {
 
 	ctx := context.Background()
 
-	inbox, err := NewInbox(testAllocator, []*types.T{types.Int}, execinfrapb.StreamID(0))
+	inbox, err := NewInbox(ctx, testAllocator, []*types.T{types.Int}, execinfrapb.StreamID(0))
 	require.NoError(t, err)
 
 	var (
@@ -168,10 +164,7 @@ func TestInboxTimeout(t *testing.T) {
 		rpcLayer    = makeMockFlowStreamRPCLayer()
 	)
 	go func() {
-		readerErrCh <- colexecerror.CatchVectorizedRuntimeError(func() {
-			inbox.Init(ctx)
-			inbox.Next()
-		})
+		readerErrCh <- colexecerror.CatchVectorizedRuntimeError(func() { inbox.Next(ctx) })
 	}()
 
 	// Timeout the inbox.
@@ -202,7 +195,7 @@ func TestInboxShutdown(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	var (
-		rng, _ = randutil.NewTestRand()
+		rng, _ = randutil.NewPseudoRand()
 		// infiniteBatches will influence whether or not we're likely to test a
 		// graceful shutdown (since other shutdown mechanisms might happen before
 		// we reach the end of the data stream). If infiniteBatches is true,
@@ -266,7 +259,7 @@ func TestInboxShutdown(t *testing.T) {
 					inboxCtx, inboxCancel := context.WithCancel(context.Background())
 					inboxMemAccount := testMemMonitor.MakeBoundAccount()
 					defer inboxMemAccount.Close(inboxCtx)
-					inbox, err := NewInbox(colmem.NewAllocator(inboxCtx, &inboxMemAccount, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0))
+					inbox, err := NewInbox(context.Background(), colmem.NewAllocator(inboxCtx, &inboxMemAccount, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0))
 					require.NoError(t, err)
 					c, err := colserde.NewArrowBatchConverter(typs)
 					require.NoError(t, err)
@@ -369,31 +362,26 @@ func TestInboxShutdown(t *testing.T) {
 									if !runNextGoroutine {
 										return
 									}
-									// Init must always be called in any scenario.
-									err = colexecerror.CatchVectorizedRuntimeError(func() {
-										inbox.Init(inboxCtx)
-									})
-									if err != nil {
-										errCh <- err
-										return
-									}
 									if drainScenario == drainMetaBeforeNext {
-										_ = inbox.DrainMeta()
+										_ = inbox.DrainMeta(inboxCtx)
 										return
 									}
 									if nextSleep != 0 {
 										time.Sleep(nextSleep)
 									}
-									var done bool
+									var (
+										done bool
+										err  error
+									)
 									for !done && err == nil {
-										err = colexecerror.CatchVectorizedRuntimeError(func() { b := inbox.Next(); done = b.Length() == 0 })
+										err = colexecerror.CatchVectorizedRuntimeError(func() { b := inbox.Next(inboxCtx); done = b.Length() == 0 })
 										if drainScenario == drainMetaPrematurely {
-											_ = inbox.DrainMeta()
+											_ = inbox.DrainMeta(inboxCtx)
 											return
 										}
 									}
 									if drainScenario == drainMetaAfterNextIsExhausted {
-										_ = inbox.DrainMeta()
+										_ = inbox.DrainMeta(inboxCtx)
 									}
 									errCh <- err
 								}()

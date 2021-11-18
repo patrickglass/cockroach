@@ -198,9 +198,9 @@ func (md *Metadata) Init() {
 // Table annotations are not transferred over; all annotations are unset on
 // the copy.
 //
-// copyScalarFn must be a function that returns a copy of the given scalar
+// copyScalar must be a function that returns a copy of the given scalar
 // expression.
-func (md *Metadata) CopyFrom(from *Metadata, copyScalarFn func(Expr) Expr) {
+func (md *Metadata) CopyFrom(from *Metadata, copyScalar func(Expr) Expr) {
 	if len(md.schemas) != 0 || len(md.cols) != 0 || len(md.tables) != 0 ||
 		len(md.sequences) != 0 || len(md.deps) != 0 || len(md.views) != 0 ||
 		len(md.userDefinedTypes) != 0 || len(md.userDefinedTypesSlice) != 0 {
@@ -208,26 +208,23 @@ func (md *Metadata) CopyFrom(from *Metadata, copyScalarFn func(Expr) Expr) {
 	}
 	md.schemas = append(md.schemas, from.schemas...)
 	md.cols = append(md.cols, from.cols...)
+	md.tables = append(md.tables, from.tables...)
 
-	if len(from.userDefinedTypesSlice) > 0 {
-		if md.userDefinedTypes == nil {
-			md.userDefinedTypes = make(map[oid.Oid]struct{}, len(from.userDefinedTypesSlice))
-		}
-		for i := range from.userDefinedTypesSlice {
-			typ := from.userDefinedTypesSlice[i]
-			md.userDefinedTypes[typ.Oid()] = struct{}{}
-			md.userDefinedTypesSlice = append(md.userDefinedTypesSlice, typ)
-		}
+	if (md.userDefinedTypes) == nil {
+		md.userDefinedTypes = make(map[oid.Oid]struct{})
+	}
+	for i := range from.userDefinedTypesSlice {
+		typ := from.userDefinedTypesSlice[i]
+		md.userDefinedTypes[typ.Oid()] = struct{}{}
+		md.userDefinedTypesSlice = append(md.userDefinedTypesSlice, typ)
 	}
 
-	if cap(md.tables) >= len(from.tables) {
-		md.tables = md.tables[:len(from.tables)]
-	} else {
-		md.tables = make([]TableMeta, len(from.tables))
-	}
-	for i := range from.tables {
-		// Note: annotations inside TableMeta are not retained.
-		md.tables[i].copyFrom(&from.tables[i], copyScalarFn)
+	// Clear table annotations and copy the scalar expressions. The annotations
+	// can be mutable and can't be safely shared between different metadata
+	// instances.
+	for i := range md.tables {
+		md.tables[i].clearAnnotations()
+		md.tables[i].copyScalars(copyScalar)
 	}
 
 	md.sequences = append(md.sequences, from.sequences...)
@@ -431,7 +428,7 @@ func (md *Metadata) DuplicateTable(
 		col := tab.Column(i)
 		oldColID := tabID.ColumnID(i)
 		newColID := md.AddColumn(string(col.ColName()), col.DatumType())
-		md.ColumnMeta(newColID).Table = newTabID
+		md.ColumnMeta(newColID).Table = tabID
 		colMap.Set(int(oldColID), int(newColID))
 	}
 

@@ -164,7 +164,7 @@ func (node *DropSequence) Format(ctx *FmtCtx) {
 
 // DropRole represents a DROP ROLE statement
 type DropRole struct {
-	Names    RoleSpecList
+	Names    Exprs
 	IsRole   bool
 	IfExists bool
 }

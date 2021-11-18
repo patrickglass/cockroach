@@ -127,10 +127,7 @@ func MakeServer(stopper *stop.Stopper, tlsConfig *tls.Config, handler http.Handl
 
 // ServeWith accepts connections on ln and serves them using serveConn.
 func (s *Server) ServeWith(
-	ctx context.Context,
-	stopper *stop.Stopper,
-	l net.Listener,
-	serveConn func(context.Context, net.Conn),
+	ctx context.Context, stopper *stop.Stopper, l net.Listener, serveConn func(net.Conn),
 ) error {
 	// Inspired by net/http.(*Server).Serve
 	var tempDelay time.Duration // how long to sleep on accept failure
@@ -153,35 +150,26 @@ func (s *Server) ServeWith(
 			return e
 		}
 		tempDelay = 0
-		err := stopper.RunAsyncTask(ctx, "pgwire-serve", func(ctx context.Context) {
+		go func() {
 			defer stopper.Recover(ctx)
-			// NB: ConnState is used to manage the list of active connections that
-			// need draining; see MakeServer().
 			s.Server.ConnState(rw, http.StateNew) // before Serve can return
-			defer s.Server.ConnState(rw, http.StateClosed)
-			serveConn(ctx, rw)
-		})
-		if err != nil {
-			return err
-		}
+			serveConn(rw)
+			s.Server.ConnState(rw, http.StateClosed)
+		}()
 	}
 }
 
-// IsClosedConnection returns true if err is a non-temporary net.Error or is
-// cmux.ErrListenerClosed, grpc.ErrServerStopped, io.EOF, or net.ErrClosed.
+// IsClosedConnection returns true if err is cmux.ErrListenerClosed,
+// grpc.ErrServerStopped, io.EOF, or the net package's errClosed.
 func IsClosedConnection(err error) bool {
-	if netError := net.Error(nil); errors.As(err, &netError) {
-		return !netError.Temporary()
-	}
-	return errors.IsAny(err, cmux.ErrListenerClosed, grpc.ErrServerStopped, io.EOF, net.ErrClosed) ||
+	return errors.IsAny(err, cmux.ErrListenerClosed, grpc.ErrServerStopped, io.EOF) ||
 		strings.Contains(err.Error(), "use of closed network connection")
 }
 
-// FatalIfUnexpected calls Log.Fatal(err) unless err is nil, or an error that
-// comes from the net package indicating that the listener was closed or from
-// the Stopper indicating quiescence.
+// FatalIfUnexpected calls Log.Fatal(err) unless err is nil,
+// cmux.ErrListenerClosed, or the net package's errClosed.
 func FatalIfUnexpected(err error) {
-	if err != nil && !IsClosedConnection(err) && !errors.Is(err, stop.ErrUnavailable) {
+	if err != nil && !IsClosedConnection(err) {
 		log.Fatalf(context.TODO(), "%+v", err)
 	}
 }

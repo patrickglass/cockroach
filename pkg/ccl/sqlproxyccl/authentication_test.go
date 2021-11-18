@@ -12,16 +12,11 @@ import (
 	"net"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/ccl/sqlproxyccl/throttler"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/errors"
 	"github.com/jackc/pgproto3/v2"
 	"github.com/stretchr/testify/require"
 )
-
-var nilThrottleHook = func(state throttler.AttemptStatus) error {
-	return nil
-}
 
 func TestAuthenticateOK(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -38,7 +33,7 @@ func TestAuthenticateOK(t *testing.T) {
 		require.Equal(t, beMsg, &pgproto3.ReadyForQuery{})
 	}()
 
-	require.NoError(t, authenticate(srv, cli, nilThrottleHook))
+	require.NoError(t, authenticate(srv, cli))
 }
 
 func TestAuthenticateClearText(t *testing.T) {
@@ -80,81 +75,7 @@ func TestAuthenticateClearText(t *testing.T) {
 		require.Equal(t, beMsg, &pgproto3.ReadyForQuery{})
 	}()
 
-	require.NoError(t, authenticate(srv, cli, nilThrottleHook))
-}
-
-func TestAuthenticateThrottled(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	server := func(t *testing.T, be *pgproto3.Backend, authResponse pgproto3.BackendMessage) {
-		require.NoError(t, be.Send(&pgproto3.AuthenticationCleartextPassword{}))
-
-		msg, err := be.Receive()
-		require.NoError(t, err)
-		require.Equal(t, msg, &pgproto3.PasswordMessage{Password: "password"})
-
-		require.NoError(t, be.Send(authResponse))
-	}
-
-	client := func(t *testing.T, fe *pgproto3.Frontend) {
-		msg, err := fe.Receive()
-		require.NoError(t, err)
-		require.Equal(t, msg, &pgproto3.AuthenticationCleartextPassword{})
-
-		require.NoError(t, fe.Send(&pgproto3.PasswordMessage{Password: "password"}))
-
-		msg, err = fe.Receive()
-		require.NoError(t, err)
-		require.Equal(t, msg, &pgproto3.ErrorResponse{
-			Severity: "FATAL",
-			Code:     "08004",
-			Message:  "codeProxyRefusedConnection: connection attempt throttled",
-			Hint:     throttledErrorHint,
-		})
-
-		// Try reading from the connection. This check ensures authorize
-		// swallowed the OK/Error response from the sql server.
-		_, err = fe.Receive()
-		require.Error(t, err)
-	}
-
-	type testCase struct {
-		name           string
-		result         pgproto3.BackendMessage
-		expectedStatus throttler.AttemptStatus
-	}
-	for _, tc := range []testCase{
-		{
-			name:           "AuthenticationOkay",
-			result:         &pgproto3.AuthenticationOk{},
-			expectedStatus: throttler.AttemptOK,
-		},
-		{
-			name:           "AuthenticationError",
-			result:         &pgproto3.ErrorResponse{Message: "wrong password"},
-			expectedStatus: throttler.AttemptInvalidCredentials,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			proxyToServer, serverToProxy := net.Pipe()
-			proxyToClient, clientToProxy := net.Pipe()
-			sqlServer := pgproto3.NewBackend(pgproto3.NewChunkReader(serverToProxy), serverToProxy)
-			sqlClient := pgproto3.NewFrontend(pgproto3.NewChunkReader(clientToProxy), clientToProxy)
-
-			go server(t, sqlServer, &pgproto3.AuthenticationOk{})
-			go client(t, sqlClient)
-
-			err := authenticate(proxyToClient, proxyToServer, func(status throttler.AttemptStatus) error {
-				require.Equal(t, throttler.AttemptOK, status)
-				return throttledError
-			})
-			require.Error(t, err)
-			require.Contains(t, err.Error(), "connection attempt throttled")
-
-			proxyToServer.Close()
-			proxyToClient.Close()
-		})
-	}
+	require.NoError(t, authenticate(srv, cli))
 }
 
 func TestAuthenticateError(t *testing.T) {
@@ -172,11 +93,11 @@ func TestAuthenticateError(t *testing.T) {
 		require.Equal(t, beMsg, &pgproto3.ErrorResponse{Severity: "FATAL", Code: "foo"})
 	}()
 
-	err := authenticate(srv, cli, nilThrottleHook)
+	err := authenticate(srv, cli)
 	require.Error(t, err)
-	codeErr := (*codeError)(nil)
+	codeErr := (*CodeError)(nil)
 	require.True(t, errors.As(err, &codeErr))
-	require.Equal(t, codeAuthFailed, codeErr.code)
+	require.Equal(t, CodeAuthFailed, codeErr.code)
 }
 
 func TestAuthenticateUnexpectedMessage(t *testing.T) {
@@ -189,16 +110,14 @@ func TestAuthenticateUnexpectedMessage(t *testing.T) {
 	go func() {
 		err := be.Send(&pgproto3.BindComplete{})
 		require.NoError(t, err)
-		_, err = fe.Receive()
-		require.Error(t, err)
+		beMsg, err := fe.Receive()
+		require.NoError(t, err)
+		require.Equal(t, beMsg, &pgproto3.BindComplete{})
 	}()
 
-	err := authenticate(srv, cli, nilThrottleHook)
-
-	srv.Close()
-
+	err := authenticate(srv, cli)
 	require.Error(t, err)
-	codeErr := (*codeError)(nil)
+	codeErr := (*CodeError)(nil)
 	require.True(t, errors.As(err, &codeErr))
-	require.Equal(t, codeBackendDisconnected, codeErr.code)
+	require.Equal(t, CodeBackendDisconnected, codeErr.code)
 }

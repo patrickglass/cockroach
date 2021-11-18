@@ -294,18 +294,6 @@ func (s *SystemConfig) GetZoneConfigForKey(key roachpb.RKey) (*zonepb.ZoneConfig
 	return s.getZoneConfigForKey(DecodeKeyIntoZoneIDAndSuffix(key))
 }
 
-// GetSpanConfigForKey looks of the span config for the given key. It's part of
-// spanconfig.StoreReader interface.
-func (s *SystemConfig) GetSpanConfigForKey(
-	ctx context.Context, key roachpb.RKey,
-) (roachpb.SpanConfig, error) {
-	zone, err := s.GetZoneConfigForKey(key)
-	if err != nil {
-		return roachpb.SpanConfig{}, err
-	}
-	return zone.AsSpanConfig(), nil
-}
-
 // DecodeKeyIntoZoneIDAndSuffix figures out the zone that the key belongs to.
 func DecodeKeyIntoZoneIDAndSuffix(key roachpb.RKey) (id SystemTenantObjectID, keySuffix []byte) {
 	objectID, keySuffix, ok := DecodeSystemTenantObjectID(key)
@@ -549,7 +537,7 @@ func (s *SystemConfig) systemTenantTableBoundarySplitKey(
 				return nil
 			}
 
-			zoneVal := s.GetValue(MakeZoneKey(keys.SystemSQLCodec, descpb.ID(id)))
+			zoneVal := s.GetValue(MakeZoneKey(id))
 			if zoneVal == nil {
 				continue
 			}

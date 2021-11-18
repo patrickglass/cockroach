@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for rank.eg.go. It's formatted in a
 // special way, so it's both valid Go and a valid text/template input. This
@@ -46,31 +44,33 @@ var _ = colexecerror.InternalError
 // outputColIdx specifies in which coldata.Vec the operator should put its
 // output (if there is no such column, a new column is appended).
 func NewRankOperator(
-	args *WindowArgs,
+	allocator *colmem.Allocator,
+	input colexecop.Operator,
 	windowFn execinfrapb.WindowerSpec_WindowFunc,
 	orderingCols []execinfrapb.Ordering_Column,
+	outputColIdx int,
+	partitionColIdx int,
+	peersColIdx int,
 ) (colexecop.Operator, error) {
 	if len(orderingCols) == 0 {
-		return colexecbase.NewConstOp(
-			args.MainAllocator, args.Input, types.Int, int64(1), args.OutputColIdx)
+		return colexecbase.NewConstOp(allocator, input, types.Int, int64(1), outputColIdx)
 	}
-	input := colexecutils.NewVectorTypeEnforcer(
-		args.MainAllocator, args.Input, types.Int, args.OutputColIdx)
+	input = colexecutils.NewVectorTypeEnforcer(allocator, input, types.Int, outputColIdx)
 	initFields := rankInitFields{
 		OneInputNode:    colexecop.NewOneInputNode(input),
-		allocator:       args.MainAllocator,
-		outputColIdx:    args.OutputColIdx,
-		partitionColIdx: args.PartitionColIdx,
-		peersColIdx:     args.PeersColIdx,
+		allocator:       allocator,
+		outputColIdx:    outputColIdx,
+		partitionColIdx: partitionColIdx,
+		peersColIdx:     peersColIdx,
 	}
 	switch windowFn {
 	case execinfrapb.WindowerSpec_RANK:
-		if args.PartitionColIdx != tree.NoColumnIdx {
+		if partitionColIdx != tree.NoColumnIdx {
 			return &rankWithPartitionOp{rankInitFields: initFields}, nil
 		}
 		return &rankNoPartitionOp{rankInitFields: initFields}, nil
 	case execinfrapb.WindowerSpec_DENSE_RANK:
-		if args.PartitionColIdx != tree.NoColumnIdx {
+		if partitionColIdx != tree.NoColumnIdx {
 			return &denseRankWithPartitionOp{rankInitFields: initFields}, nil
 		}
 		return &denseRankNoPartitionOp{rankInitFields: initFields}, nil
@@ -97,7 +97,6 @@ func _UPDATE_RANK_INCREMENT() {
 
 type rankInitFields struct {
 	colexecop.OneInputNode
-	colexecop.InitHelper
 
 	allocator       *colmem.Allocator
 	outputColIdx    int
@@ -157,11 +156,8 @@ type _RANK_STRINGOp struct {
 
 var _ colexecop.Operator = &_RANK_STRINGOp{}
 
-func (r *_RANK_STRINGOp) Init(ctx context.Context) {
-	if !r.InitHelper.Init(ctx) {
-		return
-	}
-	r.Input.Init(r.Ctx)
+func (r *_RANK_STRINGOp) Init() {
+	r.Input.Init()
 	// All rank functions start counting from 1. Before we assign the rank to a
 	// tuple in the batch, we first increment r.rank, so setting this
 	// rankIncrement to 1 will update r.rank to 1 on the very first tuple (as
@@ -169,8 +165,8 @@ func (r *_RANK_STRINGOp) Init(ctx context.Context) {
 	r.rankIncrement = 1
 }
 
-func (r *_RANK_STRINGOp) Next() coldata.Batch {
-	batch := r.Input.Next()
+func (r *_RANK_STRINGOp) Next(ctx context.Context) coldata.Batch {
+	batch := r.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch

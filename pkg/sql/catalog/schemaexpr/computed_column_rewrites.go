@@ -45,7 +45,7 @@ func ParseComputedColumnRewrites(val string) (ComputedColumnRewritesMap, error) 
 	result := make(ComputedColumnRewritesMap, len(set.Values))
 	for _, v := range set.Values {
 		binExpr, ok := v.(*tree.BinaryExpr)
-		if !ok || binExpr.Operator.Symbol != tree.JSONFetchVal {
+		if !ok || binExpr.Operator != tree.JSONFetchVal {
 			return nil, errors.Newf("invalid column rewrites expression (expected -> operator)")
 		}
 		left, ok := binExpr.Left.(*tree.ParenExpr)

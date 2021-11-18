@@ -16,6 +16,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -54,16 +55,14 @@ func TestSecondaryGC(t *testing.T) {
 		config.Sinks.FileGroups = make(map[string]*logconfig.FileSinkConfig)
 	}
 	config.Sinks.FileGroups["gctest"] = &logconfig.FileSinkConfig{
-		FileDefaults: logconfig.FileDefaults{
-			Dir:            &s.logDir,
-			MaxFileSize:    &m,
-			MaxGroupSize:   &m,
-			BufferedWrites: &bf,
-		},
-		Channels: logconfig.SelectChannels(channel.OPS),
+		Dir:            &s.logDir,
+		MaxFileSize:    &m,
+		MaxGroupSize:   &m,
+		BufferedWrites: &bf,
+		Channels:       logconfig.ChannelList{Channels: []Channel{channel.OPS}},
 	}
 
-	// Validate and apply the config.
+	// Validate and apply the config
 	require.NoError(t, config.Validate(&s.logDir))
 	TestingResetActive()
 	cleanupFn, err := ApplyConfig(config)
@@ -72,9 +71,9 @@ func TestSecondaryGC(t *testing.T) {
 
 	// Find our "gctest" file sink
 	var fs *fileSink
-	require.NoError(t, logging.allSinkInfos.iterFileSinks(
+	require.NoError(t, allSinkInfos.iterFileSinks(
 		func(p *fileSink) error {
-			if p.nameGenerator.ownsFileByPrefix(fileNameConstants.program + "-gctest") {
+			if strings.HasSuffix(p.prefix, "gctest") {
 				fs = p
 			}
 			return nil

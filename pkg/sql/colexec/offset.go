@@ -11,6 +11,8 @@
 package colexec
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 )
@@ -18,7 +20,7 @@ import (
 // offsetOp is an operator that implements offset, returning everything
 // after the first n tuples in its input.
 type offsetOp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	offset uint64
 
@@ -30,15 +32,20 @@ var _ colexecop.Operator = &offsetOp{}
 
 // NewOffsetOp returns a new offset operator with the given offset.
 func NewOffsetOp(input colexecop.Operator, offset uint64) colexecop.Operator {
-	return &offsetOp{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
-		offset:         offset,
+	c := &offsetOp{
+		OneInputNode: colexecop.NewOneInputNode(input),
+		offset:       offset,
 	}
+	return c
 }
 
-func (c *offsetOp) Next() coldata.Batch {
+func (c *offsetOp) Init() {
+	c.Input.Init()
+}
+
+func (c *offsetOp) Next(ctx context.Context) coldata.Batch {
 	for {
-		bat := c.Input.Next()
+		bat := c.Input.Next(ctx)
 		length := bat.Length()
 		if length == 0 {
 			return bat
@@ -58,7 +65,6 @@ func (c *offsetOp) Next() coldata.Batch {
 				bat.SetSelection(true)
 				sel = bat.Selection()[:delta] // slice for bounds check elimination
 				for i := range sel {
-					//gcassert:bce
 					sel[i] = outputStartIdx + i
 				}
 			}
@@ -69,4 +75,10 @@ func (c *offsetOp) Next() coldata.Batch {
 			return bat
 		}
 	}
+}
+
+// Reset resets the offsetOp for another run. Primarily used for
+// benchmarks.
+func (c *offsetOp) Reset() {
+	c.seen = 0
 }

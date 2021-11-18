@@ -15,19 +15,8 @@ package sql
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/lib/pq/oid"
-)
-
-// RDBMS options
-const (
-	MySQL    = "mysql"
-	Postgres = "postgres"
 )
 
 // GetPGMetadataSQL is a query uses udt_name::regtype instead of data_type column because
@@ -44,76 +33,38 @@ const GetPGMetadataSQL = `
 	JOIN pg_namespace n ON n.oid = c.relnamespace
 	WHERE n.nspname = $1
 	AND a.attnum > 0
-  AND c.relkind != 'i'
 	ORDER BY 1, 2;
 `
 
-// Summary will keep accountability for any unexpected difference and report it in the log.
-type Summary struct {
-	TotalTables        int
-	TotalColumns       int
-	MissingTables      int
-	MissingColumns     int
-	DatatypeMismatches int
-}
-
-// PGMetadataColumnDiff describes diffs information for a column type. Fields are exported for marshaling purposes.
-type PGMetadataColumnDiff struct {
-	Oid              uint32 `json:"oid"`
-	DataType         string `json:"dataType"`
-	ExpectedOid      uint32 `json:"expectedOid"`
-	ExpectedDataType string `json:"expectedDataType"`
-}
-
-// PGMetadataColumnDiffs maps column names to datatype diffs.
-type PGMetadataColumnDiffs map[string]*PGMetadataColumnDiff
-
-// PGMetadataTableDiffs is used to store and load expected diffs:
-// - A table name pointing to a zero length PGMetadataColumnDiffs means that we expect this table to be missing
-//   in cockroach db.
-// - If PGMetadataColumnDiffs is not empty but columnName points to null, we expect that column to be missing in that table in
-//   cockroach db.
-// - If column Name points to a not null PGMetadataColumnDiff, the test column describes how we expect that data type to be
-//   different between cockroach db and postgres.
-type PGMetadataTableDiffs map[string]PGMetadataColumnDiffs
-
-// PGMetadataColumnType represents a column type from postgres/mysql.
+// PGMetadataColumnType is a structure which contains a small description about the datatype of a column, but this can also be
+// used as a diff information if populating ExpectedOid. Fields are exported for Marshaling purposes.
 type PGMetadataColumnType struct {
-	Oid      uint32 `json:"oid"`
-	DataType string `json:"dataType"`
+	Oid              uint32  `json:"oid"`
+	DataType         string  `json:"dataType"`
+	ExpectedOid      *uint32 `json:"expectedOid"`
+	ExpectedDataType *string `json:"expectedDataType"`
 }
 
-// PGMetadataColumns maps columns names to datatypes.
+// PGMetadataColumns maps column names to datatype description
 type PGMetadataColumns map[string]*PGMetadataColumnType
 
-// PGMetadataTables maps tables with columns.
+// PGMetadataTables have 2 use cases:
+// First: This is used to model pg_schema for postgres and cockroach db for comparison purposes by mapping tableNames
+// to columns.
+// Second: This is used to store and load expected diffs:
+// - Using it this way, a table name pointing to a zero length PGMetadataColumns means that we expect this table to be missing
+//   in cockroach db
+// - If PGMetadataColumns is not empty but columnName points to null, we expect that column to be missing in that table in
+//   cockroach db
+// - If column Name points to a not null PGMetadataColumnType, the test column describes how we expect that data type to be
+//   different between cockroach db and postgres
 type PGMetadataTables map[string]PGMetadataColumns
 
-// PGMetadataFile stores the schema gotten from postgres/mysql.
+// PGMetadataFile is used to export pg_catalog from postgres and store the representation of this structure as a
+// json file
 type PGMetadataFile struct {
-	Version    string           `json:"version"`
-	PGMetadata PGMetadataTables `json:"tables"`
-}
-
-// PGMetadataDiffFile is used to store expected diffs or by the diff tool to validate a diff is an expected diff.
-type PGMetadataDiffFile struct {
-	Version            string               `json:"version"`
-	DiffSummary        Summary              `json:"diffSummary"`
-	Diffs              PGMetadataTableDiffs `json:"diffs"`
-	UnimplementedTypes map[oid.Oid]string   `json:"unimplementedTypes"`
-}
-
-func (d PGMetadataTableDiffs) addColumn(
-	tableName, columnName string, column *PGMetadataColumnDiff,
-) {
-	columns, ok := d[tableName]
-
-	if !ok {
-		columns = make(PGMetadataColumnDiffs)
-		d[tableName] = columns
-	}
-
-	columns[columnName] = column
+	PGVersion  string           `json:"pgVersion"`
+	PGMetadata PGMetadataTables `json:"pgMetadata"`
 }
 
 func (p PGMetadataTables) addColumn(tableName, columnName string, column *PGMetadataColumnType) {
@@ -134,69 +85,50 @@ func (p PGMetadataTables) AddColumnMetadata(
 	p.addColumn(tableName, columnName, &PGMetadataColumnType{
 		dataTypeOid,
 		dataType,
+		nil,
+		nil,
 	})
 }
 
 // addDiff is for the second use case for pgTables which objective is create a datatype diff
-func (d PGMetadataTableDiffs) addDiff(
+func (p PGMetadataTables) addDiff(
 	tableName string, columnName string, expected *PGMetadataColumnType, actual *PGMetadataColumnType,
 ) {
-	d.addColumn(tableName, columnName, &PGMetadataColumnDiff{
+	p.addColumn(tableName, columnName, &PGMetadataColumnType{
 		actual.Oid,
 		actual.DataType,
-		expected.Oid,
-		expected.DataType,
+		&expected.Oid,
+		&expected.DataType,
 	})
 }
 
-// Not using error interface because message is not relevant
-type compareResult int
-
-const (
-	success compareResult = 1 + iota
-	expectedDiffError
-	diffError
-)
-
-// compareColumns verifies if there is a datatype mismatch or if the diff is an expected diff
-func (d PGMetadataTableDiffs) compareColumns(
+// isDiffOid verifies if there is a datatype mismatch or if the diff is an expected diff
+func (p PGMetadataTables) isDiffOid(
 	tableName string, columnName string, expected *PGMetadataColumnType, actual *PGMetadataColumnType,
-) compareResult {
-	// MySQL don't have oid as they are in postgres so we can't compare oids.
-	if expected.Oid == 0 {
-		return 0
+) bool {
+	if expected.Oid == actual.Oid {
+		return false
 	}
 
-	expectedDiff := d.getExpectedDiff(tableName, columnName)
-
-	if actual.Oid == expected.Oid {
-		if expectedDiff != nil {
-			// Need to update JSON file
-			return expectedDiffError
-		}
-	} else if expectedDiff == nil || expectedDiff.Oid != actual.Oid ||
-		expectedDiff.ExpectedOid != expected.Oid {
-		// This diff is not expected
-		return diffError
-	}
-
-	return success
-}
-
-// If there is an expected diff for a table.column it will return it
-func (d PGMetadataTableDiffs) getExpectedDiff(tableName, columnName string) *PGMetadataColumnDiff {
-	columns, ok := d[tableName]
+	columns, ok := p[tableName]
 	if !ok {
-		return nil
+		return true
 	}
 
-	return columns[columnName]
+	// For columns that are expected to be missing, the diff is stored as nil
+	// and is present in the map.
+	diff, ok := columns[columnName]
+	if !ok || diff == nil {
+		return true
+	}
+
+	return !(diff.Oid == actual.Oid && *diff.ExpectedOid == expected.Oid)
 }
 
-// isExpectedMissingTable is used by the diff PGMetadataTableDiffs to verify whether missing a table in cockroach is expected
+// isExpectedMissingTable is used by the diff PGMetadataTables to verify whether missing a table in cockroach is expected
 // or not
-func (d PGMetadataTableDiffs) isExpectedMissingTable(tableName string) bool {
-	if columns, ok := d[tableName]; !ok || len(columns) > 0 {
+func (p PGMetadataTables) isExpectedMissingTable(tableName string) bool {
+	if columns, ok := p[tableName]; !ok || len(columns) > 0 {
 		return false
 	}
 
@@ -204,8 +136,8 @@ func (d PGMetadataTableDiffs) isExpectedMissingTable(tableName string) bool {
 }
 
 // isExpectedMissingColumn is similar to isExpectedMissingTable to verify column expected misses
-func (d PGMetadataTableDiffs) isExpectedMissingColumn(tableName string, columnName string) bool {
-	columns, ok := d[tableName]
+func (p PGMetadataTables) isExpectedMissingColumn(tableName string, columnName string) bool {
+	columns, ok := p[tableName]
 	if !ok {
 		return false
 	}
@@ -219,148 +151,50 @@ func (d PGMetadataTableDiffs) isExpectedMissingColumn(tableName string, columnNa
 }
 
 // addMissingTable adds a tablename when it is not found in cockroach db
-func (d PGMetadataTableDiffs) addMissingTable(tableName string) {
-	d[tableName] = make(PGMetadataColumnDiffs)
+func (p PGMetadataTables) addMissingTable(tableName string) {
+	p[tableName] = make(PGMetadataColumns)
 }
 
 // addMissingColumn adds a column when it is not found in cockroach db
-func (d PGMetadataTableDiffs) addMissingColumn(tableName string, columnName string) {
-	columns, ok := d[tableName]
+func (p PGMetadataTables) addMissingColumn(tableName string, columnName string) {
+	columns, ok := p[tableName]
 
 	if !ok {
-		columns = make(PGMetadataColumnDiffs)
-		d[tableName] = columns
+		columns = make(PGMetadataColumns)
+		p[tableName] = columns
 	}
 
 	columns[columnName] = nil
 }
 
 // rewriteDiffs creates pg_catalog_test-diffs.json
-func (d PGMetadataTableDiffs) rewriteDiffs(
-	source PGMetadataFile, sum Summary, diffFile string,
-) error {
+func (p PGMetadataTables) rewriteDiffs(diffFile string) error {
 	f, err := os.OpenFile(diffFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	mf := &PGMetadataDiffFile{
-		Version:            source.Version,
-		Diffs:              d,
-		DiffSummary:        sum,
-		UnimplementedTypes: source.PGMetadata.getUnimplementedTypes(),
+	byteArray, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
 	}
-	mf.Save(f)
+
+	if _, err = f.Write(byteArray); err != nil {
+		return err
+	}
+
 	return nil
 }
 
-// Save stores the diff file in a JSON format.
-func (df *PGMetadataDiffFile) Save(writer io.Writer) {
-	Save(writer, df)
-}
-
-// Save stores the table metadata in a JSON format.
+// Save have the purpose of storing all the data retrieved from postgres and useful information as postgres version
 func (f *PGMetadataFile) Save(writer io.Writer) {
-	Save(writer, f)
-}
-
-// Save stores any file into the writer in JSON format
-func Save(writer io.Writer, file interface{}) {
-	encoder := json.NewEncoder(writer)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(file); err != nil {
+	byteArray, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
 		panic(err)
 	}
-}
 
-//getUnimplementedTables retrieves the tables that are not yet part of CRDB.
-func (d PGMetadataTableDiffs) getUnimplementedTables(source PGMetadataTables) PGMetadataTables {
-	unimplementedTables := make(PGMetadataTables)
-	for tableName := range d {
-		if len(d[tableName]) == 0 && len(source[tableName].getUnimplementedTypes()) == 0 {
-			unimplementedTables[tableName] = source[tableName]
-		}
+	if _, err = writer.Write(byteArray); err != nil {
+		panic(err)
 	}
-	return unimplementedTables
-}
-
-// getUnimplementedColumns is used by diffs as it might not be in sync with
-// already implemented columns.
-func (d PGMetadataTableDiffs) getUnimplementedColumns(target PGMetadataTables) PGMetadataTables {
-	unimplementedColumns := make(PGMetadataTables)
-	for tableName, columns := range d {
-		for columnName, columnType := range columns {
-			if columnType != nil {
-				// dataType mismatch (Not a new column).
-				continue
-			}
-			sourceType, ok := target[tableName][columnName]
-			if !ok {
-				continue
-			}
-			typeOid := oid.Oid(sourceType.Oid)
-			if _, ok := types.OidToType[typeOid]; !ok || typeOid == oid.T_anyarray {
-				// can't implement this column due to missing type.
-				continue
-			}
-			unimplementedColumns.AddColumnMetadata(tableName, columnName, sourceType.DataType, sourceType.Oid)
-		}
-	}
-	return unimplementedColumns
-}
-
-// removeImplementedColumns removes diff columns that are marked as expected
-// diff (or unimplemented column) but is already implemented in CRDB.
-func (d PGMetadataTableDiffs) removeImplementedColumns(source PGMetadataTables) {
-	for tableName, columns := range source {
-		pColumns, exists := d[tableName]
-		if !exists {
-			continue
-		}
-		for columnName := range columns {
-			columnType, exists := pColumns[columnName]
-			if !exists {
-				continue
-			}
-			if columnType != nil {
-				continue
-			}
-
-			delete(pColumns, columnName)
-		}
-	}
-}
-
-// getUnimplementedTypes verifies that all the types are implemented in cockroach db.
-func (c PGMetadataColumns) getUnimplementedTypes() map[oid.Oid]string {
-	unimplemented := make(map[oid.Oid]string)
-	for _, column := range c {
-		typeOid := oid.Oid(column.Oid)
-		if _, ok := types.OidToType[typeOid]; !ok || typeOid == oid.T_anyarray {
-			unimplemented[typeOid] = column.DataType
-		}
-	}
-
-	return unimplemented
-}
-
-func (p PGMetadataTables) getUnimplementedTypes() map[oid.Oid]string {
-	unimplemented := make(map[oid.Oid]string)
-	for _, column := range p {
-		for typeOid, dataType := range column.getUnimplementedTypes() {
-			unimplemented[typeOid] = dataType
-		}
-	}
-
-	return unimplemented
-}
-
-// TablesMetadataFilename give the appropriate name where to store or read
-// any schema description from a specific database.
-func TablesMetadataFilename(path, rdbms, schema string) string {
-	return filepath.Join(
-		path,
-		fmt.Sprintf("%s_tables_from_%s.json", schema, rdbms),
-	)
 }

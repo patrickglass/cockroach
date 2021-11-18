@@ -37,11 +37,9 @@ func installSensitiveAccessLogFileSink(sc *log.TestLogScope, t *testing.T) func(
 	bt := true
 	cfg.Sinks.FileGroups = map[string]*logconfig.FileSinkConfig{
 		"sql-audit": {
-			FileDefaults: logconfig.FileDefaults{
-				CommonSinkConfig: logconfig.CommonSinkConfig{Auditable: &bt},
-			},
-			Channels: logconfig.SelectChannels(channel.SENSITIVE_ACCESS)},
-	}
+			CommonSinkConfig: logconfig.CommonSinkConfig{Auditable: &bt},
+			Channels:         logconfig.ChannelList{Channels: []log.Channel{channel.SENSITIVE_ACCESS}},
+		}}
 	dir := sc.GetDirectory()
 	if err := cfg.Validate(&dir); err != nil {
 		t.Fatal(err)
@@ -72,7 +70,8 @@ func TestAdminAuditLogBasic(t *testing.T) {
 	db.Exec(t, `SET CLUSTER SETTING sql.log.admin_audit.enabled = true;`)
 	db.Exec(t, `SELECT 1;`)
 
-	var selectAdminRe = regexp.MustCompile(`"EventType":"admin_query","Statement":"SELECT ‹1›","Tag":"SELECT","User":"root"`)
+	var selectAdminRe = regexp.MustCompile(`"EventType":"admin_query","Statement":"‹SELECT 1›","Tag":"SELECT","User":"root"`)
+
 	log.Flush()
 
 	entries, err := log.FetchEntriesFromFiles(0, math.MaxInt64, 10000, selectAdminRe,
@@ -168,15 +167,15 @@ COMMIT;
 	}{
 		{
 			"select-1-query",
-			`"EventType":"admin_query","Statement":"SELECT ‹1›"`,
+			`"EventType":"admin_query","Statement":"‹SELECT 1›"`,
 		},
 		{
 			"select-*-from-table-query",
-			`"EventType":"admin_query","Statement":"SELECT * FROM ‹\"\"›.‹\"\"›.‹t›"`,
+			`"EventType":"admin_query","Statement":"‹SELECT * FROM \"\".\"\".t›"`,
 		},
 		{
 			"create-table-query",
-			`"EventType":"admin_query","Statement":"CREATE TABLE ‹defaultdb›.public.‹t› ()"`,
+			`"EventType":"admin_query","Statement":"‹CREATE TABLE defaultdb.public.t ()›"`,
 		},
 	}
 
@@ -263,15 +262,15 @@ COMMIT;
 	}{
 		{
 			"select-1-query",
-			`"EventType":"admin_query","Statement":"SELECT ‹1›"`,
+			`"EventType":"admin_query","Statement":"‹SELECT 1›"`,
 		},
 		{
 			"select-*-from-table-query",
-			`"EventType":"admin_query","Statement":"SELECT * FROM ‹\"\"›.‹\"\"›.‹t›"`,
+			`"EventType":"admin_query","Statement":"‹SELECT * FROM \"\".\"\".t›"`,
 		},
 		{
 			"create-table-query",
-			`"EventType":"admin_query","Statement":"CREATE TABLE ‹defaultdb›.public.‹t› ()"`,
+			`"EventType":"admin_query","Statement":"‹CREATE TABLE defaultdb.public.t ()›"`,
 		},
 	}
 

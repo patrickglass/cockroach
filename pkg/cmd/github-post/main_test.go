@@ -17,9 +17,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/internal/issues"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestListFailures(t *testing.T) {
@@ -27,6 +25,7 @@ func TestListFailures(t *testing.T) {
 		testName   string
 		title      string
 		message    string
+		author     string
 		expRepro   string
 		mention    []string
 		hasProject bool
@@ -47,6 +46,7 @@ func TestListFailures(t *testing.T) {
 				testName:   "TestStopperWithCancelConcurrent",
 				title:      "util/stop: TestStopperWithCancelConcurrent failed",
 				message:    "this is just a testing issue",
+				author:     "nvanbenschoten@gmail.com",
 				mention:    []string{"@cockroachdb/server"},
 				hasProject: true,
 			}},
@@ -60,6 +60,7 @@ func TestListFailures(t *testing.T) {
 				testName:   "TestReplicateQueueRebalance",
 				title:      "kv/kvserver: TestReplicateQueueRebalance failed",
 				message:    "replicate_queue_test.go:88: condition failed to evaluate within 45s: not balanced: [10 1 10 1 8]",
+				author:     "petermattis@gmail.com",
 				mention:    []string{"@cockroachdb/kv"},
 				hasProject: true,
 			}},
@@ -73,6 +74,7 @@ func TestListFailures(t *testing.T) {
 				testName:   "TestGossipHandlesReplacedNode",
 				title:      "kv/kvserver: TestGossipHandlesReplacedNode failed",
 				message:    "F180711 20:13:15.826193 83 storage/replica.go:1877  [n?,s1,r1/1:/M{in-ax}] on-disk and in-memory state diverged:",
+				author:     "alexdwanerobinson@gmail.com",
 				mention:    []string{"@cockroachdb/kv"},
 				hasProject: true,
 			}},
@@ -86,6 +88,7 @@ func TestListFailures(t *testing.T) {
 				testName: "(unknown)",
 				title:    "storage: package failed",
 				message:  "make: *** [bin/.submodules-initialized] Error 1",
+				author:   "",
 			}},
 			formatter: defaultFormatter,
 		},
@@ -99,6 +102,7 @@ func TestListFailures(t *testing.T) {
 				message: `=== RUN   TestPretty/["hello",_["world"]]
     --- FAIL: TestPretty/["hello",_["world"]] (0.00s)
     	json_test.go:1656: injected failure`,
+				author:  "justin@cockroachlabs.com",
 				mention: []string{"@cockroachdb/unowned"},
 			}},
 			formatter: defaultFormatter,
@@ -115,6 +119,7 @@ func TestListFailures(t *testing.T) {
 					testName:   "TestTxnCoordSenderPipelining",
 					title:      "kv/kvclient/kvcoord: TestTxnCoordSenderPipelining failed",
 					message:    `injected failure`,
+					author:     "nikhil.benesch@gmail.com",
 					mention:    []string{"@cockroachdb/kv"},
 					hasProject: true,
 				},
@@ -128,6 +133,7 @@ TestTxnCoordSenderPipelining - 1.00s
 Slow passing tests:
 TestAnchorKey - 1.01s
 `,
+					author:     "andrei@cockroachlabs.com",
 					mention:    []string{"@cockroachdb/kv"},
 					hasProject: true,
 				},
@@ -151,6 +157,7 @@ TestXXX/sub3 - 0.50s
 Slow passing tests:
 TestXXA - 1.00s
 `,
+					author: "",
 				},
 			},
 			formatter: defaultFormatter,
@@ -172,6 +179,7 @@ Slow passing tests:
 TestXXB - 1.01s
 TestXXA - 1.00s
 `,
+					author: "",
 				},
 			},
 			formatter: defaultFormatter,
@@ -193,6 +201,7 @@ Slow passing tests:
 TestXXB - 1.01s
 TestXXA - 1.00s
 `,
+					author: "",
 				},
 			},
 			formatter: defaultFormatter,
@@ -207,6 +216,7 @@ TestXXA - 1.00s
 					testName: "TestXXX",
 					title:    "kv: TestXXX failed",
 					message:  `panic: induced panic`,
+					author:   "",
 				},
 			},
 			formatter: defaultFormatter,
@@ -221,6 +231,7 @@ TestXXA - 1.00s
 					testName: "(unknown)",
 					title:    "kv: package failed",
 					message:  `panic: induced panic`,
+					author:   "",
 				},
 			},
 			formatter: defaultFormatter,
@@ -269,29 +280,19 @@ TestXXA - 1.00s
 				if exp := c.expIssues[curIssue].testName; exp != f.testName {
 					t.Errorf("expected test name %s, but got %s", exp, f.testName)
 				}
+				if exp := c.expIssues[curIssue].author; exp != "" && exp != req.AuthorEmail {
+					t.Errorf("expected author %s, but got %s", exp, req.AuthorEmail)
+				}
 				if exp := c.expIssues[curIssue].title; exp != f.title {
 					t.Errorf("expected title %s, but got %s", exp, f.title)
 				}
 				if exp := c.expIssues[curIssue].message; !strings.Contains(f.testMessage, exp) {
 					t.Errorf("expected message containing %s, but got:\n%s", exp, f.testMessage)
 				}
-				// NB: all test cases here emit a repro, but we only check it when the expectation
-				// is set.
-				if c.expIssues[curIssue].expRepro != "" {
-					var actRepro, expRepro string
-					{
-						r := &issues.Renderer{}
-						req.HelpCommand(r)
-						actRepro = r.String()
-					}
-					{
-						r := &issues.Renderer{}
-						issues.ReproductionCommandFromString(c.expIssues[curIssue].expRepro)(r)
-						expRepro = r.String()
-					}
-					require.Equal(t, expRepro, actRepro)
+				if exp := c.expIssues[curIssue].expRepro; exp != "" && exp != req.ReproductionCommand {
+					t.Errorf("expected reproduction %q, but got:\n%q", exp, req.ReproductionCommand)
 				}
-				assert.Equal(t, c.expIssues[curIssue].mention, req.MentionOnCreate)
+				assert.Equal(t, c.expIssues[curIssue].mention, req.Mention)
 				assert.Equal(t, c.expIssues[curIssue].hasProject, req.ProjectColumnID != 0)
 				// On next invocation, we'll check the next expected issue.
 				curIssue++

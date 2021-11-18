@@ -13,8 +13,6 @@ package migrationmanager_test
 import (
 	"context"
 	gosql "database/sql"
-	"fmt"
-	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,7 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
 	"github.com/cockroachdb/cockroach/pkg/migration"
-	"github.com/cockroachdb/cockroach/pkg/migration/migrations"
+	"github.com/cockroachdb/cockroach/pkg/migration/migrationmanager"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -70,7 +68,7 @@ func TestAlreadyRunningJobsAreHandledProperly(t *testing.T) {
 					BinaryVersionOverride:          startCV.Version,
 					DisableAutomaticVersionUpgrade: 1,
 				},
-				MigrationManager: &migration.TestingKnobs{
+				MigrationManager: &migrationmanager.TestingKnobs{
 					ListBetweenOverride: func(from, to clusterversion.ClusterVersion) []clusterversion.ClusterVersion {
 						return []clusterversion.ClusterVersion{to}
 					},
@@ -78,8 +76,8 @@ func TestAlreadyRunningJobsAreHandledProperly(t *testing.T) {
 						if cv != endCV {
 							return nil, false
 						}
-						return migration.NewTenantMigration("test", cv, migrations.NoPrecondition, func(
-							ctx context.Context, version clusterversion.ClusterVersion, deps migration.TenantDeps, _ *jobs.Job,
+						return migration.NewTenantMigration("test", cv, func(
+							ctx context.Context, version clusterversion.ClusterVersion, deps migration.TenantDeps,
 						) error {
 							canResume := make(chan error)
 							ch <- canResume
@@ -143,15 +141,15 @@ RETURNING id;`).Scan(&secondID))
 	require.Regexp(t, "found multiple non-terminal jobs for version", err)
 
 	// Let the fake, erroneous job finish with an error.
-	fakeJobBlockChan <- jobs.MarkAsPermanentJobError(errors.New("boom"))
+	fakeJobBlockChan <- errors.New("boom")
 	require.Regexp(t, "boom", <-runErr)
 
 	// Launch a second migration which later we'll ensure does not kick off
 	// another job. We'll make sure this happens by polling the trace to see
 	// the log line indicating what we want.
-	tr := tc.Server(0).TracerI().(*tracing.Tracer)
-	recCtx, sp := tr.StartSpanCtx(ctx, "test", tracing.WithRecording(tracing.RecordingVerbose))
-	defer sp.Finish()
+	tr := tc.Server(0).Tracer().(*tracing.Tracer)
+	recCtx, getRecording, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test")
+	defer cancel()
 	upgrade2Err := make(chan error, 1)
 	go func() {
 		// Use an internal executor to get access to the trace as it happens.
@@ -161,25 +159,10 @@ RETURNING id;`).Scan(&secondID))
 	}()
 
 	testutils.SucceedsSoon(t, func() error {
-		// TODO(yuzefovich): this check is quite unfortunate since it relies on
-		// the assumption that all recordings from the child spans are imported
-		// into the tracer. However, this is not the case for the DistSQL
-		// processors where child spans are created with
-		// WithParentAndManualCollection option which requires explicitly
-		// importing the recordings from the children. This only happens when
-		// the execution flow is drained which cannot happen until we close
-		// the 'unblock' channel, and this we cannot do until we see the
-		// expected message in the trace.
-		//
-		// At the moment it works in a very fragile manner (by making sure that
-		// no processors actually create their own spans). Instead, a different
-		// way to observe the status of the migration manager should be
-		// introduced and should be used here.
-		rec := sp.GetRecording(tracing.RecordingVerbose)
-		if tracing.FindMsgInRecording(rec, "found existing migration job") > 0 {
+		if tracing.FindMsgInRecording(getRecording(), "found existing migration job") > 0 {
 			return nil
 		}
-		return errors.Errorf("waiting for job to be discovered: %v", rec)
+		return errors.Errorf("waiting for job to be discovered: %v", getRecording())
 	})
 	close(unblock)
 	require.NoError(t, <-upgrade1Err)
@@ -205,7 +188,7 @@ func TestMigrateUpdatesReplicaVersion(t *testing.T) {
 					BinaryVersionOverride:          startCV.Version,
 					DisableAutomaticVersionUpgrade: 1,
 				},
-				MigrationManager: &migration.TestingKnobs{
+				MigrationManager: &migrationmanager.TestingKnobs{
 					ListBetweenOverride: func(from, to clusterversion.ClusterVersion) []clusterversion.ClusterVersion {
 						return []clusterversion.ClusterVersion{from, to}
 					},
@@ -214,9 +197,9 @@ func TestMigrateUpdatesReplicaVersion(t *testing.T) {
 							return nil, false
 						}
 						return migration.NewSystemMigration("test", cv, func(
-							ctx context.Context, version clusterversion.ClusterVersion, d migration.SystemDeps, _ *jobs.Job,
+							ctx context.Context, version clusterversion.ClusterVersion, c migration.Cluster,
 						) error {
-							return d.DB.Migrate(ctx, desc.StartKey, desc.EndKey, cv.Version)
+							return c.DB().Migrate(ctx, desc.StartKey, desc.EndKey, cv.Version)
 						}), true
 					},
 				},
@@ -323,13 +306,13 @@ func TestConcurrentMigrationAttempts(t *testing.T) {
 					BinaryVersionOverride:          versions[0].Version,
 					DisableAutomaticVersionUpgrade: 1,
 				},
-				MigrationManager: &migration.TestingKnobs{
+				MigrationManager: &migrationmanager.TestingKnobs{
 					ListBetweenOverride: func(from, to clusterversion.ClusterVersion) []clusterversion.ClusterVersion {
 						return versions
 					},
 					RegistryOverride: func(cv clusterversion.ClusterVersion) (migration.Migration, bool) {
 						return migration.NewSystemMigration("test", cv, func(
-							ctx context.Context, version clusterversion.ClusterVersion, d migration.SystemDeps, _ *jobs.Job,
+							ctx context.Context, version clusterversion.ClusterVersion, c migration.Cluster,
 						) error {
 							if atomic.AddInt32(&active, 1) != 1 {
 								t.Error("unexpected concurrency")
@@ -385,6 +368,10 @@ func TestPauseMigration(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	defer jobs.TestingSetAdoptAndCancelIntervals(
+		10*time.Millisecond, 10*time.Millisecond,
+	)()
+
 	// We're going to be migrating from startCV to endCV.
 	startCV := clusterversion.ClusterVersion{Version: roachpb.Version{Major: 41}}
 	endCV := clusterversion.ClusterVersion{Version: roachpb.Version{Major: 42}}
@@ -400,12 +387,11 @@ func TestPauseMigration(t *testing.T) {
 		ServerArgs: base.TestServerArgs{
 			Settings: cluster.MakeTestingClusterSettingsWithVersions(endCV.Version, startCV.Version, false),
 			Knobs: base.TestingKnobs{
-				JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 				Server: &server.TestingKnobs{
 					BinaryVersionOverride:          startCV.Version,
 					DisableAutomaticVersionUpgrade: 1,
 				},
-				MigrationManager: &migration.TestingKnobs{
+				MigrationManager: &migrationmanager.TestingKnobs{
 					ListBetweenOverride: func(from, to clusterversion.ClusterVersion) []clusterversion.ClusterVersion {
 						return []clusterversion.ClusterVersion{to}
 					},
@@ -413,8 +399,8 @@ func TestPauseMigration(t *testing.T) {
 						if cv != endCV {
 							return nil, false
 						}
-						return migration.NewTenantMigration("test", cv, migrations.NoPrecondition, func(
-							ctx context.Context, version clusterversion.ClusterVersion, deps migration.TenantDeps, _ *jobs.Job,
+						return migration.NewTenantMigration("test", cv, func(
+							ctx context.Context, version clusterversion.ClusterVersion, deps migration.TenantDeps,
 						) error {
 							canResume := make(chan error)
 							ch <- migrationEvent{
@@ -475,12 +461,6 @@ SELECT id
 		t.Fatalf("did not expect the job to run again")
 	case <-time.After(10 * time.Millisecond):
 	}
-	// Wait for the job to actually be paused as opposed to waiting in
-	// pause-requested. There's a separate issue to make PAUSE wait for
-	// the job to be paused, but that's a behavior change is better than nothing.
-	tdb.CheckQueryResultsRetry(t, fmt.Sprintf(
-		`SELECT status FROM crdb_internal.jobs WHERE job_id = %d`, id,
-	), [][]string{{"paused"}})
 	tdb.Exec(t, "RESUME JOB $1", id)
 	ev = <-ch
 	close(ev.unblock)
@@ -488,137 +468,63 @@ SELECT id
 	require.NoError(t, <-upgrade2Err)
 }
 
-// Test that the precondition prevents migrations from being run.
-func TestPrecondition(t *testing.T) {
+// Test21Dot1Dot8 tests that we can move in either direction between the 21.1
+// and 21.1-124 versions, the latter of which was introduced in a backport that
+// was released as 21.1.8.
+func Test21Dot1Dot8(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	// Start by running v0. We want the precondition of v1 to prevent
-	// us from reaching v1 (or v2). We want the precondition to not be
-	// run when migrating from v1 to v2.
-	next := func(version clusterversion.ClusterVersion) clusterversion.ClusterVersion {
-		version.Internal += 2
-		return version
-	}
-	v0 := clusterversion.ClusterVersion{Version: clusterversion.TestingBinaryMinSupportedVersion}
-	v1 := next(v0)
-	v2 := next(v1)
-	versions := []clusterversion.ClusterVersion{v0, v1, v2}
-	var migrationRun, preconditionRun int64
-	var preconditionErr, migrationErr atomic.Value
-	preconditionErr.Store(true)
-	migrationErr.Store(true)
-	cf := func(run *int64, err *atomic.Value) migration.TenantMigrationFunc {
-		return func(
-			context.Context, clusterversion.ClusterVersion, migration.TenantDeps, *jobs.Job,
-		) error {
-			atomic.AddInt64(run, 1)
-			if err.Load().(bool) {
-				return jobs.MarkAsPermanentJobError(errors.New("boom"))
-			}
-			return nil
-		}
-	}
-	knobs := base.TestingKnobs{
-		Server: &server.TestingKnobs{
-			DisableAutomaticVersionUpgrade: 1,
-			BinaryVersionOverride:          v0.Version,
-		},
-		// Inject a migration which would run to upgrade the cluster.
-		// We'll validate that we never create a job for this migration.
-		MigrationManager: &migration.TestingKnobs{
-			ListBetweenOverride: func(from, to clusterversion.ClusterVersion) []clusterversion.ClusterVersion {
-				start := sort.Search(len(versions), func(i int) bool { return from.Less(versions[i].Version) })
-				end := sort.Search(len(versions), func(i int) bool { return to.Less(versions[i].Version) })
-				return versions[start:end]
-			},
-			RegistryOverride: func(cv clusterversion.ClusterVersion) (migration.Migration, bool) {
-				switch cv {
-				case v1:
-					return migration.NewTenantMigration("v1", cv,
-						migration.PreconditionFunc(func(
-							ctx context.Context, cv clusterversion.ClusterVersion, td migration.TenantDeps,
-						) error {
-							return cf(&preconditionRun, &preconditionErr)(ctx, cv, td, nil)
-						}),
-						cf(&migrationRun, &migrationErr),
-					), true
-				case v2:
-					return migration.NewTenantMigration("v2", cv,
-						migrations.NoPrecondition,
-						cf(&migrationRun, &migrationErr),
-					), true
-				default:
-					return nil, false
-				}
-			},
-		},
-	}
+	defer jobs.TestingSetAdoptAndCancelIntervals(
+		10*time.Millisecond, 10*time.Millisecond,
+	)()
+
+	// We're going to be migrating between cv21Dot8 and cv21.
+	cv21 := clusterversion.ClusterVersion{Version: clusterversion.V21Dot1}
+	cv21Dot8 := clusterversion.ClusterVersion{Version: clusterversion.V21Dot1Dot8}
+
 	ctx := context.Background()
-	args := func() base.TestServerArgs {
-		return base.TestServerArgs{
-			Knobs: knobs,
-			Settings: cluster.MakeTestingClusterSettingsWithVersions(
-				v2.Version, // binaryVersion
-				v0.Version, // binaryMinSupportedVersion
-				false,      // initializeVersion
-			),
-		}
-	}
-	tc := testcluster.StartTestCluster(t, 3, base.TestClusterArgs{
-		ServerArgsPerNode: map[int]base.TestServerArgs{
-			0: args(),
-			1: args(),
-			2: args(),
+	tc := testcluster.StartTestCluster(t, 2, base.TestClusterArgs{
+		ReplicationMode: base.ReplicationManual,
+		ServerArgs: base.TestServerArgs{
+			Settings: cluster.MakeTestingClusterSettingsWithVersions(cv21Dot8.Version, cv21.Version, false),
+			Knobs: base.TestingKnobs{
+				Server: &server.TestingKnobs{
+					BinaryVersionOverride:          cv21Dot8.Version,
+					DisableAutomaticVersionUpgrade: 1,
+				},
+			},
 		},
 	})
-	checkActiveVersion := func(t *testing.T, exp clusterversion.ClusterVersion) {
-		for i := 0; i < tc.NumServers(); i++ {
-			got := tc.Server(i).ClusterSettings().Version.ActiveVersion(ctx)
-			require.Equalf(t, exp, got, "server %d", i)
-		}
-	}
 	defer tc.Stopper().Stop(ctx)
+
+	// Add a 21.1 node.
+	tc.AddAndStartServer(t, base.TestServerArgs{
+		Knobs: base.TestingKnobs{
+			Server: &server.TestingKnobs{
+				BinaryVersionOverride:          cv21.Version,
+				DisableAutomaticVersionUpgrade: 1,
+			},
+		},
+	})
+
+	// Wait until all nodes have are considered live.
+	tc.WaitForNodeStatuses(t)
+	tc.WaitForNodeLiveness(t)
+
+	// Downgrade.
 	sqlDB := tc.ServerConn(0)
-	{
-		_, err := sqlDB.Exec("SET CLUSTER SETTING version = $1", v2.String())
-		require.Regexp(t, "boom", err)
-		require.Equal(t, int64(1), atomic.LoadInt64(&preconditionRun))
-		require.Equal(t, int64(0), atomic.LoadInt64(&migrationRun))
-		checkActiveVersion(t, v0)
-	}
-	preconditionErr.Store(false)
-	{
-		_, err := sqlDB.Exec("SET CLUSTER SETTING version = $1", v2.String())
-		require.Regexp(t, "boom", err)
-		require.Equal(t, int64(2), atomic.LoadInt64(&preconditionRun))
-		require.Equal(t, int64(1), atomic.LoadInt64(&migrationRun))
-		checkActiveVersion(t, v0)
-	}
-	migrationErr.Store(false)
-	{
-		_, err := sqlDB.Exec("SET CLUSTER SETTING version = $1", v1.String())
-		require.NoError(t, err)
-		require.Equal(t, int64(3), atomic.LoadInt64(&preconditionRun))
-		require.Equal(t, int64(2), atomic.LoadInt64(&migrationRun))
-		checkActiveVersion(t, v1)
-	}
-	preconditionErr.Store(true)
-	migrationErr.Store(true)
-	{
-		_, err := sqlDB.Exec("SET CLUSTER SETTING version = $1", v2.String())
-		require.Regexp(t, "boom", err)
-		// Note that the precondition is no longer run.
-		require.Equal(t, int64(3), atomic.LoadInt64(&preconditionRun))
-		require.Equal(t, int64(3), atomic.LoadInt64(&migrationRun))
-		checkActiveVersion(t, v1)
-	}
-	migrationErr.Store(false)
-	{
-		_, err := sqlDB.Exec("SET CLUSTER SETTING version = $1", v2.String())
-		require.NoError(t, err)
-		require.Equal(t, int64(3), atomic.LoadInt64(&preconditionRun))
-		require.Equal(t, int64(4), atomic.LoadInt64(&migrationRun))
-		checkActiveVersion(t, v2)
-	}
+	testutils.SucceedsSoon(t, func() error {
+		// Need to wait for n3 to start sometimes.
+		_, err := sqlDB.ExecContext(ctx, `SET CLUSTER SETTING version = $1`, cv21.String())
+		return err
+	})
+
+	// Upgrade again.
+	_, err := sqlDB.ExecContext(ctx, `SET CLUSTER SETTING version = $1`, cv21Dot8.String())
+	require.NoError(t, err)
+
+	// Downgrade again.
+	_, err = sqlDB.ExecContext(ctx, `SET CLUSTER SETTING version = $1`, cv21.String())
+	require.NoError(t, err)
 }

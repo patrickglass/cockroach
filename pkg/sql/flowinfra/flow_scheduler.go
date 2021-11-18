@@ -13,7 +13,6 @@ package flowinfra
 import (
 	"container/list"
 	"context"
-	"runtime"
 	"sync/atomic"
 	"time"
 
@@ -32,34 +31,11 @@ import (
 
 const flowDoneChanSize = 8
 
-// We think that it makes sense to scale the default value for
-// max_running_flows based on how beefy the machines are, so we make it a
-// multiple of the number of available CPU cores.
-//
-// The choice of 128 as the default multiple is driven by the old default value
-// of 500 and is such that if we have 4 CPUs, then we'll get the value of 512,
-// pretty close to the old default.
-// TODO(yuzefovich): we probably want to remove / disable this limit completely
-// when we enable the admission control.
 var settingMaxRunningFlows = settings.RegisterIntSetting(
 	"sql.distsql.max_running_flows",
-	"the value - when positive - used as is, or the value - when negative - "+
-		"multiplied by the number of CPUs on a node, to determine the "+
-		"maximum number of concurrent remote flows that can be run on the node",
-	-128,
+	"maximum number of concurrent flows that can be run on a node",
+	500,
 ).WithPublic()
-
-// getMaxRunningFlows returns an absolute value that determines the maximum
-// number of concurrent remote flows on this node.
-func getMaxRunningFlows(settings *cluster.Settings) int64 {
-	maxRunningFlows := settingMaxRunningFlows.Get(&settings.SV)
-	if maxRunningFlows < 0 {
-		// We use GOMAXPROCS instead of NumCPU because the former could be
-		// adjusted based on cgroup limits (see cgroups.AdjustMaxProcs).
-		return -maxRunningFlows * int64(runtime.GOMAXPROCS(0))
-	}
-	return maxRunningFlows
-}
 
 // FlowScheduler manages running flows and decides when to queue and when to
 // start flows. The main interface it presents is ScheduleFlows, which passes a
@@ -107,14 +83,6 @@ type flowWithCtx struct {
 	enqueueTime time.Time
 }
 
-// cleanupBeforeRun cleans up the flow's resources in case this flow will never
-// run.
-func (f *flowWithCtx) cleanupBeforeRun() {
-	// Note: passing f.ctx is important; that's the context that has the flow's
-	// span in it, and that span needs Finish()ing.
-	f.flow.Cleanup(f.ctx)
-}
-
 // NewFlowScheduler creates a new FlowScheduler which must be initialized before
 // use.
 func NewFlowScheduler(
@@ -126,11 +94,11 @@ func NewFlowScheduler(
 		flowDoneCh:     make(chan Flow, flowDoneChanSize),
 	}
 	fs.mu.queue = list.New()
-	maxRunningFlows := getMaxRunningFlows(settings)
+	maxRunningFlows := settingMaxRunningFlows.Get(&settings.SV)
 	fs.mu.runningFlows = make(map[execinfrapb.FlowID]time.Time, maxRunningFlows)
 	fs.atomics.maxRunningFlows = int32(maxRunningFlows)
-	settingMaxRunningFlows.SetOnChange(&settings.SV, func(ctx context.Context) {
-		atomic.StoreInt32(&fs.atomics.maxRunningFlows, int32(getMaxRunningFlows(settings)))
+	settingMaxRunningFlows.SetOnChange(&settings.SV, func() {
+		atomic.StoreInt32(&fs.atomics.maxRunningFlows, int32(settingMaxRunningFlows.Get(&settings.SV)))
 	})
 	return fs
 }
@@ -222,18 +190,6 @@ func (fs *FlowScheduler) NumFlowsInQueue() int {
 	return fs.mu.queue.Len()
 }
 
-// NumRunningFlows returns the number of flows scheduled via fs that are
-// currently running.
-func (fs *FlowScheduler) NumRunningFlows() int {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	// Note that we choose not to use fs.atomics.numRunning here because that
-	// could be imprecise in an edge (when we optimistically increase that value
-	// by 1 in canRunFlow only to decrement it later and NumRunningFlows is
-	// called in between those two events).
-	return len(fs.mu.runningFlows)
-}
-
 // CancelDeadFlows cancels all flows mentioned in the request that haven't been
 // started yet (meaning they have been queued up).
 func (fs *FlowScheduler) CancelDeadFlows(req *execinfrapb.CancelDeadFlowsRequest) {
@@ -277,44 +233,38 @@ func (fs *FlowScheduler) CancelDeadFlows(req *execinfrapb.CancelDeadFlowsRequest
 			fs.mu.queue.Remove(e)
 			fs.metrics.FlowsQueued.Dec(1)
 			numCanceled++
-			f.cleanupBeforeRun()
 		}
 	}
+}
+
+// NumRunningFlows returns the number of flows scheduled via fs that are
+// currently running.
+func (fs *FlowScheduler) NumRunningFlows() int {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	// Note that we choose not to use fs.atomics.numRunning here because that
+	// could be imprecise in an edge (when we optimistically increase that value
+	// by 1 in canRunFlow only to decrement it later and NumRunningFlows is
+	// called in between those two events).
+	return len(fs.mu.runningFlows)
 }
 
 // Start launches the main loop of the scheduler.
 func (fs *FlowScheduler) Start() {
 	ctx := fs.AnnotateCtx(context.Background())
+	// TODO(radu): we may end up with a few flows in the queue that will
+	// never be processed. Is that an issue?
 	_ = fs.stopper.RunAsyncTask(ctx, "flow-scheduler", func(context.Context) {
 		stopped := false
 		fs.mu.Lock()
 		defer fs.mu.Unlock()
 
-		quiesceCh := fs.stopper.ShouldQuiesce()
-
 		for {
-			if stopped {
-				// Drain the queue.
-				if l := fs.mu.queue.Len(); l > 0 {
-					log.Infof(ctx, "abandoning %d flows that will never run", l)
-				}
-				for {
-					e := fs.mu.queue.Front()
-					if e == nil {
-						break
-					}
-					fs.mu.queue.Remove(e)
-					n := e.Value.(*flowWithCtx)
-					// TODO(radu): somehow send an error to whoever is waiting on this flow.
-					n.cleanupBeforeRun()
-				}
-
-				if atomic.LoadInt32(&fs.atomics.numRunning) == 0 {
-					return
-				}
+			if stopped && atomic.LoadInt32(&fs.atomics.numRunning) == 0 {
+				// TODO(radu): somehow error out the flows that are still in the queue.
+				return
 			}
 			fs.mu.Unlock()
-
 			select {
 			case <-fs.flowDoneCh:
 				fs.mu.Lock()
@@ -346,14 +296,9 @@ func (fs *FlowScheduler) Start() {
 					atomic.AddInt32(&fs.atomics.numRunning, -1)
 				}
 
-			case <-quiesceCh:
+			case <-fs.stopper.ShouldQuiesce():
 				fs.mu.Lock()
 				stopped = true
-				if l := atomic.LoadInt32(&fs.atomics.numRunning); l != 0 {
-					log.Infof(ctx, "waiting for %d running flows", l)
-				}
-				// Inhibit this arm of the select so that we don't spin on it.
-				quiesceCh = nil
 			}
 		}
 	})

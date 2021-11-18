@@ -11,192 +11,34 @@
 package optbuilder
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/errors"
 )
 
-// cteSource represents a CTE in the given query.
-type cteSource struct {
-	id   opt.WithID
-	name tree.AliasClause
-	cols physical.Presentation
-	// ordering is only set if PropagateInputOrdering is used.
-	ordering     opt.Ordering
-	originalExpr tree.Statement
-	expr         memo.RelExpr
-	mtr          tree.MaterializeClause
-	// If set, this function is called when a CTE is referenced. It can throw an
-	// error.
-	onRef func()
-
-	// built is true if we have constructed a With operator for this CTE.
-	built bool
-}
-
-type cteSources []*cteSource
-
-// addCTERef adds a CTE-to-CTE reference to cteRefMap.
-func (b *Builder) addCTERef(referencedID opt.WithID, referencedBy *cteSource) {
-	if b.cteRefMap == nil {
-		b.cteRefMap = make(map[opt.WithID]cteSources)
-	}
-	b.cteRefMap[referencedID] = append(b.cteRefMap[referencedID], referencedBy)
-}
-
-// addCTE adds a CTE to the list and adds its references to cteRefMap. If CTE
-// does not reference any other CTEs, it will be built at the root level (see
-// buildStmtAtRoot). If it does reference other CTEs, it will be built as a
-// pre-requisite to building the referenced CTEs.
-func (b *Builder) addCTE(cte *cteSource) {
-	withUses := memo.WithUses(cte.expr)
-	for refWithID := range withUses {
-		b.addCTERef(refWithID, cte)
-	}
-	// Note: if the CTE references other CTEs, we don't need to add it to the list
-	// (it will get built anyway). But that is fragile because withIDs are used
-	// for other purposes; in addition, adding it to the list helps ensure that we
-	// build the CTEs in the order in which they appear in the query, whenever
-	// possible.
-	b.ctes = append(b.ctes, cte)
-}
-
-// buildWiths adds With operators on top of an expression. Operators are built
-// for all given CTEs as well as any CTEs which refer to them (directly or
-// indirectly).
-func (b *Builder) buildWiths(expr memo.RelExpr, ctes cteSources) memo.RelExpr {
-	// Any order here would be correct, but we prefer to match the order in the
-	// query as much as possible. We are building the operators from the bottom
-	// up, so we start with the last CTE.
-	for i := len(ctes) - 1; i >= 0; i-- {
-		cte := ctes[i]
-		if cte.built {
-			continue
-		}
-		cte.built = true
-
-		// First, build all the CTEs that directly or indirectly reference this CTE.
-		// This is a depth-first search achieving a reverse topological sort.
-		expr = b.buildWiths(expr, b.cteRefMap[cte.id])
-
-		private := &memo.WithPrivate{
-			ID:           ctes[i].id,
-			Name:         string(ctes[i].name.Alias),
-			Mtr:          ctes[i].mtr,
-			OriginalExpr: ctes[i].originalExpr,
-		}
-		if len(ctes[i].ordering) > 0 {
-			private.Mtr.Set = true
-			private.Mtr.Materialize = true
-			private.BindingOrdering.FromOrdering(ctes[i].ordering)
-		}
-		expr = b.factory.ConstructWith(ctes[i].expr, expr, private)
-	}
-	return expr
-}
-
-// processWiths is used when building a statement that has a WITH clause. It
-// builds any CTEs defined by the WITH clause and calls the given function to
-// build the statement itself.
 func (b *Builder) processWiths(
 	with *tree.With, inScope *scope, buildStmt func(inScope *scope) *scope,
 ) *scope {
-	var correlatedCTEs cteSources
-	inScope, correlatedCTEs = b.buildCTEs(with, inScope)
+	inScope = b.buildCTEs(with, inScope)
 	prevAtRoot := inScope.atRoot
 	inScope.atRoot = false
 	outScope := buildStmt(inScope)
-	outScope.expr = b.buildWiths(outScope.expr, correlatedCTEs)
 	inScope.atRoot = prevAtRoot
 	return outScope
 }
 
-// buildCTEs constructs expressions for the CTEs defined by a WITH clause and
-// adds them to the CTE stack. Non-correlated CTEs are set up to be built at
-// the root level. Correlated CTEs are returned and will need to be built at the
-// current scope.
-func (b *Builder) buildCTEs(
-	with *tree.With, inScope *scope,
-) (outScope *scope, correlatedCTEs cteSources) {
-	if with == nil {
-		return inScope, nil
-	}
-
-	outScope = inScope.push()
-	addedCTEs := make([]cteSource, len(with.CTEList))
-	hasRecursive := false
-
-	outScope.ctes = make(map[string]*cteSource)
-	for i, cte := range with.CTEList {
-		hasRecursive = hasRecursive || with.Recursive
-		cteExpr, cteCols, cteOrdering := b.buildCTE(cte, outScope, with.Recursive)
-
-		if cteExpr.Relational().CanMutate && !inScope.atRoot {
-			panic(
-				pgerror.Newf(
-					pgcode.FeatureNotSupported,
-					"WITH clause containing a data-modifying statement must be at the top level",
-				),
-			)
-		}
-
-		aliasStr := cte.Name.Alias.String()
-		if _, ok := outScope.ctes[aliasStr]; ok {
-			panic(pgerror.Newf(
-				pgcode.DuplicateAlias, "WITH query name %s specified more than once", aliasStr,
-			))
-		}
-
-		id := b.factory.Memo().NextWithID()
-		b.factory.Metadata().AddWithBinding(id, cteExpr)
-
-		addedCTEs[i] = cteSource{
-			name:         cte.Name,
-			cols:         cteCols,
-			ordering:     cteOrdering,
-			originalExpr: cte.Stmt,
-			expr:         cteExpr,
-			id:           id,
-			mtr:          cte.Mtr,
-		}
-		cte := &addedCTEs[i]
-		outScope.ctes[cte.name.Alias.String()] = cte
-
-		if isCorrelated := !cteExpr.Relational().OuterCols.Empty(); isCorrelated {
-			correlatedCTEs = append(correlatedCTEs, cte)
-		} else {
-			b.addCTE(cte)
-		}
-	}
-
-	telemetry.Inc(sqltelemetry.CteUseCounter)
-	if hasRecursive {
-		telemetry.Inc(sqltelemetry.RecursiveCteUseCounter)
-	}
-
-	return outScope, correlatedCTEs
-}
-
-// buildCTE constructs an expression for a CTE.
-//
-// The returned ordering can only be set if PropagateInputOrdering is set.
 func (b *Builder) buildCTE(
 	cte *tree.CTE, inScope *scope, isRecursive bool,
-) (memo.RelExpr, physical.Presentation, opt.Ordering) {
+) (memo.RelExpr, physical.Presentation) {
 	if !isRecursive {
 		cteScope := b.buildStmt(cte.Stmt, nil /* desiredTypes */, inScope)
 		cteScope.removeHiddenCols()
-		if !b.evalCtx.SessionData().PropagateInputOrdering {
-			b.dropOrderingAndExtraCols(cteScope)
-		}
-		return cteScope.expr, b.getCTECols(cteScope, cte.Name), cteScope.ordering
+		b.dropOrderingAndExtraCols(cteScope)
+		return cteScope.expr, b.getCTECols(cteScope, cte.Name)
 	}
 
 	// WITH RECURSIVE queries are always of the form:
@@ -234,15 +76,24 @@ func (b *Builder) buildCTE(
 	cteScope.ctes = map[string]*cteSource{cte.Name.Alias.String(): cteSrc}
 
 	initial, recursive, isUnionAll, ok := b.splitRecursiveCTE(cte.Stmt)
-	if !ok {
+	// We don't currently support the UNION form (only UNION ALL).
+	if !ok || !isUnionAll {
 		// Build this as a non-recursive CTE, but throw a proper error message if it
 		// does have a recursive reference.
 		cteSrc.onRef = func() {
-			panic(pgerror.Newf(
-				pgcode.Syntax,
-				"recursive query %q does not have the form non-recursive-term UNION [ALL] recursive-term",
-				cte.Name.Alias,
-			))
+			if !ok {
+				panic(pgerror.Newf(
+					pgcode.Syntax,
+					"recursive query %q does not have the form non-recursive-term UNION ALL recursive-term",
+					cte.Name.Alias,
+				))
+			} else {
+				panic(unimplementedWithIssueDetailf(
+					46642, "",
+					"recursive query %q uses UNION which is not implemented (only UNION ALL is supported)",
+					cte.Name.Alias,
+				))
+			}
 		}
 		return b.buildCTE(cte, cteScope, false /* recursive */)
 	}
@@ -257,27 +108,12 @@ func (b *Builder) buildCTE(
 	}
 	// If the initial statement contains CTEs, we don't want the Withs hoisted
 	// above the recursive CTE.
+	b.pushWithFrame()
 	initialScope := b.buildStmt(initial, nil /* desiredTypes */, cteScope)
+	b.popWithFrame(initialScope)
 
 	initialScope.removeHiddenCols()
 	b.dropOrderingAndExtraCols(initialScope)
-
-	outScope := inScope.push()
-	initialTypes := initialScope.makeColumnTypes()
-
-	// We use the initialScope just to get the names of the columns; we reassign
-	// the IDs below.
-	cteSrc.cols = b.getCTECols(initialScope, cte.Name)
-
-	// Synthesize new output columns (because they contain values from both the
-	// initial and the recursive relations). These columns will also be used to
-	// refer to the working table (from the recursive query); we can't use the
-	// initial columns directly because they might contain duplicate IDs (e.g.
-	// consider initial query SELECT 0, 0).
-	for i, c := range cteSrc.cols {
-		newCol := b.synthesizeColumn(outScope, scopeColName(tree.Name(c.Alias)), initialTypes[i], nil /* expr */, nil /* scalar */)
-		cteSrc.cols[i].ID = newCol.id
-	}
 
 	// The properties of the binding are tricky: the recursive expression is
 	// invoked repeatedly and these must hold each time. We can't use the initial
@@ -286,7 +122,7 @@ func (b *Builder) buildCTE(
 	// working table contains, except that it has at least one row (the recursive
 	// query is never invoked with an empty working table).
 	bindingProps := &props.Relational{}
-	bindingProps.OutputCols = outScope.colSet()
+	bindingProps.OutputCols = initialScope.colSet()
 	bindingProps.Cardinality = props.AnyCardinality.AtLeast(props.OneCardinality)
 	// We don't really know the input row count, except for the first time we run
 	// the recursive query. We don't have anything better though.
@@ -301,6 +137,22 @@ func (b *Builder) buildCTE(
 	})
 	b.factory.Metadata().AddWithBinding(withID, cteSrc.expr)
 
+	cteSrc.cols = b.getCTECols(initialScope, cte.Name)
+
+	outScope := inScope.push()
+
+	initialTypes := initialScope.makeColumnTypes()
+
+	// Synthesize new output columns (because they contain values from both the
+	// initial and the recursive relations). These columns will also be used to
+	// refer to the working table (from the recursive query); we can't use the
+	// initial columns directly because they might contain duplicate IDs (e.g.
+	// consider initial query SELECT 0, 0).
+	for i, c := range cteSrc.cols {
+		newCol := b.synthesizeColumn(outScope, c.Alias, initialTypes[i], nil /* expr */, nil /* scalar */)
+		cteSrc.cols[i].ID = newCol.id
+	}
+
 	// We want to check if the recursive query is actually recursive. This is for
 	// annoying cases like `SELECT 1 UNION ALL SELECT 2`.
 	numRefs := 0
@@ -308,11 +160,16 @@ func (b *Builder) buildCTE(
 		numRefs++
 	}
 
+	// If the recursive statement contains CTEs, we don't want the Withs hoisted
+	// above the recursive CTE.
+	b.pushWithFrame()
 	recursiveScope := b.buildStmt(recursive, initialTypes /* desiredTypes */, cteScope)
+	b.popWithFrame(recursiveScope)
+
 	if numRefs == 0 {
 		// Build this as a non-recursive CTE.
 		cteScope := b.buildSetOp(tree.UnionOp, false /* all */, inScope, initialScope, recursiveScope)
-		return cteScope.expr, b.getCTECols(cteScope, cte.Name), nil
+		return cteScope.expr, b.getCTECols(cteScope, cte.Name)
 	}
 
 	if numRefs != 1 {
@@ -323,11 +180,6 @@ func (b *Builder) buildCTE(
 			cte.Name.Alias,
 		))
 	}
-
-	// Build the With operators for any CTEs that refer to this CTE recursively.
-	// They would become invalid if we let them get hoisted above the
-	// RecursiveCTE operator.
-	recursiveScope.expr = b.buildWiths(recursiveScope.expr, b.cteRefMap[cteSrc.id])
 
 	recursiveScope.removeHiddenCols()
 	b.dropOrderingAndExtraCols(recursiveScope)
@@ -348,11 +200,10 @@ func (b *Builder) buildCTE(
 		InitialCols:   colsToColList(initialScope.cols),
 		RecursiveCols: colsToColList(recursiveScope.cols),
 		OutCols:       colsToColList(outScope.cols),
-		Deduplicate:   !isUnionAll,
 	}
 
 	expr := b.factory.ConstructRecursiveCTE(cteSrc.expr, initialScope.expr, recursiveScope.expr, &private)
-	return expr, cteSrc.cols, nil
+	return expr, cteSrc.cols
 }
 
 // getCTECols returns a presentation for the scope, renaming the columns to
@@ -388,9 +239,9 @@ func (b *Builder) getCTECols(cteScope *scope, name tree.AliasClause) physical.Pr
 }
 
 // splitRecursiveCTE splits a CTE statement of the form
-//   initial_query UNION [ALL] recursive_query
-// into the initial and recursive parts.
-// If the statement is not of this form, returns ok=false.
+//   initial_query UNION ALL recursive_query
+// into the initial and recursive parts. If the statement is not of this form,
+// returns ok=false.
 func (b *Builder) splitRecursiveCTE(
 	stmt tree.Statement,
 ) (initial, recursive *tree.Select, isUnionAll bool, ok bool) {

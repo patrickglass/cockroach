@@ -30,8 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/workload"
 	"github.com/cockroachdb/cockroach/pkg/workload/histogram"
 	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgconn"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx"
 	"github.com/spf13/pflag"
 )
 
@@ -143,7 +142,7 @@ func (s *schemaChange) Hooks() workload.Hooks {
 	}
 }
 
-// Ops implements the workload.Opser interface.
+// Tables implements the workload.Opser interface.
 func (s *schemaChange) Ops(
 	ctx context.Context, urls []string, reg *histogram.Registry,
 ) (workload.QueryLoad, error) {
@@ -154,12 +153,12 @@ func (s *schemaChange) Ops(
 	cfg := workload.MultiConnPoolCfg{
 		MaxTotalConnections: s.concurrency * 2, //TODO(spaskob): pick a sensible default.
 	}
-	pool, err := workload.NewMultiConnPool(ctx, cfg, urls...)
+	pool, err := workload.NewMultiConnPool(cfg, urls...)
 	if err != nil {
 		return workload.QueryLoad{}, err
 	}
 
-	seqNum, err := s.initSeqNum(ctx, pool)
+	seqNum, err := s.initSeqNum(pool)
 	if err != nil {
 		return workload.QueryLoad{}, err
 	}
@@ -228,9 +227,7 @@ func (s *schemaChange) Ops(
 // TODO(spaskob): Do we need to protect from workloads running concurrently.
 // It's not obvious how the workloads will behave when accessing the same
 // cluster.
-func (s *schemaChange) initSeqNum(
-	ctx context.Context, pool *workload.MultiConnPool,
-) (*int64, error) {
+func (s *schemaChange) initSeqNum(pool *workload.MultiConnPool) (*int64, error) {
 	seqNum := new(int64)
 
 	const q = `
@@ -250,7 +247,7 @@ SELECT max(regexp_extract(name, '[0-9]+$')::INT8)
     OR name ~ '^(col|index)[0-9]+_[0-9]+$';
 `
 	var max gosql.NullInt64
-	if err := pool.Get().QueryRow(ctx, q).Scan(&max); err != nil {
+	if err := pool.Get().QueryRow(q).Scan(&max); err != nil {
 		return nil, err
 	}
 	if max.Valid {
@@ -285,7 +282,28 @@ type LogEntry struct {
 	ExpectedExecErrors   string   `json:"expectedExecErrors"`
 	ExpectedCommitErrors string   `json:"expectedCommitErrors"`
 	// Optional message for errors or if a hook was called.
-	Message string `json:"message"`
+	Message  string   `json:"message"`
+	TxStatus TxStatus `json:"txStatus"`
+}
+
+// TxStatus mirrors pgx.TxStatus for printing.
+type TxStatus int
+
+//go:generate stringer -type TxStatus
+const (
+	TxStatusInFailure       TxStatus = pgx.TxStatusInFailure
+	TxStatusRollbackFailure TxStatus = pgx.TxStatusRollbackFailure
+	TxStatusCommitFailure   TxStatus = pgx.TxStatusCommitFailure
+	TxStatusInProgress      TxStatus = pgx.TxStatusInProgress
+	TxStatusCommitSuccess   TxStatus = pgx.TxStatusCommitSuccess
+	TxStatusRollbackSuccess TxStatus = pgx.TxStatusRollbackSuccess
+)
+
+// MarshalJSON encodes a TxStatus to a string.
+func (s TxStatus) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	_, _ = fmt.Fprintf(&buf, "%q", s)
+	return buf.Bytes(), nil
 }
 
 type histBin int
@@ -305,7 +323,7 @@ func (w *schemaChangeWorker) recordInHist(elapsed time.Duration, bin histBin) {
 	w.hists.Get(bin.String()).Record(elapsed)
 }
 
-func (w *schemaChangeWorker) runInTxn(ctx context.Context, tx pgx.Tx) error {
+func (w *schemaChangeWorker) runInTxn(tx *pgx.Tx) error {
 	w.logger.startLog()
 	w.logger.writeLog("BEGIN")
 	opsNum := 1 + w.opGen.randIntn(w.maxOpsPerWorker)
@@ -322,25 +340,29 @@ func (w *schemaChangeWorker) runInTxn(ctx context.Context, tx pgx.Tx) error {
 			break
 		}
 
-		op, err := w.opGen.randOp(ctx, tx)
+		op, noops, err := w.opGen.randOp(tx)
+		if w.logger.verbose >= 2 {
+			for _, noop := range noops {
+				w.logger.writeLog(noop)
+			}
+		}
 
-		if pgErr := new(pgconn.PgError); errors.As(err, &pgErr) && pgcode.MakeCode(pgErr.Code) == pgcode.SerializationFailure {
-			return errors.Mark(err, errRunInTxnRbkSentinel)
-		} else if err != nil {
+		w.logger.addExpectedErrors(w.opGen.expectedExecErrors, w.opGen.expectedCommitErrors)
+
+		if err != nil {
 			return errors.Mark(
 				errors.Wrap(err, "***UNEXPECTED ERROR; Failed to generate a random operation"),
 				errRunInTxnFatalSentinel,
 			)
 		}
 
-		w.logger.addExpectedErrors(w.opGen.expectedExecErrors, w.opGen.expectedCommitErrors)
 		w.logger.writeLog(op)
 		if !w.dryRun {
 			start := timeutil.Now()
 
-			if _, err = tx.Exec(ctx, op); err != nil {
-				// If the error not an instance of pgconn.PgError, then it is unexpected.
-				pgErr := new(pgconn.PgError)
+			if _, err = tx.Exec(op); err != nil {
+				// If the error not an instance of pgx.PgError, then it is unexpected.
+				pgErr := pgx.PgError{}
 				if !errors.As(err, &pgErr) {
 					return errors.Mark(
 						errors.Wrap(err, "***UNEXPECTED ERROR; Received a non pg error"),
@@ -383,24 +405,24 @@ func (w *schemaChangeWorker) runInTxn(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
-func (w *schemaChangeWorker) run(ctx context.Context) error {
-	tx, err := w.pool.Get().Begin(ctx)
+func (w *schemaChangeWorker) run(_ context.Context) error {
+	tx, err := w.pool.Get().Begin()
 	if err != nil {
 		return errors.Wrap(err, "cannot get a connection and begin a txn")
 	}
 
 	// Release log entry locks if holding all.
-	defer w.releaseLocksIfHeld()
+	w.releaseLocksIfHeld()
 
 	// Run between 1 and maxOpsPerWorker schema change operations.
 	start := timeutil.Now()
 	w.opGen.resetTxnState()
-	err = w.runInTxn(ctx, tx)
+	err = w.runInTxn(tx)
 
 	if err != nil {
 		// Rollback in all cases to release the txn object and its conn pool. Wrap the original
 		// error with a rollback error if necessary.
-		if rbkErr := tx.Rollback(ctx); rbkErr != nil {
+		if rbkErr := tx.Rollback(); rbkErr != nil {
 			err = errors.Mark(
 				errors.Wrap(rbkErr, "***UNEXPECTED ERROR DURING ROLLBACK;"),
 				errRunInTxnFatalSentinel,
@@ -423,9 +445,9 @@ func (w *schemaChangeWorker) run(ctx context.Context) error {
 	}
 
 	w.logger.writeLog("COMMIT")
-	if err = tx.Commit(ctx); err != nil {
-		// If the error not an instance of pgconn.PgError, then it is unexpected.
-		pgErr := new(pgconn.PgError)
+	if err = tx.Commit(); err != nil {
+		// If the error not an instance of pgx.PgError, then it is unexpected.
+		pgErr := pgx.PgError{}
 		if !errors.As(err, &pgErr) {
 			err = errors.Mark(
 				errors.Wrap(err, "***UNEXPECTED COMMIT ERROR; Received a non pg error"),
@@ -557,7 +579,7 @@ func (l *logger) addExpectedErrors(execErrors errorCodeSet, commitErrors errorCo
 
 // flushLog outputs the currentLogEntry of the schemaChangeWorker.
 // It is a noop if l.verbose < 0.
-func (l *logger) flushLog(tx pgx.Tx, message string) {
+func (l *logger) flushLog(tx *pgx.Tx, message string) {
 	if l.verbose < 1 {
 		return
 	}
@@ -567,7 +589,7 @@ func (l *logger) flushLog(tx pgx.Tx, message string) {
 
 // flushLogAndLock prints the currentLogEntry of the schemaChangeWorker and does not release
 // the lock for w.currentLogEntry upon returning. The lock will not be acquired if l.verbose < 1.
-func (l *logger) flushLogAndLock(_ pgx.Tx, message string, stdout bool) {
+func (l *logger) flushLogAndLock(tx *pgx.Tx, message string, stdout bool) {
 	if l.verbose < 1 {
 		return
 	}
@@ -580,6 +602,9 @@ func (l *logger) flushLogAndLock(_ pgx.Tx, message string, stdout bool) {
 
 	if message != "" {
 		l.currentLogEntry.mu.entry.Message = message
+	}
+	if tx != nil {
+		l.currentLogEntry.mu.entry.TxStatus = TxStatus(tx.Status())
 	}
 	jsonBytes, err := json.MarshalIndent(l.currentLogEntry.mu.entry, "", " ")
 	if err != nil {

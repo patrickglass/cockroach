@@ -15,7 +15,7 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/geo/geoindex"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/inverted"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
@@ -32,11 +32,10 @@ import (
 // NewDatumsToInvertedExpr returns a new DatumsToInvertedExpr. Currently there
 // is only one possible implementation returned, geoDatumsToInvertedExpr.
 func NewDatumsToInvertedExpr(
-	evalCtx *tree.EvalContext, colTypes []*types.T, expr tree.TypedExpr, idx catalog.Index,
+	evalCtx *tree.EvalContext, colTypes []*types.T, expr tree.TypedExpr, desc *descpb.IndexDescriptor,
 ) (invertedexpr.DatumsToInvertedExpr, error) {
-	geoConfig := idx.GetGeoConfig()
-	if !geoindex.IsEmptyConfig(&geoConfig) {
-		return NewGeoDatumsToInvertedExpr(evalCtx, colTypes, expr, &geoConfig)
+	if !geoindex.IsEmptyConfig(&desc.GeoConfig) {
+		return NewGeoDatumsToInvertedExpr(evalCtx, colTypes, expr, &desc.GeoConfig)
 	}
 
 	return NewJSONOrArrayDatumsToInvertedExpr(evalCtx, colTypes, expr)
@@ -116,7 +115,7 @@ func TryFilterInvertedIndex(
 			index:           index,
 			computedColumns: computedColumns,
 		}
-		col := index.InvertedColumn().InvertedSourceColumnOrdinal()
+		col := index.VirtualInvertedColumn().InvertedSourceColumnOrdinal()
 		typ = factory.Metadata().Table(tabID).Column(col).DatumType()
 	}
 
@@ -193,7 +192,6 @@ func TryJoinInvertedIndex(
 		}
 	} else {
 		joinPlanner = &jsonOrArrayJoinPlanner{
-			factory:   factory,
 			tabID:     tabID,
 			index:     index,
 			inputCols: inputCols,
@@ -221,7 +219,7 @@ func TryJoinInvertedIndex(
 
 	// The resulting expression must contain at least one column from the input.
 	var p props.Shared
-	memo.BuildSharedProps(invertedExpr, &p, factory.EvalContext())
+	memo.BuildSharedProps(invertedExpr, &p)
 	if !p.OuterCols.Intersects(inputCols) {
 		return nil
 	}
@@ -509,7 +507,7 @@ func extractInvertedFilterCondition(
 func isIndexColumn(
 	tabID opt.TableID, index cat.Index, e opt.Expr, computedColumns map[opt.ColumnID]opt.ScalarExpr,
 ) bool {
-	invertedSourceCol := tabID.ColumnID(index.InvertedColumn().InvertedSourceColumnOrdinal())
+	invertedSourceCol := tabID.ColumnID(index.VirtualInvertedColumn().InvertedSourceColumnOrdinal())
 	if v, ok := e.(*memo.VariableExpr); ok && v.Col == invertedSourceCol {
 		return true
 	}

@@ -16,9 +16,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
@@ -28,106 +26,76 @@ func TestIndexForDisplay(t *testing.T) {
 
 	database := tree.Name("foo")
 	table := tree.Name("bar")
-	tableName := tree.MakeTableNameWithSchema(database, tree.PublicSchemaName, table)
+	tableName := tree.MakeTableName(database, table)
 
-	compExpr := "a + b"
-	cols := []descpb.ColumnDescriptor{
-		// a INT
-		{
-			ID:   1,
-			Name: "a",
-			Type: types.Int,
-		},
-		// b INT
-		{
-			ID:   2,
-			Name: "b",
-			Type: types.Int,
-		},
-		// c INT
-		{
-			ID:   3,
-			Name: "c",
-			Type: types.Int,
-		},
-		// d INT AS (a + b) VIRTUAL [INACCESSIBLE]
-		{
-			ID:           4,
-			Name:         "d",
-			Type:         types.Int,
-			ComputeExpr:  &compExpr,
-			Virtual:      true,
-			Inaccessible: true,
-		},
-	}
+	colNames := []string{"a", "b"}
+	tableDesc := testTableDesc(
+		string(table),
+		[]testCol{{colNames[0], types.Int}, {colNames[1], types.Int}},
+		nil,
+	)
 
-	tableDesc := tabledesc.NewBuilder(&descpb.TableDescriptor{
-		Name:    string(table),
-		ID:      1,
-		Columns: cols,
-	}).BuildImmutableTable()
-
-	// INDEX baz (a ASC, b DESC)
+	indexName := "baz"
 	baseIndex := descpb.IndexDescriptor{
-		Name:                "baz",
-		ID:                  0x0,
-		KeyColumnNames:      []string{"a", "b"},
-		KeyColumnIDs:        descpb.ColumnIDs{1, 2},
-		KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_DESC},
+		Name:             indexName,
+		ID:               0x0,
+		ColumnNames:      colNames,
+		ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_DESC},
 	}
 
-	// UNIQUE INDEX baz (a ASC, b DESC)
 	uniqueIndex := baseIndex
 	uniqueIndex.Unique = true
 
-	// INVERTED INDEX baz (a)
 	invertedIndex := baseIndex
 	invertedIndex.Type = descpb.IndexDescriptor_INVERTED
-	invertedIndex.KeyColumnNames = []string{"a"}
-	invertedIndex.KeyColumnIDs = descpb.ColumnIDs{1}
+	invertedIndex.ColumnNames = []string{"a"}
 
-	// INDEX baz (a ASC, b DESC) STORING (c)
 	storingIndex := baseIndex
 	storingIndex.StoreColumnNames = []string{"c"}
 
-	// INDEX baz (a ASC, b DESC) WHERE a > 1:::INT8
 	partialIndex := baseIndex
 	partialIndex.Predicate = "a > 1:::INT8"
 
-	// INDEX baz (a ASC, (a + b) DESC, b ASC)
-	expressionIndex := baseIndex
-	expressionIndex.KeyColumnNames = []string{"a", "d", "b"}
-	expressionIndex.KeyColumnIDs = descpb.ColumnIDs{1, 4, 2}
-	expressionIndex.KeyColumnDirections = []descpb.IndexDescriptor_Direction{
-		descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_DESC, descpb.IndexDescriptor_ASC,
-	}
-
 	testData := []struct {
-		index     descpb.IndexDescriptor
-		tableName tree.TableName
-		partition string
-		expected  string
+		index      descpb.IndexDescriptor
+		tableName  tree.TableName
+		partition  string
+		interleave string
+		expected   string
 	}{
-		{baseIndex, descpb.AnonymousTable, "", "INDEX baz (a ASC, b DESC)"},
-		{baseIndex, tableName, "", "INDEX baz ON foo.public.bar (a ASC, b DESC)"},
-		{uniqueIndex, descpb.AnonymousTable, "", "UNIQUE INDEX baz (a ASC, b DESC)"},
-		{invertedIndex, descpb.AnonymousTable, "", "INVERTED INDEX baz (a)"},
-		{storingIndex, descpb.AnonymousTable, "", "INDEX baz (a ASC, b DESC) STORING (c)"},
-		{partialIndex, descpb.AnonymousTable, "", "INDEX baz (a ASC, b DESC) WHERE a > 1:::INT8"},
-		{expressionIndex, descpb.AnonymousTable, "", "INDEX baz (a ASC, (a + b) DESC, b ASC)"},
+		{baseIndex, descpb.AnonymousTable, "", "", "INDEX baz (a ASC, b DESC)"},
+		{baseIndex, tableName, "", "", "INDEX baz ON foo.public.bar (a ASC, b DESC)"},
+		{uniqueIndex, descpb.AnonymousTable, "", "", "UNIQUE INDEX baz (a ASC, b DESC)"},
+		{invertedIndex, descpb.AnonymousTable, "", "", "INVERTED INDEX baz (a)"},
+		{storingIndex, descpb.AnonymousTable, "", "", "INDEX baz (a ASC, b DESC) STORING (c)"},
+		{partialIndex, descpb.AnonymousTable, "", "", "INDEX baz (a ASC, b DESC) WHERE a > 1:::INT8"},
 		{
 			partialIndex,
 			descpb.AnonymousTable,
 			" PARTITION BY LIST (a) (PARTITION p VALUES IN (2))",
+			"",
 			"INDEX baz (a ASC, b DESC) PARTITION BY LIST (a) (PARTITION p VALUES IN (2)) WHERE a > 1:::INT8",
+		},
+		{
+			partialIndex,
+			descpb.AnonymousTable,
+			"",
+			" INTERLEAVE IN PARENT par (a)",
+			"INDEX baz (a ASC, b DESC) INTERLEAVE IN PARENT par (a) WHERE a > 1:::INT8",
+		},
+		{
+			partialIndex,
+			descpb.AnonymousTable,
+			" PARTITION BY LIST (a) (PARTITION p VALUES IN (2))",
+			" INTERLEAVE IN PARENT par (a)",
+			"INDEX baz (a ASC, b DESC) INTERLEAVE IN PARENT par (a) PARTITION BY LIST (a) (PARTITION p VALUES IN (2)) WHERE a > 1:::INT8",
 		},
 	}
 
-	sd := &sessiondata.SessionData{}
 	for testIdx, tc := range testData {
 		t.Run(strconv.Itoa(testIdx), func(t *testing.T) {
-			got, err := indexForDisplay(
-				ctx, tableDesc, &tc.tableName, &tc.index, false /* isPrimary */, tc.partition, &semaCtx, sd,
+			got, err := IndexForDisplay(
+				ctx, tableDesc, &tc.tableName, &tc.index, tc.partition, tc.interleave, &semaCtx,
 			)
 			if err != nil {
 				t.Fatalf("unexpected error: %s", err)

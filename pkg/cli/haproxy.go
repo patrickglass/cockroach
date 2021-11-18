@@ -22,7 +22,6 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -47,7 +46,7 @@ The addresses used are those advertised by the nodes themselves. Make sure hapro
 can resolve the hostnames in the configuration file, either by using full-qualified names, or
 running haproxy in the same network.
 
-Nodes that have been decommissioned are excluded from the generated configuration.
+Notes that have been decommissioned are excluded from the generated configuration.
 
 Nodes to include can be filtered by localities matching the '--locality' regular expression. eg:
   --locality=region=us-east                  # Nodes in region "us-east"
@@ -59,7 +58,7 @@ The key (eg: 'region') must be fully specified, only values (eg: 'us-east1') can
 An error is returned if no nodes match the locality filter.
 `,
 	Args: cobra.NoArgs,
-	RunE: clierrorplus.MaybeDecorateError(runGenHAProxyCmd),
+	RunE: MaybeDecorateGRPCError(runGenHAProxyCmd),
 }
 
 type haProxyNodeInfo struct {
@@ -269,27 +268,11 @@ global
 
 defaults
     mode                tcp
-
     # Timeout values should be configured for your specific use.
     # See: https://cbonte.github.io/haproxy-dconv/1.8/configuration.html#4-timeout%20connect
-
-    # With the timeout connect 5 secs,
-    # if the backend server is not responding, haproxy will make a total
-    # of 3 connection attempts waiting 5s each time before giving up on the server,
-    # for a total of 15 seconds.
-    retries             2
-    timeout connect     5s
-
-    # timeout client and server govern the maximum amount of time of TCP inactivity.
-    # The server node may idle on a TCP connection either because it takes time to
-    # execute a query before the first result set record is emitted, or in case of
-    # some trouble on the server. So these timeout settings should be larger than the
-    # time to execute the longest (most complex, under substantial concurrent workload)
-    # query, yet not too large so truly failed connections are lingering too long
-    # (resources associated with failed connections should be freed reasonably promptly).
-    timeout client      10m
-    timeout server      10m
-
+    timeout connect     10s
+    timeout client      1m
+    timeout server      1m
     # TCP keep-alive on client side. Server already enables them.
     option              clitcpka
 

@@ -32,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
@@ -44,7 +45,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -317,21 +320,13 @@ func TestAdminAPIDatabases(t *testing.T) {
 	defer s.Stopper().Stop(context.Background())
 	ts := s.(*TestServer)
 
-	ac := log.AmbientContext{Tracer: ts.Tracer()}
+	ac := log.AmbientContext{Tracer: s.ClusterSettings().Tracer}
 	ctx, span := ac.AnnotateCtxWithSpan(context.Background(), "test")
 	defer span.Finish()
 
 	const testdb = "test"
 	query := "CREATE DATABASE " + testdb
 	if _, err := db.Exec(query); err != nil {
-		t.Fatal(err)
-	}
-	// Test needs to revoke CONNECT on the public database to properly exercise
-	// fine-grained permissions logic.
-	if _, err := db.Exec(fmt.Sprintf("REVOKE CONNECT ON DATABASE %s FROM public", testdb)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec("REVOKE CONNECT ON DATABASE defaultdb FROM public"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -343,7 +338,7 @@ func TestAdminAPIDatabases(t *testing.T) {
 	}
 
 	// Grant permissions to view the tables for the given viewing user.
-	privileges := []string{"CONNECT"}
+	privileges := []string{"SELECT", "UPDATE"}
 	query = fmt.Sprintf(
 		"GRANT %s ON DATABASE %s TO %s",
 		strings.Join(privileges, ", "),
@@ -359,7 +354,7 @@ func TestAdminAPIDatabases(t *testing.T) {
 		isAdmin     bool
 	}{
 		{[]string{"defaultdb", "postgres", "system", testdb}, true},
-		{[]string{"postgres", testdb}, false},
+		{[]string{testdb}, false},
 	} {
 		t.Run(fmt.Sprintf("isAdmin:%t", tc.isAdmin), func(t *testing.T) {
 			// Test databases endpoint.
@@ -395,7 +390,7 @@ func TestAdminAPIDatabases(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if a, e := len(details.Grants), 3; a != e {
+			if a, e := len(details.Grants), 4; a != e {
 				t.Fatalf("# of grants %d != expected %d", a, e)
 			}
 
@@ -570,6 +565,10 @@ func TestRangeCount(t *testing.T) {
 		}
 
 		sysDBMap["public.descriptor"] = 1
+		// public.namespace resolves to public.namespace2, which means that we
+		// double count public.namespace2's range in this test. Set it to 0 to remove
+		// this double counting.
+		sysDBMap["public.namespace"] = 0
 	}
 	var systemTableRangeCount int64
 	for _, n := range sysDBMap {
@@ -639,12 +638,12 @@ func TestAdminAPITableDetails(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	for _, tc := range []struct {
-		name, dbName, tblName, pkName string
+		name, dbName, tblName string
 	}{
-		{name: "lower", dbName: "test", tblName: "tbl", pkName: "tbl_pkey"},
-		{name: "lower", dbName: "test", tblName: `testschema.tbl`, pkName: "tbl_pkey"},
-		{name: "lower with space", dbName: "test test", tblName: `"tbl tbl"`, pkName: "tbl tbl_pkey"},
-		{name: "upper", dbName: "TEST", tblName: `"TBL"`, pkName: "TBL_pkey"}, // Regression test for issue #14056
+		{name: "lower", dbName: "test", tblName: "tbl"},
+		{name: "lower", dbName: "test", tblName: `testschema.tbl`},
+		{name: "lower with space", dbName: "test test", tblName: `"tbl tbl"`},
+		{name: "upper", dbName: "TEST", tblName: `"TBL"`}, // Regression test for issue #14056
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
@@ -655,7 +654,7 @@ func TestAdminAPITableDetails(t *testing.T) {
 			tblName := tc.tblName
 			schemaName := "testschema"
 
-			ac := log.AmbientContext{Tracer: ts.Tracer()}
+			ac := log.AmbientContext{Tracer: s.ClusterSettings().Tracer}
 			ctx, span := ac.AnnotateCtxWithSpan(context.Background(), "test")
 			defer span.Finish()
 
@@ -741,11 +740,7 @@ func TestAdminAPITableDetails(t *testing.T) {
 
 			// Verify indexes.
 			expIndexes := []serverpb.TableDetailsResponse_Index{
-				{Name: tc.pkName, Column: "string_default", Direction: "N/A", Unique: true, Seq: 5, Storing: true},
-				{Name: tc.pkName, Column: "default2", Direction: "N/A", Unique: true, Seq: 4, Storing: true},
-				{Name: tc.pkName, Column: "nulls_not_allowed", Direction: "N/A", Unique: true, Seq: 3, Storing: true},
-				{Name: tc.pkName, Column: "nulls_allowed", Direction: "N/A", Unique: true, Seq: 2, Storing: true},
-				{Name: tc.pkName, Column: "rowid", Direction: "ASC", Unique: true, Seq: 1},
+				{Name: "primary", Column: "rowid", Direction: "ASC", Unique: true, Seq: 1},
 				{Name: "descidx", Column: "rowid", Direction: "ASC", Unique: false, Seq: 2, Implicit: true},
 				{Name: "descidx", Column: "default2", Direction: "DESC", Unique: false, Seq: 1},
 			}
@@ -801,7 +796,7 @@ func TestAdminAPIZoneDetails(t *testing.T) {
 	ts := s.(*TestServer)
 
 	// Create database and table.
-	ac := log.AmbientContext{Tracer: ts.Tracer()}
+	ac := log.AmbientContext{Tracer: s.ClusterSettings().Tracer}
 	ctx, span := ac.AnnotateCtxWithSpan(context.Background(), "test")
 	defer span.Finish()
 	setupQueries := []string{
@@ -1418,14 +1413,9 @@ func TestHealthAPI(t *testing.T) {
 	}
 }
 
-// getSystemJobIDs queries the jobs table for all job IDs that have
-// the given status. Sorted by decreasing creation time.
-func getSystemJobIDs(t testing.TB, db *sqlutils.SQLRunner, status jobs.Status) []int64 {
-	rows := db.Query(
-		t,
-		`SELECT job_id FROM crdb_internal.jobs WHERE status=$1 ORDER BY created DESC`,
-		status,
-	)
+// getSystemJobIDs queries the jobs table for all jobs IDs. Sorted by decreasing creation time.
+func getSystemJobIDs(t testing.TB, db *sqlutils.SQLRunner) []int64 {
+	rows := db.Query(t, `SELECT job_id FROM crdb_internal.jobs ORDER BY created DESC;`)
 	defer rows.Close()
 
 	res := []int64{}
@@ -1447,18 +1437,8 @@ func TestAdminAPIJobs(t *testing.T) {
 	defer s.Stopper().Stop(context.Background())
 	sqlDB := sqlutils.MakeSQLRunner(conn)
 
-	testutils.RunTrueAndFalse(t, "isAdmin", func(t *testing.T, isAdmin bool) {
-		// Creating this client causes a user to be created, which causes jobs
-		// to be created, so we do it up-front rather than inside the test.
-		_, err := s.GetAuthenticatedHTTPClient(isAdmin)
-		if err != nil {
-			t.Fatal(err)
-		}
-	})
-
-	existingSucceededIDs := getSystemJobIDs(t, sqlDB, jobs.StatusSucceeded)
-	existingRunningIDs := getSystemJobIDs(t, sqlDB, jobs.StatusRunning)
-	existingIDs := append(existingSucceededIDs, existingRunningIDs...)
+	// Get list of existing jobs (migrations). Assumed to all have succeeded.
+	existingIDs := getSystemJobIDs(t, sqlDB)
 
 	testJobs := []struct {
 		id       int64
@@ -1510,56 +1490,16 @@ func TestAdminAPIJobs(t *testing.T) {
 		expectedIDsViaAdmin    []int64
 		expectedIDsViaNonAdmin []int64
 	}{
-		{
-			"jobs",
-			append([]int64{5, 4, 3, 2, 1}, existingIDs...),
-			[]int64{5},
-		},
-		{
-			"jobs?limit=1",
-			[]int64{5},
-			[]int64{5},
-		},
-		{
-			"jobs?status=running",
-			append([]int64{4, 2, 1}, existingRunningIDs...),
-			[]int64{},
-		},
-		{
-			"jobs?status=succeeded",
-			append([]int64{5, 3}, existingSucceededIDs...),
-			[]int64{5},
-		},
-		{
-			"jobs?status=pending",
-			[]int64{},
-			[]int64{},
-		},
-		{
-			"jobs?status=garbage",
-			[]int64{},
-			[]int64{},
-		},
-		{
-			fmt.Sprintf("jobs?type=%d", jobspb.TypeBackup),
-			[]int64{5, 3, 2},
-			[]int64{5},
-		},
-		{
-			fmt.Sprintf("jobs?type=%d", jobspb.TypeRestore),
-			[]int64{1},
-			[]int64{},
-		},
-		{
-			fmt.Sprintf("jobs?type=%d", invalidJobType),
-			[]int64{},
-			[]int64{},
-		},
-		{
-			fmt.Sprintf("jobs?status=running&type=%d", jobspb.TypeBackup),
-			[]int64{2},
-			[]int64{},
-		},
+		{"jobs", append([]int64{5, 4, 3, 2, 1}, existingIDs...), []int64{5}},
+		{"jobs?limit=1", []int64{5}, []int64{5}},
+		{"jobs?status=running", []int64{4, 2, 1}, []int64{}},
+		{"jobs?status=succeeded", append([]int64{5, 3}, existingIDs...), []int64{5}},
+		{"jobs?status=pending", []int64{}, []int64{}},
+		{"jobs?status=garbage", []int64{}, []int64{}},
+		{fmt.Sprintf("jobs?type=%d", jobspb.TypeBackup), []int64{5, 3, 2}, []int64{5}},
+		{fmt.Sprintf("jobs?type=%d", jobspb.TypeRestore), []int64{1}, []int64{}},
+		{fmt.Sprintf("jobs?type=%d", invalidJobType), []int64{}, []int64{}},
+		{fmt.Sprintf("jobs?status=running&type=%d", jobspb.TypeBackup), []int64{2}, []int64{}},
 	}
 
 	testutils.RunTrueAndFalse(t, "isAdmin", func(t *testing.T, isAdmin bool) {
@@ -1578,13 +1518,6 @@ func TestAdminAPIJobs(t *testing.T) {
 				expected = testCase.expectedIDsViaNonAdmin
 			}
 
-			sort.Slice(expected, func(i, j int) bool {
-				return expected[i] < expected[j]
-			})
-
-			sort.Slice(resIDs, func(i, j int) bool {
-				return resIDs[i] < resIDs[j]
-			})
 			if e, a := expected, resIDs; !reflect.DeepEqual(e, a) {
 				t.Errorf("%d: expected job IDs %v, but got %v", i, e, a)
 			}
@@ -1916,6 +1849,26 @@ func TestAdminAPIDataDistribution(t *testing.T) {
 	if err := getAdminJSONProto(firstServer, "data_distribution", &resp); err != nil {
 		t.Fatal(err)
 	}
+
+	// Clusters which were upgraded rather than bootstrapped are missing a
+	// namespace entry for namespace2. Remarkably this causes very few problems
+	// because very little refers to namespace2, however, it can cause problems
+	// in the data distribution page which uses the names in descriptors to
+	// then look up zone configurations by name. This tests that even when
+	// that namespace entry does not exist, no issues arise
+	t.Run("missing namespace entry for namespace2", func(t *testing.T) {
+		ctx := context.Background()
+		require.NoError(t, testCluster.Server(0).DB().Txn(ctx, func(
+			ctx context.Context, txn *kv.Txn,
+		) (err error) {
+			err = catalogkv.RemoveObjectNamespaceEntry(
+				ctx, txn, keys.SystemSQLCodec, keys.SystemDatabaseID, descpb.InvalidID,
+				systemschema.NamespaceTable.GetName(), // namespace2
+				false /* kvTrace */)
+			return err
+		}))
+		require.NoError(t, getAdminJSONProto(firstServer, "data_distribution", &resp))
+	})
 }
 
 func BenchmarkAdminAPIDataDistribution(b *testing.B) {

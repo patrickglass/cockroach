@@ -29,7 +29,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/enum"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -39,7 +38,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/text/collate"
@@ -68,7 +66,7 @@ func parseTableDesc(createTableStmt string) (catalog.TableDescriptor, error) {
 	const parentID = descpb.ID(keys.MaxReservedDescID + 1)
 	const tableID = descpb.ID(keys.MaxReservedDescID + 2)
 	semaCtx := makeTestSemaCtx()
-	mutDesc, err := importccl.MakeTestingSimpleTableDescriptor(
+	mutDesc, err := importccl.MakeSimpleTableDescriptor(
 		ctx, &semaCtx, st, createTable, parentID, keys.PublicSchemaID, tableID, importccl.NoFKs, hlc.UnixNano())
 	if err != nil {
 		return nil, err
@@ -129,7 +127,7 @@ func parseAvroSchema(j string) (*avroDataRecord, error) {
 	for _, f := range s.Fields {
 		// s.Fields[idx] has `Name` and `SchemaType` set but nothing else.
 		// They're needed for serialization/deserialization, so fake out a
-		// column descriptor so that we can reuse columnToAvroSchema to get
+		// column descriptor so that we can reuse columnDescToAvroSchema to get
 		// all the various fields of avroSchemaField populated for free.
 		colDesc, err := avroFieldMetadataToColDesc(f.Metadata)
 		if err != nil {
@@ -137,6 +135,7 @@ func parseAvroSchema(j string) (*avroDataRecord, error) {
 		}
 		tableDesc.Columns = append(tableDesc.Columns, *colDesc)
 	}
+
 	return tableToAvroSchema(tabledesc.NewBuilder(&tableDesc).BuildImmutableTable(), avroSchemaNoSuffix, "")
 }
 
@@ -148,11 +147,8 @@ func avroFieldMetadataToColDesc(metadata string) (*descpb.ColumnDescriptor, erro
 	def := parsed.AST.(*tree.AlterTable).Cmds[0].(*tree.AlterTableAddColumn).ColumnDef
 	ctx := context.Background()
 	semaCtx := makeTestSemaCtx()
-	cdd, err := tabledesc.MakeColumnDefDescs(ctx, def, &semaCtx, &tree.EvalContext{})
-	if err != nil {
-		return nil, err
-	}
-	return cdd.ColumnDescriptor, err
+	col, _, _, err := tabledesc.MakeColumnDefDescs(ctx, def, &semaCtx, &tree.EvalContext{})
+	return col, err
 }
 
 // randTime generates a random time.Time whose .UnixNano result doesn't
@@ -195,7 +191,7 @@ func createEnum(enumLabels tree.EnumValueList, typeName tree.TypeName) *types.T 
 func TestAvroSchema(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	type test struct {
 		name   string
@@ -223,8 +219,7 @@ func TestAvroSchema(t *testing.T) {
 	// Type-specific random logic for when we can't use the randgen library
 	// and/or need to modify the type to add random user-defined values
 	// The returned datum will be nil if we can just use randgen
-	var overrideRandGen func(typ *types.T) (tree.Datum, *types.T)
-	overrideRandGen = func(typ *types.T) (tree.Datum, *types.T) {
+	overrideRandGen := func(typ *types.T) (tree.Datum, *types.T) {
 		switch typ.Family() {
 		case types.TimestampFamily:
 			// Truncate to millisecond instead of microsecond because of a bug
@@ -267,41 +262,22 @@ func TestAvroSchema(t *testing.T) {
 				panic(err)
 			}
 			return datum, typ
-		case types.ArrayFamily:
-			// Apply the other cases in this function
-			// to the contents of the array
-			contentType := typ.ArrayContents()
-			el, contentType := overrideRandGen(contentType)
-			if el == nil {
-				return nil, typ
-			}
-			typ.InternalType.ArrayContents = contentType
-			datum := randgen.RandDatum(rng, typ, false /* nullOk */)
-			for i := range datum.(*tree.DArray).Array {
-				datum.(*tree.DArray).Array[i], _ = overrideRandGen(contentType)
-			}
-			return datum, typ
-
 		}
 		return nil, typ
 	}
 
 	// Types we don't support that are present in types.OidToType
-	var skipType func(typ *types.T) bool
-	skipType = func(typ *types.T) bool {
+	skipType := func(typ *types.T) bool {
 		switch typ.Family() {
 		case types.AnyFamily, types.OidFamily, types.TupleFamily:
 			// These aren't expected to be needed for changefeeds.
 			return true
 		case types.ArrayFamily:
-			if !randgen.IsAllowedForArray(typ.ArrayContents()) {
-				return true
-			}
-			if skipType(typ.ArrayContents()) {
-				return true
-			}
+			// Backported support, but these tests rely on newer randgen
+			// Tested in encoder_test.go instead
+			return true
 		}
-		return !randgen.IsLegalColumnType(typ)
+		return false
 	}
 
 	typesToTest := make([]*types.T, 0, 256)
@@ -332,7 +308,7 @@ func TestAvroSchema(t *testing.T) {
 		var datum tree.Datum
 		datum, typ = overrideRandGen(typ)
 		if datum == nil {
-			datum = randgen.RandDatum(rng, typ, false /* nullOk */)
+			datum = rowenc.RandDatum(rng, typ, false /* nullOk */)
 		}
 		if datum == tree.DNull {
 			// DNull is returned by RandDatum for types.UNKNOWN or if the
@@ -373,9 +349,7 @@ func TestAvroSchema(t *testing.T) {
 			require.NoError(t, err)
 
 			for _, row := range rows {
-				evalCtx := &tree.EvalContext{
-					SessionDataStack: sessiondata.NewStack(&sessiondata.SessionData{}),
-				}
+				evalCtx := &tree.EvalContext{SessionData: &sessiondata.SessionData{}}
 				serialized, err := origSchema.textualFromRow(row)
 				require.NoError(t, err)
 				roundtripped, err := roundtrippedSchema.rowFromTextual(serialized)
@@ -403,7 +377,7 @@ func TestAvroSchema(t *testing.T) {
 				`{"type":["null","long"],"name":"_u0001f366_","default":null,`+
 				`"__crdb__":"🍦 INT8 NOT NULL"}]}`,
 			tableSchema.codec.Schema())
-		indexSchema, err := indexToAvroSchema(tableDesc, tableDesc.GetPrimaryIndex(), tableDesc.GetName(), "")
+		indexSchema, err := indexToAvroSchema(tableDesc, tableDesc.GetPrimaryIndex().IndexDesc(), tableDesc.GetName(), "")
 		require.NoError(t, err)
 		require.Equal(t,
 			`{"type":"record","name":"_u2603_","fields":[`+
@@ -438,7 +412,7 @@ func TestAvroSchema(t *testing.T) {
 			`VARBIT`:            `["null",{"type":"array","items":"long"}]`,
 
 			`BIT(3)`:       `["null",{"type":"array","items":"long"}]`,
-			`DECIMAL(3,2)`: `["null",{"type":"bytes","logicalType":"decimal","precision":3,"scale":2},"string"]`,
+			`DECIMAL(3,2)`: `["null",{"type":"bytes","logicalType":"decimal","precision":3,"scale":2}]`,
 		}
 
 		for _, typ := range append(types.Scalar, types.BoolArray, types.MakeCollatedString(types.String, `fr`), types.MakeBit(3)) {
@@ -543,15 +517,6 @@ func TestAvroSchema(t *testing.T) {
 			{sqlType: `DECIMAL(4,1)`,
 				sql:  `1.2`,
 				avro: `{"bytes.decimal":"\f"}`},
-			{sqlType: `DECIMAL(4,1)`,
-				sql:  `DECIMAL 'Infinity'`,
-				avro: `{"string":"Infinity"}`},
-			{sqlType: `DECIMAL(4,1)`,
-				sql:  `DECIMAL '-Infinity'`,
-				avro: `{"string":"-Infinity"}`},
-			{sqlType: `DECIMAL(4,1)`,
-				sql:  `DECIMAL 'NaN'`,
-				avro: `{"string":"NaN"}`},
 
 			{sqlType: `UUID`, sql: `NULL`, avro: `null`},
 			{sqlType: `UUID`,
@@ -817,7 +782,7 @@ func TestDecimalRatRoundtrip(t *testing.T) {
 		require.EqualError(t, err, "cannot convert Infinite form decimal")
 	})
 	t.Run(`rand`, func(t *testing.T) {
-		rng, _ := randutil.NewTestRand()
+		rng, _ := randutil.NewPseudoRand()
 		precision := rng.Int31n(10) + 1
 		scale := rng.Int31n(precision + 1)
 		coeff := rng.Int63n(int64(math.Pow10(int(precision))))
@@ -829,154 +794,4 @@ func TestDecimalRatRoundtrip(t *testing.T) {
 			t.Errorf(`%s != %s`, dec, &roundtrip)
 		}
 	})
-}
-
-func benchmarkEncodeType(b *testing.B, typ *types.T, encRow rowenc.EncDatumRow) {
-	defer leaktest.AfterTest(b)()
-	defer log.Scope(b).Close(b)
-
-	tableDesc, err := parseTableDesc(
-		fmt.Sprintf(`CREATE TABLE bench_table (bench_field %s)`, typ.SQLString()))
-	require.NoError(b, err)
-	schema, err := tableToAvroSchema(tableDesc, "suffix", "namespace")
-	require.NoError(b, err)
-
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		_, err := schema.BinaryFromRow(nil, encRow)
-		require.NoError(b, err)
-	}
-}
-
-// returns random EncDatum row where the first column is of specified
-// type and the second one an types.Int, corresponding to a row id.
-func randEncDatumRow(typ *types.T) rowenc.EncDatumRow {
-	const allowNull = true
-	const notNull = false
-	rnd, _ := randutil.NewTestRand()
-	return rowenc.EncDatumRow{
-		rowenc.DatumToEncDatum(typ, randgen.RandDatum(rnd, typ, allowNull)),
-		rowenc.DatumToEncDatum(types.Int, randgen.RandDatum(rnd, types.Int, notNull)),
-	}
-}
-
-func BenchmarkEncodeIntArray(b *testing.B) {
-	benchmarkEncodeType(b, types.IntArray, randEncDatumRow(types.IntArray))
-}
-
-func BenchmarkEncodeInt(b *testing.B) {
-	benchmarkEncodeType(b, types.Int, randEncDatumRow(types.Int))
-}
-
-func BenchmarkEncodeBitSmall(b *testing.B) {
-	smallBit := types.MakeBit(8)
-	benchmarkEncodeType(b, smallBit, randEncDatumRow(smallBit))
-}
-
-func BenchmarkEncodeBitLarge(b *testing.B) {
-	largeBit := types.MakeBit(64*3 + 1)
-	benchmarkEncodeType(b, largeBit, randEncDatumRow(largeBit))
-}
-
-func BenchmarkEncodeVarbit(b *testing.B) {
-	benchmarkEncodeType(b, types.VarBit, randEncDatumRow(types.VarBit))
-}
-
-func BenchmarkEncodeBool(b *testing.B) {
-	benchmarkEncodeType(b, types.Bool, randEncDatumRow(types.Bool))
-}
-
-func BenchmarkEncodeEnum(b *testing.B) {
-	testEnum := createEnum(
-		tree.EnumValueList{tree.EnumValue(`open`), tree.EnumValue(`closed`)},
-		tree.MakeUnqualifiedTypeName(`switch`),
-	)
-	benchmarkEncodeType(b, testEnum, randEncDatumRow(testEnum))
-}
-
-func BenchmarkEncodeFloat(b *testing.B) {
-	benchmarkEncodeType(b, types.Float, randEncDatumRow(types.Float))
-}
-
-func BenchmarkEncodeBox2D(b *testing.B) {
-	benchmarkEncodeType(b, types.Box2D, randEncDatumRow(types.Box2D))
-}
-
-func BenchmarkEncodeGeography(b *testing.B) {
-	benchmarkEncodeType(b, types.Geography, randEncDatumRow(types.Geography))
-}
-
-func BenchmarkEncodeGeometry(b *testing.B) {
-	benchmarkEncodeType(b, types.Geometry, randEncDatumRow(types.Geometry))
-}
-
-func BenchmarkEncodeBytes(b *testing.B) {
-	benchmarkEncodeType(b, types.Bytes, randEncDatumRow(types.Bytes))
-}
-
-func BenchmarkEncodeString(b *testing.B) {
-	benchmarkEncodeType(b, types.String, randEncDatumRow(types.String))
-}
-
-var collatedStringType = types.MakeCollatedString(types.String, `fr`)
-
-func BenchmarkEncodeCollatedString(b *testing.B) {
-	benchmarkEncodeType(b, collatedStringType, randEncDatumRow(collatedStringType))
-}
-
-func BenchmarkEncodeDate(b *testing.B) {
-	// RandDatum could return "interesting" dates (infinite past, etc).  Alas, avro
-	// doesn't support those yet, so override it to something we do support.
-	encRow := randEncDatumRow(types.Date)
-	if d, ok := encRow[0].Datum.(*tree.DDate); ok && !d.IsFinite() {
-		d.Date = pgdate.LowDate
-	}
-	benchmarkEncodeType(b, types.Date, encRow)
-}
-
-func BenchmarkEncodeTime(b *testing.B) {
-	benchmarkEncodeType(b, types.Time, randEncDatumRow(types.Time))
-}
-
-func BenchmarkEncodeTimeTZ(b *testing.B) {
-	benchmarkEncodeType(b, types.TimeTZ, randEncDatumRow(types.TimeTZ))
-}
-
-func BenchmarkEncodeTimestamp(b *testing.B) {
-	benchmarkEncodeType(b, types.Timestamp, randEncDatumRow(types.Timestamp))
-}
-
-func BenchmarkEncodeTimestampTZ(b *testing.B) {
-	benchmarkEncodeType(b, types.TimestampTZ, randEncDatumRow(types.TimestampTZ))
-}
-
-func BenchmarkEncodeInterval(b *testing.B) {
-	benchmarkEncodeType(b, types.Interval, randEncDatumRow(types.Interval))
-}
-
-func BenchmarkEncodeDecimal(b *testing.B) {
-	typ := types.MakeDecimal(10, 4)
-	encRow := randEncDatumRow(typ)
-
-	// rowenc.RandDatum generates all possible datums. We just want small subset
-	// to fit in our specified precision/scale.
-	d := &tree.DDecimal{}
-	coeff := int64(rand.Uint64()) % 10000
-	d.Decimal.SetFinite(coeff, 2)
-	encRow[0] = rowenc.DatumToEncDatum(typ, d)
-	benchmarkEncodeType(b, typ, encRow)
-}
-
-func BenchmarkEncodeUUID(b *testing.B) {
-	benchmarkEncodeType(b, types.Uuid, randEncDatumRow(types.Uuid))
-}
-
-func BenchmarkEncodeINet(b *testing.B) {
-	benchmarkEncodeType(b, types.INet, randEncDatumRow(types.INet))
-}
-
-func BenchmarkEncodeJSON(b *testing.B) {
-	benchmarkEncodeType(b, types.Jsonb, randEncDatumRow(types.Jsonb))
 }

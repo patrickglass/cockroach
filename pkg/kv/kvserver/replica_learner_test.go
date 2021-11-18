@@ -14,7 +14,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -310,8 +309,6 @@ func TestLearnerSnapshotFailsRollback(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	skip.UnderShort(t) // Takes 90s.
-
 	runTest := func(t *testing.T, replicaType roachpb.ReplicaType) {
 		var rejectSnapshots int64
 		knobs, ltk := makeReplicationTestKnobs()
@@ -419,29 +416,16 @@ func TestNonVoterCatchesUpViaRaftSnapshotQueue(t *testing.T) {
 	require.NotNil(t, leaseholderRepl)
 
 	time.Sleep(kvserver.RaftLogQueuePendingSnapshotGracePeriod)
-
-	testutils.SucceedsSoon(t, func() error {
-		// Manually enqueue the leaseholder replica into its store's raft snapshot
-		// queue. We expect it to pick up on the fact that the non-voter on its range
-		// needs a snapshot.
-		recording, pErr, err := leaseholderStore.ManuallyEnqueue(
-			ctx, "raftsnapshot", leaseholderRepl, false, /* skipShouldQueue */
-		)
-		if pErr != nil {
-			return pErr
-		}
-		if err != nil {
-			return err
-		}
-		matched, err := regexp.MatchString("streamed VIA_SNAPSHOT_QUEUE snapshot.*to.*NON_VOTER", recording.String())
-		if err != nil {
-			return err
-		}
-		if !matched {
-			return errors.Errorf("the raft snapshot queue did not send a snapshot to the non-voter")
-		}
-		return nil
-	})
+	// Manually enqueue the leaseholder replica into its store's raft snapshot
+	// queue. We expect it to pick up on the fact that the non-voter on its range
+	// needs a snapshot.
+	recording, pErr, err := leaseholderStore.ManuallyEnqueue(
+		ctx, "raftsnapshot", leaseholderRepl, false, /* skipShouldQueue */
+	)
+	require.NoError(t, pErr)
+	require.NoError(t, err)
+	trace := recording.String()
+	require.Regexp(t, "streamed VIA_SNAPSHOT_QUEUE snapshot.*to.*NON_VOTER", trace)
 	require.NoError(t, g.Wait())
 }
 
@@ -685,16 +669,7 @@ func TestLearnerAdminChangeReplicasRace(t *testing.T) {
 	scratchStartKey := tc.ScratchRange(t)
 	g := ctxgroup.WithContext(ctx)
 	g.GoCtx(func(ctx context.Context) error {
-		// NB: we don't use tc.AddVoters because that will auto-retry
-		// and the test expects to see the error that results on the
-		// first attempt.
-		desc, err := tc.LookupRange(scratchStartKey)
-		if err != nil {
-			return err
-		}
-		_, err = tc.Servers[0].DB().AdminChangeReplicas(
-			ctx, scratchStartKey, desc, roachpb.MakeReplicationChanges(roachpb.ADD_VOTER, tc.Target(1)),
-		)
+		_, err := tc.AddVoters(scratchStartKey, tc.Target(1))
 		return err
 	})
 
@@ -884,10 +859,10 @@ func TestLearnerAndVoterOutgoingFollowerRead(t *testing.T) {
 	})
 	defer tc.Stopper().Stop(ctx)
 	db := sqlutils.MakeSQLRunner(tc.ServerConn(0))
-	tr := tc.Server(0).TracerI().(*tracing.Tracer)
+	tr := tc.Server(0).Tracer().(*tracing.Tracer)
 	db.Exec(t, fmt.Sprintf(`SET CLUSTER SETTING kv.closed_timestamp.target_duration = '%s'`,
 		testingTargetDuration))
-	db.Exec(t, fmt.Sprintf(`SET CLUSTER SETTING kv.closed_timestamp.side_transport_interval = '%s'`, testingSideTransportInterval))
+	db.Exec(t, `SET CLUSTER SETTING kv.closed_timestamp.close_fraction = $1`, testingCloseFraction)
 	db.Exec(t, `SET CLUSTER SETTING kv.closed_timestamp.follower_reads_enabled = true`)
 
 	scratchStartKey := tc.ScratchRange(t)
@@ -912,15 +887,15 @@ func TestLearnerAndVoterOutgoingFollowerRead(t *testing.T) {
 		testutils.SucceedsSoon(t, func() error {
 			// Trace the Send call so we can verify that it hit the exact `learner
 			// replicas cannot serve follower reads` branch that we're trying to test.
-			sendCtx, getRecAndFinish := tracing.ContextWithRecordingSpan(ctx, tr, "manual read request")
-			defer getRecAndFinish()
+			sendCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "manual read request")
+			defer cancel()
 			_, pErr := repl.Send(sendCtx, req)
 			err := pErr.GoError()
 			if !testutils.IsError(err, `not lease holder`) {
 				return errors.Errorf(`expected "not lease holder" error got: %+v`, err)
 			}
 			const msg = `cannot serve follower reads`
-			formattedTrace := getRecAndFinish().String()
+			formattedTrace := collect().String()
 			if !strings.Contains(formattedTrace, msg) {
 				return errors.Errorf("expected a trace with `%s` got:\n%s", msg, formattedTrace)
 			}

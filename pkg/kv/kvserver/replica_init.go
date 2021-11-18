@@ -73,28 +73,29 @@ func newUnloadedReplica(
 		store:          store,
 		abortSpan:      abortspan.New(desc.RangeID),
 		concMgr: concurrency.NewManager(concurrency.Config{
-			NodeDesc:          store.nodeDesc,
-			RangeDesc:         desc,
-			Settings:          store.ClusterSettings(),
-			DB:                store.DB(),
-			Clock:             store.Clock(),
-			Stopper:           store.Stopper(),
-			IntentResolver:    store.intentResolver,
-			TxnWaitMetrics:    store.txnWaitMetrics,
-			SlowLatchGauge:    store.metrics.SlowLatchRequests,
-			DisableTxnPushing: store.TestingKnobs().DontPushOnWriteIntentError,
-			TxnWaitKnobs:      store.TestingKnobs().TxnWaitKnobs,
+			NodeDesc:                           store.nodeDesc,
+			RangeDesc:                          desc,
+			Settings:                           store.ClusterSettings(),
+			DB:                                 store.DB(),
+			Clock:                              store.Clock(),
+			Stopper:                            store.Stopper(),
+			IntentResolver:                     store.intentResolver,
+			TxnWaitMetrics:                     store.txnWaitMetrics,
+			SlowLatchGauge:                     store.metrics.SlowLatchRequests,
+			ConflictingIntentCleanupRejections: store.metrics.ConflictingIntentsResolveRejected,
+			DisableTxnPushing:                  store.TestingKnobs().DontPushOnWriteIntentError,
+			TxnWaitKnobs:                       store.TestingKnobs().TxnWaitKnobs,
 		}),
 	}
 	r.mu.pendingLeaseRequest = makePendingLeaseRequest(r)
 	r.mu.stateLoader = stateloader.Make(desc.RangeID)
 	r.mu.quiescent = true
-	r.mu.conf = store.cfg.DefaultSpanConfig
+	r.mu.zone = store.cfg.DefaultZoneConfig
 	r.mu.replicaID = replicaID
 	split.Init(&r.loadBasedSplitter, rand.Intn, func() float64 {
 		return float64(SplitByLoadQPSThreshold.Get(&store.cfg.Settings.SV))
 	}, func() time.Duration {
-		return kvserverbase.SplitByLoadMergeDelay.Get(&store.cfg.Settings.SV)
+		return SplitByLoadMergeDelay.Get(&store.cfg.Settings.SV)
 	})
 	r.mu.proposals = map[kvserverbase.CmdIDKey]*ProposalData{}
 	r.mu.checksums = map[uuid.UUID]ReplicaChecksum{}
@@ -341,7 +342,7 @@ func (r *Replica) setDescLockedRaftMuLocked(ctx context.Context, desc *roachpb.R
 		r.mu.tenantID = tenantID
 		r.store.metrics.acquireTenant(tenantID)
 		if tenantID != roachpb.SystemTenantID {
-			r.tenantLimiter = r.store.tenantRateLimiters.GetTenant(ctx, tenantID, r.store.stopper.ShouldQuiesce())
+			r.tenantLimiter = r.store.tenantRateLimiters.GetTenant(tenantID, r.store.stopper.ShouldQuiesce())
 		}
 	}
 

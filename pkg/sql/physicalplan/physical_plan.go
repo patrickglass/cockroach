@@ -138,6 +138,11 @@ type PhysicalPlan struct {
 	// want to pay this cost if we don't have multiple streams to merge.
 	MergeOrdering execinfrapb.Ordering
 
+	// MaxEstimatedRowCount tracks the maximum estimated row count that a table
+	// reader in this plan will output. This information is used to decide
+	// whether to use the vectorized execution engine.
+	// TODO(radu): move this field to PlanInfrastructure.
+	MaxEstimatedRowCount uint64
 	// TotalEstimatedScannedRows is the sum of the row count estimate of all the
 	// table readers in the plan.
 	// TODO(radu): move this field to PlanInfrastructure.
@@ -180,7 +185,7 @@ func (p *PhysicalPlan) GetResultTypes() []*types.T {
 // NewStage updates the distribution of the plan given the fact whether the new
 // stage contains at least one processor planned on a remote node and returns a
 // stage identifier of the new stage that can be used in processor specs.
-func (p *PhysicalPlan) NewStage(containsRemoteProcessor bool, allowPartialDistribution bool) int32 {
+func (p *PhysicalPlan) NewStage(containsRemoteProcessor bool) int32 {
 	newStageDistribution := LocalPlan
 	if containsRemoteProcessor {
 		newStageDistribution = FullyDistributedPlan
@@ -190,7 +195,7 @@ func (p *PhysicalPlan) NewStage(containsRemoteProcessor bool, allowPartialDistri
 		// distribution as is.
 		p.Distribution = newStageDistribution
 	} else {
-		p.Distribution = p.Distribution.compose(newStageDistribution, allowPartialDistribution)
+		p.Distribution = p.Distribution.compose(newStageDistribution)
 	}
 	p.stageCounter++
 	return p.stageCounter
@@ -199,13 +204,16 @@ func (p *PhysicalPlan) NewStage(containsRemoteProcessor bool, allowPartialDistri
 // NewStageOnNodes is the same as NewStage but takes in the information about
 // the nodes participating in the new stage and the gateway.
 func (p *PhysicalPlan) NewStageOnNodes(nodes []roachpb.NodeID) int32 {
+	return p.NewStageWithFirstNode(len(nodes), nodes[0])
+}
+
+// NewStageWithFirstNode is the same as NewStage but takes in the number of
+// total nodes participating in the new stage and the first node's id.
+func (p *PhysicalPlan) NewStageWithFirstNode(nNodes int, firstNode roachpb.NodeID) int32 {
 	// We have a remote processor either when we have multiple nodes
 	// participating in the stage or the single processor is scheduled not on
 	// the gateway.
-	return p.NewStage(
-		len(nodes) > 1 || nodes[0] != p.GatewayNodeID, /* containsRemoteProcessor */
-		false, /* allowPartialDistribution */
-	)
+	return p.NewStage(nNodes > 1 || firstNode != p.GatewayNodeID /* containsRemoteProcessor */)
 }
 
 // SetMergeOrdering sets p.MergeOrdering.
@@ -237,17 +245,7 @@ func (p *PhysicalPlan) AddNoInputStage(
 	outputTypes []*types.T,
 	newOrdering execinfrapb.Ordering,
 ) {
-	// Note that in order to find out whether we have a remote processor it is
-	// not sufficient to have len(corePlacements) be greater than one - we might
-	// plan multiple table readers on the gateway if the plan is local.
-	containsRemoteProcessor := false
-	for i := range corePlacements {
-		if corePlacements[i].NodeID != p.GatewayNodeID {
-			containsRemoteProcessor = true
-			break
-		}
-	}
-	stageID := p.NewStage(containsRemoteProcessor, false /* allowPartialDistribution */)
+	stageID := p.NewStageWithFirstNode(len(corePlacements), corePlacements[0].NodeID)
 	p.ResultRouters = make([]ProcessorIdx, len(corePlacements))
 	for i := range p.ResultRouters {
 		proc := Processor{
@@ -298,7 +296,7 @@ func (p *PhysicalPlan) AddNoGroupingStageWithCoreFunc(
 ) {
 	// New stage has the same distribution as the previous one, so we need to
 	// figure out whether the last stage contains a remote processor.
-	stageID := p.NewStage(p.IsLastStageDistributed(), false /* allowPartialDistribution */)
+	stageID := p.NewStage(p.IsLastStageDistributed())
 	prevStageResultTypes := p.GetResultTypes()
 	for i, resultProc := range p.ResultRouters {
 		prevProc := &p.Processors[resultProc]
@@ -307,7 +305,7 @@ func (p *PhysicalPlan) AddNoGroupingStageWithCoreFunc(
 			Node: prevProc.Node,
 			Spec: execinfrapb.ProcessorSpec{
 				Input: []execinfrapb.InputSyncSpec{{
-					Type:        execinfrapb.InputSyncSpec_PARALLEL_UNORDERED,
+					Type:        execinfrapb.InputSyncSpec_UNORDERED,
 					ColumnTypes: prevStageResultTypes,
 				}},
 				Core: coreFunc(int(resultProc), prevProc),
@@ -347,17 +345,23 @@ func (p *PhysicalPlan) MergeResultStreams(
 	forceSerialization bool,
 ) {
 	proc := &p.Processors[destProcessor]
-	if len(ordering.Columns) > 0 && len(resultRouters) > 1 {
+	// We want to use unordered synchronizer if the ordering is empty and
+	// we're not being forced to serialize streams. Note that ordered
+	// synchronizers support the case of an empty ordering - they will be
+	// merging the result streams by fully consuming one stream at a time
+	// before moving on to the next one.
+	useUnorderedSync := len(ordering.Columns) == 0 && !forceSerialization
+	if len(resultRouters) == 1 {
+		// However, if we only have a single result router, then there is
+		// nothing to merge, and we unconditionally will use the unordered
+		// synchronizer since it is more efficient.
+		useUnorderedSync = true
+	}
+	if useUnorderedSync {
+		proc.Spec.Input[destInput].Type = execinfrapb.InputSyncSpec_UNORDERED
+	} else {
 		proc.Spec.Input[destInput].Type = execinfrapb.InputSyncSpec_ORDERED
 		proc.Spec.Input[destInput].Ordering = ordering
-	} else {
-		if forceSerialization && len(resultRouters) > 1 {
-			// If we're forced to serialize the streams and we have multiple
-			// result routers, we have to use a slower serial unordered sync.
-			proc.Spec.Input[destInput].Type = execinfrapb.InputSyncSpec_SERIAL_UNORDERED
-		} else {
-			proc.Spec.Input[destInput].Type = execinfrapb.InputSyncSpec_PARALLEL_UNORDERED
-		}
 	}
 
 	for _, resultProc := range resultRouters {
@@ -394,7 +398,7 @@ func (p *PhysicalPlan) AddSingleGroupStage(
 			// We're planning a single processor on the node nodeID, so we'll
 			// have a remote processor only when the node is different from the
 			// gateway.
-			StageID:     p.NewStage(nodeID != p.GatewayNodeID, false /* allowPartialDistribution */),
+			StageID:     p.NewStage(nodeID != p.GatewayNodeID),
 			ResultTypes: outputTypes,
 		},
 	}
@@ -429,10 +433,6 @@ func (p *PhysicalPlan) EnsureSingleStreamOnGateway() {
 			panic("ensuring a single stream on the gateway failed")
 		}
 	}
-	// We now must have a single stream in the whole physical plan, so there is no
-	// ordering to be maintained for the merge of multiple streams. This also
-	// adheres to the comment on p.MergeOrdering.
-	p.MergeOrdering = execinfrapb.Ordering{}
 }
 
 // CheckLastStagePost checks that the processors of the last stage of the
@@ -496,22 +496,42 @@ func isIdentityProjection(columns []uint32, numExistingCols int) bool {
 }
 
 // AddProjection applies a projection to a plan. The new plan outputs the
-// columns of the old plan as listed in the slice. newMergeOrdering must refer
-// to the columns **after** the projection is applied.
+// columns of the old plan as listed in the slice. The Ordering is updated;
+// columns in the ordering are added to the projection as needed.
 //
 // The PostProcessSpec may not be updated if the resulting projection keeps all
 // the columns in their original order.
 //
 // Note: the columns slice is relinquished to this function, which can modify it
 // or use it directly in specs.
-func (p *PhysicalPlan) AddProjection(columns []uint32, newMergeOrdering execinfrapb.Ordering) {
-	// Set the merge ordering early since we might short-circuit.
-	p.SetMergeOrdering(newMergeOrdering)
-
+func (p *PhysicalPlan) AddProjection(columns []uint32) {
 	// If the projection we are trying to apply projects every column, don't
 	// update the spec.
 	if isIdentityProjection(columns, len(p.GetResultTypes())) {
 		return
+	}
+
+	// Update the ordering.
+	if len(p.MergeOrdering.Columns) > 0 {
+		newOrdering := make([]execinfrapb.Ordering_Column, len(p.MergeOrdering.Columns))
+		for i, c := range p.MergeOrdering.Columns {
+			// Look for the column in the new projection.
+			found := -1
+			for j, projCol := range columns {
+				if projCol == c.ColIdx {
+					found = j
+				}
+			}
+			if found == -1 {
+				// We have a column that is not in the projection but will be necessary
+				// later when the streams are merged; add it.
+				found = len(columns)
+				columns = append(columns, c.ColIdx)
+			}
+			newOrdering[i].ColIdx = uint32(found)
+			newOrdering[i].Direction = c.Direction
+		}
+		p.MergeOrdering.Columns = newOrdering
 	}
 
 	newResultTypes := make([]*types.T, len(columns))
@@ -562,16 +582,12 @@ func exprColumn(expr tree.TypedExpr, indexVarMap []int) (int, bool) {
 // plan. The rendering is achieved either through an adjustment on the last
 // stage post-process spec, or via a new stage.
 //
-// newMergeOrdering must refer to the columns **after** the rendering is
-// applied.
+// The Ordering is updated; columns in the ordering are added to the render
+// expressions as necessary.
 //
 // See MakeExpression for a description of indexVarMap.
 func (p *PhysicalPlan) AddRendering(
-	exprs []tree.TypedExpr,
-	exprCtx ExprContext,
-	indexVarMap []int,
-	outTypes []*types.T,
-	newMergeOrdering execinfrapb.Ordering,
+	exprs []tree.TypedExpr, exprCtx ExprContext, indexVarMap []int, outTypes []*types.T,
 ) error {
 	// First check if we need an Evaluator, or we are just shuffling values. We
 	// also check if the rendering is a no-op ("identity").
@@ -602,7 +618,7 @@ func (p *PhysicalPlan) AddRendering(
 			}
 			cols[i] = uint32(streamCol)
 		}
-		p.AddProjection(cols, newMergeOrdering)
+		p.AddProjection(cols)
 		return nil
 	}
 
@@ -632,7 +648,46 @@ func (p *PhysicalPlan) AddRendering(
 			return err
 		}
 	}
-	p.SetMergeOrdering(newMergeOrdering)
+
+	if len(p.MergeOrdering.Columns) > 0 {
+		outTypes = outTypes[:len(outTypes):len(outTypes)]
+		newOrdering := make([]execinfrapb.Ordering_Column, len(p.MergeOrdering.Columns))
+		for i, c := range p.MergeOrdering.Columns {
+			found := -1
+			// Look for the column in the new projection.
+			for exprIdx, e := range exprs {
+				if varIdx, ok := exprColumn(e, indexVarMap); ok && varIdx == int(c.ColIdx) {
+					found = exprIdx
+					break
+				}
+			}
+			if found == -1 {
+				// We have a column that is not being rendered but will be necessary
+				// later when the streams are merged; add it.
+
+				// The new expression refers to column post.OutputColumns[c.ColIdx].
+				internalColIdx := c.ColIdx
+				if post.Projection {
+					internalColIdx = post.OutputColumns[internalColIdx]
+				}
+				newExpr, err := MakeExpression(tree.NewTypedOrdinalReference(
+					int(internalColIdx),
+					p.GetResultTypes()[c.ColIdx]),
+					exprCtx, nil /* indexVarMap */)
+				if err != nil {
+					return err
+				}
+
+				found = len(post.RenderExprs)
+				post.RenderExprs = append(post.RenderExprs, newExpr)
+				outTypes = append(outTypes, p.GetResultTypes()[c.ColIdx])
+			}
+			newOrdering[i].ColIdx = uint32(found)
+			newOrdering[i].Direction = c.Direction
+		}
+		p.MergeOrdering.Columns = newOrdering
+	}
+
 	post.Projection = false
 	post.OutputColumns = nil
 	p.SetLastStagePost(post, outTypes)
@@ -892,6 +947,10 @@ func (p *PhysicalPlan) GenerateFlowSpecs() map[roachpb.NodeID]*execinfrapb.FlowS
 // plans.
 func (p *PhysicalPlan) SetRowEstimates(left, right *PhysicalPlan) {
 	p.TotalEstimatedScannedRows = left.TotalEstimatedScannedRows + right.TotalEstimatedScannedRows
+	p.MaxEstimatedRowCount = left.MaxEstimatedRowCount
+	if right.MaxEstimatedRowCount > p.MaxEstimatedRowCount {
+		p.MaxEstimatedRowCount = right.MaxEstimatedRowCount
+	}
 }
 
 // MergePlans is used when merging two plans into a new plan. All plans must
@@ -900,14 +959,13 @@ func MergePlans(
 	mergedPlan *PhysicalPlan,
 	left, right *PhysicalPlan,
 	leftPlanDistribution, rightPlanDistribution PlanDistribution,
-	allowPartialDistribution bool,
 ) {
 	if mergedPlan.PhysicalInfrastructure != left.PhysicalInfrastructure ||
 		mergedPlan.PhysicalInfrastructure != right.PhysicalInfrastructure {
 		panic(errors.AssertionFailedf("can only merge plans that share infrastructure"))
 	}
 	mergedPlan.SetRowEstimates(left, right)
-	mergedPlan.Distribution = leftPlanDistribution.compose(rightPlanDistribution, allowPartialDistribution)
+	mergedPlan.Distribution = leftPlanDistribution.compose(rightPlanDistribution)
 }
 
 // AddJoinStage adds join processors at each of the specified nodes, and wires
@@ -1239,18 +1297,9 @@ func (a PlanDistribution) String() string {
 
 // compose returns the distribution indicator of a plan given indicators for
 // two parts of it.
-func (a PlanDistribution) compose(
-	b PlanDistribution, allowPartialDistribution bool,
-) PlanDistribution {
-	if allowPartialDistribution && a != b {
+func (a PlanDistribution) compose(b PlanDistribution) PlanDistribution {
+	if a != b {
 		return PartiallyDistributedPlan
 	}
-	// TODO(yuzefovich): this is not quite correct - using
-	// PartiallyDistributedPlan would make more sense when a != b, but that
-	// would lead to confusing to users "distribution: partial" in the EXPLAIN
-	// output, so for now we have this hack.
-	if a != LocalPlan || b != LocalPlan {
-		return FullyDistributedPlan
-	}
-	return LocalPlan
+	return a
 }

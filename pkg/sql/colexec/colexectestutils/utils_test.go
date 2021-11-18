@@ -54,13 +54,12 @@ func TestRepeatableBatchSource(t *testing.T) {
 	}
 	batch.SetLength(batchLen)
 	input := colexecop.NewRepeatableBatchSource(testAllocator, batch, typs)
-	input.Init(context.Background())
 
-	b := input.Next()
+	b := input.Next(context.Background())
 	b.SetLength(0)
 	b.SetSelection(true)
 
-	b = input.Next()
+	b = input.Next(context.Background())
 	if b.Length() != batchLen {
 		t.Fatalf("expected RepeatableBatchSource to reset batch length to %d, found %d", batchLen, b.Length())
 	}
@@ -74,7 +73,7 @@ func TestRepeatableBatchSourceWithFixedSel(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	typs := []*types.T{types.Int}
 	batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	batchSize := 10
 	if batchSize > coldata.BatchSize() {
 		batchSize = coldata.BatchSize()
@@ -85,12 +84,11 @@ func TestRepeatableBatchSourceWithFixedSel(t *testing.T) {
 	batch.SetSelection(true)
 	copy(batch.Selection(), sel)
 	input := colexecop.NewRepeatableBatchSource(testAllocator, batch, typs)
-	input.Init(context.Background())
-	b := input.Next()
+	b := input.Next(context.Background())
 
 	b.SetLength(0)
 	b.SetSelection(false)
-	b = input.Next()
+	b = input.Next(context.Background())
 	if b.Length() != batchLen {
 		t.Fatalf("expected RepeatableBatchSource to reset batch length to %d, found %d", batchLen, b.Length())
 	}
@@ -109,7 +107,7 @@ func TestRepeatableBatchSourceWithFixedSel(t *testing.T) {
 	b.SetLength(newBatchLen)
 	b.SetSelection(true)
 	copy(b.Selection(), newSel)
-	b = input.Next()
+	b = input.Next(context.Background())
 	if b.Length() != batchLen {
 		t.Fatalf("expected RepeatableBatchSource to reset batch length to %d, found %d", batchLen, b.Length())
 	}

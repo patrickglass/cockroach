@@ -3,7 +3,6 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "colexectestutils",
     srcs = [
-        "args.go",
         "proj_utils.go",
         "utils.go",
     ],
@@ -11,6 +10,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/col/coldata",
+        "//pkg/col/coldataext",
         "//pkg/col/typeconv",
         "//pkg/settings/cluster",
         "//pkg/sql/colexec/colexecargs",
@@ -20,7 +20,7 @@ go_library(
         "//pkg/sql/execinfra",
         "//pkg/sql/execinfrapb",
         "//pkg/sql/parser",
-        "//pkg/sql/randgen",
+        "//pkg/sql/rowenc",
         "//pkg/sql/rowexec",
         "//pkg/sql/sem/tree",
         "//pkg/sql/types",
@@ -31,7 +31,6 @@ go_library(
         "//pkg/util/mon",
         "//pkg/util/randutil",
         "//pkg/util/timeofday",
-        "//pkg/util/timeutil",
         "@com_github_cockroachdb_apd_v2//:apd",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_pmezard_go_difflib//difflib",

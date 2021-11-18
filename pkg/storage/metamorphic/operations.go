@@ -14,10 +14,9 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
-	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -125,20 +124,16 @@ func generateMVCCScan(
 	}
 	maxKeys := int64(m.floatGenerator.parse(args[3]) * 32)
 	targetBytes := int64(m.floatGenerator.parse(args[4]) * (1 << 20))
-	targetBytesAvoidExcess := m.boolGenerator.parse(args[5])
-	targetBytesAllowEmpty := m.boolGenerator.parse(args[6])
 	return &mvccScanOp{
-		m:                      m,
-		key:                    key.Key,
-		endKey:                 endKey.Key,
-		ts:                     ts,
-		txn:                    txn,
-		inconsistent:           inconsistent,
-		reverse:                reverse,
-		maxKeys:                maxKeys,
-		targetBytes:            targetBytes,
-		targetBytesAvoidExcess: targetBytesAvoidExcess,
-		targetBytesAllowEmpty:  targetBytesAllowEmpty,
+		m:            m,
+		key:          key.Key,
+		endKey:       endKey.Key,
+		ts:           ts,
+		txn:          txn,
+		inconsistent: inconsistent,
+		reverse:      reverse,
+		maxKeys:      maxKeys,
+		targetBytes:  targetBytes,
 	}
 }
 
@@ -151,16 +146,6 @@ func printIterState(iter storage.MVCCIterator) string {
 		return "valid = false"
 	}
 	return fmt.Sprintf("key = %s", iter.UnsafeKey().String())
-}
-
-func addKeyToLockSpans(txn *roachpb.Transaction, key roachpb.Key) {
-	// Update the txn's lock spans to account for this intent being written.
-	newLockSpans := make([]roachpb.Span, 0, len(txn.LockSpans)+1)
-	newLockSpans = append(newLockSpans, txn.LockSpans...)
-	newLockSpans = append(newLockSpans, roachpb.Span{
-		Key: key,
-	})
-	txn.LockSpans, _ = roachpb.MergeSpans(&newLockSpans)
 }
 
 type mvccGetOp struct {
@@ -211,7 +196,10 @@ func (m mvccPutOp) run(ctx context.Context) string {
 		return fmt.Sprintf("error: %s", err)
 	}
 
-	addKeyToLockSpans(txn, m.key)
+	// Update the txn's lock spans to account for this intent being written.
+	txn.LockSpans = append(txn.LockSpans, roachpb.Span{
+		Key: m.key,
+	})
 	return "ok"
 }
 
@@ -234,7 +222,10 @@ func (m mvccCPutOp) run(ctx context.Context) string {
 		return fmt.Sprintf("error: %s", err)
 	}
 
-	addKeyToLockSpans(txn, m.key)
+	// Update the txn's lock spans to account for this intent being written.
+	txn.LockSpans = append(txn.LockSpans, roachpb.Span{
+		Key: m.key,
+	})
 	return "ok"
 }
 
@@ -256,7 +247,10 @@ func (m mvccInitPutOp) run(ctx context.Context) string {
 		return fmt.Sprintf("error: %s", err)
 	}
 
-	addKeyToLockSpans(txn, m.key)
+	// Update the txn's lock spans to account for this intent being written.
+	txn.LockSpans = append(txn.LockSpans, roachpb.Span{
+		Key: m.key,
+	})
 	return "ok"
 }
 
@@ -280,17 +274,11 @@ func (m mvccDeleteRangeOp) run(ctx context.Context) string {
 
 	// Update the txn's lock spans to account for this intent being written.
 	for _, key := range keys {
-		addKeyToLockSpans(txn, key)
+		txn.LockSpans = append(txn.LockSpans, roachpb.Span{
+			Key: key,
+		})
 	}
-	var builder strings.Builder
-	fmt.Fprintf(&builder, "truncated range to delete = %s - %s, deleted keys = ", m.key, m.endKey)
-	for i, key := range keys {
-		fmt.Fprintf(&builder, "%s", key)
-		if i < len(keys)-1 {
-			fmt.Fprintf(&builder, ", ")
-		}
-	}
-	return builder.String()
+	return "ok"
 }
 
 type mvccClearTimeRangeOp struct {
@@ -304,9 +292,8 @@ type mvccClearTimeRangeOp struct {
 
 func (m mvccClearTimeRangeOp) run(ctx context.Context) string {
 	writer := m.m.getReadWriter(m.writer)
-	useTBI := m.writer == "engine"
 	span, err := storage.MVCCClearTimeRange(ctx, writer, &enginepb.MVCCStats{}, m.key, m.endKey,
-		m.startTime, m.endTime, math.MaxInt64, math.MaxInt64, useTBI)
+		m.startTime, m.endTime, math.MaxInt64, math.MaxInt64, true /* useTBI */)
 	if err != nil {
 		return fmt.Sprintf("error: %s", err)
 	}
@@ -331,7 +318,9 @@ func (m mvccDeleteOp) run(ctx context.Context) string {
 	}
 
 	// Update the txn's lock spans to account for this intent being written.
-	addKeyToLockSpans(txn, m.key)
+	txn.LockSpans = append(txn.LockSpans, roachpb.Span{
+		Key: m.key,
+	})
 	return "ok"
 }
 
@@ -352,17 +341,15 @@ func (m mvccFindSplitKeyOp) run(ctx context.Context) string {
 }
 
 type mvccScanOp struct {
-	m                      *metaTestRunner
-	key                    roachpb.Key
-	endKey                 roachpb.Key
-	ts                     hlc.Timestamp
-	txn                    txnID
-	inconsistent           bool
-	reverse                bool
-	maxKeys                int64
-	targetBytes            int64
-	targetBytesAvoidExcess bool
-	targetBytesAllowEmpty  bool
+	m            *metaTestRunner
+	key          roachpb.Key
+	endKey       roachpb.Key
+	ts           hlc.Timestamp
+	txn          txnID
+	inconsistent bool
+	reverse      bool
+	maxKeys      int64
+	targetBytes  int64
 }
 
 func (m mvccScanOp) run(ctx context.Context) string {
@@ -377,14 +364,12 @@ func (m mvccScanOp) run(ctx context.Context) string {
 	// we will try MVCCScanning on batches and produce diffs between runs on
 	// different engines that don't point to an actual issue.
 	result, err := storage.MVCCScan(ctx, m.m.engine, m.key, m.endKey, m.ts, storage.MVCCScanOptions{
-		Inconsistent:           m.inconsistent,
-		Tombstones:             true,
-		Reverse:                m.reverse,
-		Txn:                    txn,
-		MaxKeys:                m.maxKeys,
-		TargetBytes:            m.targetBytes,
-		TargetBytesAvoidExcess: m.targetBytesAvoidExcess,
-		TargetBytesAllowEmpty:  m.targetBytesAllowEmpty,
+		Inconsistent: m.inconsistent,
+		Tombstones:   true,
+		Reverse:      m.reverse,
+		Txn:          txn,
+		MaxKeys:      m.maxKeys,
+		TargetBytes:  m.targetBytes,
 	})
 	if err != nil {
 		return fmt.Sprintf("error: %s", err)
@@ -427,7 +412,6 @@ type txnCommitOp struct {
 func (t txnCommitOp) run(ctx context.Context) string {
 	txn := t.m.getTxn(t.id)
 	txn.Status = roachpb.COMMITTED
-	txn.Sequence++
 
 	for _, span := range txn.LockSpans {
 		intent := roachpb.MakeLockUpdate(txn, span)
@@ -438,79 +422,7 @@ func (t txnCommitOp) run(ctx context.Context) string {
 		}
 	}
 	delete(t.m.openTxns, t.id)
-	delete(t.m.openSavepoints, t.id)
 
-	return "ok"
-}
-
-type txnAbortOp struct {
-	m  *metaTestRunner
-	id txnID
-}
-
-func (t txnAbortOp) run(ctx context.Context) string {
-	txn := t.m.getTxn(t.id)
-	txn.Status = roachpb.ABORTED
-
-	for _, span := range txn.LockSpans {
-		intent := roachpb.MakeLockUpdate(txn, span)
-		intent.Status = roachpb.ABORTED
-		_, err := storage.MVCCResolveWriteIntent(context.TODO(), t.m.engine, nil, intent)
-		if err != nil {
-			panic(err)
-		}
-	}
-	delete(t.m.openTxns, t.id)
-	delete(t.m.openSavepoints, t.id)
-
-	return "ok"
-}
-
-type txnCreateSavepointOp struct {
-	m  *metaTestRunner
-	id txnID
-	// The index of the savepoint (in m.openSavepoints[id]) being created.
-	// As savepoints are only appended to the end, this must equal
-	// len(m.openSavepoints[t.id]) at time of running.
-	savepoint int
-}
-
-func (t txnCreateSavepointOp) run(ctx context.Context) string {
-	txn := t.m.getTxn(t.id)
-	txn.Sequence++
-
-	// Append txn.Sequence.
-	if len(t.m.openSavepoints[t.id]) == t.savepoint {
-		t.m.openSavepoints[t.id] = append(t.m.openSavepoints[t.id], txn.Sequence)
-	} else {
-		panic(fmt.Sprintf("mismatching savepoint index: %d != %d", len(t.m.openSavepoints[t.id]), t.savepoint))
-	}
-
-	return fmt.Sprintf("savepoint %d", t.savepoint)
-}
-
-type txnRollbackSavepointOp struct {
-	m  *metaTestRunner
-	id txnID
-	// The index of the savepoint (in m.openSavepoints[id]) being rolled back to.
-	// Txn sequences are generated and stored at runtime in that slice.
-	savepoint int
-}
-
-func (t txnRollbackSavepointOp) run(ctx context.Context) string {
-	txn := t.m.getTxn(t.id)
-	txn.Sequence++
-
-	savepoints := t.m.openSavepoints[t.id]
-	if len(savepoints) == 0 || t.savepoint > len(savepoints) {
-		panic(fmt.Sprintf("got a higher savepoint idx %d than allowed for txn %s", t.savepoint, t.id))
-	}
-
-	ignoredSeqNumRange := enginepb.IgnoredSeqNumRange{
-		Start: savepoints[t.savepoint],
-		End:   txn.Sequence,
-	}
-	txn.AddIgnoredSeqNumRange(ignoredSeqNumRange)
 	return "ok"
 }
 
@@ -553,7 +465,7 @@ type iterOpenOp struct {
 
 func (i iterOpenOp) run(ctx context.Context) string {
 	rw := i.m.getReadWriter(i.rw)
-	iter := rw.NewMVCCIterator(storage.MVCCKeyIterKind, storage.IterOptions{
+	iter := rw.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{
 		Prefix:     false,
 		LowerBound: i.key,
 		UpperBound: i.endKey.Next(),
@@ -603,7 +515,7 @@ func (i iterSeekOp) run(ctx context.Context) string {
 		if i.seekLT {
 			return "noop due to missing seekLT support in rocksdb batch iterators"
 		}
-		// RocksDB batch iterators do not account åfor lower bounds consistently:
+		// RocksDB batch iterators do not account for lower bounds consistently:
 		// https://github.com/cockroachdb/cockroach/issues/44512
 		// In the meantime, ensure the SeekGE key >= lower bound.
 		lowerBound := iterInfo.lowerBound
@@ -706,10 +618,11 @@ type ingestOp struct {
 
 func (i ingestOp) run(ctx context.Context) string {
 	sstPath := filepath.Join(i.m.path, "ingest.sst")
-	f, err := i.m.engineFS.Create(sstPath)
+	f, err := os.Create(sstPath)
 	if err != nil {
 		return fmt.Sprintf("error = %s", err.Error())
 	}
+	defer f.Close()
 
 	sstWriter := storage.MakeIngestionSSTWriter(f)
 	for _, key := range i.keys {
@@ -737,9 +650,8 @@ func (r restartOp) run(ctx context.Context) string {
 		return "ok"
 	}
 
-	oldEngine, newEngine := r.m.restart()
-	r.m.printComment(fmt.Sprintf("restarting: %s -> %s", oldEngine.name, newEngine.name))
-	r.m.printComment(fmt.Sprintf("new options: %s", newEngine.opts.String()))
+	oldEngineName, newEngineName := r.m.restart()
+	r.m.printComment(fmt.Sprintf("restarting: %s -> %s", oldEngineName, newEngineName))
 	return "ok"
 }
 
@@ -749,6 +661,7 @@ func (r restartOp) run(ctx context.Context) string {
 //  - MVCCBlindPut
 //  - MVCCMerge
 //  - MVCCIncrement
+//  - MVCCResolveWriteIntent in the aborted case
 //  - and any others that would be important to test.
 var opGenerators = []opGenerator{
 	{
@@ -796,13 +709,13 @@ var opGenerators = []opGenerator{
 		name: "mvcc_put",
 		generate: func(ctx context.Context, m *metaTestRunner, args ...string) mvccOp {
 			writer := readWriterID(args[0])
-			txn := txnID(args[1])
-			key := m.txnKeyGenerator.parse(args[2])
-			value := roachpb.MakeValueFromBytes(m.valueGenerator.parse(args[3]))
+			key := m.keyGenerator.parse(args[1])
+			value := roachpb.MakeValueFromBytes(m.valueGenerator.parse(args[2]))
+			txn := txnID(args[3])
 
 			// Track this write in the txn generator. This ensures the batch will be
 			// committed before the transaction is committed
-			m.txnGenerator.trackTransactionalWrite(writer, txn, key.Key, nil)
+			m.txnGenerator.trackWriteOnBatch(writer, txn)
 			return &mvccPutOp{
 				m:      m,
 				writer: writer,
@@ -813,9 +726,9 @@ var opGenerators = []opGenerator{
 		},
 		operands: []operandType{
 			operandReadWriter,
-			operandTransaction,
-			operandUnusedMVCCKey,
+			operandMVCCKey,
 			operandValue,
+			operandTransaction,
 		},
 		weight: 500,
 	},
@@ -823,14 +736,14 @@ var opGenerators = []opGenerator{
 		name: "mvcc_conditional_put",
 		generate: func(ctx context.Context, m *metaTestRunner, args ...string) mvccOp {
 			writer := readWriterID(args[0])
-			txn := txnID(args[1])
-			key := m.txnKeyGenerator.parse(args[2])
-			value := roachpb.MakeValueFromBytes(m.valueGenerator.parse(args[3]))
-			expVal := m.valueGenerator.parse(args[4])
+			key := m.keyGenerator.parse(args[1])
+			value := roachpb.MakeValueFromBytes(m.valueGenerator.parse(args[2]))
+			expVal := m.valueGenerator.parse(args[3])
+			txn := txnID(args[4])
 
 			// Track this write in the txn generator. This ensures the batch will be
 			// committed before the transaction is committed
-			m.txnGenerator.trackTransactionalWrite(writer, txn, key.Key, nil)
+			m.txnGenerator.trackWriteOnBatch(writer, txn)
 			return &mvccCPutOp{
 				m:      m,
 				writer: writer,
@@ -842,10 +755,10 @@ var opGenerators = []opGenerator{
 		},
 		operands: []operandType{
 			operandReadWriter,
+			operandMVCCKey,
+			operandValue,
+			operandValue,
 			operandTransaction,
-			operandUnusedMVCCKey,
-			operandValue,
-			operandValue,
 		},
 		weight: 50,
 	},
@@ -853,13 +766,13 @@ var opGenerators = []opGenerator{
 		name: "mvcc_init_put",
 		generate: func(ctx context.Context, m *metaTestRunner, args ...string) mvccOp {
 			writer := readWriterID(args[0])
-			txn := txnID(args[1])
-			key := m.txnKeyGenerator.parse(args[2])
-			value := roachpb.MakeValueFromBytes(m.valueGenerator.parse(args[3]))
+			key := m.keyGenerator.parse(args[1])
+			value := roachpb.MakeValueFromBytes(m.valueGenerator.parse(args[2]))
+			txn := txnID(args[3])
 
 			// Track this write in the txn generator. This ensures the batch will be
 			// committed before the transaction is committed
-			m.txnGenerator.trackTransactionalWrite(writer, txn, key.Key, nil)
+			m.txnGenerator.trackWriteOnBatch(writer, txn)
 			return &mvccInitPutOp{
 				m:      m,
 				writer: writer,
@@ -870,9 +783,9 @@ var opGenerators = []opGenerator{
 		},
 		operands: []operandType{
 			operandReadWriter,
-			operandTransaction,
-			operandUnusedMVCCKey,
+			operandMVCCKey,
 			operandValue,
+			operandTransaction,
 		},
 		weight: 50,
 	},
@@ -880,22 +793,17 @@ var opGenerators = []opGenerator{
 		name: "mvcc_delete_range",
 		generate: func(ctx context.Context, m *metaTestRunner, args ...string) mvccOp {
 			writer := readWriterID(args[0])
-			txn := txnID(args[1])
-			key := m.keyGenerator.parse(args[2]).Key
-			endKey := m.keyGenerator.parse(args[3]).Key
+			key := m.keyGenerator.parse(args[1]).Key
+			endKey := m.keyGenerator.parse(args[2]).Key
+			txn := txnID(args[3])
 
 			if endKey.Compare(key) < 0 {
 				key, endKey = endKey, key
 			}
-			// forEachConflict is guaranteed to iterate
-			m.txnGenerator.forEachConflict(writer, txn, key, endKey, func(conflict roachpb.Span) bool {
-				endKey = conflict.Key
-				return false
-			})
 
 			// Track this write in the txn generator. This ensures the batch will be
 			// committed before the transaction is committed
-			m.txnGenerator.trackTransactionalWrite(writer, txn, key, endKey)
+			m.txnGenerator.trackWriteOnBatch(writer, txn)
 			return &mvccDeleteRangeOp{
 				m:      m,
 				writer: writer,
@@ -904,14 +812,14 @@ var opGenerators = []opGenerator{
 				txn:    txn,
 			}
 		},
-		dependentOps: func(m *metaTestRunner, args ...string) []opReference {
+		dependentOps: func(m *metaTestRunner, args ...string) (results []opReference) {
 			return closeItersOnBatch(m, readWriterID(args[0]))
 		},
 		operands: []operandType{
 			operandReadWriter,
+			operandMVCCKey,
+			operandMVCCKey,
 			operandTransaction,
-			operandUnusedMVCCKey,
-			operandUnusedMVCCKey,
 		},
 		weight: 20,
 	},
@@ -930,11 +838,6 @@ var opGenerators = []opGenerator{
 			if endTime.Less(startTime) {
 				startTime, endTime = endTime, startTime
 			}
-			// This is to avoid a panic where startTime == endTime == hlc.Timestamp{}
-			// and where startTime gets next()'d in the time-bound iterator creation
-			// but endTime doesn't, making it seem like a start timestamp is set
-			// but an end timestamp is not.
-			endTime = endTime.Next()
 			return &mvccClearTimeRangeOp{
 				m:         m,
 				writer:    writer,
@@ -944,7 +847,7 @@ var opGenerators = []opGenerator{
 				endTime:   endTime,
 			}
 		},
-		dependentOps: func(m *metaTestRunner, args ...string) []opReference {
+		dependentOps: func(m *metaTestRunner, args ...string) (results []opReference) {
 			return closeItersOnBatch(m, readWriterID(args[0]))
 		},
 		operands: []operandType{
@@ -960,12 +863,12 @@ var opGenerators = []opGenerator{
 		name: "mvcc_delete",
 		generate: func(ctx context.Context, m *metaTestRunner, args ...string) mvccOp {
 			writer := readWriterID(args[0])
-			txn := txnID(args[1])
-			key := m.txnKeyGenerator.parse(args[2])
+			key := m.keyGenerator.parse(args[1])
+			txn := txnID(args[2])
 
 			// Track this write in the txn generator. This ensures the batch will be
 			// committed before the transaction is committed
-			m.txnGenerator.trackTransactionalWrite(writer, txn, key.Key, nil)
+			m.txnGenerator.trackWriteOnBatch(writer, txn)
 			return &mvccDeleteOp{
 				m:      m,
 				writer: writer,
@@ -975,8 +878,8 @@ var opGenerators = []opGenerator{
 		},
 		operands: []operandType{
 			operandReadWriter,
+			operandMVCCKey,
 			operandTransaction,
-			operandUnusedMVCCKey,
 		},
 		weight: 100,
 	},
@@ -1011,8 +914,6 @@ var opGenerators = []opGenerator{
 			operandTransaction,
 			operandFloat,
 			operandFloat,
-			operandBool,
-			operandBool,
 		},
 		weight: 100,
 	},
@@ -1027,8 +928,6 @@ var opGenerators = []opGenerator{
 			operandPastTS,
 			operandFloat,
 			operandFloat,
-			operandBool,
-			operandBool,
 		},
 		weight: 100,
 	},
@@ -1043,8 +942,6 @@ var opGenerators = []opGenerator{
 			operandTransaction,
 			operandFloat,
 			operandFloat,
-			operandBool,
-			operandBool,
 		},
 		weight: 100,
 	},
@@ -1089,73 +986,7 @@ var opGenerators = []opGenerator{
 		operands: []operandType{
 			operandTransaction,
 		},
-		weight: 50,
-	},
-	{
-		name: "txn_abort",
-		generate: func(ctx context.Context, m *metaTestRunner, args ...string) mvccOp {
-			m.txnGenerator.generateClose(txnID(args[0]))
-			return &txnAbortOp{
-				m:  m,
-				id: txnID(args[0]),
-			}
-		},
-		dependentOps: func(m *metaTestRunner, args ...string) (result []opReference) {
-			txn := txnID(args[0])
-
-			// A transaction could have in-flight writes in some batches. Get a list
-			// of all those batches, and dispatch batch_commit operations for them.
-			for batch := range m.txnGenerator.openBatches[txn] {
-				result = append(result, opReference{
-					generator: m.nameToGenerator["batch_commit"],
-					args:      []string{string(batch)},
-				})
-			}
-			return
-		},
-		operands: []operandType{
-			operandTransaction,
-		},
-		weight: 50,
-	},
-	{
-		name: "txn_create_savepoint",
-		generate: func(ctx context.Context, m *metaTestRunner, args ...string) mvccOp {
-			savepoint, err := strconv.ParseInt(args[1], 10, 32)
-			if err != nil {
-				panic(err.Error())
-			}
-			return &txnCreateSavepointOp{
-				m:         m,
-				id:        txnID(args[0]),
-				savepoint: int(savepoint),
-			}
-		},
-		operands: []operandType{
-			operandTransaction,
-			operandSavepoint,
-		},
-		isOpener: true,
-		weight:   10,
-	},
-	{
-		name: "txn_rollback_savepoint",
-		generate: func(ctx context.Context, m *metaTestRunner, args ...string) mvccOp {
-			savepoint, err := strconv.ParseInt(args[1], 10, 32)
-			if err != nil {
-				panic(err.Error())
-			}
-			return &txnRollbackSavepointOp{
-				m:         m,
-				id:        txnID(args[0]),
-				savepoint: int(savepoint),
-			}
-		},
-		operands: []operandType{
-			operandTransaction,
-			operandSavepoint,
-		},
-		weight: 10,
+		weight: 100,
 	},
 	{
 		name: "batch_open",

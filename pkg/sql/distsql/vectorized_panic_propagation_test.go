@@ -18,12 +18,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colflow"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/testutils/distsqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/stretchr/testify/require"
 )
@@ -45,25 +45,32 @@ func TestNonVectorizedPanicDoesntHangServer(t *testing.T) {
 	base := flowinfra.NewFlowBase(
 		flowCtx,
 		nil, /* flowReg */
-		nil, /* rowSyncFlowConsumer */
-		nil, /* batchSyncFlowConsumer */
+		nil, /* syncFlowConsumer */
 		nil, /* localProcessors */
 		nil, /* onFlowCleanup */
 	)
 	flow := colflow.NewVectorizedFlow(base)
 
-	mat := colexec.NewMaterializer(
+	mat, err := colexec.NewMaterializer(
 		&flowCtx,
 		0, /* processorID */
-		colexecargs.OpWithMetaInfo{Root: &colexecop.CallbackOperator{
-			NextCb: func() coldata.Batch {
+		&colexecop.CallbackOperator{
+			NextCb: func(ctx context.Context) coldata.Batch {
 				panic("")
 			},
-		}},
+		},
 		nil, /* typs */
+		&distsqlutils.RowBuffer{},
+		nil, /* getStats */
+		nil, /* metadataSourceQueue */
+		nil, /* toClose */
+		nil, /* cancelFlow */
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	ctx, _, err := base.Setup(ctx, nil, flowinfra.FuseAggressively)
+	ctx, err = base.Setup(ctx, nil, flowinfra.FuseAggressively)
 	require.NoError(t, err)
 
 	base.SetProcessors([]execinfra.Processor{mat})
@@ -81,5 +88,5 @@ func TestNonVectorizedPanicDoesntHangServer(t *testing.T) {
 		}),
 	)
 
-	require.Panics(t, func() { flow.Run(ctx, nil) })
+	require.Panics(t, func() { require.NoError(t, flow.Run(ctx, nil)) })
 }

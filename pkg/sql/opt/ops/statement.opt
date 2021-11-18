@@ -53,9 +53,6 @@ define CreateViewPrivate {
 
     # Deps contains the data source dependencies of the view.
     Deps ViewDeps
-
-    # TypeDeps contains the type dependencies of the view.
-    TypeDeps ViewTypeDeps
 }
 
 # Explain returns information about the execution plan of the "input"
@@ -201,9 +198,6 @@ define AlterTableRelocatePrivate {
 define ControlJobs {
     # The input expression returns job IDs (as integers).
     Input RelExpr
-
-    # Reason is the reason string for the command job.
-    Reason ScalarExpr
     _ ControlJobsPrivate
 }
 

@@ -69,7 +69,7 @@ func (b *Builder) buildUpdate(upd *tree.Update, inScope *scope) (outScope *scope
 	}
 
 	// UX friendliness safeguard.
-	if upd.Where == nil && b.evalCtx.SessionData().SafeUpdates {
+	if upd.Where == nil && b.evalCtx.SessionData.SafeUpdates {
 		panic(pgerror.DangerousStatementf("UPDATE without WHERE clause"))
 	}
 
@@ -196,36 +196,41 @@ func (mb *mutationBuilder) addUpdateCols(exprs tree.UpdateExprs) {
 	checkCol := func(sourceCol *scopeColumn, targetColID opt.ColumnID) {
 		// Type check the input expression against the corresponding table column.
 		ord := mb.tabID.ColumnOrdinal(targetColID)
-		targetCol := mb.tab.Column(ord)
-		checkDatumTypeFitsColumnType(targetCol, sourceCol.typ)
-
-		for _, expr := range exprs {
-			// Compatibility check the input expression against the corresponding
-			// table column.
-			if len(expr.Names) == 1 && expr.Names[0] == targetCol.ColName() {
-				checkUpdateExpression(targetCol, expr)
-			}
-		}
+		checkDatumTypeFitsColumnType(mb.tab.Column(ord), sourceCol.typ)
 
 		// Add source column ID to the list of columns to update.
 		mb.updateColIDs[ord] = sourceCol.id
+
+		// Rename the column to match the target column being updated.
+		sourceCol.name = mb.tab.Column(ord).ColName()
 	}
 
 	addCol := func(expr tree.Expr, targetColID opt.ColumnID) {
+		// If the expression is already a scopeColumn, we can skip creating a
+		// new scopeColumn and proceed with type checking and adding the column
+		// to the list of source columns to update. The expression can be a
+		// scopeColumn when addUpdateCols is called from the
+		// onUpdateCascadeBuilder while building foreign key cascading updates.
+		//
+		// The input scopeColumn is a pointer to a column in mb.outScope. It was
+		// copied by value to projectionsScope. The checkCol function mutates
+		// the name of projected columns, so we must lookup the column in
+		// projectionsScope so that the correct scopeColumn is renamed.
+		if scopeCol, ok := expr.(*scopeColumn); ok {
+			checkCol(projectionsScope.getColumn(scopeCol.id), targetColID)
+			return
+		}
+
 		// Allow right side of SET to be DEFAULT.
 		if _, ok := expr.(tree.DefaultVal); ok {
-			expr = mb.parseDefaultExpr(targetColID)
+			expr = mb.parseDefaultOrComputedExpr(targetColID)
 		}
 
 		// Add new column to the projections scope.
-		// TODO(mgartner): Perform an assignment cast if necessary.
 		targetColMeta := mb.md.ColumnMeta(targetColID)
 		desiredType := targetColMeta.Type
 		texpr := inScope.resolveType(expr, desiredType)
-		colName := scopeColName(tree.Name(targetColMeta.Alias)).WithMetadataName(
-			targetColMeta.Alias + "_new",
-		)
-		scopeCol := projectionsScope.addColumn(colName, texpr)
+		scopeCol := projectionsScope.addColumn(targetColMeta.Alias+"_new", texpr)
 		mb.b.buildScalar(texpr, inScope, projectionsScope, scopeCol, nil)
 
 		checkCol(scopeCol, targetColID)
@@ -244,8 +249,6 @@ func (mb *mutationBuilder) addUpdateCols(exprs tree.UpdateExprs) {
 				// Type check and rename columns.
 				for i := range subqueryScope.cols {
 					checkCol(&subqueryScope.cols[i], mb.targetColList[n])
-					ord := mb.tabID.ColumnOrdinal(mb.targetColList[n])
-					subqueryScope.cols[i].name = scopeColName(mb.tab.Column(ord).ColName())
 					n++
 				}
 
@@ -304,11 +307,7 @@ func (mb *mutationBuilder) addSynthesizedColsForUpdate() {
 	// table. These are not visible to queries, and will always be updated to
 	// their default values. This is necessary because they may not yet have been
 	// set by the backfiller.
-	mb.addSynthesizedDefaultCols(
-		mb.updateColIDs,
-		false, /* includeOrdinary */
-		true,  /* applyOnUpdate */
-	)
+	mb.addSynthesizedDefaultCols(mb.updateColIDs, false /* includeOrdinary */)
 
 	// Possibly round DECIMAL-related columns containing update values. Do
 	// this before evaluating computed expressions, since those may depend on
@@ -333,7 +332,11 @@ func (mb *mutationBuilder) buildUpdate(returning tree.ReturningExprs) {
 	// check constraint, refer to the correct columns.
 	mb.disambiguateColumns()
 
-	// Add any check constraint boolean columns to the input.
+	// Keep a reference to the scope before the check constraint columns are
+	// projected. We use this scope when projecting the partial index put
+	// columns because the check columns are not in-scope for those expressions.
+	preCheckScope := mb.outScope
+
 	mb.addCheckConstraintCols(true /* isUpdate */)
 
 	// Add the partial index predicate expressions to the table metadata.
@@ -342,7 +345,7 @@ func (mb *mutationBuilder) buildUpdate(returning tree.ReturningExprs) {
 	mb.b.addPartialIndexPredicatesForTable(mb.md.TableMeta(mb.tabID), nil /* scan */)
 
 	// Project partial index PUT and DEL boolean columns.
-	mb.projectPartialIndexPutAndDelCols()
+	mb.projectPartialIndexPutAndDelCols(preCheckScope, mb.fetchScope)
 
 	mb.buildUniqueChecksForUpdate()
 

@@ -19,20 +19,20 @@ import "github.com/cockroachdb/cockroach/pkg/settings"
 var DummyVars = map[string]sessionVar{
 	"enable_seqscan": makeDummyBooleanSessionVar(
 		"enable_seqscan",
-		func(evalCtx *extendedEvalContext) (string, error) {
-			return formatBoolAsPostgresSetting(evalCtx.SessionData().EnableSeqScan), nil
+		func(evalCtx *extendedEvalContext) string {
+			return formatBoolAsPostgresSetting(evalCtx.SessionData.EnableSeqScan)
 		},
-		func(m sessionDataMutator, v bool) {
+		func(m *sessionDataMutator, v bool) {
 			m.SetEnableSeqScan(v)
 		},
 		func(sv *settings.Values) string { return "on" },
 	),
 	"synchronous_commit": makeDummyBooleanSessionVar(
 		"synchronous_commit",
-		func(evalCtx *extendedEvalContext) (string, error) {
-			return formatBoolAsPostgresSetting(evalCtx.SessionData().SynchronousCommit), nil
+		func(evalCtx *extendedEvalContext) string {
+			return formatBoolAsPostgresSetting(evalCtx.SessionData.SynchronousCommit)
 		},
-		func(m sessionDataMutator, v bool) {
+		func(m *sessionDataMutator, v bool) {
 			m.SetSynchronousCommit(v)
 		},
 		func(sv *settings.Values) string { return "on" },
@@ -64,6 +64,7 @@ var UnsupportedVars = func(ss ...string) map[string]struct{} {
 	// "application_name",
 	"array_nulls",
 	"backend_flush_after",
+	"backslash_quote",
 	// "bytea_output",
 	"check_function_bodies",
 	// "client_encoding",
@@ -118,10 +119,10 @@ var UnsupportedVars = func(ss ...string) map[string]struct{} {
 	// "idle_in_transaction_session_timeout",
 	"ignore_checksum_failure",
 	"join_collapse_limit",
-	// "lc_messages",
-	// "lc_monetary",
-	// "lc_numeric",
-	// "lc_time",
+	"lc_messages",
+	"lc_monetary",
+	"lc_numeric",
+	"lc_time",
 	"lo_compat_privileges",
 	"local_preload_libraries",
 	// "lock_timeout",
@@ -152,7 +153,7 @@ var UnsupportedVars = func(ss ...string) map[string]struct{} {
 	"quote_all_identifiers",
 	"random_page_cost",
 	"replacement_sort_tuples",
-	// "role",
+	"role",
 	// "row_security",
 	// "search_path",
 	"seed",

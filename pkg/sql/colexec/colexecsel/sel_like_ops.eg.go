@@ -12,6 +12,7 @@ package colexecsel
 
 import (
 	"bytes"
+	"context"
 	"regexp"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
@@ -22,15 +23,16 @@ type selPrefixBytesBytesConstOp struct {
 	constArg []byte
 }
 
-func (p *selPrefixBytesBytesConstOp) Next() coldata.Batch {
+func (p *selPrefixBytesBytesConstOp) Next(ctx context.Context) coldata.Batch {
 	// In order to inline the templated code of overloads, we need to have a
 	// `_overloadHelper` local variable of type `execgen.OverloadHelper`.
 	_overloadHelper := p.overloadHelper
 	// However, the scratch is not used in all of the selection operators, so
 	// we add this to go around "unused" error.
 	_ = _overloadHelper
+	var isNull bool
 	for {
-		batch := p.Input.Next()
+		batch := p.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return batch
 		}
@@ -44,13 +46,11 @@ func (p *selPrefixBytesBytesConstOp) Next() coldata.Batch {
 			if sel := batch.Selection(); sel != nil {
 				sel = sel[:n]
 				for _, i := range sel {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = bytes.HasPrefix(arg, p.constArg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -60,13 +60,11 @@ func (p *selPrefixBytesBytesConstOp) Next() coldata.Batch {
 				sel := batch.Selection()
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = bytes.HasPrefix(arg, p.constArg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -79,7 +77,8 @@ func (p *selPrefixBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = bytes.HasPrefix(arg, p.constArg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -92,7 +91,8 @@ func (p *selPrefixBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = bytes.HasPrefix(arg, p.constArg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -104,6 +104,10 @@ func (p *selPrefixBytesBytesConstOp) Next() coldata.Batch {
 			return batch
 		}
 	}
+}
+
+func (p *selPrefixBytesBytesConstOp) Init() {
+	p.Input.Init()
 }
 
 type selSuffixBytesBytesConstOp struct {
@@ -111,15 +115,16 @@ type selSuffixBytesBytesConstOp struct {
 	constArg []byte
 }
 
-func (p *selSuffixBytesBytesConstOp) Next() coldata.Batch {
+func (p *selSuffixBytesBytesConstOp) Next(ctx context.Context) coldata.Batch {
 	// In order to inline the templated code of overloads, we need to have a
 	// `_overloadHelper` local variable of type `execgen.OverloadHelper`.
 	_overloadHelper := p.overloadHelper
 	// However, the scratch is not used in all of the selection operators, so
 	// we add this to go around "unused" error.
 	_ = _overloadHelper
+	var isNull bool
 	for {
-		batch := p.Input.Next()
+		batch := p.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return batch
 		}
@@ -133,13 +138,11 @@ func (p *selSuffixBytesBytesConstOp) Next() coldata.Batch {
 			if sel := batch.Selection(); sel != nil {
 				sel = sel[:n]
 				for _, i := range sel {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = bytes.HasSuffix(arg, p.constArg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -149,13 +152,11 @@ func (p *selSuffixBytesBytesConstOp) Next() coldata.Batch {
 				sel := batch.Selection()
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = bytes.HasSuffix(arg, p.constArg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -168,7 +169,8 @@ func (p *selSuffixBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = bytes.HasSuffix(arg, p.constArg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -181,7 +183,8 @@ func (p *selSuffixBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = bytes.HasSuffix(arg, p.constArg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -193,6 +196,10 @@ func (p *selSuffixBytesBytesConstOp) Next() coldata.Batch {
 			return batch
 		}
 	}
+}
+
+func (p *selSuffixBytesBytesConstOp) Init() {
+	p.Input.Init()
 }
 
 type selContainsBytesBytesConstOp struct {
@@ -200,15 +207,16 @@ type selContainsBytesBytesConstOp struct {
 	constArg []byte
 }
 
-func (p *selContainsBytesBytesConstOp) Next() coldata.Batch {
+func (p *selContainsBytesBytesConstOp) Next(ctx context.Context) coldata.Batch {
 	// In order to inline the templated code of overloads, we need to have a
 	// `_overloadHelper` local variable of type `execgen.OverloadHelper`.
 	_overloadHelper := p.overloadHelper
 	// However, the scratch is not used in all of the selection operators, so
 	// we add this to go around "unused" error.
 	_ = _overloadHelper
+	var isNull bool
 	for {
-		batch := p.Input.Next()
+		batch := p.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return batch
 		}
@@ -222,13 +230,11 @@ func (p *selContainsBytesBytesConstOp) Next() coldata.Batch {
 			if sel := batch.Selection(); sel != nil {
 				sel = sel[:n]
 				for _, i := range sel {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = bytes.Contains(arg, p.constArg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -238,13 +244,11 @@ func (p *selContainsBytesBytesConstOp) Next() coldata.Batch {
 				sel := batch.Selection()
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = bytes.Contains(arg, p.constArg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -257,7 +261,8 @@ func (p *selContainsBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = bytes.Contains(arg, p.constArg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -270,7 +275,8 @@ func (p *selContainsBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = bytes.Contains(arg, p.constArg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -282,6 +288,10 @@ func (p *selContainsBytesBytesConstOp) Next() coldata.Batch {
 			return batch
 		}
 	}
+}
+
+func (p *selContainsBytesBytesConstOp) Init() {
+	p.Input.Init()
 }
 
 type selRegexpBytesBytesConstOp struct {
@@ -289,15 +299,16 @@ type selRegexpBytesBytesConstOp struct {
 	constArg *regexp.Regexp
 }
 
-func (p *selRegexpBytesBytesConstOp) Next() coldata.Batch {
+func (p *selRegexpBytesBytesConstOp) Next(ctx context.Context) coldata.Batch {
 	// In order to inline the templated code of overloads, we need to have a
 	// `_overloadHelper` local variable of type `execgen.OverloadHelper`.
 	_overloadHelper := p.overloadHelper
 	// However, the scratch is not used in all of the selection operators, so
 	// we add this to go around "unused" error.
 	_ = _overloadHelper
+	var isNull bool
 	for {
-		batch := p.Input.Next()
+		batch := p.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return batch
 		}
@@ -311,13 +322,11 @@ func (p *selRegexpBytesBytesConstOp) Next() coldata.Batch {
 			if sel := batch.Selection(); sel != nil {
 				sel = sel[:n]
 				for _, i := range sel {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = p.constArg.Match(arg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -327,13 +336,11 @@ func (p *selRegexpBytesBytesConstOp) Next() coldata.Batch {
 				sel := batch.Selection()
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = p.constArg.Match(arg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -346,7 +353,8 @@ func (p *selRegexpBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = p.constArg.Match(arg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -359,7 +367,8 @@ func (p *selRegexpBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = p.constArg.Match(arg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -371,6 +380,10 @@ func (p *selRegexpBytesBytesConstOp) Next() coldata.Batch {
 			return batch
 		}
 	}
+}
+
+func (p *selRegexpBytesBytesConstOp) Init() {
+	p.Input.Init()
 }
 
 type selNotPrefixBytesBytesConstOp struct {
@@ -378,15 +391,16 @@ type selNotPrefixBytesBytesConstOp struct {
 	constArg []byte
 }
 
-func (p *selNotPrefixBytesBytesConstOp) Next() coldata.Batch {
+func (p *selNotPrefixBytesBytesConstOp) Next(ctx context.Context) coldata.Batch {
 	// In order to inline the templated code of overloads, we need to have a
 	// `_overloadHelper` local variable of type `execgen.OverloadHelper`.
 	_overloadHelper := p.overloadHelper
 	// However, the scratch is not used in all of the selection operators, so
 	// we add this to go around "unused" error.
 	_ = _overloadHelper
+	var isNull bool
 	for {
-		batch := p.Input.Next()
+		batch := p.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return batch
 		}
@@ -400,13 +414,11 @@ func (p *selNotPrefixBytesBytesConstOp) Next() coldata.Batch {
 			if sel := batch.Selection(); sel != nil {
 				sel = sel[:n]
 				for _, i := range sel {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !bytes.HasPrefix(arg, p.constArg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -416,13 +428,11 @@ func (p *selNotPrefixBytesBytesConstOp) Next() coldata.Batch {
 				sel := batch.Selection()
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !bytes.HasPrefix(arg, p.constArg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -435,7 +445,8 @@ func (p *selNotPrefixBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !bytes.HasPrefix(arg, p.constArg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -448,7 +459,8 @@ func (p *selNotPrefixBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !bytes.HasPrefix(arg, p.constArg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -460,6 +472,10 @@ func (p *selNotPrefixBytesBytesConstOp) Next() coldata.Batch {
 			return batch
 		}
 	}
+}
+
+func (p *selNotPrefixBytesBytesConstOp) Init() {
+	p.Input.Init()
 }
 
 type selNotSuffixBytesBytesConstOp struct {
@@ -467,15 +483,16 @@ type selNotSuffixBytesBytesConstOp struct {
 	constArg []byte
 }
 
-func (p *selNotSuffixBytesBytesConstOp) Next() coldata.Batch {
+func (p *selNotSuffixBytesBytesConstOp) Next(ctx context.Context) coldata.Batch {
 	// In order to inline the templated code of overloads, we need to have a
 	// `_overloadHelper` local variable of type `execgen.OverloadHelper`.
 	_overloadHelper := p.overloadHelper
 	// However, the scratch is not used in all of the selection operators, so
 	// we add this to go around "unused" error.
 	_ = _overloadHelper
+	var isNull bool
 	for {
-		batch := p.Input.Next()
+		batch := p.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return batch
 		}
@@ -489,13 +506,11 @@ func (p *selNotSuffixBytesBytesConstOp) Next() coldata.Batch {
 			if sel := batch.Selection(); sel != nil {
 				sel = sel[:n]
 				for _, i := range sel {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !bytes.HasSuffix(arg, p.constArg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -505,13 +520,11 @@ func (p *selNotSuffixBytesBytesConstOp) Next() coldata.Batch {
 				sel := batch.Selection()
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !bytes.HasSuffix(arg, p.constArg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -524,7 +537,8 @@ func (p *selNotSuffixBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !bytes.HasSuffix(arg, p.constArg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -537,7 +551,8 @@ func (p *selNotSuffixBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !bytes.HasSuffix(arg, p.constArg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -549,6 +564,10 @@ func (p *selNotSuffixBytesBytesConstOp) Next() coldata.Batch {
 			return batch
 		}
 	}
+}
+
+func (p *selNotSuffixBytesBytesConstOp) Init() {
+	p.Input.Init()
 }
 
 type selNotContainsBytesBytesConstOp struct {
@@ -556,15 +575,16 @@ type selNotContainsBytesBytesConstOp struct {
 	constArg []byte
 }
 
-func (p *selNotContainsBytesBytesConstOp) Next() coldata.Batch {
+func (p *selNotContainsBytesBytesConstOp) Next(ctx context.Context) coldata.Batch {
 	// In order to inline the templated code of overloads, we need to have a
 	// `_overloadHelper` local variable of type `execgen.OverloadHelper`.
 	_overloadHelper := p.overloadHelper
 	// However, the scratch is not used in all of the selection operators, so
 	// we add this to go around "unused" error.
 	_ = _overloadHelper
+	var isNull bool
 	for {
-		batch := p.Input.Next()
+		batch := p.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return batch
 		}
@@ -578,13 +598,11 @@ func (p *selNotContainsBytesBytesConstOp) Next() coldata.Batch {
 			if sel := batch.Selection(); sel != nil {
 				sel = sel[:n]
 				for _, i := range sel {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !bytes.Contains(arg, p.constArg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -594,13 +612,11 @@ func (p *selNotContainsBytesBytesConstOp) Next() coldata.Batch {
 				sel := batch.Selection()
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !bytes.Contains(arg, p.constArg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -613,7 +629,8 @@ func (p *selNotContainsBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !bytes.Contains(arg, p.constArg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -626,7 +643,8 @@ func (p *selNotContainsBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !bytes.Contains(arg, p.constArg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -638,6 +656,10 @@ func (p *selNotContainsBytesBytesConstOp) Next() coldata.Batch {
 			return batch
 		}
 	}
+}
+
+func (p *selNotContainsBytesBytesConstOp) Init() {
+	p.Input.Init()
 }
 
 type selNotRegexpBytesBytesConstOp struct {
@@ -645,15 +667,16 @@ type selNotRegexpBytesBytesConstOp struct {
 	constArg *regexp.Regexp
 }
 
-func (p *selNotRegexpBytesBytesConstOp) Next() coldata.Batch {
+func (p *selNotRegexpBytesBytesConstOp) Next(ctx context.Context) coldata.Batch {
 	// In order to inline the templated code of overloads, we need to have a
 	// `_overloadHelper` local variable of type `execgen.OverloadHelper`.
 	_overloadHelper := p.overloadHelper
 	// However, the scratch is not used in all of the selection operators, so
 	// we add this to go around "unused" error.
 	_ = _overloadHelper
+	var isNull bool
 	for {
-		batch := p.Input.Next()
+		batch := p.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return batch
 		}
@@ -667,13 +690,11 @@ func (p *selNotRegexpBytesBytesConstOp) Next() coldata.Batch {
 			if sel := batch.Selection(); sel != nil {
 				sel = sel[:n]
 				for _, i := range sel {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !p.constArg.Match(arg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -683,13 +704,11 @@ func (p *selNotRegexpBytesBytesConstOp) Next() coldata.Batch {
 				sel := batch.Selection()
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
-					if nulls.NullAt(i) {
-						continue
-					}
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !p.constArg.Match(arg)
-					if cmp {
+					isNull = nulls.NullAt(i)
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -702,7 +721,8 @@ func (p *selNotRegexpBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !p.constArg.Match(arg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -715,7 +735,8 @@ func (p *selNotRegexpBytesBytesConstOp) Next() coldata.Batch {
 					var cmp bool
 					arg := col.Get(i)
 					cmp = !p.constArg.Match(arg)
-					if cmp {
+					isNull = false
+					if cmp && !isNull {
 						sel[idx] = i
 						idx++
 					}
@@ -727,4 +748,8 @@ func (p *selNotRegexpBytesBytesConstOp) Next() coldata.Batch {
 			return batch
 		}
 	}
+}
+
+func (p *selNotRegexpBytesBytesConstOp) Init() {
+	p.Input.Init()
 }

@@ -52,16 +52,22 @@ func getStats(t *testing.T, reader storage.Reader) enginepb.MVCCStats {
 	return s
 }
 
+// createTestRocksDBEngine returns a new in-memory RocksDB engine with 1MB of
+// storage capacity.
+func createTestRocksDBEngine(ctx context.Context) storage.Engine {
+	return storage.NewInMemForTesting(ctx, roachpb.Attributes{}, 1<<20)
+}
+
 // createTestPebbleEngine returns a new in-memory Pebble storage engine.
-func createTestPebbleEngine(ctx context.Context) (storage.Engine, error) {
-	return storage.Open(ctx, storage.InMemory(),
-		storage.MaxSize(1<<20), storage.ForTesting)
+func createTestPebbleEngine(ctx context.Context) storage.Engine {
+	return storage.NewInMemForTesting(ctx, roachpb.Attributes{}, 1<<20)
 }
 
 var engineImpls = []struct {
 	name   string
-	create func(context.Context) (storage.Engine, error)
+	create func(context.Context) storage.Engine
 }{
+	{"rocksdb", createTestRocksDBEngine},
 	{"pebble", createTestPebbleEngine},
 }
 
@@ -79,10 +85,7 @@ func TestCmdRevertRange(t *testing.T) {
 	// https://github.com/cockroachdb/cockroach/pull/42386
 	for _, engineImpl := range engineImpls {
 		t.Run(engineImpl.name, func(t *testing.T) {
-			eng, err := engineImpl.create(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
+			eng := engineImpl.create(ctx)
 			defer eng.Close()
 
 			baseTime := hlc.Timestamp{WallTime: 1000}

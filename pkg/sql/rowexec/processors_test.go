@@ -31,7 +31,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -45,7 +44,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,7 +78,7 @@ func TestPostProcess(t *testing.T) {
 	}{
 		{
 			post:          execinfrapb.PostProcessSpec{},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4] [0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
@@ -90,7 +89,7 @@ func TestPostProcess(t *testing.T) {
 				Projection:    true,
 				OutputColumns: []uint32{0, 2},
 			},
-			outputTypes:   types.TwoIntCols,
+			outputTypes:   rowenc.TwoIntCols,
 			expNeededCols: []int{0, 2},
 			expected:      "[[0 2] [0 3] [0 4] [0 3] [0 4] [0 4] [1 3] [1 4] [1 4] [2 4]]",
 		},
@@ -100,7 +99,7 @@ func TestPostProcess(t *testing.T) {
 			post: execinfrapb.PostProcessSpec{
 				RenderExprs: []execinfrapb.Expression{{Expr: "@1"}, {Expr: "@2"}, {Expr: "@1 + @2"}},
 			},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1},
 			expected:      "[[0 1 1] [0 1 1] [0 1 1] [0 2 2] [0 2 2] [0 3 3] [1 2 3] [1 2 3] [1 3 4] [2 3 5]]",
 		},
@@ -136,7 +135,7 @@ func TestPostProcess(t *testing.T) {
 		// Offset.
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
@@ -144,25 +143,25 @@ func TestPostProcess(t *testing.T) {
 		// Limit.
 		{
 			post:          execinfrapb.PostProcessSpec{Limit: 3},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Limit: 9},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4] [0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Limit: 10},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4] [0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Limit: 11},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4] [0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
@@ -170,25 +169,25 @@ func TestPostProcess(t *testing.T) {
 		// Offset + limit.
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3, Limit: 2},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3, Limit: 6},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3, Limit: 7},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3, Limit: 8},
-			outputTypes:   types.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
@@ -196,14 +195,14 @@ func TestPostProcess(t *testing.T) {
 
 	for tcIdx, tc := range testCases {
 		t.Run(strconv.Itoa(tcIdx), func(t *testing.T) {
-			inBuf := distsqlutils.NewRowBuffer(types.ThreeIntCols, input, distsqlutils.RowBufferArgs{})
+			inBuf := distsqlutils.NewRowBuffer(rowenc.ThreeIntCols, input, distsqlutils.RowBufferArgs{})
 			outBuf := &distsqlutils.RowBuffer{}
 
 			var out execinfra.ProcOutputHelper
 			semaCtx := tree.MakeSemaContext()
 			evalCtx := tree.NewTestingEvalContext(cluster.MakeTestingClusterSettings())
 			defer evalCtx.Stop(context.Background())
-			if err := out.Init(&tc.post, inBuf.OutputTypes(), &semaCtx, evalCtx); err != nil {
+			if err := out.Init(&tc.post, inBuf.OutputTypes(), &semaCtx, evalCtx, outBuf); err != nil {
 				t.Fatal(err)
 			}
 
@@ -223,12 +222,12 @@ func TestPostProcess(t *testing.T) {
 			}
 			// Run the rows through the helper.
 			for i := range input {
-				status, err := out.EmitRow(context.Background(), input[i], outBuf)
+				status, err := out.EmitRow(context.Background(), input[i])
 				if err != nil {
 					t.Fatal(err)
 				}
 				if status != execinfra.NeedMoreRows {
-					outBuf.ProducerDone()
+					out.Close()
 					break
 				}
 			}
@@ -352,7 +351,7 @@ func TestProcessorBaseContext(t *testing.T) {
 		}
 		defer flowCtx.EvalCtx.Stop(ctx)
 
-		input := execinfra.NewRepeatableRowSource(types.OneIntCol, randgen.MakeIntRows(10, 1))
+		input := execinfra.NewRepeatableRowSource(rowenc.OneIntCol, rowenc.MakeIntRows(10, 1))
 		noop, err := newNoopProcessor(flowCtx, 0 /* processorID */, input, &execinfrapb.PostProcessSpec{}, &rowDisposer{})
 		if err != nil {
 			t.Fatal(err)
@@ -415,17 +414,15 @@ func TestProcessorBaseContext(t *testing.T) {
 	})
 }
 
-func getPGXConnAndCleanupFunc(
-	ctx context.Context, t *testing.T, servingSQLAddr string,
-) (*pgx.Conn, func()) {
+func getPGXConnAndCleanupFunc(t *testing.T, servingSQLAddr string) (*pgx.Conn, func()) {
 	t.Helper()
 	pgURL, cleanup := sqlutils.PGUrl(t, servingSQLAddr, t.Name(), url.User(security.RootUser))
 	pgURL.Path = "test"
-	pgxConfig, err := pgx.ParseConfig(pgURL.String())
+	pgxConfig, err := pgx.ParseConnectionString(pgURL.String())
 	require.NoError(t, err)
-	defaultConn, err := pgx.ConnectConfig(ctx, pgxConfig)
+	defaultConn, err := pgx.Connect(pgxConfig)
 	require.NoError(t, err)
-	_, err = defaultConn.Exec(ctx, "set distsql='always'")
+	_, err = defaultConn.Exec("set distsql='always'; set vectorize_row_count_threshold=0")
 	require.NoError(t, err)
 	return defaultConn, cleanup
 }
@@ -495,7 +492,7 @@ func TestDrainingProcessorSwallowsUncertaintyError(t *testing.T) {
 								}
 								key := req.(*roachpb.ScanRequest).Key.String()
 								endKey := req.(*roachpb.ScanRequest).EndKey.String()
-								if strings.Contains(key, "/1") && strings.Contains(endKey, "/6") {
+								if strings.Contains(key, "/1") && strings.Contains(endKey, "5/") {
 									blockedRead.Lock()
 									for !blockedRead.shouldUnblock {
 										blockedRead.unblockCond.Wait()
@@ -516,8 +513,7 @@ func TestDrainingProcessorSwallowsUncertaintyError(t *testing.T) {
 				},
 			},
 		})
-	ctx := context.Background()
-	defer tc.Stopper().Stop(ctx)
+	defer tc.Stopper().Stop(context.Background())
 
 	origDB0 := tc.ServerConn(0)
 	sqlutils.CreateTable(t, origDB0, "t",
@@ -539,7 +535,7 @@ func TestDrainingProcessorSwallowsUncertaintyError(t *testing.T) {
 	}
 
 	populateRangeCacheAndDisableBuffering(t, origDB0, "t")
-	defaultConn, cleanup := getPGXConnAndCleanupFunc(ctx, t, tc.Server(0).ServingSQLAddr())
+	defaultConn, cleanup := getPGXConnAndCleanupFunc(t, tc.Server(0).ServingSQLAddr())
 	defer cleanup()
 
 	atomic.StoreInt64(&trapRead, 1)
@@ -557,7 +553,7 @@ func TestDrainingProcessorSwallowsUncertaintyError(t *testing.T) {
 			blockedRead.Unlock()
 			// Force DistSQL to distribute the query. Otherwise, as of Nov 2018, it's hard
 			// to convince it to distribute a query that uses an index.
-			if _, err := defaultConn.Exec(ctx, "set distsql='always'"); err != nil {
+			if _, err := defaultConn.Exec("set distsql='always'"); err != nil {
 				t.Fatal(err)
 			}
 			vectorizeMode := "off"
@@ -565,7 +561,7 @@ func TestDrainingProcessorSwallowsUncertaintyError(t *testing.T) {
 				vectorizeMode = "on"
 			}
 
-			if _, err := defaultConn.Exec(ctx, fmt.Sprintf("set vectorize='%s'", vectorizeMode)); err != nil {
+			if _, err := defaultConn.Exec(fmt.Sprintf("set vectorize='%s'; set vectorize_row_count_threshold=0", vectorizeMode)); err != nil {
 				t.Fatal(err)
 			}
 
@@ -576,7 +572,7 @@ func TestDrainingProcessorSwallowsUncertaintyError(t *testing.T) {
 			query := fmt.Sprintf(
 				"select x from t where x <= 5 union all select x from t where x > 5 limit %d",
 				limit)
-			rows, err := defaultConn.Query(ctx, query)
+			rows, err := defaultConn.Query(query)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -641,7 +637,7 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 				UseDatabase: "test",
 			},
 		}
-		rng, _ = randutil.NewTestRand()
+		rng, _ = randutil.NewPseudoRand()
 	)
 
 	filters := make([]struct {
@@ -702,9 +698,8 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 		}(nodeIdx)
 	}
 
-	ctx := context.Background()
 	tc := serverutils.StartNewTestCluster(t, numNodes, testClusterArgs)
-	defer tc.Stopper().Stop(ctx)
+	defer tc.Stopper().Stop(context.Background())
 
 	// Create a 30-row table, split and scatter evenly across the numNodes nodes.
 	dbConn := tc.ServerConn(0)
@@ -723,7 +718,7 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 	))
 	require.NoError(t, err)
 	populateRangeCacheAndDisableBuffering(t, dbConn, "t")
-	defaultConn, cleanup := getPGXConnAndCleanupFunc(ctx, t, tc.Server(0).ServingSQLAddr())
+	defaultConn, cleanup := getPGXConnAndCleanupFunc(t, tc.Server(0).ServingSQLAddr())
 	defer cleanup()
 
 	// errorOriginSpec is a way for test cases to enable a request filter on the
@@ -768,8 +763,8 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 
 	// runQueryAndExhaust is a helper function to get an error that happens during
 	// the execution of a query.
-	runQueryAndExhaust := func(tx pgx.Tx, query string) error {
-		res, err := tx.Query(ctx, query)
+	runQueryAndExhaust := func(tx *pgx.Tx, query string) error {
+		res, err := tx.Query(query)
 		if err != nil {
 			return err
 		}
@@ -790,14 +785,11 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 					skip.IgnoreLint(t, testCase.skip)
 				}
 				func() {
-					_, err := defaultConn.Exec(ctx, fmt.Sprintf("set vectorize=%s", vectorizeOpt))
+					_, err := defaultConn.Exec(fmt.Sprintf("set vectorize=%s", vectorizeOpt))
 					require.NoError(t, err)
 					func() {
 						// Check distsql plan.
-						rows, err := defaultConn.Query(
-							ctx,
-							fmt.Sprintf("SELECT info FROM [EXPLAIN (DISTSQL) %s] WHERE info LIKE 'Diagram:%%'", testCase.query),
-						)
+						rows, err := defaultConn.Query(fmt.Sprintf("SELECT info FROM [EXPLAIN (DISTSQL) %s] WHERE info LIKE 'Diagram:%%'", testCase.query))
 						require.NoError(t, err)
 						defer rows.Close()
 						rows.Next()
@@ -834,9 +826,9 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 					// Begin a transaction to issue multiple statements. The first dummy
 					// statement is issued so that some results are returned and auto
 					// retries are therefore disabled for the rest of the transaction.
-					tx, err := defaultConn.Begin(ctx)
+					tx, err := defaultConn.Begin()
 					defer func() {
-						require.Error(t, tx.Commit(ctx))
+						require.Error(t, tx.Commit())
 					}()
 					require.NoError(t, err)
 					require.NoError(t, runQueryAndExhaust(tx, "SELECT count(*) FROM t"))

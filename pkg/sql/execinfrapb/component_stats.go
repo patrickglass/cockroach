@@ -11,9 +11,7 @@
 package execinfrapb
 
 import (
-	"context"
 	"fmt"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -151,20 +149,6 @@ func (s *ComponentStats) formatStats(fn func(suffix string, value interface{})) 
 	if s.KV.BytesRead.HasValue() {
 		fn("KV bytes read", humanize.IBytes(s.KV.BytesRead.Value()))
 	}
-	if s.KV.NumInterfaceSteps.HasValue() {
-		fn("MVCC step count (ext/int)",
-			fmt.Sprintf("%s/%s",
-				humanizeutil.Count(s.KV.NumInterfaceSteps.Value()),
-				humanizeutil.Count(s.KV.NumInternalSteps.Value())),
-		)
-	}
-	if s.KV.NumInterfaceSeeks.HasValue() {
-		fn("MVCC seek count (ext/int)",
-			fmt.Sprintf("%s/%s",
-				humanizeutil.Count(s.KV.NumInterfaceSeeks.Value()),
-				humanizeutil.Count(s.KV.NumInternalSeeks.Value())),
-		)
-	}
 
 	// Exec stats.
 	if s.Exec.ExecTime.HasValue() {
@@ -174,7 +158,7 @@ func (s *ComponentStats) formatStats(fn func(suffix string, value interface{})) 
 		fn("max memory allocated", humanize.IBytes(s.Exec.MaxAllocatedMem.Value()))
 	}
 	if s.Exec.MaxAllocatedDisk.HasValue() {
-		fn("max sql temp disk usage", humanize.IBytes(s.Exec.MaxAllocatedDisk.Value()))
+		fn("max scratch disk allocated", humanize.IBytes(s.Exec.MaxAllocatedDisk.Value()))
 	}
 
 	// Output stats.
@@ -230,18 +214,6 @@ func (s *ComponentStats) Union(other *ComponentStats) *ComponentStats {
 	}
 	if !result.KV.ContentionTime.HasValue() {
 		result.KV.ContentionTime = other.KV.ContentionTime
-	}
-	if !result.KV.NumInterfaceSteps.HasValue() {
-		result.KV.NumInterfaceSteps = other.KV.NumInterfaceSteps
-	}
-	if !result.KV.NumInternalSteps.HasValue() {
-		result.KV.NumInternalSteps = other.KV.NumInternalSteps
-	}
-	if !result.KV.NumInterfaceSeeks.HasValue() {
-		result.KV.NumInterfaceSeeks = other.KV.NumInterfaceSeeks
-	}
-	if !result.KV.NumInternalSeeks.HasValue() {
-		result.KV.NumInternalSeeks = other.KV.NumInternalSeeks
 	}
 	if !result.KV.TuplesRead.HasValue() {
 		result.KV.TuplesRead = other.KV.TuplesRead
@@ -332,10 +304,6 @@ func (s *ComponentStats) MakeDeterministic() {
 	// KV.
 	timeVal(&s.KV.KVTime)
 	timeVal(&s.KV.ContentionTime)
-	resetUint(&s.KV.NumInterfaceSteps)
-	resetUint(&s.KV.NumInternalSteps)
-	resetUint(&s.KV.NumInterfaceSeeks)
-	resetUint(&s.KV.NumInternalSeeks)
 	if s.KV.BytesRead.HasValue() {
 		// BytesRead is overridden to a useful value for tests.
 		s.KV.BytesRead.Set(8 * s.KV.TuplesRead.Value())
@@ -366,7 +334,7 @@ func ExtractStatsFromSpans(
 	var componentStats ComponentStats
 	for i := range spans {
 		span := &spans[i]
-		span.Structured(func(item *types.Any, _ time.Time) {
+		span.Structured(func(item *types.Any) {
 			if !types.Is(item, &componentStats) {
 				return
 			}
@@ -385,14 +353,9 @@ func ExtractStatsFromSpans(
 				statsMap[stats.Component] = &stats
 			} else {
 				// In the vectorized flow we can have multiple statistics
-				// entries for one componentID because a single processor is
-				// represented by multiple components (e.g. when hash/merge
-				// joins have an ON expression that is not supported natively -
-				// we will plan the row-execution filterer processor then).
-				//
-				// Merge the stats together.
-				// TODO(yuzefovich): remove this once such edge cases are no
-				// longer present.
+				// entries for one component. Merge the stats together.
+				// TODO(radu): figure out a way to emit the statistics correctly
+				// in the first place.
 				statsMap[stats.Component] = existing.Union(&stats)
 			}
 		})
@@ -402,14 +365,14 @@ func ExtractStatsFromSpans(
 
 // ExtractNodesFromSpans extracts a list of node ids from a set of tracing
 // spans.
-func ExtractNodesFromSpans(ctx context.Context, spans []tracingpb.RecordedSpan) util.FastIntSet {
+func ExtractNodesFromSpans(spans []tracingpb.RecordedSpan) util.FastIntSet {
 	var nodes util.FastIntSet
 	// componentStats is only used to check whether a structured payload item is
 	// of ComponentStats type.
 	var componentStats ComponentStats
 	for i := range spans {
 		span := &spans[i]
-		span.Structured(func(item *types.Any, _ time.Time) {
+		span.Structured(func(item *types.Any) {
 			if !types.Is(item, &componentStats) {
 				return
 			}

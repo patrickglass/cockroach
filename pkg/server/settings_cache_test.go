@@ -42,10 +42,9 @@ func TestCachedSettingsStoreAndLoad(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	engine, err := storage.Open(ctx, storage.InMemory(),
-		storage.MaxSize(512<<20 /* 512 MiB */),
-		storage.ForTesting)
-	require.NoError(t, err)
+	attrs := roachpb.Attributes{}
+	storeSize := int64(512 << 20) /* 512 MiB */
+	engine := storage.NewInMemForTesting(ctx, attrs, storeSize)
 	defer engine.Close()
 
 	require.NoError(t, storeCachedSettingsKVs(ctx, engine, testSettings))
@@ -59,18 +58,12 @@ func TestCachedSettingsServerRestart(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	ctx := context.Background()
-	stickyEngineRegistry := NewStickyInMemEnginesRegistry()
-	defer stickyEngineRegistry.CloseAllStickyInMemEngines()
+	storeDir, cleanupFn := testutils.TempDir(t)
+	defer cleanupFn()
 
 	serverArgs := base.TestServerArgs{
 		StoreSpecs: []base.StoreSpec{
-			{InMemory: true, StickyInMemoryEngineID: "1"},
-		},
-		Knobs: base.TestingKnobs{
-			Server: &TestingKnobs{
-				StickyEngineRegistry: stickyEngineRegistry,
-			},
+			{InMemory: false, Path: storeDir},
 		},
 	}
 
@@ -106,7 +99,7 @@ func TestCachedSettingsServerRestart(t *testing.T) {
 		dialOpts, err := s.rpcContext.GRPCDialOptions()
 		require.NoError(t, err)
 
-		initConfig := newInitServerConfig(ctx, s.cfg, dialOpts)
+		initConfig := newInitServerConfig(s.cfg, dialOpts)
 		inspectState, err := inspectEngines(
 			context.Background(),
 			s.engines,

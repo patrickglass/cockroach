@@ -19,12 +19,7 @@ type loggerRegistry struct {
 	}
 }
 
-// clear erases the registry.
-func (r *loggerRegistry) clear() {
-	r.mu.Lock()
-	r.mu.loggers = nil
-	r.mu.Unlock()
-}
+var allLoggers = loggerRegistry{}
 
 // put adds a logger into the registry.
 func (r *loggerRegistry) put(l *loggerT) {
@@ -56,12 +51,7 @@ type sinkInfoRegistry struct {
 	}
 }
 
-// clear erases the registry.
-func (r *sinkInfoRegistry) clear() {
-	r.mu.Lock()
-	r.mu.sinkInfos = nil
-	r.mu.Unlock()
-}
+var allSinkInfos = sinkInfoRegistry{}
 
 // iter iterates over all the sinks infos and stops at the first error
 // encountered.

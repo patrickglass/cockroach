@@ -459,32 +459,6 @@ func (r ReplicaDescriptor) GetType() ReplicaType {
 // SafeValue implements the redact.SafeValue interface.
 func (r ReplicaType) SafeValue() {}
 
-// IsVoterOldConfig returns true if the replica is a voter in the outgoing
-// config (or, simply is a voter if the range is not in a joint-config state).
-// Can be used as a filter for
-// ReplicaDescriptors.Filter(ReplicaDescriptor.IsVoterOldConfig).
-func (r ReplicaDescriptor) IsVoterOldConfig() bool {
-	switch r.GetType() {
-	case VOTER_FULL, VOTER_OUTGOING, VOTER_DEMOTING_NON_VOTER, VOTER_DEMOTING_LEARNER:
-		return true
-	default:
-		return false
-	}
-}
-
-// IsVoterNewConfig returns true if the replica is a voter in the incoming
-// config (or, simply is a voter if the range is not in a joint-config state).
-// Can be used as a filter for
-// ReplicaDescriptors.Filter(ReplicaDescriptor.IsVoterOldConfig).
-func (r ReplicaDescriptor) IsVoterNewConfig() bool {
-	switch r.GetType() {
-	case VOTER_FULL, VOTER_INCOMING:
-		return true
-	default:
-		return false
-	}
-}
-
 // PercentilesFromData derives percentiles from a slice of data points.
 // Sorts the input data if it isn't already sorted.
 func PercentilesFromData(data []float64) Percentiles {
@@ -526,20 +500,6 @@ func (p Percentiles) SafeFormat(w redact.SafePrinter, _ rune) {
 		p.P10, p.P25, p.P50, p.P75, p.P90, p.PMax)
 }
 
-func (sc FileStoreProperties) String() string {
-	return redact.StringWithoutMarkers(sc)
-}
-
-// SafeFormat implements the redact.SafeFormatter interface.
-func (sc FileStoreProperties) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.Printf("{path=%s, fs=%s, blkdev=%s, mnt=%s opts=%s}",
-		sc.Path,
-		redact.SafeString(sc.FsType),
-		sc.BlockDevice,
-		sc.MountPoint,
-		sc.MountOptions)
-}
-
 // String returns a string representation of the StoreCapacity.
 func (sc StoreCapacity) String() string {
 	return redact.StringWithoutMarkers(sc)
@@ -550,8 +510,8 @@ func (sc StoreCapacity) SafeFormat(w redact.SafePrinter, _ rune) {
 	w.Printf("disk (capacity=%s, available=%s, used=%s, logicalBytes=%s), "+
 		"ranges=%d, leases=%d, queries=%.2f, writes=%.2f, "+
 		"bytesPerReplica={%s}, writesPerReplica={%s}",
-		humanizeutil.IBytes(sc.Capacity), humanizeutil.IBytes(sc.Available),
-		humanizeutil.IBytes(sc.Used), humanizeutil.IBytes(sc.LogicalBytes),
+		redact.Safe(humanizeutil.IBytes(sc.Capacity)), redact.Safe(humanizeutil.IBytes(sc.Available)),
+		redact.Safe(humanizeutil.IBytes(sc.Used)), redact.Safe(humanizeutil.IBytes(sc.LogicalBytes)),
 		sc.RangeCount, sc.LeaseCount, sc.QueriesPerSecond, sc.WritesPerSecond,
 		sc.BytesPerReplica, sc.WritesPerReplica)
 }
@@ -566,7 +526,7 @@ func (sc StoreCapacity) FractionUsed() float64 {
 	// cost, not truly part of the disk's capacity. This means that the disk's
 	// capacity is really just the available space plus cockroach's usage.
 	//
-	// Fall back to a more pessimistic calculation of disk usage if we don't know
+	// Fall back to a more pessimistic calcuation of disk usage if we don't know
 	// how much space the store's data is taking up.
 	if sc.Used == 0 {
 		return float64(sc.Capacity-sc.Available) / float64(sc.Capacity)

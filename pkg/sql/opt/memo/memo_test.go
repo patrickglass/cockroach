@@ -26,8 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/datadriven"
 )
 
@@ -139,11 +137,11 @@ func TestMemoIsStale(t *testing.T) {
 
 	// Revoke access to the underlying table. The user should retain indirect
 	// access via the view.
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).Revoked = true
+	catalog.Table(tree.NewTableName("t", "abc")).Revoked = true
 
 	// Initialize context with starting values.
 	evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
-	evalCtx.SessionData().Database = "t"
+	evalCtx.SessionData.Database = "t"
 
 	var o xform.Optimizer
 	opttestutils.BuildQuery(t, &o, catalog, &evalCtx, "SELECT a, b+1 FROM abcview WHERE c='foo'")
@@ -183,93 +181,51 @@ func TestMemoIsStale(t *testing.T) {
 	notStale()
 
 	// Stale reorder joins limit.
-	evalCtx.SessionData().ReorderJoinsLimit = 4
+	evalCtx.SessionData.ReorderJoinsLimit = 4
 	stale()
-	evalCtx.SessionData().ReorderJoinsLimit = 0
+	evalCtx.SessionData.ReorderJoinsLimit = 0
 	notStale()
 
 	// Stale zig zag join enable.
-	evalCtx.SessionData().ZigzagJoinEnabled = true
+	evalCtx.SessionData.ZigzagJoinEnabled = true
 	stale()
-	evalCtx.SessionData().ZigzagJoinEnabled = false
+	evalCtx.SessionData.ZigzagJoinEnabled = false
 	notStale()
 
 	// Stale optimizer histogram usage enable.
-	evalCtx.SessionData().OptimizerUseHistograms = true
+	evalCtx.SessionData.OptimizerUseHistograms = true
 	stale()
-	evalCtx.SessionData().OptimizerUseHistograms = false
+	evalCtx.SessionData.OptimizerUseHistograms = false
 	notStale()
 
 	// Stale optimizer multi-col stats usage enable.
-	evalCtx.SessionData().OptimizerUseMultiColStats = true
+	evalCtx.SessionData.OptimizerUseMultiColStats = true
 	stale()
-	evalCtx.SessionData().OptimizerUseMultiColStats = false
+	evalCtx.SessionData.OptimizerUseMultiColStats = false
 	notStale()
 
 	// Stale locality optimized search enable.
-	evalCtx.SessionData().LocalityOptimizedSearch = true
+	evalCtx.SessionData.LocalityOptimizedSearch = true
 	stale()
-	evalCtx.SessionData().LocalityOptimizedSearch = false
+	evalCtx.SessionData.LocalityOptimizedSearch = false
 	notStale()
 
 	// Stale safe updates.
-	evalCtx.SessionData().SafeUpdates = true
+	evalCtx.SessionData.SafeUpdates = true
 	stale()
-	evalCtx.SessionData().SafeUpdates = false
-	notStale()
-
-	// Stale intervalStyleEnabled.
-	evalCtx.SessionData().IntervalStyleEnabled = true
-	stale()
-	evalCtx.SessionData().IntervalStyleEnabled = false
-	notStale()
-
-	// Stale dateStyleEnabled.
-	evalCtx.SessionData().DateStyleEnabled = true
-	stale()
-	evalCtx.SessionData().DateStyleEnabled = false
-	notStale()
-
-	// Stale DateStyle.
-	evalCtx.SessionData().DataConversionConfig.DateStyle = pgdate.DateStyle{Order: pgdate.Order_YMD}
-	stale()
-	evalCtx.SessionData().DataConversionConfig.DateStyle = pgdate.DefaultDateStyle()
-	notStale()
-
-	// Stale IntervalStyle.
-	evalCtx.SessionData().DataConversionConfig.IntervalStyle = duration.IntervalStyle_ISO_8601
-	stale()
-	evalCtx.SessionData().DataConversionConfig.IntervalStyle = duration.IntervalStyle_POSTGRES
+	evalCtx.SessionData.SafeUpdates = false
 	notStale()
 
 	// Stale prefer lookup joins for FKs.
-	evalCtx.SessionData().PreferLookupJoinsForFKs = true
+	evalCtx.SessionData.PreferLookupJoinsForFKs = true
 	stale()
-	evalCtx.SessionData().PreferLookupJoinsForFKs = false
+	evalCtx.SessionData.PreferLookupJoinsForFKs = false
 	notStale()
 
-	// Stale PropagateInputOrdering.
-	evalCtx.SessionData().PropagateInputOrdering = true
+	// Stale improve disjunction selectivity.
+	evalCtx.SessionData.OptimizerImproveDisjunctionSelectivity = true
 	stale()
-	evalCtx.SessionData().PropagateInputOrdering = false
-	notStale()
-
-	// Stale disallow full table scan.
-	evalCtx.SessionData().DisallowFullTableScans = true
-	stale()
-	evalCtx.SessionData().DisallowFullTableScans = false
-	notStale()
-
-	// Stale large full scan rows.
-	evalCtx.SessionData().LargeFullScanRows = 1000
-	stale()
-	evalCtx.SessionData().LargeFullScanRows = 0
-	notStale()
-
-	// Stale null ordered last.
-	evalCtx.SessionData().NullOrderedLast = true
-	stale()
-	evalCtx.SessionData().NullOrderedLast = false
+	evalCtx.SessionData.OptimizerImproveDisjunctionSelectivity = false
 	notStale()
 
 	// Stale data sources and schema. Create new catalog so that data sources are
@@ -285,24 +241,24 @@ func TestMemoIsStale(t *testing.T) {
 	}
 
 	// User no longer has access to view.
-	catalog.View(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abcview")).Revoked = true
+	catalog.View(tree.NewTableName("t", "abcview")).Revoked = true
 	_, err = o.Memo().IsStale(ctx, &evalCtx, catalog)
 	if exp := "user does not have privilege"; !testutils.IsError(err, exp) {
 		t.Fatalf("expected %q error, but got %+v", exp, err)
 	}
-	catalog.View(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abcview")).Revoked = false
+	catalog.View(tree.NewTableName("t", "abcview")).Revoked = false
 	notStale()
 
 	// Table ID changes.
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).TabID = 1
+	catalog.Table(tree.NewTableName("t", "abc")).TabID = 1
 	stale()
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).TabID = 53
+	catalog.Table(tree.NewTableName("t", "abc")).TabID = 53
 	notStale()
 
 	// Table Version changes.
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).TabVersion = 1
+	catalog.Table(tree.NewTableName("t", "abc")).TabVersion = 1
 	stale()
-	catalog.Table(tree.NewTableNameWithSchema("t", tree.PublicSchemaName, "abc")).TabVersion = 0
+	catalog.Table(tree.NewTableName("t", "abc")).TabVersion = 0
 	notStale()
 }
 

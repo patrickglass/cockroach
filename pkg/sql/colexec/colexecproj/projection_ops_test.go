@@ -104,7 +104,7 @@ func TestProjDivFloat64Float64Op(t *testing.T) {
 func TestGetProjectionConstOperator(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	binOp := tree.MakeBinaryOperator(tree.Mult)
+	binOp := tree.Mult
 	var input colexecop.Operator
 	colIdx := 3
 	inputTypes := make([]*types.T, colIdx+1)
@@ -121,10 +121,10 @@ func TestGetProjectionConstOperator(t *testing.T) {
 	}
 	expected := &projMultFloat64Float64ConstOp{
 		projConstOpBase: projConstOpBase{
-			OneInputHelper: colexecop.MakeOneInputHelper(op.(*projMultFloat64Float64ConstOp).Input),
-			allocator:      testAllocator,
-			colIdx:         colIdx,
-			outputIdx:      outputIdx,
+			OneInputNode: colexecop.NewOneInputNode(op.(*projMultFloat64Float64ConstOp).Input),
+			allocator:    testAllocator,
+			colIdx:       colIdx,
+			outputIdx:    outputIdx,
 		},
 		constArg: constVal,
 	}
@@ -136,7 +136,7 @@ func TestGetProjectionConstOperator(t *testing.T) {
 func TestGetProjectionConstMixedTypeOperator(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	cmpOp := tree.MakeComparisonOperator(tree.GE)
+	cmpOp := tree.GE
 	var input colexecop.Operator
 	colIdx := 3
 	inputTypes := make([]*types.T, colIdx+1)
@@ -153,10 +153,10 @@ func TestGetProjectionConstMixedTypeOperator(t *testing.T) {
 	}
 	expected := &projGEInt64Int16ConstOp{
 		projConstOpBase: projConstOpBase{
-			OneInputHelper: colexecop.MakeOneInputHelper(op.(*projGEInt64Int16ConstOp).Input),
-			allocator:      testAllocator,
-			colIdx:         colIdx,
-			outputIdx:      outputIdx,
+			OneInputNode: colexecop.NewOneInputNode(op.(*projGEInt64Int16ConstOp).Input),
+			allocator:    testAllocator,
+			colIdx:       colIdx,
+			outputIdx:    outputIdx,
 		},
 		constArg: constVal,
 	}
@@ -182,7 +182,7 @@ func TestRandomComparisons(t *testing.T) {
 		},
 	}
 	const numTuples = 2048
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	expected := make([]bool, numTuples)
 	var da rowenc.DatumAlloc
@@ -215,15 +215,15 @@ func TestRandomComparisons(t *testing.T) {
 		}
 		colconv.ColVecToDatumAndDeselect(lDatums, lVec, numTuples, nil /* sel */, &da)
 		colconv.ColVecToDatumAndDeselect(rDatums, rVec, numTuples, nil /* sel */, &da)
-		supportedCmpOps := []tree.ComparisonOperatorSymbol{tree.EQ, tree.NE, tree.LT, tree.LE, tree.GT, tree.GE}
+		supportedCmpOps := []tree.ComparisonOperator{tree.EQ, tree.NE, tree.LT, tree.LE, tree.GT, tree.GE}
 		if typ.Family() == types.JsonFamily {
-			supportedCmpOps = []tree.ComparisonOperatorSymbol{tree.EQ, tree.NE}
+			supportedCmpOps = []tree.ComparisonOperator{tree.EQ, tree.NE}
 		}
-		for _, cmpOpSymbol := range supportedCmpOps {
+		for _, cmpOp := range supportedCmpOps {
 			for i := range lDatums {
 				cmp := lDatums[i].Compare(&evalCtx, rDatums[i])
 				var b bool
-				switch cmpOpSymbol {
+				switch cmpOp {
 				case tree.EQ:
 					b = cmp == 0
 				case tree.NE:
@@ -239,16 +239,15 @@ func TestRandomComparisons(t *testing.T) {
 				}
 				expected[i] = b
 			}
-			cmpOp := tree.MakeComparisonOperator(cmpOpSymbol)
 			input := colexectestutils.NewChunkingBatchSource(testAllocator, typs, []coldata.Vec{lVec, rVec, ret}, numTuples)
 			op, err := colexectestutils.CreateTestProjectingOperator(
 				ctx, flowCtx, input, []*types.T{typ, typ},
 				fmt.Sprintf("@1 %s @2", cmpOp), false /* canFallbackToRowexec */, testMemAcc,
 			)
 			require.NoError(t, err)
-			op.Init(ctx)
+			op.Init()
 			var idx int
-			for batch := op.Next(); batch.Length() > 0; batch = op.Next() {
+			for batch := op.Next(ctx); batch.Length() > 0; batch = op.Next(ctx) {
 				for i := 0; i < batch.Length(); i++ {
 					absIdx := idx + i
 					assert.Equal(t, expected[absIdx], batch.ColVec(2).Bool()[i],
@@ -265,7 +264,7 @@ func TestGetProjectionOperator(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	typ := types.Int2
-	binOp := tree.MakeBinaryOperator(tree.Mult)
+	binOp := tree.Mult
 	var input colexecop.Operator
 	col1Idx := 5
 	col2Idx := 7
@@ -282,11 +281,11 @@ func TestGetProjectionOperator(t *testing.T) {
 	}
 	expected := &projMultInt16Int16Op{
 		projOpBase: projOpBase{
-			OneInputHelper: colexecop.MakeOneInputHelper(op.(*projMultInt16Int16Op).Input),
-			allocator:      testAllocator,
-			col1Idx:        col1Idx,
-			col2Idx:        col2Idx,
-			outputIdx:      outputIdx,
+			OneInputNode: colexecop.NewOneInputNode(op.(*projMultInt16Int16Op).Input),
+			allocator:    testAllocator,
+			col1Idx:      col1Idx,
+			col2Idx:      col2Idx,
+			outputIdx:    outputIdx,
 		},
 	}
 	if !reflect.DeepEqual(op, expected) {
@@ -303,7 +302,7 @@ func benchmarkProjOp(
 	hasNulls bool,
 ) {
 	ctx := context.Background()
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	batch := testAllocator.NewMemBatchWithMaxCapacity(inputTypes)
 	nullProb := 0.0
 	if hasNulls {
@@ -333,12 +332,12 @@ func benchmarkProjOp(
 	source := colexecop.NewRepeatableBatchSource(testAllocator, batch, inputTypes)
 	op, err := makeProjOp(source)
 	require.NoError(b, err)
-	op.Init(ctx)
+	op.Init()
 
 	b.Run(name, func(b *testing.B) {
 		b.SetBytes(int64(len(inputTypes) * 8 * coldata.BatchSize()))
 		for i := 0; i < b.N; i++ {
-			op.Next()
+			op.Next(ctx)
 		}
 	})
 }
@@ -361,11 +360,11 @@ func BenchmarkProjOp(b *testing.B) {
 		opNames []string
 		opInfix []string
 	)
-	for _, binOp := range []tree.BinaryOperatorSymbol{tree.Plus, tree.Minus, tree.Mult, tree.Div} {
+	for _, binOp := range []tree.BinaryOperator{tree.Plus, tree.Minus, tree.Mult, tree.Div} {
 		opNames = append(opNames, execgen.BinaryOpName[binOp])
 		opInfix = append(opInfix, binOp.String())
 	}
-	for _, cmpOp := range []tree.ComparisonOperatorSymbol{tree.EQ, tree.NE, tree.LT, tree.LE, tree.GT, tree.GE} {
+	for _, cmpOp := range []tree.ComparisonOperator{tree.EQ, tree.NE, tree.LT, tree.LE, tree.GT, tree.GE} {
 		opNames = append(opNames, execgen.ComparisonOpName[cmpOp])
 		opInfix = append(opInfix, cmpOp.String())
 	}

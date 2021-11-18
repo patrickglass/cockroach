@@ -29,13 +29,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
-	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
-	"github.com/stretchr/testify/require"
 )
 
 func TestTableSet(t *testing.T) {
@@ -90,14 +87,14 @@ func TestTableSet(t *testing.T) {
 			s := &descriptorVersionState{
 				Descriptor: tabledesc.NewBuilder(&descpb.TableDescriptor{Version: op.version}).BuildImmutable(),
 			}
-			s.mu.expiration = hlc.Timestamp{WallTime: op.expiration}
+			s.expiration = hlc.Timestamp{WallTime: op.expiration}
 			set.insert(s)
 
 		case remove:
 			s := &descriptorVersionState{
 				Descriptor: tabledesc.NewBuilder(&descpb.TableDescriptor{Version: op.version}).BuildImmutable(),
 			}
-			s.mu.expiration = hlc.Timestamp{WallTime: op.expiration}
+			s.expiration = hlc.Timestamp{WallTime: op.expiration}
 			set.remove(s)
 
 		case newest:
@@ -107,7 +104,7 @@ func TestTableSet(t *testing.T) {
 			}
 			s := "<nil>"
 			if n != nil {
-				s = fmt.Sprintf("%d:%d", n.GetVersion(), n.getExpiration().WallTime)
+				s = fmt.Sprintf("%d:%d", n.GetVersion(), n.expiration.WallTime)
 			}
 			if d.expected != s {
 				t.Fatalf("%d: expected %s, but found %s", i, d.expected, s)
@@ -169,13 +166,15 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 			if err := leaseManager.AcquireFreshestFromStore(context.Background(), tableDesc.GetID()); err != nil {
 				t.Fatal(err)
 			}
-			table, err := leaseManager.Acquire(context.Background(), s.Clock().Now(), tableDesc.GetID())
+			table, exp, err := leaseManager.Acquire(context.Background(), s.Clock().Now(), tableDesc.GetID())
 			if err != nil {
 				t.Fatal(err)
 			}
-			tables = append(tables, table.Underlying().(catalog.TableDescriptor))
-			expiration = table.Expiration()
-			table.Release(context.Background())
+			tables = append(tables, table.(catalog.TableDescriptor))
+			expiration = exp
+			if err := leaseManager.Release(table); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	getLeases()
@@ -207,7 +206,7 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 	ts.mu.Lock()
 	correctLease := ts.mu.active.data[0].GetID() == tables[5].GetID() &&
 		ts.mu.active.data[0].GetVersion() == tables[5].GetVersion()
-	correctExpiration := ts.mu.active.data[0].getExpiration() == expiration
+	correctExpiration := ts.mu.active.data[0].expiration == expiration
 	ts.mu.Unlock()
 	if !correctLease {
 		t.Fatalf("wrong lease survived purge")
@@ -221,8 +220,8 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 	ts.mu.Lock()
 	tableVersion := &descriptorVersionState{
 		Descriptor: tables[0],
+		expiration: tables[5].GetModificationTime(),
 	}
-	tableVersion.mu.expiration = tables[5].GetModificationTime()
 	ts.mu.active.insert(tableVersion)
 	ts.mu.Unlock()
 	if numLeases := getNumVersions(ts); numLeases != 2 {
@@ -285,12 +284,14 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 		if err := leaseManager.AcquireFreshestFromStore(ctx, tableDesc.GetID()); err != nil {
 			t.Fatal(err)
 		}
-		table, err := leaseManager.Acquire(ctx, futureTime, tableDesc.GetID())
+		table, _, err := leaseManager.Acquire(ctx, futureTime, tableDesc.GetID())
 		if err != nil {
 			t.Fatal(err)
 		}
-		latestDesc := table.Underlying().(catalog.TableDescriptor)
-		table.Release(ctx)
+		latestDesc := table.(catalog.TableDescriptor)
+		if err := leaseManager.Release(table); err != nil {
+			t.Fatal(err)
+		}
 		return latestDesc
 	}
 	origDesc := getLatestDesc()
@@ -306,9 +307,7 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 	update := func(catalog.MutableDescriptor) error { return nil }
 	logEvent := func(txn *kv.Txn) error {
 		txn2 := kvDB.NewTxn(ctx, "future-read")
-		if err := txn2.SetFixedTimestamp(ctx, futureTime.Prev()); err != nil {
-			return err
-		}
+		txn2.SetFixedTimestamp(ctx, futureTime.Prev())
 		if _, err := txn2.Get(ctx, "key"); err != nil {
 			return errors.Wrap(err, "read from other txn in future")
 		}
@@ -385,7 +384,6 @@ CREATE TEMP TABLE t2 (temp int);
 	for _, tableName := range []string{"t", "t2"} {
 		tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "defaultdb", tableName)
 		lease := leaseManager.names.get(
-			context.Background(),
 			tableDesc.GetParentID(),
 			descpb.ID(keys.PublicSchemaID),
 			tableName,
@@ -425,30 +423,20 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 	}
 
 	// Check that the cache has been updated.
-	if leaseManager.names.get(
-		context.Background(),
-		tableDesc.GetParentID(),
-		tableDesc.GetParentSchemaID(),
-		"test",
-		s.Clock().Now(),
-	) != nil {
+	if leaseManager.names.get(tableDesc.GetParentID(), tableDesc.GetParentSchemaID(), "test", s.Clock().Now()) != nil {
 		t.Fatalf("old name still in cache")
 	}
 
-	lease := leaseManager.names.get(
-		context.Background(),
-		tableDesc.GetParentID(),
-		tableDesc.GetParentSchemaID(),
-		"test2",
-		s.Clock().Now(),
-	)
+	lease := leaseManager.names.get(tableDesc.GetParentID(), tableDesc.GetParentSchemaID(), "test2", s.Clock().Now())
 	if lease == nil {
 		t.Fatalf("new name not found in cache")
 	}
 	if lease.GetID() != tableDesc.GetID() {
 		t.Fatalf("new name has wrong ID: %d (expected: %d)", lease.GetID(), tableDesc.GetID())
 	}
-	lease.Release(context.Background())
+	if err := leaseManager.Release(lease.Descriptor); err != nil {
+		t.Fatal(err)
+	}
 
 	// Rename to a different database.
 	if _, err := db.Exec("ALTER TABLE t.test2 RENAME TO t1.test2;"); err != nil {
@@ -462,30 +450,20 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 	}
 
 	// Check that the cache has been updated.
-	if leaseManager.names.get(
-		context.Background(),
-		tableDesc.GetParentID(),
-		tableDesc.GetParentSchemaID(),
-		"test2",
-		s.Clock().Now(),
-	) != nil {
+	if leaseManager.names.get(tableDesc.GetParentID(), tableDesc.GetParentSchemaID(), "test2", s.Clock().Now()) != nil {
 		t.Fatalf("old name still in cache")
 	}
 
-	lease = leaseManager.names.get(
-		context.Background(),
-		newTableDesc.GetParentID(),
-		tableDesc.GetParentSchemaID(),
-		"test2",
-		s.Clock().Now(),
-	)
+	lease = leaseManager.names.get(newTableDesc.GetParentID(), tableDesc.GetParentSchemaID(), "test2", s.Clock().Now())
 	if lease == nil {
 		t.Fatalf("new name not found in cache")
 	}
 	if lease.GetID() != tableDesc.GetID() {
 		t.Fatalf("new name has wrong ID: %d (expected: %d)", lease.GetID(), tableDesc.GetID())
 	}
-	lease.Release(context.Background())
+	if err := leaseManager.Release(lease.Descriptor); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Tests that a name cache entry with by an expired lease is not returned.
@@ -513,28 +491,18 @@ CREATE TABLE t.%s (k CHAR PRIMARY KEY, v CHAR);
 
 	// Check the assumptions this tests makes: that there is a cache entry
 	// (with a valid lease).
-	if lease := leaseManager.names.get(
-		context.Background(),
-		tableDesc.GetParentID(),
-		tableDesc.GetParentSchemaID(),
-		tableName,
-		s.Clock().Now(),
-	); lease == nil {
+	if lease := leaseManager.names.get(tableDesc.GetParentID(), tableDesc.GetParentSchemaID(), tableName, s.Clock().Now()); lease == nil {
 		t.Fatalf("name cache has no unexpired entry for (%d, %s)", tableDesc.GetParentID(), tableName)
 	} else {
-		lease.Release(context.Background())
+		if err := leaseManager.Release(lease.Descriptor); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	leaseManager.ExpireLeases(s.Clock())
 
 	// Check the name no longer resolves.
-	if lease := leaseManager.names.get(
-		context.Background(),
-		tableDesc.GetParentID(),
-		tableDesc.GetParentSchemaID(),
-		tableName,
-		s.Clock().Now(),
-	); lease != nil {
+	if lease := leaseManager.names.get(tableDesc.GetParentID(), tableDesc.GetParentSchemaID(), tableName, s.Clock().Now()); lease != nil {
 		t.Fatalf("name cache has unexpired entry for (%d, %s): %s", tableDesc.GetParentID(), tableName, lease)
 	}
 }
@@ -572,17 +540,11 @@ CREATE TABLE t.%s (k CHAR PRIMARY KEY, v CHAR);
 	}
 
 	// There is a cache entry.
-	lease := leaseManager.names.get(
-		context.Background(),
-		tableDesc.GetParentID(),
-		tableDesc.GetParentSchemaID(),
-		tableName,
-		s.Clock().Now(),
-	)
+	lease := leaseManager.names.get(tableDesc.GetParentID(), tableDesc.GetParentSchemaID(), tableName, s.Clock().Now())
 	if lease == nil {
 		t.Fatalf("name cache has no unexpired entry for (%d, %s)", tableDesc.GetParentID(), tableName)
 	}
-	expiration := lease.Expiration()
+
 	tracker := removalTracker.TrackRemoval(lease.Descriptor)
 
 	// Acquire another lease.
@@ -591,23 +553,26 @@ CREATE TABLE t.%s (k CHAR PRIMARY KEY, v CHAR);
 	}
 
 	// Check the name resolves to the new lease.
-	newLease := leaseManager.names.get(context.Background(), tableDesc.GetParentID(), tableDesc.GetParentSchemaID(), tableName, s.Clock().Now())
+	newLease := leaseManager.names.get(tableDesc.GetParentID(), tableDesc.GetParentSchemaID(), tableName, s.Clock().Now())
 	if newLease == nil {
 		t.Fatalf("name cache doesn't contain entry for (%d, %s)", tableDesc.GetParentID(), tableName)
 	}
-	if newLease.Expiration() == expiration {
-		t.Fatalf("same lease %s %s", expiration.GoTime(), newLease.Expiration().GoTime())
+	if newLease == lease {
+		t.Fatalf("same lease %s", newLease.expiration.GoTime())
 	}
 
-	// TODO(ajwerner): does this matter?
-	lease.Release(context.Background())
+	if err := leaseManager.Release(lease.Descriptor); err != nil {
+		t.Fatal(err)
+	}
 
 	// The first lease acquisition was released.
 	if err := tracker.WaitForRemoval(); err != nil {
 		t.Fatal(err)
 	}
 
-	newLease.Release(context.Background())
+	if err := leaseManager.Release(lease.Descriptor); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Test that table names are treated as case sensitive by the name cache.
@@ -632,13 +597,7 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "test")
 
 	// Check that we cannot get the table by a different name.
-	if leaseManager.names.get(
-		context.Background(),
-		tableDesc.GetParentID(),
-		tableDesc.GetParentSchemaID(),
-		"tEsT",
-		s.Clock().Now(),
-	) != nil {
+	if leaseManager.names.get(tableDesc.GetParentID(), tableDesc.GetParentSchemaID(), "tEsT", s.Clock().Now()) != nil {
 		t.Fatalf("lease manager incorrectly found table with different case")
 	}
 }
@@ -675,7 +634,7 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 
 	// Populate the name cache.
 	ctx := context.Background()
-	table, err := leaseManager.AcquireByName(
+	table, _, err := leaseManager.AcquireByName(
 		ctx,
 		leaseManager.storage.clock.Now(),
 		tableDesc.GetParentID(),
@@ -685,26 +644,27 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 	if err != nil {
 		t.Fatal(err)
 	}
-	table.Release(ctx)
+	if err := leaseManager.Release(table); err != nil {
+		t.Fatal(err)
+	}
 
 	// Try to trigger the race repeatedly: race an AcquireByName against a
 	// Release.
 	// tableChan acts as a barrier, synchronizing the two routines at every
 	// iteration.
-	tableChan := make(chan LeasedDescriptor)
-	releaseChan := make(chan struct{})
+	tableChan := make(chan catalog.TableDescriptor)
+	errChan := make(chan error)
 	go func() {
 		for table := range tableChan {
 			// Move errors to the main goroutine.
-			table.Release(ctx)
-			releaseChan <- struct{}{}
+			errChan <- leaseManager.Release(table)
 		}
 	}()
 
-	for i := 0; i < 1; i++ {
+	for i := 0; i < 50; i++ {
 		timestamp := leaseManager.storage.clock.Now()
 		ctx := context.Background()
-		desc, err := leaseManager.AcquireByName(
+		desc, _, err := leaseManager.AcquireByName(
 			ctx,
 			timestamp,
 			tableDesc.GetParentID(),
@@ -714,7 +674,7 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 		if err != nil {
 			t.Fatal(err)
 		}
-		table := desc.Underlying().(catalog.TableDescriptor)
+		table := desc.(catalog.TableDescriptor)
 		// This test will need to wait until leases are removed from the store
 		// before creating new leases because the jitter used in the leases'
 		// expiration causes duplicate key errors when trying to create new
@@ -725,8 +685,8 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 		tracker := removalTracker.TrackRemoval(table)
 		// Start the race: signal the other guy to release, and we do another
 		// acquire at the same time.
-		tableChan <- desc
-		tableByName, err := leaseManager.AcquireByName(
+		tableChan <- table
+		tableByName, _, err := leaseManager.AcquireByName(
 			ctx,
 			timestamp,
 			tableDesc.GetParentID(),
@@ -738,10 +698,15 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 		}
 
 		// See if there was an error releasing lease.
-		<-releaseChan
+		err = <-errChan
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		// Release the lease for the last time.
-		tableByName.Release(ctx)
+		if err := leaseManager.Release(tableByName); err != nil {
+			t.Fatal(err)
+		}
 
 		// There are 2 possible results of the race above: Either we acquired before
 		// releasing (causing us to acquire the same lease, incrementing and then
@@ -788,11 +753,13 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 			if err := leaseManager.AcquireFreshestFromStore(context.Background(), tableDesc.GetID()); err != nil {
 				t.Error(err)
 			}
-			table, err := leaseManager.Acquire(context.Background(), s.Clock().Now(), tableDesc.GetID())
+			table, _, err := leaseManager.Acquire(context.Background(), s.Clock().Now(), tableDesc.GetID())
 			if err != nil {
 				t.Error(err)
 			}
-			table.Release(context.Background())
+			if err := leaseManager.Release(table); err != nil {
+				t.Error(err)
+			}
 		}()
 	}
 	wg.Wait()
@@ -836,11 +803,13 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 	for i := 0; i < numRoutines; i++ {
 		go func() {
 			defer wg.Done()
-			table, err := leaseManager.Acquire(context.Background(), now, tableDesc.GetID())
+			table, _, err := leaseManager.Acquire(context.Background(), now, tableDesc.GetID())
 			if err != nil {
 				t.Error(err)
 			}
-			table.Release(context.Background())
+			if err := leaseManager.Release(table); err != nil {
+				t.Error(err)
+			}
 		}()
 	}
 
@@ -870,21 +839,13 @@ func TestLeaseAcquireAndReleaseConcurrently(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	skip.WithIssue(t, 51798, "fails in the presence of migrations requiring backfill, "+
-		"but cannot import startupmigrations")
+		"but cannot import sqlmigrations")
 
 	// Result is a struct for moving results to the main result routine.
 	type Result struct {
-		table LeasedDescriptor
+		table catalog.TableDescriptor
 		exp   hlc.Timestamp
 		err   error
-	}
-	mkResult := func(table LeasedDescriptor, err error) Result {
-		res := Result{err: err}
-		if table != nil {
-			res.table = table
-			res.exp = table.Expiration()
-		}
-		return res
 	}
 
 	descID := descpb.ID(keys.LeaseTableID)
@@ -895,7 +856,8 @@ func TestLeaseAcquireAndReleaseConcurrently(t *testing.T) {
 		m *Manager,
 		acquireChan chan Result,
 	) {
-		acquireChan <- mkResult(m.Acquire(ctx, m.storage.clock.Now(), descID))
+		table, e, err := m.Acquire(ctx, m.storage.clock.Now(), descID)
+		acquireChan <- Result{err: err, exp: e, table: table.(catalog.TableDescriptor)}
 	}
 
 	testCases := []struct {
@@ -948,7 +910,7 @@ func TestLeaseAcquireAndReleaseConcurrently(t *testing.T) {
 					LeaseStoreTestingKnobs: StorageTestingKnobs{
 						RemoveOnceDereferenced: true,
 						LeaseReleasedEvent:     removalTracker.LeaseRemovedNotification,
-						LeaseAcquireResultBlockEvent: func(leaseBlockType AcquireBlockType, _ descpb.ID) {
+						LeaseAcquireResultBlockEvent: func(leaseBlockType AcquireBlockType) {
 							if leaseBlockType == AcquireBlock {
 								if count := atomic.LoadInt32(&acquireArrivals); (count < 1 && test.isSecondCallAcquireFreshest) ||
 									(count < 2 && !test.isSecondCallAcquireFreshest) {
@@ -974,11 +936,12 @@ func TestLeaseAcquireAndReleaseConcurrently(t *testing.T) {
 
 			serverArgs := base.TestServerArgs{Knobs: testingKnobs}
 
+			serverArgs.LeaseManagerConfig = base.NewLeaseManagerConfig()
 			// The LeaseJitterFraction is zero so leases will have
 			// monotonically increasing expiration. This prevents two leases
 			// from having the same expiration due to randomness, as the
 			// leases are checked for having a different expiration.
-			LeaseJitterFraction.Override(ctx, &serverArgs.SV, 0)
+			serverArgs.LeaseManagerConfig.DescriptorLeaseJitterFraction = 0.0
 
 			s, _, _ := serverutils.StartServer(
 				t, serverArgs)
@@ -993,10 +956,11 @@ func TestLeaseAcquireAndReleaseConcurrently(t *testing.T) {
 			if test.isSecondCallAcquireFreshest {
 				go func(ctx context.Context, m *Manager, acquireChan chan Result) {
 					if err := m.AcquireFreshestFromStore(ctx, descID); err != nil {
-						acquireChan <- mkResult(nil, err)
+						acquireChan <- Result{err: err, exp: hlc.Timestamp{}, table: nil}
 						return
 					}
-					acquireChan <- mkResult(m.Acquire(ctx, s.Clock().Now(), descID))
+					table, e, err := m.Acquire(ctx, s.Clock().Now(), descID)
+					acquireChan <- Result{err: err, exp: e, table: table.(catalog.TableDescriptor)}
 				}(ctx, leaseManager, acquireResultChan)
 
 			} else {
@@ -1022,8 +986,10 @@ func TestLeaseAcquireAndReleaseConcurrently(t *testing.T) {
 
 			// Release the lease. This also causes it to get removed as the
 			// knob RemoveOnceDereferenced is set.
-			tracker := removalTracker.TrackRemoval(result1.table.Underlying())
-			result1.table.Release(ctx)
+			tracker := removalTracker.TrackRemoval(result1.table)
+			if err := leaseManager.Release(result1.table); err != nil {
+				t.Fatal(err)
+			}
 			// Wait until the lease is removed.
 			if err := tracker.WaitForRemoval(); err != nil {
 				t.Fatal(err)
@@ -1051,200 +1017,6 @@ func TestLeaseAcquireAndReleaseConcurrently(t *testing.T) {
 			if count := atomic.LoadInt32(&leasesAcquiredCount); count != 2 {
 				t.Fatalf("Expected to acquire 2 leases, instead got %d", count)
 			}
-		})
-	}
-}
-
-// Tests retrieving older versions within a given start and end timestamp of a
-// table descriptor from store through an ExportRequest.
-func TestReadOlderVersionForTimestamp(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	serverParams := base.TestServerArgs{
-		Knobs: base.TestingKnobs{
-			SQLLeaseManager: &ManagerTestingKnobs{
-				TestingDescriptorUpdateEvent: func(_ *descpb.Descriptor) error {
-					return errors.New("Caught race between resetting state and refreshing leases")
-				},
-			},
-		},
-	}
-	var stopper *stop.Stopper
-	s, sqlDB, _ := serverutils.StartServer(t, serverParams)
-	stopper = s.Stopper()
-	ctx := context.Background()
-	defer stopper.Stop(ctx)
-
-	tdb := sqlutils.MakeSQLRunner(sqlDB)
-	// Prevent non-explicit Acquire to leases for testing purposes.
-	tdb.Exec(t, "SET CLUSTER SETTING sql.tablecache.lease.refresh_limit = 0")
-	tdb.Exec(t, "CREATE TABLE foo (i INT PRIMARY KEY)")
-	var tableID descpb.ID
-	tdb.QueryRow(t, "SELECT id FROM system.namespace WHERE name = 'foo'").Scan(&tableID)
-
-	manager := s.LeaseManager().(*Manager)
-	const numHistoricalVersions = 5
-	const maxVersion = numHistoricalVersions + 1
-	descs := make([]catalog.Descriptor, maxVersion)
-
-	// Create numHistoricalVersions versions of table descriptor
-	for i := 0; i < numHistoricalVersions; i++ {
-		_, err := manager.Publish(ctx, tableID, func(desc catalog.MutableDescriptor) error {
-			descs[i] = desc.ImmutableCopy()
-			return nil
-		}, nil)
-		require.NoError(t, err)
-	}
-	{
-		last, err := manager.Acquire(ctx, s.Clock().Now(), tableID)
-		require.NoError(t, err)
-		descs[numHistoricalVersions] = last.Underlying()
-		last.Release(ctx)
-	}
-
-	type version int
-	type testCase struct {
-		before   []version
-		ts       hlc.Timestamp
-		tsStr    string
-		expected []version
-	}
-	versionTS := func(v version) hlc.Timestamp {
-		return descs[v-1].GetModificationTime()
-	}
-	versionDesc := func(v version) catalog.Descriptor {
-		return descs[v-1]
-	}
-	resetDescriptorState := func(
-		manager *Manager, tableID descpb.ID, tc testCase,
-	) {
-		manager.mu.Lock()
-		defer manager.mu.Unlock()
-		descStates := manager.mu.descriptors
-		descStates[tableID] = &descriptorState{m: manager, id: tableID}
-		for _, v := range tc.before {
-			addedDescVState := &descriptorVersionState{
-				t:          descStates[tableID],
-				Descriptor: versionDesc(v),
-			}
-			addedDescVState.mu.Lock()
-			if v < maxVersion {
-				addedDescVState.mu.expiration = versionTS(v + 1)
-			} else {
-				addedDescVState.mu.expiration = hlc.MaxTimestamp
-			}
-			addedDescVState.mu.Unlock()
-			descStates[tableID].mu.active.insert(addedDescVState)
-		}
-	}
-
-	// Test historical read for descriptors as of specific timestamps and confirm
-	// expected data.
-	// [v1 ---)[v2 --)[v3 ---)[v4 ----)[v5 -----)[v6 ------)
-	for _, tc := range []testCase{
-
-		// The following cases represent having no existing descriptor state, or
-		// as importantly, having some descriptor state but searching for a
-		// timestamp after the known state. The code, as stands, assumes that
-		// when this happens, we'll rely on an existing lease to provide the end
-		// timestamp, and when no such lease exists, we'll go get one. If the
-		// attempt to get a lease fails, then we'll propagate that error up. This
-		// fact is the source of the known limitation described on
-		// Acquire and AcquireByName.
-		{
-			before:   []version{},
-			ts:       versionTS(1),
-			tsStr:    "ts1",
-			expected: []version{},
-		},
-		{
-			before:   []version{},
-			ts:       versionTS(4),
-			tsStr:    "ts4",
-			expected: []version{},
-		},
-		{
-			before:   []version{},
-			ts:       versionTS(6),
-			tsStr:    "ts6",
-			expected: []version{},
-		},
-		{
-			before:   []version{1, 2, 3},
-			ts:       versionTS(4).Next(),
-			tsStr:    "ts4.Next",
-			expected: []version{},
-		},
-		{
-			before:   []version{},
-			ts:       versionTS(6).Prev(),
-			tsStr:    "ts6.Prev",
-			expected: []version{},
-		},
-
-		{
-			before:   []version{6},
-			ts:       versionTS(4).Prev(),
-			tsStr:    "ts4.Prev",
-			expected: []version{3, 4, 5},
-		},
-		{
-			before:   []version{6},
-			ts:       versionTS(5),
-			tsStr:    "ts5",
-			expected: []version{5},
-		},
-		{
-			before:   []version{5, 6},
-			ts:       versionTS(3).Prev(),
-			tsStr:    "ts3.Prev",
-			expected: []version{2, 3, 4},
-		},
-		{
-			before:   []version{1, 2, 3, 4, 5, 6},
-			ts:       versionTS(4),
-			tsStr:    "ts4",
-			expected: []version{},
-		},
-		{
-			before:   []version{1, 4, 5, 6},
-			ts:       versionTS(4).Prev(),
-			tsStr:    "ts4.Prev",
-			expected: []version{3},
-		},
-		{
-			before:   []version{1, 4, 5, 6},
-			ts:       versionTS(3).Prev(),
-			tsStr:    "ts3.Prev",
-			expected: []version{2, 3},
-		},
-		{
-			before:   []version{1, 4, 5, 6},
-			ts:       versionTS(2),
-			tsStr:    "ts2",
-			expected: []version{2, 3},
-		},
-		{
-			before:   []version{1, 4, 5, 6},
-			ts:       versionTS(2).Prev(),
-			tsStr:    "ts2.Prev",
-			expected: []version{},
-		},
-	} {
-		t.Run(fmt.Sprintf("%v@%v->%v", tc.before, tc.tsStr, tc.expected), func(t *testing.T) {
-			// Reset the descriptor state to before versions.
-			resetDescriptorState(manager, tableID, tc)
-
-			// Retrieve historicalDescriptors modification times.
-			retrieved, err := manager.readOlderVersionForTimestamp(ctx, tableID, tc.ts)
-			require.NoError(t, err)
-
-			// Validate retrieved descriptors match expected versions.
-			retrievedVersions := make([]version, 0)
-			for _, desc := range retrieved {
-				ver := version(desc.desc.GetVersion())
-				retrievedVersions = append([]version{ver}, retrievedVersions...)
-			}
-			require.Equal(t, tc.expected, retrievedVersions)
 		})
 	}
 }

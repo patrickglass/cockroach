@@ -18,15 +18,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx"
 	"github.com/lib/pq/oid"
 )
 
 // txTypeResolver is a minimal type resolver to support writing enum values to
 // columns.
 type txTypeResolver struct {
-	tx pgx.Tx
+	tx *pgx.Tx
 }
 
 // ResolveType implements the TypeReferenceResolver interface.
@@ -37,7 +36,7 @@ func (t txTypeResolver) ResolveType(
 ) (*types.T, error) {
 
 	if name.HasExplicitSchema() {
-		rows, err := t.tx.Query(ctx, `
+		rows, err := t.tx.Query(`
   SELECT enumlabel, enumsortorder, pgt.oid::int
     FROM pg_enum AS pge, pg_type AS pgt, pg_namespace AS pgn
    WHERE (pgt.typnamespace = pgn.oid AND pgt.oid = pge.enumtypid)
@@ -88,27 +87,19 @@ ORDER BY enumsortorder`, name.Object(), name.Schema())
 
 	// Since the type is not a user defined schema type, it is a primitive type.
 	var objectID oid.Oid
-	if err := t.tx.QueryRow(ctx, `
+	if err := t.tx.QueryRow(`
   SELECT oid::int
     FROM pg_type
    WHERE typname = $1
   `, name.Object(),
 	).Scan(&objectID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			err = errors.Errorf("failed to resolve primitive type %s", name)
-		}
 		return nil, err
 	}
 
 	if _, exists := types.OidToType[objectID]; !exists {
 		return nil, pgerror.Newf(pgcode.UndefinedObject, "type %s with oid %s does not exist", name.Object(), objectID)
 	}
-	// Special case CHAR to have the right width.
-	if objectID == oid.T_bpchar {
-		t := *types.OidToType[objectID]
-		t.InternalType.Width = 1
-		return &t, nil
-	}
+
 	return types.OidToType[objectID], nil
 }
 

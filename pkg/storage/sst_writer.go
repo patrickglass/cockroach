@@ -24,7 +24,7 @@ import (
 // SSTWriter writes SSTables.
 type SSTWriter struct {
 	fw *sstable.Writer
-	f  io.Writer
+	f  writeCloseSyncer
 	// DataSize tracks the total key and value bytes added so far.
 	DataSize int64
 	scratch  []byte
@@ -38,23 +38,9 @@ type writeCloseSyncer interface {
 	Sync() error
 }
 
-// noopSyncCloser is used to wrap io.Writers for sstable.Writer so that callers
-// can decide when to close/sync.
-type noopSyncCloser struct {
-	io.Writer
-}
-
-func (noopSyncCloser) Sync() error {
-	return nil
-}
-
-func (noopSyncCloser) Close() error {
-	return nil
-}
-
-// MakeBackupSSTWriter creates a new SSTWriter tailored for backup SSTs which
-// are typically only ever iterated in their entirety.
-func MakeBackupSSTWriter(f io.Writer) SSTWriter {
+// MakeBackupSSTWriter creates a new SSTWriter tailored for backup SSTs. These
+// SSTs have bloom filters disabled and format set to LevelDB.
+func MakeBackupSSTWriter(f writeCloseSyncer) SSTWriter {
 	opts := DefaultPebbleOptions().MakeWriterOptions(0)
 	opts.TableFormat = sstable.TableFormatRocksDBv2
 
@@ -66,7 +52,7 @@ func MakeBackupSSTWriter(f io.Writer) SSTWriter {
 	opts.BlockSize = 128 << 10
 
 	opts.MergerName = "nullptr"
-	sst := sstable.NewWriter(noopSyncCloser{f}, opts)
+	sst := sstable.NewWriter(f, opts)
 	return SSTWriter{fw: sst, f: f}
 }
 
@@ -180,6 +166,11 @@ func (fw *SSTWriter) PutEngineKey(key EngineKey, value []byte) error {
 	return fw.fw.Set(fw.scratch, value)
 }
 
+// SafeToWriteSeparatedIntents implements the Writer interface.
+func (fw *SSTWriter) SafeToWriteSeparatedIntents(context.Context) (bool, error) {
+	return false, errors.Errorf("SSTWriter does not support SafeToWriteSeparatedIntents")
+}
+
 // put puts a kv entry into the sstable being built. An error is returned if it
 // is not greater than any previously added entry (according to the comparator
 // configured during writer creation). `Close` cannot have been called.
@@ -237,11 +228,6 @@ func (fw *SSTWriter) ClearEngineKey(key EngineKey) error {
 	fw.scratch = key.EncodeToBuf(fw.scratch[:0])
 	fw.DataSize += int64(len(key.Key))
 	return fw.fw.Delete(fw.scratch)
-}
-
-// OverrideTxnDidNotUpdateMetaToFalse implements the Writer interface.
-func (fw *SSTWriter) OverrideTxnDidNotUpdateMetaToFalse(ctx context.Context) bool {
-	panic("OverrideTxnDidNotUpdateMetaToFalse is unsupported")
 }
 
 // An error is returned if it is not greater than any previous point key

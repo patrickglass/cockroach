@@ -19,8 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlclient"
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlexec"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/heapprofiler"
@@ -50,7 +48,6 @@ var customQuery = map[string]string{
 		") SELECT * FROM spans, LATERAL crdb_internal.payloads_for_span(span_id)",
 	"system.jobs":       "SELECT *, to_hex(payload) AS hex_payload, to_hex(progress) AS hex_progress FROM system.jobs",
 	"system.descriptor": "SELECT *, to_hex(descriptor) AS hex_descriptor FROM system.descriptor",
-	"system.settings":   "SELECT *, to_hex(value::bytes) as hex_value FROM system.settings",
 }
 
 type debugZipContext struct {
@@ -60,7 +57,7 @@ type debugZipContext struct {
 	admin          serverpb.AdminClient
 	status         serverpb.StatusClient
 
-	firstNodeSQLConn clisqlclient.Conn
+	firstNodeSQLConn *sqlConn
 
 	sem semaphore.Semaphore
 }
@@ -182,11 +179,11 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 
 	// We're going to use the SQL code, but in non-interactive mode.
 	// Override whatever terminal-driven defaults there may be out there.
-	cliCtx.IsInteractive = false
-	sqlExecCtx.TerminalOutput = false
-	sqlExecCtx.ShowTimes = false
+	cliCtx.isInteractive = false
+	cliCtx.terminalOutput = false
+	sqlCtx.showTimes = false
 	// Use a streaming format to avoid accumulating all rows in RAM.
-	sqlExecCtx.TableDisplayFormat = clisqlexec.TableDisplayTSV
+	cliCtx.tableDisplayFormat = tableDisplayTSV
 
 	sqlConn, err := makeSQLClient("cockroach zip", useSystemDb)
 	if err != nil {
@@ -194,8 +191,8 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 	} else {
 		// Note: we're not printing "connection established" because the driver we're using
 		// does late binding.
-		defer func() { retErr = errors.CombineErrors(retErr, sqlConn.Close()) }()
-		s.progress("using SQL connection URL: %s", sqlConn.GetURL())
+		defer sqlConn.Close()
+		s.progress("using SQL connection URL: %s", sqlConn.url)
 		s.done()
 	}
 
@@ -296,7 +293,7 @@ func maybeAddProfileSuffix(name string) string {
 // An error is returned by this function if it is unable to write to
 // the output file or some other unrecoverable error is encountered.
 func (zc *debugZipContext) dumpTableDataForZip(
-	zr *zipReporter, conn clisqlclient.Conn, base, table, query string,
+	zr *zipReporter, conn *sqlConn, base, table, query string,
 ) error {
 	fullQuery := fmt.Sprintf(`SET statement_timeout = '%s'; %s`, zc.timeout, query)
 	baseName := base + "/" + sanitizeFilename(table)
@@ -317,7 +314,7 @@ func (zc *debugZipContext) dumpTableDataForZip(
 			}
 			// Pump the SQL rows directly into the zip writer, to avoid
 			// in-RAM buffering.
-			return sqlExecCtx.RunQueryAndFormatResults(conn, w, stderr, clisqlclient.MakeQuery(fullQuery))
+			return runQueryAndFormatResults(conn, w, makeQuery(fullQuery))
 		}()
 		if sqlErr != nil {
 			if cErr := zc.z.createError(s, name, sqlErr); cErr != nil {

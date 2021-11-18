@@ -57,7 +57,7 @@ $right
 =>
 $left
 
-# SimplifyOrTrue maps the Or operator to True if its right input is True.
+# SimplifyOrTrue maps the Or operator to True if its righht input is True.
 [SimplifyOrTrue, Normalize]
 (Or * $right:(True))
 =>
@@ -114,8 +114,8 @@ $input
 [NegateComparison, Normalize]
 (Not
     $input:(Comparison $left:* $right:*) &
-        ^(Contains | ContainedBy | JsonExists | JsonSomeExists
-                | JsonAllExists | Overlaps
+        ^(Contains | JsonExists | JsonSomeExists | JsonAllExists
+                | Overlaps
         )
 )
 =>
@@ -156,9 +156,8 @@ $input
 (Or
     $left:^(Or)
     $right:^(Or) &
-        (Let
-            ($conjunct $ok):(FindRedundantConjunct $left $right)
-            $ok
+        (Succeeded
+            $conjunct:(FindRedundantConjunct $left $right)
         )
 )
 =>

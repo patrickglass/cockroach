@@ -16,11 +16,12 @@ import (
 	"math"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/config"
+	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
@@ -88,13 +89,13 @@ type mergeQueue struct {
 	purgChan <-chan time.Time
 }
 
-func newMergeQueue(store *Store, db *kv.DB) *mergeQueue {
+func newMergeQueue(store *Store, db *kv.DB, gossip *gossip.Gossip) *mergeQueue {
 	mq := &mergeQueue{
 		db:       db,
 		purgChan: time.NewTicker(mergeQueuePurgatoryCheckInterval).C,
 	}
 	mq.baseQueue = newBaseQueue(
-		"merge", mq, store,
+		"merge", mq, store, gossip,
 		queueConfig{
 			maxSize:        defaultQueueMaxSize,
 			maxConcurrency: mergeQueueConcurrency,
@@ -129,8 +130,8 @@ func (mq *mergeQueue) enabled() bool {
 }
 
 func (mq *mergeQueue) shouldQueue(
-	ctx context.Context, now hlc.ClockTimestamp, repl *Replica, confReader spanconfig.StoreReader,
-) (shouldQueue bool, priority float64) {
+	ctx context.Context, now hlc.ClockTimestamp, repl *Replica, sysCfg *config.SystemConfig,
+) (shouldQ bool, priority float64) {
 	if !mq.enabled() {
 		return false, 0
 	}
@@ -142,7 +143,7 @@ func (mq *mergeQueue) shouldQueue(
 		return false, 0
 	}
 
-	if confReader.NeedsSplit(ctx, desc.StartKey, desc.EndKey.Next()) {
+	if sysCfg.NeedsSplit(ctx, desc.StartKey, desc.EndKey.Next()) {
 		// This range would need to be split if it extended just one key further.
 		// There is thus no possible right-hand neighbor that it could be merged
 		// with.
@@ -198,7 +199,7 @@ func (mq *mergeQueue) requestRangeStats(
 }
 
 func (mq *mergeQueue) process(
-	ctx context.Context, lhsRepl *Replica, confReader spanconfig.StoreReader,
+	ctx context.Context, lhsRepl *Replica, sysCfg *config.SystemConfig,
 ) (processed bool, err error) {
 	if !mq.enabled() {
 		log.VEventf(ctx, 2, "skipping merge: queue has been disabled")
@@ -270,7 +271,7 @@ func (mq *mergeQueue) process(
 	// by a small increase in load.
 	conservativeLoadBasedSplitThreshold := 0.5 * lhsRepl.SplitByLoadQPSThreshold()
 	shouldSplit, _ := shouldSplitRange(ctx, mergedDesc, mergedStats,
-		lhsRepl.GetMaxBytes(), lhsRepl.shouldBackpressureWrites(), confReader)
+		lhsRepl.GetMaxBytes(), lhsRepl.shouldBackpressureWrites(), sysCfg)
 	if shouldSplit || mergedQPS >= conservativeLoadBasedSplitThreshold {
 		log.VEventf(ctx, 2,
 			"skipping merge to avoid thrashing: merged range %s may split "+
@@ -386,7 +387,7 @@ func (mq *mergeQueue) process(
 		return false, rangeMergePurgatoryError{err}
 	}
 	if testingAggressiveConsistencyChecks {
-		if _, err := mq.store.consistencyQueue.process(ctx, lhsRepl, confReader); err != nil {
+		if _, err := mq.store.consistencyQueue.process(ctx, lhsRepl, sysCfg); err != nil {
 			log.Warningf(ctx, "%v", err)
 		}
 	}

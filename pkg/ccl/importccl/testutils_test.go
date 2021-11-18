@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
@@ -29,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -53,7 +53,7 @@ func descForTable(
 		name := parsed[0].AST.(*tree.CreateSequence).Name.String()
 
 		ts := hlc.Timestamp{WallTime: nanos}
-		priv := descpb.NewBasePrivilegeDescriptor(security.AdminRoleName())
+		priv := descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName())
 		desc, err := sql.NewSequenceTableDesc(
 			ctx,
 			name,
@@ -75,7 +75,7 @@ func descForTable(
 		stmt = parsed[0].AST.(*tree.CreateTable)
 	}
 	semaCtx := tree.MakeSemaContext()
-	table, err := MakeTestingSimpleTableDescriptor(context.Background(), &semaCtx, settings, stmt, parent, keys.PublicSchemaID, id, fks, nanos)
+	table, err := MakeSimpleTableDescriptor(context.Background(), &semaCtx, settings, stmt, parent, keys.PublicSchemaID, id, fks, nanos)
 	if err != nil {
 		t.Fatalf("could not interpret %q: %v", create, err)
 	}
@@ -86,11 +86,9 @@ func descForTable(
 }
 
 var testEvalCtx = &tree.EvalContext{
-	SessionDataStack: sessiondata.NewStack(
-		&sessiondata.SessionData{
-			Location: time.UTC,
-		},
-	),
+	SessionData: &sessiondata.SessionData{
+		Location: time.UTC,
+	},
 	StmtTimestamp: timeutil.Unix(100000000, 0),
 	Settings:      cluster.MakeTestingClusterSettings(),
 	Codec:         keys.SystemSQLCodec,
@@ -273,9 +271,19 @@ func (es *generatorExternalStorage) Size(ctx context.Context, basename string) (
 	return int64(es.gen.size), nil
 }
 
+func (es *generatorExternalStorage) WriteFile(
+	ctx context.Context, basename string, content io.ReadSeeker,
+) error {
+	return errors.New("unsupported")
+}
+
 func (es *generatorExternalStorage) Writer(
 	ctx context.Context, basename string,
 ) (io.WriteCloser, error) {
+	return nil, errors.New("unsupported")
+}
+
+func (es *generatorExternalStorage) ListFiles(ctx context.Context, _ string) ([]string, error) {
 	return nil, errors.New("unsupported")
 }
 

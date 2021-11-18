@@ -13,7 +13,6 @@ package optbuilder
 import (
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -26,16 +25,6 @@ func (b *Builder) buildControlJobs(n *tree.ControlJobs, inScope *scope) (outScop
 	colTypes := []*types.T{types.Int}
 	inputScope := b.buildStmt(n.Jobs, colTypes, emptyScope)
 
-	var reason opt.ScalarExpr
-	if n.Reason != nil {
-		reasonStr := emptyScope.resolveType(n.Reason, types.String)
-		reason = b.buildScalar(
-			reasonStr, emptyScope, nil /* outScope */, nil /* outCol */, nil, /* colRefs */
-		)
-	} else {
-		reason = b.factory.ConstructNull(types.String)
-	}
-
 	checkInputColumns(
 		fmt.Sprintf("%s JOBS", tree.JobCommandToStatement[n.Command]),
 		inputScope,
@@ -46,7 +35,6 @@ func (b *Builder) buildControlJobs(n *tree.ControlJobs, inScope *scope) (outScop
 	outScope = inScope.push()
 	outScope.expr = b.factory.ConstructControlJobs(
 		inputScope.expr.(memo.RelExpr),
-		reason,
 		&memo.ControlJobsPrivate{
 			Props:   inputScope.makePhysicalProps(),
 			Command: n.Command,

@@ -13,7 +13,6 @@ package stats
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -65,7 +64,7 @@ func DeleteOldStatsForColumns(
                    LIMIT $4
                )`,
 		tableID,
-		jobspb.AutoStatsName,
+		AutoStatsName,
 		columnIDsVal,
 		keepCount,
 	)

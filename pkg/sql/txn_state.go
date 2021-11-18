@@ -18,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
@@ -27,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 // txnState contains state associated with an ongoing SQL txn; it constitutes
@@ -94,9 +92,6 @@ type txnState struct {
 	// through the use of AS OF SYSTEM TIME.
 	isHistorical bool
 
-	// lastEpoch is the last observed epoch in the current txn.
-	lastEpoch enginepb.TxnEpoch
-
 	// mon tracks txn-bound objects like the running state of
 	// planNode in the midst of performing a computation.
 	mon *mon.BytesMonitor
@@ -111,10 +106,6 @@ type txnState struct {
 	// txnAbortCount is incremented whenever the state transitions to
 	// stateAborted.
 	txnAbortCount *metric.Counter
-
-	// testingForceRealTracingSpans is a test-only knob that forces the use of
-	// real (i.e. not no-op) tracing spans for every statement.
-	testingForceRealTracingSpans bool
 }
 
 // txnType represents the type of a SQL transaction.
@@ -160,7 +151,6 @@ func (ts *txnState) resetForNewSQLTxn(
 	// Reset state vars to defaults.
 	ts.sqlTimestamp = sqlTimestamp
 	ts.isHistorical = false
-	ts.lastEpoch = 0
 
 	// Create a context for this transaction. It will include a root span that
 	// will contain everything executed as part of the upcoming SQL txn, including
@@ -172,18 +162,19 @@ func (ts *txnState) resetForNewSQLTxn(
 	var sp *tracing.Span
 	duration := traceTxnThreshold.Get(&tranCtx.settings.SV)
 	if alreadyRecording || duration > 0 {
-		txnCtx, sp = createRootOrChildSpan(connCtx, opName, tranCtx.tracer,
-			tracing.WithRecording(tracing.RecordingVerbose))
-	} else if ts.testingForceRealTracingSpans {
+		// WithForceRealSpan is used to support the use of session tracing,
+		// which will start recording on this span. Similarly, it enables the
+		// tracing of the txns that exceed the duration threshold.
 		txnCtx, sp = createRootOrChildSpan(connCtx, opName, tranCtx.tracer, tracing.WithForceRealSpan())
 	} else {
 		txnCtx, sp = createRootOrChildSpan(connCtx, opName, tranCtx.tracer)
 	}
 	if txnType == implicitTxn {
-		sp.SetTag("implicit", attribute.StringValue("true"))
+		sp.SetTag("implicit", "true")
 	}
 
 	if !alreadyRecording && (duration > 0) {
+		sp.SetVerbose(true)
 		ts.recordingThreshold = duration
 		ts.recordingStart = timeutil.Now()
 	}
@@ -207,9 +198,7 @@ func (ts *txnState) resetForNewSQLTxn(
 	ts.mu.txnStart = timeutil.Now()
 	ts.mu.Unlock()
 	if historicalTimestamp != nil {
-		if err := ts.setHistoricalTimestamp(ts.Ctx, *historicalTimestamp); err != nil {
-			panic(err)
-		}
+		ts.setHistoricalTimestamp(ts.Ctx, *historicalTimestamp)
 	}
 	if err := ts.setReadOnlyMode(readOnly); err != nil {
 		panic(err)
@@ -231,7 +220,7 @@ func (ts *txnState) finishSQLTxn() {
 	}
 
 	if ts.recordingThreshold > 0 {
-		logTraceAboveThreshold(ts.Ctx, sp.GetRecording(sp.RecordingType()), "SQL txn", ts.recordingThreshold, timeutil.Since(ts.recordingStart))
+		logTraceAboveThreshold(ts.Ctx, sp.GetRecording(), "SQL txn", ts.recordingThreshold, timeutil.Since(ts.recordingStart))
 	}
 
 	sp.Finish()
@@ -269,16 +258,11 @@ func (ts *txnState) finishExternalTxn() {
 	ts.mu.Unlock()
 }
 
-func (ts *txnState) setHistoricalTimestamp(
-	ctx context.Context, historicalTimestamp hlc.Timestamp,
-) error {
+func (ts *txnState) setHistoricalTimestamp(ctx context.Context, historicalTimestamp hlc.Timestamp) {
 	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	if err := ts.mu.txn.SetFixedTimestamp(ctx, historicalTimestamp); err != nil {
-		return err
-	}
+	ts.mu.txn.SetFixedTimestamp(ctx, historicalTimestamp)
+	ts.mu.Unlock()
 	ts.isHistorical = true
-	return nil
 }
 
 // getReadTimestamp returns the transaction's current read timestamp.

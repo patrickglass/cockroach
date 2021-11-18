@@ -15,17 +15,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/redact"
 	types "github.com/gogo/protobuf/types"
 )
 
-// TraceID is a probabilistically-unique id, shared by all spans in a trace.
-type TraceID uint64
-
-// SpanID is a probabilistically-unique span id.
-type SpanID uint64
-
-// LogMessageField is the field name used for the log message in a LogRecord.
+// LogMessageField is the field name used for the opentracing.Span.LogFields()
+// for a log message.
 const LogMessageField = "event"
 
 func (s *RecordedSpan) String() string {
@@ -39,42 +33,23 @@ func (s *RecordedSpan) String() string {
 
 // Structured visits the data passed to RecordStructured for the Span from which
 // the RecordedSpan was created.
-func (s *RecordedSpan) Structured(visit func(*types.Any, time.Time)) {
-	for _, sr := range s.StructuredRecords {
-		visit(sr.Payload, sr.Time)
+func (s *RecordedSpan) Structured(visit func(*types.Any)) {
+	for _, item := range s.InternalStructured {
+		visit(item)
 	}
 }
 
 // Msg extracts the message of the LogRecord, which is either in an "event" or
 // "error" field.
-func (l LogRecord) Msg() redact.RedactableString {
-	if l.Message != "" {
-		return l.Message
-	}
-
-	// Compatibility with 21.2: look at l.DeprecatedFields.
-	for _, f := range l.DeprecatedFields {
+func (l LogRecord) Msg() string {
+	for _, f := range l.Fields {
 		key := f.Key
 		if key == LogMessageField {
 			return f.Value
 		}
 		if key == "error" {
-			return redact.Sprintf("error: %s", f.Value)
+			return fmt.Sprint("error:", f.Value)
 		}
 	}
 	return ""
-}
-
-// MemorySize implements the sizable interface.
-func (l *LogRecord) MemorySize() int {
-	return 3*8 + // 3 words for time.Time
-		2*8 + // 2 words for StringHeader
-		len(l.Message)
-}
-
-// MemorySize implements the sizable interface.
-func (r *StructuredRecord) MemorySize() int {
-	return 3*8 + // 3 words for time.Time
-		1*8 + // 1 words for *Any
-		r.Payload.Size() // TODO(andrei): this is the encoded size, not the mem size
 }

@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -27,12 +26,12 @@ import (
 
 // InboundStreamHandler is a handler of an inbound stream.
 type InboundStreamHandler interface {
-	// Run is called once a FlowStream RPC is handled and a stream is obtained to
+	// run is called once a FlowStream RPC is handled and a stream is obtained to
 	// make this stream accessible to the rest of the flow.
 	Run(
 		ctx context.Context, stream execinfrapb.DistSQL_FlowStreamServer, firstMsg *execinfrapb.ProducerMessage, f *FlowBase,
 	) error
-	// Timeout is called with an error, which results in the teardown of the
+	// timeout is called with an error, which results in the teardown of the
 	// stream strategy with the given error.
 	// WARNING: timeout may block.
 	Timeout(err error)
@@ -110,7 +109,7 @@ func processInboundStreamHelper(
 
 	if firstMsg != nil {
 		if res := processProducerMessage(
-			ctx, f, stream, dst, &sd, &draining, firstMsg,
+			ctx, stream, dst, &sd, &draining, firstMsg,
 		); res.err != nil || res.consumerClosed {
 			sendErrToConsumer(res.err)
 			return res.err
@@ -137,7 +136,7 @@ func processInboundStreamHelper(
 			if err != nil {
 				if err != io.EOF {
 					// Communication error.
-					err = pgerror.Wrap(err, pgcode.InternalConnectionFailure, "inbox communication error")
+					err = pgerror.Newf(pgcode.InternalConnectionFailure, "inbox communication error: %s", err)
 					sendErrToConsumer(err)
 					errChan <- err
 					return
@@ -149,7 +148,7 @@ func processInboundStreamHelper(
 			}
 
 			if res := processProducerMessage(
-				ctx, f, stream, dst, &sd, &draining, msg,
+				ctx, stream, dst, &sd, &draining, msg,
 			); res.err != nil || res.consumerClosed {
 				sendErrToConsumer(res.err)
 				errChan <- res.err
@@ -185,7 +184,6 @@ func sendDrainSignalToStreamProducer(
 // closed), the caller must return the error to the producer.
 func processProducerMessage(
 	ctx context.Context,
-	flowBase *FlowBase,
 	stream execinfrapb.DistSQL_FlowStreamServer,
 	dst execinfra.RowReceiver,
 	sd *StreamDecoder,
@@ -201,15 +199,6 @@ func processProducerMessage(
 				// show the tags later.
 				log.FormatWithContextTags(ctx, "decoding error")),
 			consumerClosed: false,
-		}
-	}
-	var admissionQ *admission.WorkQueue
-	if flowBase.Cfg != nil {
-		admissionQ = flowBase.Cfg.SQLSQLResponseAdmissionQ
-	}
-	if admissionQ != nil {
-		if _, err := admissionQ.Admit(ctx, flowBase.admissionInfo); err != nil {
-			return processMessageResult{err: err, consumerClosed: false}
 		}
 	}
 	var types []*types.T

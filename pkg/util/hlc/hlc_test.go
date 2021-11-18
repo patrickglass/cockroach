@@ -22,7 +22,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
@@ -373,10 +372,9 @@ func TestHybridManualClock(t *testing.T) {
 	require.LessOrEqual(t, c.Now().WallTime, UnixNano())
 	require.LessOrEqual(t, UnixNano(), c.Now().WallTime)
 
-	inc := time.Second.Nanoseconds()
-	m.Increment(inc)
-	require.LessOrEqual(t, c.Now().WallTime, UnixNano()+inc)
-	require.LessOrEqual(t, UnixNano()+inc, c.Now().WallTime)
+	m.Increment(10)
+	require.LessOrEqual(t, c.Now().WallTime, UnixNano()+10)
+	require.LessOrEqual(t, UnixNano()+10, c.Now().WallTime)
 }
 
 // TestHybridManualClockPause test the Pause() functionality of the
@@ -392,14 +390,8 @@ func TestHybridManualClockPause(t *testing.T) {
 	require.Equal(t, now, c.Now().WallTime)
 	time.Sleep(10 * time.Millisecond)
 	require.Equal(t, now, c.Now().WallTime)
-	inc := time.Second.Nanoseconds()
-	m.Increment(inc)
-	require.Equal(t, now+inc, c.Now().WallTime)
-	m.Resume()
-	trueNow := UnixNano()
-	require.LessOrEqual(t, trueNow+inc, c.Now().WallTime)
-	time.Sleep(10 * time.Millisecond)
-	require.Less(t, trueNow+inc, c.Now().WallTime)
+	m.Increment(10)
+	require.Equal(t, now+10, c.Now().WallTime)
 }
 
 func TestHLCMonotonicityCheck(t *testing.T) {
@@ -529,33 +521,6 @@ func TestHLCEnforceWallTimeWithinBoundsInUpdate(t *testing.T) {
 			a.Equal(test.isFatal, fatal)
 		})
 	}
-}
-
-// Ensure that an appropriately structured error is returned when trying to
-// update a clock using a timestamp too far in the future.
-func TestClock_UpdateAndCheckMaxOffset_UntrustworthyValue(t *testing.T) {
-	t0 := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
-	m := NewManualClock(t0.UnixNano())
-	c := NewClock(m.UnixNano, 500*time.Millisecond)
-	require.NoError(t, c.UpdateAndCheckMaxOffset(context.Background(), ClockTimestamp{
-		WallTime: t0.Add(499 * time.Millisecond).UnixNano(),
-	}))
-	err := c.UpdateAndCheckMaxOffset(context.Background(), ClockTimestamp{
-		WallTime: t0.Add(time.Second).UnixNano(),
-	})
-	require.True(t, IsUntrustworthyRemoteWallTimeError(err), err)
-
-	// Test that the error properly round-trips through protobuf encoding.
-	t.Run("encoding", func(t *testing.T) {
-		err := errors.Wrapf(err, "wrapping")
-		encoded := errors.EncodeError(context.Background(), err)
-		marshaled, err := protoutil.Marshal(&encoded)
-		require.NoError(t, err)
-		var unmarshaled errors.EncodedError
-		require.NoError(t, protoutil.Unmarshal(marshaled, &unmarshaled))
-		decoded := errors.DecodeError(context.Background(), unmarshaled)
-		require.True(t, IsUntrustworthyRemoteWallTimeError(decoded), decoded)
-	})
 }
 
 func TestResetAndRefreshHLCUpperBound(t *testing.T) {

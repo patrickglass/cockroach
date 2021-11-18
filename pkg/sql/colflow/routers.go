@@ -17,7 +17,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colcontainer"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexechash"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
@@ -101,7 +100,6 @@ type drainCoordinator interface {
 }
 
 type routerOutputOp struct {
-	colexecop.InitHelper
 	// input is a reference to our router.
 	input execinfra.OpNode
 	// drainCoordinator is a reference to the HashRouter to be able to notify it
@@ -213,17 +211,15 @@ func newRouterOutputOp(args routerOutputOpArgs) *routerOutputOp {
 	return o
 }
 
-func (o *routerOutputOp) Init(ctx context.Context) {
-	o.InitHelper.Init(ctx)
-}
+func (o *routerOutputOp) Init() {}
 
 // nextErrorLocked is a helper method that handles an error encountered in Next.
-func (o *routerOutputOp) nextErrorLocked(err error) {
+func (o *routerOutputOp) nextErrorLocked(ctx context.Context, err error) {
 	o.mu.state = routerOutputOpDraining
 	o.maybeUnblockLocked()
 	// Unlock the mutex, since the HashRouter will cancel all outputs.
 	o.mu.Unlock()
-	o.drainCoordinator.encounteredError(o.Ctx)
+	o.drainCoordinator.encounteredError(ctx)
 	o.mu.Lock()
 	colexecerror.InternalError(err)
 }
@@ -231,7 +227,7 @@ func (o *routerOutputOp) nextErrorLocked(err error) {
 // Next returns the next coldata.Batch from the routerOutputOp. Note that Next
 // is designed for only one concurrent caller and will block until data is
 // ready.
-func (o *routerOutputOp) Next() coldata.Batch {
+func (o *routerOutputOp) Next(ctx context.Context) coldata.Batch {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for o.mu.forwardedErr == nil && o.mu.state == routerOutputOpRunning && o.mu.data.Empty() {
@@ -244,12 +240,12 @@ func (o *routerOutputOp) Next() coldata.Batch {
 	if o.mu.state == routerOutputOpDraining {
 		return coldata.ZeroBatch
 	}
-	b, err := o.mu.data.Dequeue(o.Ctx)
+	b, err := o.mu.data.Dequeue(ctx)
 	if err == nil && o.testingKnobs.nextTestInducedErrorCb != nil {
 		err = o.testingKnobs.nextTestInducedErrorCb()
 	}
 	if err != nil {
-		o.nextErrorLocked(err)
+		o.nextErrorLocked(ctx, err)
 	}
 	o.mu.numUnread -= b.Length()
 	if o.mu.numUnread <= o.testingKnobs.blockedThreshold {
@@ -258,18 +254,18 @@ func (o *routerOutputOp) Next() coldata.Batch {
 	if b.Length() == 0 {
 		if o.testingKnobs.nextTestInducedErrorCb != nil {
 			if err := o.testingKnobs.nextTestInducedErrorCb(); err != nil {
-				o.nextErrorLocked(err)
+				o.nextErrorLocked(ctx, err)
 			}
 		}
 		// This is the last batch. closeLocked will set done to protect against
 		// further calls to Next since this is allowed by the interface as well as
 		// cleaning up and releasing possible disk infrastructure.
-		o.closeLocked(o.Ctx)
+		o.closeLocked(ctx)
 	}
 	return b
 }
 
-func (o *routerOutputOp) DrainMeta() []execinfrapb.ProducerMetadata {
+func (o *routerOutputOp) DrainMeta(_ context.Context) []execinfrapb.ProducerMetadata {
 	o.mu.Lock()
 	o.mu.state = routerOutputOpDraining
 	o.maybeUnblockLocked()
@@ -407,14 +403,22 @@ const (
 // returned by the constructor.
 type HashRouter struct {
 	colexecop.OneInputNode
-	// inputMetaInfo contains all of the meta components that the hash router
-	// is responsible for. Root field is exactly the same as OneInputNode.Input.
-	inputMetaInfo colexecargs.OpWithMetaInfo
 	// hashCols is a slice of indices of the columns used for hashing.
 	hashCols []uint32
 
 	// One output for each stream.
 	outputs []routerOutput
+	// getStats, when non-nil, will be called by the hash router to retrieve the
+	// execution statistics which are then propagated as
+	// execinfrapb.ProducerMetadata object. This will be done right before
+	// draining metadataSources.
+	getStats func() []*execinfrapb.ComponentStats
+	// metadataSources is a slice of execinfrapb.MetadataSources that need to be
+	// drained when the HashRouter terminates.
+	metadataSources execinfrapb.MetadataSources
+	// closers is a slice of Closers that need to be closed when the hash router
+	// terminates.
+	closers colexecop.Closers
 
 	// unblockedEventsChan is a channel shared between the HashRouter and its
 	// outputs. outputs send events on this channel when they are unblocked by a
@@ -454,13 +458,16 @@ type HashRouter struct {
 // needs to have a separate disk account.
 func NewHashRouter(
 	unlimitedAllocators []*colmem.Allocator,
-	input colexecargs.OpWithMetaInfo,
+	input colexecop.Operator,
 	types []*types.T,
 	hashCols []uint32,
 	memoryLimit int64,
 	diskQueueCfg colcontainer.DiskQueueCfg,
 	fdSemaphore semaphore.Semaphore,
 	diskAccounts []*mon.BoundAccount,
+	getStats func() []*execinfrapb.ComponentStats,
+	toDrain []execinfrapb.MetadataSource,
+	toClose []colexecop.Closer,
 ) (*HashRouter, []colexecop.DrainableOperator) {
 	if diskQueueCfg.CacheMode != colcontainer.DiskQueueCacheModeDefault {
 		colexecerror.InternalError(errors.Errorf("hash router instantiated with incompatible disk queue cache mode: %d", diskQueueCfg.CacheMode))
@@ -491,20 +498,25 @@ func NewHashRouter(
 		outputs[i] = op
 		outputsAsOps[i] = op
 	}
-	return newHashRouterWithOutputs(input, hashCols, unblockEventsChan, outputs), outputsAsOps
+	return newHashRouterWithOutputs(input, hashCols, unblockEventsChan, outputs, getStats, toDrain, toClose), outputsAsOps
 }
 
 func newHashRouterWithOutputs(
-	input colexecargs.OpWithMetaInfo,
+	input colexecop.Operator,
 	hashCols []uint32,
 	unblockEventsChan <-chan struct{},
 	outputs []routerOutput,
+	getStats func() []*execinfrapb.ComponentStats,
+	toDrain []execinfrapb.MetadataSource,
+	toClose []colexecop.Closer,
 ) *HashRouter {
 	r := &HashRouter{
-		OneInputNode:        colexecop.NewOneInputNode(input.Root),
-		inputMetaInfo:       input,
+		OneInputNode:        colexecop.NewOneInputNode(input),
 		hashCols:            hashCols,
 		outputs:             outputs,
+		getStats:            getStats,
+		metadataSources:     toDrain,
+		closers:             toClose,
 		unblockedEventsChan: unblockEventsChan,
 		// waitForMetadata is a buffered channel to avoid blocking if nobody will
 		// read the metadata.
@@ -550,14 +562,12 @@ func (r *HashRouter) Run(ctx context.Context) {
 	if span != nil {
 		defer span.Finish()
 	}
-	var inputInitialized bool
 	// Since HashRouter runs in a separate goroutine, we want to be safe and
 	// make sure that we catch errors in all code paths, so we wrap the whole
 	// method with a catcher. Note that we also have "internal" catchers as
 	// well for more fine-grained control of error propagation.
 	if err := colexecerror.CatchVectorizedRuntimeError(func() {
-		r.Input.Init(ctx)
-		inputInitialized = true
+		r.Input.Init()
 		var done bool
 		processNextBatch := func() {
 			done = r.processNextBatch(ctx)
@@ -611,32 +621,32 @@ func (r *HashRouter) Run(ctx context.Context) {
 	}); err != nil {
 		r.cancelOutputs(ctx, err)
 	}
-	if inputInitialized {
-		// Retrieving stats and draining the metadata is only safe if the input
-		// to the hash router was properly initialized.
-		if span != nil {
-			for _, s := range r.inputMetaInfo.StatsCollectors {
-				span.RecordStructured(s.GetStats())
-			}
-			if meta := execinfra.GetTraceDataAsMetadata(span); meta != nil {
-				r.bufferedMeta = append(r.bufferedMeta, *meta)
+	if span != nil {
+		if r.getStats != nil {
+			for _, s := range r.getStats() {
+				span.RecordStructured(s)
 			}
 		}
-		r.bufferedMeta = append(r.bufferedMeta, r.inputMetaInfo.MetadataSources.DrainMeta()...)
+		if trace := span.GetRecording(); len(trace) > 0 {
+			meta := execinfrapb.GetProducerMeta()
+			meta.TraceData = trace
+			r.bufferedMeta = append(r.bufferedMeta, *meta)
+		}
 	}
+	r.bufferedMeta = append(r.bufferedMeta, r.metadataSources.DrainMeta(ctx)...)
 	// Non-blocking send of metadata so that one of the outputs can return it
 	// in DrainMeta.
 	r.waitForMetadata <- r.bufferedMeta
 	close(r.waitForMetadata)
 
-	r.inputMetaInfo.ToClose.CloseAndLogOnErr(ctx, "hash router")
+	r.closers.CloseAndLogOnErr(ctx, "hash router")
 }
 
 // processNextBatch reads the next batch from its input, hashes it and adds
 // each column to its corresponding output, returning whether the input is
 // done.
 func (r *HashRouter) processNextBatch(ctx context.Context) bool {
-	b := r.Input.Next()
+	b := r.Input.Next(ctx)
 	n := b.Length()
 	if n == 0 {
 		// Done. Push an empty batch to outputs to tell them the data is done as
@@ -647,13 +657,12 @@ func (r *HashRouter) processNextBatch(ctx context.Context) bool {
 		return true
 	}
 
-	// It is ok that we call Init() on every batch since all calls except for
-	// the first one are noops.
-	r.tupleDistributor.Init(ctx)
-	selections := r.tupleDistributor.Distribute(b, r.hashCols)
+	selections := r.tupleDistributor.Distribute(ctx, b, r.hashCols)
 	for i, o := range r.outputs {
 		if len(selections[i]) > 0 {
-			colexecutils.UpdateBatchState(b, len(selections[i]), true /* usesSel */, selections[i])
+			b.SetSelection(true)
+			copy(b.Selection(), selections[i])
+			b.SetLength(len(selections[i]))
 			if o.addBatch(ctx, b) {
 				// This batch blocked the output.
 				r.numBlockedOutputs++

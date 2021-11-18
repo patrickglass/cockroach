@@ -17,11 +17,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowinfra"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -94,7 +94,7 @@ func newRowFetcherStatCollector(f *row.Fetcher) *rowFetcherStatCollector {
 // NextRow is part of the rowFetcher interface.
 func (c *rowFetcherStatCollector) NextRow(
 	ctx context.Context,
-) (rowenc.EncDatumRow, catalog.TableDescriptor, catalog.Index, error) {
+) (rowenc.EncDatumRow, catalog.TableDescriptor, *descpb.IndexDescriptor, error) {
 	start := timeutil.Now()
 	row, t, i, err := c.Fetcher.NextRow(ctx)
 	if row != nil {
@@ -109,13 +109,13 @@ func (c *rowFetcherStatCollector) StartScan(
 	ctx context.Context,
 	txn *kv.Txn,
 	spans roachpb.Spans,
-	batchBytesLimit rowinfra.BytesLimit,
-	limitHint rowinfra.RowLimit,
+	limitBatches bool,
+	limitHint int64,
 	traceKV bool,
 	forceProductionKVBatchSize bool,
 ) error {
 	start := timeutil.Now()
-	err := c.Fetcher.StartScan(ctx, txn, spans, batchBytesLimit, limitHint, traceKV, forceProductionKVBatchSize)
+	err := c.Fetcher.StartScan(ctx, txn, spans, limitBatches, limitHint, traceKV, forceProductionKVBatchSize)
 	c.startScanStallTime += timeutil.Since(start)
 	return err
 }
@@ -127,14 +127,14 @@ func (c *rowFetcherStatCollector) StartInconsistentScan(
 	initialTimestamp hlc.Timestamp,
 	maxTimestampAge time.Duration,
 	spans roachpb.Spans,
-	batchBytesLimit rowinfra.BytesLimit,
-	limitHint rowinfra.RowLimit,
+	limitBatches bool,
+	limitHint int64,
 	traceKV bool,
 	forceProductionKVBatchSize bool,
 ) error {
 	start := timeutil.Now()
 	err := c.Fetcher.StartInconsistentScan(
-		ctx, db, initialTimestamp, maxTimestampAge, spans, batchBytesLimit, limitHint, traceKV, forceProductionKVBatchSize,
+		ctx, db, initialTimestamp, maxTimestampAge, spans, limitBatches, limitHint, traceKV, forceProductionKVBatchSize,
 	)
 	c.startScanStallTime += timeutil.Since(start)
 	return err

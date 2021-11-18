@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -28,6 +29,8 @@ import (
 
 func TestLargeEnums(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+
+	skip.UnderStress(t, "too slow")
 
 	ctx := context.Background()
 	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{})
@@ -108,65 +111,4 @@ type intItem int
 
 func (i intItem) Less(o btree.Item) bool {
 	return i < o.(intItem)
-}
-
-// TestEnumPlaceholderWithAsOfSystemTime is a regression test for an edge case
-// with bind where we would not properly deal with leases involving types.
-func TestEnumPlaceholderWithAsOfSystemTime(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	ctx := context.Background()
-	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{})
-	defer tc.Stopper().Stop(ctx)
-
-	db := sqlutils.MakeSQLRunner(tc.ServerConn(0))
-	db.Exec(t, "CREATE TYPE typ AS ENUM ('a', 'b')")
-	db.Exec(t, "CREATE TABLE tab (k INT PRIMARY KEY, v typ)")
-	db.Exec(t, "INSERT INTO tab VALUES ($1, $2)", 1, "a")
-	var afterInsert string
-	db.QueryRow(t, "SELECT cluster_logical_timestamp()").Scan(&afterInsert)
-	db.Exec(t, "ALTER TYPE typ ADD VALUE 'c'")
-	db.Exec(t, "INSERT INTO tab VALUES ($1, $2)", 2, "c")
-	// Before the commit which introduced this test, the below statement would
-	// crash the server.
-	q := fmt.Sprintf("SELECT k FROM tab AS OF SYSTEM TIME %s WHERE v = $1", afterInsert)
-	require.Equal(t, [][]string{{"1"}}, db.QueryStr(t, q, "a"))
-	db.Exec(t, "ALTER TYPE typ RENAME VALUE 'a' TO 'd'")
-	db.Exec(t, "ALTER TYPE typ RENAME VALUE 'b' TO 'a'")
-	// The AOST does not apply to the transaction that binds 'a' to the
-	// placeholder.
-	require.Equal(t, [][]string{}, db.QueryStr(t, q, "a"))
-	require.Equal(t, [][]string{{"1"}}, db.QueryStr(t, q, "d"))
-}
-
-// TestEnumDropValueCheckConstraint tests that check constraints containing
-// a reference to an enum value are properly taken into account when attempting
-// to drop said value.
-func TestEnumDropValueCheckConstraint(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	ctx := context.Background()
-	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{})
-	defer tc.Stopper().Stop(ctx)
-
-	db := sqlutils.MakeSQLRunner(tc.ServerConn(0))
-	db.Exec(t, "CREATE TYPE typ AS ENUM ('a', 'b', 'c')")
-
-	// Check that an enum value cannot be dropped if it is referenced in a table's
-	// check constraint.
-	db.Exec(t, "CREATE TABLE t1 (k typ CHECK (k::typ = 'a'))")
-	db.ExpectErr(t, "^pq: could not remove enum value \"a\" as it is being used in a check constraint of \"t1\"$",
-		"ALTER TYPE typ DROP VALUE 'a'")
-
-	db.Exec(t, "DROP TABLE t1")
-	db.Exec(t, "ALTER TYPE typ DROP VALUE 'a'")
-
-	// Check that the enum value cannot be dropped even if it is referenced only
-	// in a table's check constraint.
-	db.Exec(t, "CREATE TABLE t2 (k STRING CHECK (k::typ = 'b'))")
-	db.ExpectErr(t, "^pq: could not remove enum value \"b\" as it is being used in a check constraint of \"t2\"$",
-		"ALTER TYPE typ DROP VALUE 'b'")
-
-	db.Exec(t, "DROP TABLE t2")
-	db.Exec(t, "ALTER TYPE typ DROP VALUE 'b'")
 }

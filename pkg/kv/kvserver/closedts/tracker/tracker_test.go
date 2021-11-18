@@ -405,7 +405,7 @@ func (c *requestConsumer) run(ctx context.Context) {
 			c.mu.t.Untrack(ctx, req.tok)
 			req.release()
 			consumed++
-			evalTime := timeutil.Since(req.start)
+			evalTime := timeutil.Now().Sub(req.start)
 			if c.maxEvaluationTime < evalTime {
 				c.maxEvaluationTime = evalTime
 			}

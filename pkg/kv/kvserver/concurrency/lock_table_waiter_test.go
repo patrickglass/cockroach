@@ -12,7 +12,6 @@ package concurrency
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -25,10 +24,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
@@ -67,8 +66,6 @@ type mockLockTableGuard struct {
 	toResolve     []roachpb.LockUpdate
 }
 
-var _ lockTableGuard = &mockLockTableGuard{}
-
 // mockLockTableGuard implements the lockTableGuard interface.
 func (g *mockLockTableGuard) ShouldWait() bool            { return true }
 func (g *mockLockTableGuard) NewStateChan() chan struct{} { return g.signal }
@@ -81,9 +78,6 @@ func (g *mockLockTableGuard) CurState() waitingState {
 }
 func (g *mockLockTableGuard) ResolveBeforeScanning() []roachpb.LockUpdate {
 	return g.toResolve
-}
-func (g *mockLockTableGuard) CheckOptimisticNoConflicts(*spanset.SpanSet) (ok bool) {
-	return true
 }
 func (g *mockLockTableGuard) notify() { g.signal <- struct{}{} }
 
@@ -100,28 +94,24 @@ func (lt *mockLockTable) TransactionIsFinalized(txn *roachpb.Transaction) {
 
 var lockTableWaiterTestClock = hlc.Timestamp{WallTime: 12}
 
-func setupLockTableWaiterTest() (
-	*lockTableWaiterImpl,
-	*mockIntentResolver,
-	*mockLockTableGuard,
-	*hlc.ManualClock,
-) {
+func setupLockTableWaiterTest() (*lockTableWaiterImpl, *mockIntentResolver, *mockLockTableGuard) {
 	ir := &mockIntentResolver{}
 	st := cluster.MakeTestingClusterSettings()
-	LockTableLivenessPushDelay.Override(context.Background(), &st.SV, 0)
-	LockTableDeadlockDetectionPushDelay.Override(context.Background(), &st.SV, 0)
+	LockTableLivenessPushDelay.Override(&st.SV, 0)
+	LockTableDeadlockDetectionPushDelay.Override(&st.SV, 0)
 	manual := hlc.NewManualClock(lockTableWaiterTestClock.WallTime)
 	guard := &mockLockTableGuard{
 		signal: make(chan struct{}, 1),
 	}
 	w := &lockTableWaiterImpl{
-		st:      st,
-		clock:   hlc.NewClock(manual.UnixNano, time.Nanosecond),
-		stopper: stop.NewStopper(),
-		ir:      ir,
-		lt:      &mockLockTable{},
+		st:                                  st,
+		clock:                               hlc.NewClock(manual.UnixNano, time.Nanosecond),
+		stopper:                             stop.NewStopper(),
+		ir:                                  ir,
+		lt:                                  &mockLockTable{},
+		conflictingIntentsResolveRejections: metric.NewCounter(metric.Metadata{}),
 	}
-	return w, ir, guard, manual
+	return w, ir, guard
 }
 
 func makeTxnProto(name string) roachpb.Transaction {
@@ -181,12 +171,8 @@ func TestLockTableWaiterWithTxn(t *testing.T) {
 				testWaitNoopUntilDone(t, waitSelf, makeReq)
 			})
 
-			t.Run("waitQueueMaxLengthExceeded", func(t *testing.T) {
-				testErrorWaitPush(t, waitQueueMaxLengthExceeded, makeReq, dontExpectPush, reasonWaitQueueMaxLengthExceeded)
-			})
-
 			t.Run("doneWaiting", func(t *testing.T) {
-				w, _, g, _ := setupLockTableWaiterTest()
+				w, _, g := setupLockTableWaiterTest()
 				defer w.stopper.Stop(ctx)
 
 				g.state = waitingState{kind: doneWaiting}
@@ -198,7 +184,7 @@ func TestLockTableWaiterWithTxn(t *testing.T) {
 		})
 
 		t.Run("ctx done", func(t *testing.T) {
-			w, _, g, _ := setupLockTableWaiterTest()
+			w, _, g := setupLockTableWaiterTest()
 			defer w.stopper.Stop(ctx)
 
 			ctxWithCancel, cancel := context.WithCancel(ctx)
@@ -210,7 +196,7 @@ func TestLockTableWaiterWithTxn(t *testing.T) {
 		})
 
 		t.Run("stopper quiesce", func(t *testing.T) {
-			w, _, g, _ := setupLockTableWaiterTest()
+			w, _, g := setupLockTableWaiterTest()
 			defer w.stopper.Stop(ctx)
 
 			go func() {
@@ -257,12 +243,8 @@ func TestLockTableWaiterWithNonTxn(t *testing.T) {
 			t.Log("waitSelf is not possible for non-transactional request")
 		})
 
-		t.Run("waitQueueMaxLengthExceeded", func(t *testing.T) {
-			testErrorWaitPush(t, waitQueueMaxLengthExceeded, makeReq, dontExpectPush, reasonWaitQueueMaxLengthExceeded)
-		})
-
 		t.Run("doneWaiting", func(t *testing.T) {
-			w, _, g, _ := setupLockTableWaiterTest()
+			w, _, g := setupLockTableWaiterTest()
 			defer w.stopper.Stop(ctx)
 
 			g.state = waitingState{kind: doneWaiting}
@@ -274,7 +256,7 @@ func TestLockTableWaiterWithNonTxn(t *testing.T) {
 	})
 
 	t.Run("ctx done", func(t *testing.T) {
-		w, _, g, _ := setupLockTableWaiterTest()
+		w, _, g := setupLockTableWaiterTest()
 		defer w.stopper.Stop(ctx)
 
 		ctxWithCancel, cancel := context.WithCancel(ctx)
@@ -286,7 +268,7 @@ func TestLockTableWaiterWithNonTxn(t *testing.T) {
 	})
 
 	t.Run("stopper quiesce", func(t *testing.T) {
-		w, _, g, _ := setupLockTableWaiterTest()
+		w, _, g := setupLockTableWaiterTest()
 		defer w.stopper.Stop(ctx)
 
 		go func() {
@@ -304,7 +286,7 @@ func testWaitPush(t *testing.T, k waitKind, makeReq func() Request, expPushTS hl
 	keyA := roachpb.Key("keyA")
 	testutils.RunTrueAndFalse(t, "lockHeld", func(t *testing.T, lockHeld bool) {
 		testutils.RunTrueAndFalse(t, "waitAsWrite", func(t *testing.T, waitAsWrite bool) {
-			w, ir, g, _ := setupLockTableWaiterTest()
+			w, ir, g := setupLockTableWaiterTest()
 			defer w.stopper.Stop(ctx)
 			pusheeTxn := makeTxnProto("pushee")
 
@@ -329,8 +311,8 @@ func testWaitPush(t *testing.T, k waitKind, makeReq func() Request, expPushTS hl
 				return
 			}
 
-			// Non-transactional requests without a timeout do not push
-			// reservations, only locks. They wait for doneWaiting.
+			// Non-transactional requests do not push reservations, only locks.
+			// They wait for doneWaiting.
 			if req.Txn == nil && !lockHeld {
 				defer notifyUntilDone(t, g)()
 				err := w.WaitOn(ctx, req, g)
@@ -386,7 +368,7 @@ func testWaitPush(t *testing.T, k waitKind, makeReq func() Request, expPushTS hl
 
 func testWaitNoopUntilDone(t *testing.T, k waitKind, makeReq func() Request) {
 	ctx := context.Background()
-	w, _, g, _ := setupLockTableWaiterTest()
+	w, _, g := setupLockTableWaiterTest()
 	defer w.stopper.Stop(ctx)
 
 	txn := makeTxnProto("noop-wait-txn")
@@ -418,8 +400,6 @@ func notifyUntilDone(t *testing.T, g *mockLockTableGuard) func() {
 	return func() { <-done }
 }
 
-// TestLockTableWaiterWithErrorWaitPolicy tests the lockTableWaiter's behavior
-// under different waiting states with an Error wait policy.
 func TestLockTableWaiterWithErrorWaitPolicy(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -441,27 +421,23 @@ func TestLockTableWaiterWithErrorWaitPolicy(t *testing.T) {
 
 	t.Run("state", func(t *testing.T) {
 		t.Run("waitFor", func(t *testing.T) {
-			testErrorWaitPush(t, waitFor, makeReq, expPushTS, reasonWaitPolicy)
+			testErrorWaitPush(t, waitFor, makeReq, expPushTS)
 		})
 
 		t.Run("waitForDistinguished", func(t *testing.T) {
-			testErrorWaitPush(t, waitForDistinguished, makeReq, expPushTS, reasonWaitPolicy)
+			testErrorWaitPush(t, waitForDistinguished, makeReq, expPushTS)
 		})
 
 		t.Run("waitElsewhere", func(t *testing.T) {
-			testErrorWaitPush(t, waitElsewhere, makeReq, expPushTS, reasonWaitPolicy)
+			testErrorWaitPush(t, waitElsewhere, makeReq, expPushTS)
 		})
 
 		t.Run("waitSelf", func(t *testing.T) {
 			testWaitNoopUntilDone(t, waitSelf, makeReq)
 		})
 
-		t.Run("waitQueueMaxLengthExceeded", func(t *testing.T) {
-			testErrorWaitPush(t, waitQueueMaxLengthExceeded, makeReq, dontExpectPush, reasonWaitQueueMaxLengthExceeded)
-		})
-
 		t.Run("doneWaiting", func(t *testing.T) {
-			w, _, g, _ := setupLockTableWaiterTest()
+			w, _, g := setupLockTableWaiterTest()
 			defer w.stopper.Stop(ctx)
 
 			g.state = waitingState{kind: doneWaiting}
@@ -473,290 +449,69 @@ func TestLockTableWaiterWithErrorWaitPolicy(t *testing.T) {
 	})
 }
 
-var dontExpectPush = hlc.Timestamp{}
-
-func testErrorWaitPush(
-	t *testing.T,
-	k waitKind,
-	makeReq func() Request,
-	expPushTS hlc.Timestamp,
-	errReason roachpb.WriteIntentError_Reason,
-) {
+func testErrorWaitPush(t *testing.T, k waitKind, makeReq func() Request, expPushTS hlc.Timestamp) {
 	ctx := context.Background()
 	keyA := roachpb.Key("keyA")
 	testutils.RunTrueAndFalse(t, "lockHeld", func(t *testing.T, lockHeld bool) {
-		testutils.RunTrueAndFalse(t, "pusheeActive", func(t *testing.T, pusheeActive bool) {
-			if !lockHeld && !pusheeActive {
-				// !lockHeld means a lock reservation, so is only possible when
-				// pusheeActive is true.
-				skip.IgnoreLint(t, "incompatible params")
-			}
+		w, ir, g := setupLockTableWaiterTest()
+		defer w.stopper.Stop(ctx)
+		pusheeTxn := makeTxnProto("pushee")
 
-			w, ir, g, _ := setupLockTableWaiterTest()
-			defer w.stopper.Stop(ctx)
-			pusheeTxn := makeTxnProto("pushee")
+		req := makeReq()
+		g.state = waitingState{
+			kind:        k,
+			txn:         &pusheeTxn.TxnMeta,
+			key:         keyA,
+			held:        lockHeld,
+			guardAccess: spanset.SpanReadOnly,
+		}
+		g.notify()
 
-			req := makeReq()
-			g.state = waitingState{
-				kind:        k,
-				txn:         &pusheeTxn.TxnMeta,
-				key:         keyA,
-				held:        lockHeld,
-				guardAccess: spanset.SpanReadOnly,
-			}
-			g.notify()
-
-			// If the lock is not held or expPushTS is empty, expect an error
-			// immediately. The one exception to this is waitElsewhere, which
-			// expects no error.
-			if !lockHeld || expPushTS == dontExpectPush {
-				err := w.WaitOn(ctx, req, g)
-				if k == waitElsewhere {
-					require.Nil(t, err)
-				} else {
-					require.NotNil(t, err)
-					wiErr := new(roachpb.WriteIntentError)
-					require.True(t, errors.As(err.GoError(), &wiErr))
-					require.Equal(t, errReason, wiErr.Reason)
-				}
-				return
-			}
-
-			ir.pushTxn = func(
-				_ context.Context,
-				pusheeArg *enginepb.TxnMeta,
-				h roachpb.Header,
-				pushType roachpb.PushTxnType,
-			) (*roachpb.Transaction, *Error) {
-				require.Equal(t, &pusheeTxn.TxnMeta, pusheeArg)
-				require.Equal(t, req.Txn, h.Txn)
-				require.Equal(t, expPushTS, h.Timestamp)
-				require.Equal(t, roachpb.PUSH_TOUCH, pushType)
-
-				resp := &roachpb.Transaction{TxnMeta: *pusheeArg, Status: roachpb.PENDING}
-				if pusheeActive {
-					return nil, roachpb.NewError(&roachpb.TransactionPushError{
-						PusheeTxn: *resp,
-					})
-				}
-
-				// Next, we'll try to resolve the lock now that we know the
-				// holder is ABORTED.
-				w.lt.(*mockLockTable).txnFinalizedFn = func(txn *roachpb.Transaction) {
-					require.Equal(t, pusheeTxn.ID, txn.ID)
-					require.Equal(t, roachpb.ABORTED, txn.Status)
-				}
-				ir.resolveIntent = func(_ context.Context, intent roachpb.LockUpdate) *Error {
-					require.Equal(t, keyA, intent.Key)
-					require.Equal(t, pusheeTxn.ID, intent.Txn.ID)
-					require.Equal(t, roachpb.ABORTED, intent.Status)
-					g.state = waitingState{kind: doneWaiting}
-					g.notify()
-					return nil
-				}
-				resp.Status = roachpb.ABORTED
-				return resp, nil
-			}
-
+		// If the lock is not held, expect an error immediately. The one
+		// exception to this is waitElsewhere, which expects no error.
+		if !lockHeld {
 			err := w.WaitOn(ctx, req, g)
-			if pusheeActive {
-				require.NotNil(t, err)
-				wiErr := new(roachpb.WriteIntentError)
-				require.True(t, errors.As(err.GoError(), &wiErr))
-				require.Equal(t, errReason, wiErr.Reason)
-			} else {
+			if k == waitElsewhere {
 				require.Nil(t, err)
+			} else {
+				require.NotNil(t, err)
+				require.Regexp(t, "conflicting intents", err)
 			}
-		})
-	})
-}
-
-// TestLockTableWaiterWithLockTimeout tests the lockTableWaiter's behavior under
-// different waiting states with a lock timeout.
-func TestLockTableWaiterWithLockTimeout(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-
-	testutils.RunTrueAndFalse(t, "txn", func(t *testing.T, txn bool) {
-		const lockTimeout = 1 * time.Millisecond
-		makeReq := func() Request {
-			txn := makeTxnProto("request")
-			return Request{
-				Txn:         &txn,
-				Timestamp:   txn.ReadTimestamp,
-				LockTimeout: lockTimeout,
-			}
-		}
-		if !txn {
-			makeReq = func() Request {
-				return Request{
-					Timestamp:   hlc.Timestamp{WallTime: 10},
-					LockTimeout: lockTimeout,
-				}
-			}
+			return
 		}
 
-		t.Run("state", func(t *testing.T) {
-			t.Run("waitFor", func(t *testing.T) {
-				testWaitPushWithTimeout(t, waitFor, makeReq)
-			})
+		ir.pushTxn = func(
+			_ context.Context,
+			pusheeArg *enginepb.TxnMeta,
+			h roachpb.Header,
+			pushType roachpb.PushTxnType,
+		) (*roachpb.Transaction, *Error) {
+			require.Equal(t, &pusheeTxn.TxnMeta, pusheeArg)
+			require.Equal(t, req.Txn, h.Txn)
+			require.Equal(t, expPushTS, h.Timestamp)
+			require.Equal(t, roachpb.PUSH_TOUCH, pushType)
 
-			t.Run("waitForDistinguished", func(t *testing.T) {
-				testWaitPushWithTimeout(t, waitForDistinguished, makeReq)
-			})
+			resp := &roachpb.Transaction{TxnMeta: *pusheeArg, Status: roachpb.ABORTED}
 
-			t.Run("waitElsewhere", func(t *testing.T) {
-				testWaitPushWithTimeout(t, waitElsewhere, makeReq)
-			})
-
-			t.Run("waitSelf", func(t *testing.T) {
-				testWaitNoopUntilDone(t, waitSelf, makeReq)
-			})
-
-			t.Run("waitQueueMaxLengthExceeded", func(t *testing.T) {
-				testErrorWaitPush(t, waitQueueMaxLengthExceeded, makeReq, dontExpectPush, reasonWaitQueueMaxLengthExceeded)
-			})
-
-			t.Run("doneWaiting", func(t *testing.T) {
-				w, _, g, _ := setupLockTableWaiterTest()
-				defer w.stopper.Stop(ctx)
-
+			// Next, we'll try to resolve the lock now that we know the
+			// holder is ABORTED.
+			w.lt.(*mockLockTable).txnFinalizedFn = func(txn *roachpb.Transaction) {
+				require.Equal(t, pusheeTxn.ID, txn.ID)
+				require.Equal(t, roachpb.ABORTED, txn.Status)
+			}
+			ir.resolveIntent = func(_ context.Context, intent roachpb.LockUpdate) *Error {
+				require.Equal(t, keyA, intent.Key)
+				require.Equal(t, pusheeTxn.ID, intent.Txn.ID)
+				require.Equal(t, roachpb.ABORTED, intent.Status)
 				g.state = waitingState{kind: doneWaiting}
 				g.notify()
+				return nil
+			}
+			return resp, nil
+		}
 
-				err := w.WaitOn(ctx, makeReq(), g)
-				require.Nil(t, err)
-			})
-		})
-	})
-}
-
-func testWaitPushWithTimeout(t *testing.T, k waitKind, makeReq func() Request) {
-	ctx := context.Background()
-	keyA := roachpb.Key("keyA")
-	testutils.RunTrueAndFalse(t, "lockHeld", func(t *testing.T, lockHeld bool) {
-		testutils.RunTrueAndFalse(t, "pusheeActive", func(t *testing.T, pusheeActive bool) {
-			testutils.RunTrueAndFalse(t, "timeoutBeforePush", func(t *testing.T, timeoutBeforePush bool) {
-				if k == waitElsewhere && timeoutBeforePush {
-					// waitElsewhere pushes immediately, so timeoutBeforePush is
-					// irrelevant.
-					skip.IgnoreLint(t, "incompatible params")
-				}
-				if !lockHeld && !pusheeActive {
-					// !lockHeld means a lock reservation, so is only possible when
-					// pusheeActive is true.
-					skip.IgnoreLint(t, "incompatible params")
-				}
-
-				w, ir, g, manual := setupLockTableWaiterTest()
-				defer w.stopper.Stop(ctx)
-				pusheeTxn := makeTxnProto("pushee")
-
-				req := makeReq()
-				g.state = waitingState{
-					kind:        k,
-					txn:         &pusheeTxn.TxnMeta,
-					key:         keyA,
-					held:        lockHeld,
-					guardAccess: spanset.SpanReadWrite,
-				}
-				g.notify()
-
-				// If the timeout should already be expired by the time that the
-				// push is initiated, install a hook to manipulate the clock.
-				if timeoutBeforePush {
-					w.onPushTimer = func() {
-						manual.Increment(req.LockTimeout.Nanoseconds())
-					}
-				}
-
-				// waitElsewhere does not cause a push if the lock is not held.
-				// It returns immediately.
-				if !lockHeld && k == waitElsewhere {
-					err := w.WaitOn(ctx, req, g)
-					require.Nil(t, err)
-					return
-				}
-
-				// If the lock is not held and the request hits its lock timeout
-				// before a deadlock push, an error is returned immediately.
-				if !lockHeld && timeoutBeforePush {
-					err := w.WaitOn(ctx, req, g)
-					require.NotNil(t, err)
-					wiErr := new(roachpb.WriteIntentError)
-					require.True(t, errors.As(err.GoError(), &wiErr))
-					require.Equal(t, reasonLockTimeout, wiErr.Reason)
-					return
-				}
-
-				expBlockingPush := !timeoutBeforePush
-				sawBlockingPush := false
-				sawNonBlockingPush := false
-				ir.pushTxn = func(
-					ctx context.Context,
-					pusheeArg *enginepb.TxnMeta,
-					h roachpb.Header,
-					pushType roachpb.PushTxnType,
-				) (*roachpb.Transaction, *Error) {
-					require.Equal(t, &pusheeTxn.TxnMeta, pusheeArg)
-					require.Equal(t, req.Txn, h.Txn)
-
-					if expBlockingPush {
-						require.Equal(t, roachpb.PUSH_ABORT, pushType)
-						_, hasDeadline := ctx.Deadline()
-						require.True(t, hasDeadline)
-						sawBlockingPush = true
-						expBlockingPush = false
-
-						// Wait for the context to hit its timeout.
-						<-ctx.Done()
-						return nil, roachpb.NewError(ctx.Err())
-					}
-
-					require.Equal(t, roachpb.PUSH_TOUCH, pushType)
-					_, hasDeadline := ctx.Deadline()
-					require.False(t, hasDeadline)
-					sawNonBlockingPush = true
-
-					resp := &roachpb.Transaction{TxnMeta: *pusheeArg, Status: roachpb.PENDING}
-					if pusheeActive {
-						return nil, roachpb.NewError(&roachpb.TransactionPushError{
-							PusheeTxn: *resp,
-						})
-					}
-
-					// Next, we'll try to resolve the lock now that we know the
-					// holder is ABORTED.
-					w.lt.(*mockLockTable).txnFinalizedFn = func(txn *roachpb.Transaction) {
-						require.Equal(t, pusheeTxn.ID, txn.ID)
-						require.Equal(t, roachpb.ABORTED, txn.Status)
-					}
-					ir.resolveIntent = func(_ context.Context, intent roachpb.LockUpdate) *Error {
-						require.Equal(t, keyA, intent.Key)
-						require.Equal(t, pusheeTxn.ID, intent.Txn.ID)
-						require.Equal(t, roachpb.ABORTED, intent.Status)
-						g.state = waitingState{kind: doneWaiting}
-						g.notify()
-						return nil
-					}
-					resp.Status = roachpb.ABORTED
-					return resp, nil
-				}
-
-				err := w.WaitOn(ctx, req, g)
-				if pusheeActive {
-					require.NotNil(t, err)
-					wiErr := new(roachpb.WriteIntentError)
-					require.True(t, errors.As(err.GoError(), &wiErr))
-					require.Equal(t, reasonLockTimeout, wiErr.Reason)
-				} else {
-					require.Nil(t, err)
-				}
-				require.Equal(t, !timeoutBeforePush, sawBlockingPush)
-				require.Equal(t, lockHeld, sawNonBlockingPush)
-			})
-		})
+		err := w.WaitOn(ctx, req, g)
+		require.Nil(t, err)
 	})
 }
 
@@ -767,7 +522,7 @@ func TestLockTableWaiterIntentResolverError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	w, ir, g, _ := setupLockTableWaiterTest()
+	w, ir, g := setupLockTableWaiterTest()
 	defer w.stopper.Stop(ctx)
 
 	err1 := roachpb.NewErrorf("error1")
@@ -826,7 +581,7 @@ func TestLockTableWaiterDeferredIntentResolverError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	w, ir, g, _ := setupLockTableWaiterTest()
+	w, ir, g := setupLockTableWaiterTest()
 	defer w.stopper.Stop(ctx)
 
 	txn := makeTxnProto("request")

@@ -478,12 +478,6 @@ REVOKE ADMIN OPTION FOR admin FROM unknownuser
 statement error pq: role/user unknownrole does not exist
 REVOKE ADMIN OPTION FOR unknownrole FROM root
 
-statement error pgcode 42939 CURRENT_USER cannot be used as a role name here
-CREATE ROLE CURRENT_USER
-
-statement error pgcode 42939 SESSION_USER cannot be used as a role name here
-CREATE ROLE SESSION_USER
-
 statement ok
 CREATE ROLE rolea
 
@@ -698,7 +692,6 @@ SHOW GRANTS ON DATABASE db2
 database_name  grantee   privilege_type
 db2            admin     ALL
 db2            newgroup  ALL
-db2            public    CONNECT
 db2            root      ALL
 
 statement ok
@@ -791,22 +784,10 @@ CREATE USER public
 statement error role name "public" is reserved
 CREATE ROLE public
 
-statement error role name "none" is reserved
-CREATE ROLE "none"
-
-statement error role name "pg_otan" is reserved
-CREATE ROLE pg_otan
-
-statement error role name "crdb_internal_otan" is reserved
-CREATE ROLE crdb_internal_otan
-
-statement error "foo☂": username is invalid
-CREATE ROLE foo☂
-
-statement error role name "public" is reserved
+statement error cannot drop role/user public: grants still exist on system.public.comments
 DROP USER public
 
-statement error role name "public" is reserved
+statement error cannot drop role/user public: grants still exist on system.public.comments
 DROP ROLE public
 
 statement error role/user public does not exist
@@ -1105,15 +1086,14 @@ role_name  member  is_admin
 statement error role name "public" is reserved
 CREATE USER public
 
-statement error role name "public" is reserved
+statement error cannot drop role/user public: grants still exist on system.public.comments
 DROP USER public
 
 statement ok
-CREATE DATABASE publicdb
+CREATE DATABASE publicdb;
 
 statement ok
 CREATE DATABASE privatedb;
-REVOKE CONNECT ON DATABASE privatedb FROM public
 
 statement ok
 CREATE TABLE publicdb.publictable (k int)
@@ -1141,17 +1121,12 @@ user testuser
 query TTTTT
 SHOW DATABASES
 ----
-db2        root  NULL  {}  NULL
-defaultdb  root  NULL  {}  NULL
-postgres   root  NULL  {}  NULL
-publicdb   root  NULL  {}  NULL
-test       root  NULL  {}  NULL
+publicdb  root  NULL  {}  NULL
 
 query TTTTIT
 SHOW TABLES FROM publicdb
 ----
-public  privatetable  table  root  0  NULL
-public  publictable   table  root  0  NULL
+public  publictable  table  root  0  NULL
 
 query TTTTIT
 SHOW TABLES FROM privatedb
@@ -1199,8 +1174,6 @@ INSERT INTO publicdb.publictable VALUES (1)
 query TTTTIT
 SHOW TABLES FROM publicdb
 ----
-public  privatetable  table  root  0  NULL
-public  publictable   table  root  0  NULL
 
 # Test that non-admin users cannot drop admins.
 user root
@@ -1390,19 +1363,3 @@ CREATE ROLE otherrole4 NOCREATELOGIN
 
 statement error user testuser does not have CREATELOGIN privilege
 CREATE ROLE otherrole4 LOGIN
-
-user root
-
-# Verify that root is allowed to edit some other role that has ADMIN.
-statement ok
-CREATE ROLE other_admin;
-GRANT admin TO other_admin;
-ALTER ROLE other_admin CREATEDB
-
-user testuser
-
-# Verify that testuser is not allowed to edit some other role that has ADMIN.
-# The error message is important for this test -- we want to make sure it fails
-# because of a missing ADMIN power, not because of a missing CREATEROLE option.
-statement error only users with the admin role are allowed to ALTER ROLE admin
-ALTER ROLE other_admin NOCREATEDB

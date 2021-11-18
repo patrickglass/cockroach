@@ -67,8 +67,8 @@ func (l *intervalLexer) consumeNum() (int64, bool, float64) {
 		// Try to convert.
 		value, err := strconv.ParseFloat(l.str[start:l.offset], 64)
 		if err != nil {
-			l.err = pgerror.Wrap(
-				err, pgcode.InvalidDatetimeFormat, "interval")
+			l.err = pgerror.Newf(
+				pgcode.InvalidDatetimeFormat, "interval: %v", err)
 			return 0, false, 0
 		}
 		decPart = value
@@ -108,8 +108,8 @@ func (l *intervalLexer) consumeInt() int64 {
 
 	x, err := strconv.ParseInt(l.str[start:l.offset], 10, 64)
 	if err != nil {
-		l.err = pgerror.Wrap(
-			err, pgcode.InvalidDatetimeFormat, "interval")
+		l.err = pgerror.Newf(
+			pgcode.InvalidDatetimeFormat, "interval: %v", err)
 		return 0
 	}
 	if start == l.offset {
@@ -501,9 +501,7 @@ var unitMap = func(
 // parseDuration parses a duration in the "traditional" Postgres
 // format (e.g. '1 day 2 hours', '1 day 03:02:04', etc.) or golang
 // format (e.g. '1d2h', '1d3h2m4s', etc.)
-func parseDuration(
-	style duration.IntervalStyle, s string, itm types.IntervalTypeMetadata,
-) (duration.Duration, error) {
+func parseDuration(s string, itm types.IntervalTypeMetadata) (duration.Duration, error) {
 	var d duration.Duration
 	l := intervalLexer{str: s, offset: 0, err: nil}
 	l.consumeSpaces()
@@ -512,17 +510,6 @@ func parseDuration(
 		return d, pgerror.Newf(
 			pgcode.InvalidDatetimeFormat, "interval: invalid input syntax: %q", l.str)
 	}
-
-	// If we have strictly one negative at the beginning belonging to a
-	// in SQL Standard parsing, treat everything as negative.
-	isSQLStandardNegative :=
-		style == duration.IntervalStyle_SQL_STANDARD &&
-			(l.offset+1) < len(l.str) && l.str[l.offset] == '-' &&
-			!strings.ContainsAny(l.str[l.offset+1:], "+-")
-	if isSQLStandardNegative {
-		l.offset++
-	}
-
 	for l.offset != len(l.str) {
 		// To support -00:XX:XX we record the sign here since -0 doesn't exist
 		// as an int64.
@@ -557,22 +544,12 @@ func parseDuration(
 			continue
 		}
 
-		if l.err != nil {
-			return d, l.err
-		}
 		if u != "" {
 			return d, pgerror.Newf(
 				pgcode.InvalidDatetimeFormat, "interval: unknown unit %q in duration %q", u, s)
 		}
 		return d, pgerror.Newf(
 			pgcode.InvalidDatetimeFormat, "interval: missing unit at position %d: %q", l.offset, s)
-	}
-	if isSQLStandardNegative {
-		return duration.MakeDuration(
-			-d.Nanos(),
-			-d.Days,
-			-d.Months,
-		), l.err
 	}
 	return d, l.err
 }

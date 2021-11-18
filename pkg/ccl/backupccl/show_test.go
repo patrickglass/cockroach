@@ -60,19 +60,19 @@ CREATE TABLE data.sc.t2 (a data.welcome);
 
 	res := sqlDB.QueryStr(t, `
 SELECT
-  database_name, parent_schema_name, object_name, object_type, backup_type,
+  database_name, parent_schema_name, object_name, object_type,
   start_time::string, end_time::string, rows, is_full_cluster
 FROM
 	[SHOW BACKUP $1]
 ORDER BY object_type, object_name`, full)
 	expectedObjects := [][]string{
-		{"NULL", "NULL", "data", "database", "full", "NULL", beforeTS, "NULL", "false"},
-		{"data", "NULL", "sc", "schema", "full", "NULL", beforeTS, "NULL", "false"},
-		{"data", "public", "bank", "table", "full", "NULL", beforeTS, strconv.Itoa(numAccounts), "false"},
-		{"data", "sc", "t1", "table", "full", "NULL", beforeTS, strconv.Itoa(0), "false"},
-		{"data", "sc", "t2", "table", "full", "NULL", beforeTS, strconv.Itoa(0), "false"},
-		{"data", "public", "_welcome", "type", "full", "NULL", beforeTS, "NULL", "false"},
-		{"data", "public", "welcome", "type", "full", "NULL", beforeTS, "NULL", "false"},
+		{"NULL", "NULL", "data", "database", "NULL", beforeTS, "NULL", "false"},
+		{"data", "NULL", "sc", "schema", "NULL", beforeTS, "NULL", "false"},
+		{"data", "public", "bank", "table", "NULL", beforeTS, strconv.Itoa(numAccounts), "false"},
+		{"data", "sc", "t1", "table", "NULL", beforeTS, strconv.Itoa(0), "false"},
+		{"data", "sc", "t2", "table", "NULL", beforeTS, strconv.Itoa(0), "false"},
+		{"data", "public", "_welcome", "type", "NULL", beforeTS, "NULL", "false"},
+		{"data", "public", "welcome", "type", "NULL", beforeTS, "NULL", "false"},
 	}
 	require.Equal(t, expectedObjects, res)
 
@@ -90,24 +90,24 @@ ORDER BY object_type, object_name`, full)
 	sqlDB.Exec(t, fmt.Sprintf(`BACKUP DATABASE data TO $1 AS OF SYSTEM TIME '%s' INCREMENTAL FROM $2`, incTS), inc, full)
 
 	// Check the appended base backup.
-	res = sqlDB.QueryStr(t, `SELECT object_name, backup_type, start_time::string, end_time::string, rows, is_full_cluster FROM [SHOW BACKUP $1]`, full)
+	res = sqlDB.QueryStr(t, `SELECT object_name, start_time::string, end_time::string, rows, is_full_cluster FROM [SHOW BACKUP $1]`, full)
 	require.Equal(t, [][]string{
 		// Full.
-		{"data", "full", "NULL", beforeTS, "NULL", "false"},
-		{"bank", "full", "NULL", beforeTS, strconv.Itoa(numAccounts), "false"},
-		{"welcome", "full", "NULL", beforeTS, "NULL", "false"},
-		{"_welcome", "full", "NULL", beforeTS, "NULL", "false"},
-		{"sc", "full", "NULL", beforeTS, "NULL", "false"},
-		{"t1", "full", "NULL", beforeTS, "0", "false"},
-		{"t2", "full", "NULL", beforeTS, "0", "false"},
+		{"data", "NULL", beforeTS, "NULL", "false"},
+		{"bank", "NULL", beforeTS, strconv.Itoa(numAccounts), "false"},
+		{"welcome", "NULL", beforeTS, "NULL", "false"},
+		{"_welcome", "NULL", beforeTS, "NULL", "false"},
+		{"sc", "NULL", beforeTS, "NULL", "false"},
+		{"t1", "NULL", beforeTS, "0", "false"},
+		{"t2", "NULL", beforeTS, "0", "false"},
 		// Incremental.
-		{"data", "incremental", beforeTS, incTS, "NULL", "false"},
-		{"bank", "incremental", beforeTS, incTS, strconv.Itoa(int(affectedRows * 2)), "false"},
-		{"welcome", "incremental", beforeTS, incTS, "NULL", "false"},
-		{"_welcome", "incremental", beforeTS, incTS, "NULL", "false"},
-		{"sc", "incremental", beforeTS, incTS, "NULL", "false"},
-		{"t1", "incremental", beforeTS, incTS, "0", "false"},
-		{"t2", "incremental", beforeTS, incTS, "0", "false"},
+		{"data", beforeTS, incTS, "NULL", "false"},
+		{"bank", beforeTS, incTS, strconv.Itoa(int(affectedRows * 2)), "false"},
+		{"welcome", beforeTS, incTS, "NULL", "false"},
+		{"_welcome", beforeTS, incTS, "NULL", "false"},
+		{"sc", beforeTS, incTS, "NULL", "false"},
+		{"t1", beforeTS, incTS, "0", "false"},
+		{"t2", beforeTS, incTS, "0", "false"},
 	}, res)
 
 	// Check the separate inc backup.
@@ -128,19 +128,19 @@ ORDER BY object_type, object_name`, full)
 	sqlDB.Exec(t, fmt.Sprintf(`BACKUP DATABASE data TO $1 AS OF SYSTEM TIME '%s' INCREMENTAL FROM $2, $3`, inc2TS), inc2, full, inc)
 
 	// Check the appended base backup.
-	res = sqlDB.QueryStr(t, `SELECT object_name, backup_type, start_time::string, end_time::string, rows FROM [SHOW BACKUP $1] WHERE object_type='table'`, full)
+	res = sqlDB.QueryStr(t, `SELECT object_name, start_time::string, end_time::string, rows FROM [SHOW BACKUP $1] WHERE object_type='table'`, full)
 	require.Equal(t, [][]string{
-		{"bank", "full", "NULL", beforeTS, strconv.Itoa(numAccounts)},
-		{"t1", "full", "NULL", beforeTS, "0"},
-		{"t2", "full", "NULL", beforeTS, "0"},
-		{"bank", "incremental", beforeTS, incTS, strconv.Itoa(int(affectedRows * 2))},
-		{"t1", "incremental", beforeTS, incTS, "0"},
-		{"t2", "incremental", beforeTS, incTS, "0"},
-		{"bank", "incremental", incTS, inc2TS, "0"},
-		{"t1", "incremental", incTS, inc2TS, "0"},
-		{"t2", "incremental", incTS, inc2TS, "0"},
-		{"auth", "incremental", incTS, inc2TS, "0"},
-		{"users", "incremental", incTS, inc2TS, "3"},
+		{"bank", "NULL", beforeTS, strconv.Itoa(numAccounts)},
+		{"t1", "NULL", beforeTS, "0"},
+		{"t2", "NULL", beforeTS, "0"},
+		{"bank", beforeTS, incTS, strconv.Itoa(int(affectedRows * 2))},
+		{"t1", beforeTS, incTS, "0"},
+		{"t2", beforeTS, incTS, "0"},
+		{"bank", incTS, inc2TS, "0"},
+		{"t1", incTS, inc2TS, "0"},
+		{"t2", incTS, inc2TS, "0"},
+		{"auth", incTS, inc2TS, "0"},
+		{"users", incTS, inc2TS, "3"},
 	}, res)
 
 	// Check the separate inc backup.
@@ -212,7 +212,7 @@ ORDER BY object_type, object_name`, full)
 		expectedCreateTable := `CREATE TABLE tablea (
 		a INT8 NOT NULL,
 		b INT8 NULL,
-		CONSTRAINT tablea_pkey PRIMARY KEY (a ASC),
+		CONSTRAINT "primary" PRIMARY KEY (a ASC),
 		INDEX tablea_b_idx (b ASC),
 		FAMILY "primary" (a, b)
 	)`
@@ -247,15 +247,15 @@ ORDER BY object_type, object_name`, full)
 		wantSameDB := `CREATE TABLE fkreftable (
 				a INT8 NOT NULL,
 				b INT8 NULL,
-				CONSTRAINT fkreftable_pkey PRIMARY KEY (a ASC),
-				CONSTRAINT fkreftable_b_fkey FOREIGN KEY (b) REFERENCES public.fksrc(a),
+				CONSTRAINT "primary" PRIMARY KEY (a ASC),
+				CONSTRAINT fk_b_ref_fksrc FOREIGN KEY (b) REFERENCES public.fksrc(a),
 				FAMILY "primary" (a, b)
 			)`
 		wantDiffDB := `CREATE TABLE fkreftable (
 				a INT8 NOT NULL,
 				b INT8 NULL,
-				CONSTRAINT fkreftable_pkey PRIMARY KEY (a ASC),
-				CONSTRAINT fkreftable_b_fkey FOREIGN KEY (b) REFERENCES data.public.fksrc(a),
+				CONSTRAINT "primary" PRIMARY KEY (a ASC),
+				CONSTRAINT fk_b_ref_fksrc FOREIGN KEY (b) REFERENCES data.public.fksrc(a),
 				FAMILY "primary" (a, b)
 			)`
 
@@ -280,7 +280,7 @@ ORDER BY object_type, object_name`, full)
 		want := `CREATE TABLE fkreftable (
 				a INT8 NOT NULL,
 				b INT8 NULL,
-				CONSTRAINT fkreftable_pkey PRIMARY KEY (a ASC),
+				CONSTRAINT "primary" PRIMARY KEY (a ASC),
 				FAMILY "primary" (a, b)
 			)`
 
@@ -353,11 +353,11 @@ GRANT UPDATE ON top_secret TO agent_bond;
 
 		want := [][]string{
 			{`mi5`, `database`, `GRANT ALL ON mi5 TO admin; GRANT CONNECT, CREATE, DELETE, DROP, GRANT, INSERT, ` +
-				`SELECT, ZONECONFIG ON mi5 TO agents; GRANT CONNECT ON mi5 TO public; GRANT ALL ON mi5 TO root; `, `root`},
+				`SELECT, ZONECONFIG ON mi5 TO agents; GRANT ALL ON mi5 TO root; `, `root`},
 			{`locator`, `schema`, `GRANT ALL ON locator TO admin; GRANT CREATE, GRANT ON locator TO agent_bond; GRANT ALL ON locator TO m; ` +
 				`GRANT ALL ON locator TO root; `, `root`},
-			{`continent`, `type`, `GRANT ALL ON continent TO admin; GRANT GRANT ON continent TO agent_bond; GRANT ALL ON continent TO m; GRANT USAGE ON continent TO public; GRANT ALL ON continent TO root; `, `root`},
-			{`_continent`, `type`, `GRANT ALL ON _continent TO admin; GRANT USAGE ON _continent TO public; GRANT ALL ON _continent TO root; `, `root`},
+			{`continent`, `type`, `GRANT ALL ON continent TO admin; GRANT GRANT ON continent TO agent_bond; GRANT ALL ON continent TO m; GRANT ALL ON continent TO root; `, `root`},
+			{`_continent`, `type`, `GRANT ALL ON _continent TO admin; GRANT ALL ON _continent TO root; `, `root`},
 			{`agent_locations`, `table`, `GRANT ALL ON agent_locations TO admin; ` +
 				`GRANT SELECT ON agent_locations TO agent_bond; GRANT UPDATE ON agent_locations TO agents; ` +
 				`GRANT ALL ON agent_locations TO m; GRANT ALL ON agent_locations TO root; `, `root`},
@@ -433,11 +433,6 @@ func TestShowBackups(t *testing.T) {
 	require.Equal(t, 4, len(b1))
 	b2 := sqlDBRestore.QueryStr(t, `SELECT * FROM [SHOW BACKUP $1 IN $2] WHERE object_type='table'`, rows[1][0], full)
 	require.Equal(t, 3, len(b2))
-
-	require.Equal(t,
-		sqlDBRestore.QueryStr(t, `SHOW BACKUP $1 IN $2`, rows[2][0], full),
-		sqlDBRestore.QueryStr(t, `SHOW BACKUP LATEST IN $1`, full),
-	)
 }
 
 func TestShowBackupTenants(t *testing.T) {
@@ -483,11 +478,6 @@ func TestShowBackupTenants(t *testing.T) {
 	res = systemDB.QueryStr(t, `SELECT start_pretty, end_pretty FROM [SHOW BACKUP FILES 'nodelocal://1/t10']`)
 	require.Equal(t, [][]string{
 		{"/Tenant/10", "/Tenant/11"},
-	}, res)
-
-	res = systemDB.QueryStr(t, `SELECT database_id, parent_schema_id, object_id FROM [SHOW BACKUP 'nodelocal://1/t10' WITH debug_ids]`)
-	require.Equal(t, [][]string{
-		{"NULL", "NULL", "10"},
 	}, res)
 }
 
@@ -595,82 +585,4 @@ func showUpgradedForeignKeysTest(exportDir string) func(t *testing.T) {
 			require.Regexp(t, regexp.MustCompile(tc.expectedForeignKeyPattern), results[0][0])
 		}
 	}
-}
-
-func TestShowBackupWithDebugIDs(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	const numAccounts = 11
-	// Create test database with bank table
-	_, _, sqlDB, _, cleanupFn := BackupRestoreTestSetup(t, singleNode, numAccounts, InitManualReplication)
-	defer cleanupFn()
-
-	// add 1 type, 1 schema, and 2 tables to the database
-	sqlDB.Exec(t, `
-		SET CLUSTER SETTING sql.cross_db_fks.enabled = TRUE;
-		CREATE TYPE data.welcome AS ENUM ('hello', 'hi');
-		USE data; CREATE SCHEMA sc;
-		CREATE TABLE data.sc.t1 (a INT);
-		CREATE TABLE data.sc.t2 (a data.welcome);
-  `)
-
-	const full = LocalFoo + "/full"
-
-	beforeTS := sqlDB.QueryStr(t, `SELECT now()::timestamp::string`)[0][0]
-	sqlDB.Exec(t, fmt.Sprintf(`BACKUP DATABASE data TO $1 AS OF SYSTEM TIME '%s'`, beforeTS), full)
-
-	// extract the object IDs for the database and public schema
-	databaseRow := sqlDB.QueryStr(t, `
-		SELECT database_name, database_id, parent_schema_name, parent_schema_id, object_name, object_id, object_type
-		FROM [SHOW BACKUP $1 WITH debug_ids]
-		WHERE object_name = 'bank'`, full)
-	require.NotEmpty(t, databaseRow)
-	dbID, err := strconv.Atoi(databaseRow[0][1])
-	require.NoError(t, err)
-	publicID, err := strconv.Atoi(databaseRow[0][3])
-	require.NoError(t, err)
-
-	require.Greater(t, dbID, 0)
-	require.Greater(t, publicID, 0)
-
-	res := sqlDB.QueryStr(t, `
-		SELECT database_name, database_id, parent_schema_name, parent_schema_id, object_name, object_id, object_type
-		FROM [SHOW BACKUP $1 WITH debug_ids]
-		ORDER BY object_id`, full)
-
-	dbIDStr := strconv.Itoa(dbID)
-	publicIDStr := strconv.Itoa(publicID)
-	schemaIDStr := strconv.Itoa(dbID + 4)
-
-	expectedObjects := [][]string{
-		{"NULL", "NULL", "NULL", "NULL", "data", dbIDStr, "database"},
-		{"data", dbIDStr, "public", publicIDStr, "bank", strconv.Itoa(dbID + 1), "table"},
-		{"data", dbIDStr, "public", publicIDStr, "welcome", strconv.Itoa(dbID + 2), "type"},
-		{"data", dbIDStr, "public", publicIDStr, "_welcome", strconv.Itoa(dbID + 3), "type"},
-		{"data", dbIDStr, "NULL", "NULL", "sc", schemaIDStr, "schema"},
-		{"data", dbIDStr, "sc", schemaIDStr, "t1", strconv.Itoa(dbID + 5), "table"},
-		{"data", dbIDStr, "sc", schemaIDStr, "t2", strconv.Itoa(dbID + 6), "table"},
-	}
-
-	require.Equal(t, expectedObjects, res)
-
-}
-
-func TestShowBackupPathIsCollectionRoot(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	const numAccounts = 11
-
-	// Create test database with bank table.
-	_, _, sqlDB, _, cleanupFn := BackupRestoreTestSetup(t, singleNode, numAccounts, InitManualReplication)
-	defer cleanupFn()
-
-	// Make an initial backup.
-	sqlDB.Exec(t, `BACKUP data.bank INTO $1`, LocalFoo)
-
-	// Ensure proper error gets returned from back SHOW BACKUP Path
-	sqlDB.ExpectErr(t, "The specified path is the root of a backup collection.",
-		"SHOW BACKUP $1", LocalFoo)
 }

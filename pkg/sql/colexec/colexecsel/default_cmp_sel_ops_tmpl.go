@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for default_cmp_sel_ops.eg.go. It's
 // formatted in a special way, so it's both valid Go and a valid text/template
@@ -22,12 +20,13 @@
 package colexecsel
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexeccmp"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 )
 
@@ -46,11 +45,14 @@ type defaultCmp_KINDSelOp struct {
 }
 
 var _ colexecop.Operator = &defaultCmp_KINDSelOp{}
-var _ execinfra.Releasable = &defaultCmp_KINDSelOp{}
 
-func (d *defaultCmp_KINDSelOp) Next() coldata.Batch {
+func (d *defaultCmp_KINDSelOp) Init() {
+	d.Input.Init()
+}
+
+func (d *defaultCmp_KINDSelOp) Next(ctx context.Context) coldata.Batch {
 	for {
-		batch := d.Input.Next()
+		batch := d.Input.Next(ctx)
 		n := batch.Length()
 		if n == 0 {
 			return coldata.ZeroBatch
@@ -98,10 +100,6 @@ func (d *defaultCmp_KINDSelOp) Next() coldata.Batch {
 			return batch
 		}
 	}
-}
-
-func (d *defaultCmp_KINDSelOp) Release() {
-	d.toDatumConverter.Release()
 }
 
 // {{end}}

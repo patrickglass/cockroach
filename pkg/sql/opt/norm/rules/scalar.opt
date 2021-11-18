@@ -23,7 +23,7 @@
 #   SELECT * FROM a WHERE a.x = (SELECT SUM(b.x) FROM b)
 #
 # The right side of the equality expression is a constant expression tree, even
-# though it contains an entire subquery, because it always evaluates to the same
+# though it contains an entire subquery, because it always evalutes to the same
 # result. The left side is not a constant expression tree, even though it
 # contains just a single variable, because its value can be different for each
 # row in the table "a".
@@ -86,16 +86,6 @@ $input
 =>
 (Null (BoolType))
 
-[SimplifyInSingleElement, Normalize]
-(In $left:* (Tuple [ $right:* ]))
-=>
-(Eq $left $right)
-
-[SimplifyNotInSingleElement, Normalize]
-(NotIn $left:* (Tuple [ $right:* ]))
-=>
-(Ne $left $right)
-
 # UnifyComparisonTypes takes a mixed-type comparison between a non-constant and
 # a constant and, if appropriate, converts the constant to the type of the
 # non-constant to allow constraints to be generated.
@@ -103,7 +93,7 @@ $input
 (Comparison
     $left:(Variable)
     $right:(Const) &
-        (Let ($result $ok):(UnifyComparison $left $right) $ok)
+        (Succeeded $result:(UnifyComparison $left $right))
 )
 =>
 ((OpName) $left $result)

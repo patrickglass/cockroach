@@ -16,13 +16,10 @@ go_test(
     name = "timer_test",
     size = "small",
     srcs = ["timer_test.go"],
-    data = glob(["testdata/**"]) + [
-        "@go_sdk//:files",
-    ],
+    data = glob(["testdata/**"]),
+    tags = ["broken_in_bazel"],
     deps = [
         ":timer",
-        "//pkg/build/bazel",
-        "//pkg/testutils",
         "//pkg/testutils/skip",
         "@org_golang_x_tools//go/analysis/analysistest",
     ],

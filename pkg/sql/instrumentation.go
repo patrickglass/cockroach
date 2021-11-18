@@ -27,8 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessionphase"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/stmtdiagnostics"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -91,9 +89,9 @@ type instrumentationHelper struct {
 	// See EXECUTE .. DISCARD ROWS.
 	discardRows bool
 
-	diagRequestID           stmtdiagnostics.RequestID
-	stmtDiagnosticsRecorder *stmtdiagnostics.Registry
-	withStatementTrace      func(trace tracing.Recording, stmt string)
+	diagRequestID               stmtdiagnostics.RequestID
+	finishCollectionDiagnostics func()
+	withStatementTrace          func(trace tracing.Recording, stmt string)
 
 	sp *tracing.Span
 	// shouldFinishSpan determines whether sp needs to be finished in
@@ -114,10 +112,6 @@ type instrumentationHelper struct {
 
 	// regions used only on EXPLAIN ANALYZE to be displayed as top-level stat.
 	regions []string
-
-	// planGist is a compressed version of plan that can be converted (lossily)
-	// back into a logical plan or be used to get a plan hash.
-	planGist explain.PlanGist
 }
 
 // outputMode indicates how the statement output needs to be populated (for
@@ -145,7 +139,7 @@ func (ih *instrumentationHelper) SetOutputMode(outputMode outputMode, explainFla
 func (ih *instrumentationHelper) Setup(
 	ctx context.Context,
 	cfg *ExecutorConfig,
-	statsCollector sqlstats.StatsCollector,
+	appStats *appStats,
 	p *planner,
 	stmtDiagnosticsRecorder *stmtdiagnostics.Registry,
 	fingerprint string,
@@ -170,15 +164,18 @@ func (ih *instrumentationHelper) Setup(
 		ih.discardRows = true
 
 	default:
-		ih.collectBundle, ih.diagRequestID =
+		ih.collectBundle, ih.diagRequestID, ih.finishCollectionDiagnostics =
 			stmtDiagnosticsRecorder.ShouldCollectDiagnostics(ctx, fingerprint)
 	}
 
-	ih.stmtDiagnosticsRecorder = stmtDiagnosticsRecorder
 	ih.withStatementTrace = cfg.TestingKnobs.WithStatementTrace
 
-	ih.savePlanForStats =
-		statsCollector.ShouldSaveLogicalPlanDesc(fingerprint, implicitTxn, p.SessionData().Database)
+	// We don't know yet if we will hit an error, so we assume we don't. The
+	// worst that can happen is that for statements that always error out, we
+	// will always save the tree plan.
+	stats, _ := appStats.getStatsForStmt(fingerprint, implicitTxn, p.SessionData().Database, nil /* error */, false /* createIfNonexistent */)
+
+	ih.savePlanForStats = appStats.shouldSaveLogicalPlanDescription(stats)
 
 	if sp := tracing.SpanFromContext(ctx); sp != nil {
 		if sp.IsVerbose() {
@@ -199,8 +196,7 @@ func (ih *instrumentationHelper) Setup(
 	}
 
 	ih.collectExecStats = collectTxnExecStats
-
-	if !collectTxnExecStats && ih.savePlanForStats {
+	if !collectTxnExecStats && stats == nil {
 		// We don't collect the execution stats for statements in this txn, but
 		// this is the first time we see this statement ever, so we'll collect
 		// its execution stats anyway (unless the user disabled txn stats
@@ -211,11 +207,9 @@ func (ih *instrumentationHelper) Setup(
 
 	if !ih.collectBundle && ih.withStatementTrace == nil && ih.outputMode == unmodifiedOutput {
 		if ih.collectExecStats {
-			// If we need to collect stats, create a child span with structured
-			// recording. Stats will be added as structured metadata and processed in
-			// Finish.
-			newCtx, ih.sp = tracing.EnsureChildSpan(ctx, cfg.AmbientCtx.Tracer, "traced statement",
-				tracing.WithRecording(tracing.RecordingStructured))
+			// If we need to collect stats, create a non-verbose child span. Stats
+			// will be added as structured metadata and processed in Finish.
+			newCtx, ih.sp = tracing.EnsureChildSpan(ctx, cfg.AmbientCtx.Tracer, "traced statement", tracing.WithForceRealSpan())
 			ih.shouldFinishSpan = true
 			return newCtx, true
 		}
@@ -232,9 +226,10 @@ func (ih *instrumentationHelper) Setup(
 
 func (ih *instrumentationHelper) Finish(
 	cfg *ExecutorConfig,
-	statsCollector sqlstats.StatsCollector,
+	appStats *appStats,
 	txnStats *execstats.QueryLevelStats,
 	collectTxnExecStats bool,
+	statsCollector *sqlStatsCollector,
 	p *planner,
 	ast tree.Statement,
 	stmtRawSQL string,
@@ -245,15 +240,13 @@ func (ih *instrumentationHelper) Finish(
 	if ih.sp == nil {
 		return retErr
 	}
+	if ih.shouldFinishSpan {
+		ih.sp.Finish()
+	}
 
 	// Record the statement information that we've collected.
 	// Note that in case of implicit transactions, the trace contains the auto-commit too.
-	var trace tracing.Recording
-	if ih.shouldFinishSpan {
-		trace = ih.sp.FinishAndGetRecording(ih.sp.RecordingType())
-	} else {
-		trace = ih.sp.GetRecording(ih.sp.RecordingType())
-	}
+	trace := ih.sp.GetRecording()
 
 	if ih.withStatementTrace != nil {
 		ih.withStatementTrace(trace, stmtRawSQL)
@@ -281,30 +274,20 @@ func (ih *instrumentationHelper) Finish(
 		}
 		log.VInfof(ctx, 1, msg, ih.fingerprint, err)
 	} else {
-		stmtStatsKey := roachpb.StatementStatisticsKey{
-			Query:       ih.fingerprint,
-			ImplicitTxn: ih.implicitTxn,
-			Database:    p.SessionData().Database,
-			Failed:      retErr != nil,
-		}
-		// We populate transaction fingerprint ID if this is an implicit transaction.
-		// See executor_statement_metrics.go:recordStatementSummary() for further
-		// explanation.
-		if ih.implicitTxn {
-			stmtFingerprintID := stmtStatsKey.FingerprintID()
-			txnFingerprintHash := util.MakeFNV64()
-			txnFingerprintHash.Add(uint64(stmtFingerprintID))
-			stmtStatsKey.TransactionFingerprintID =
-				roachpb.TransactionFingerprintID(txnFingerprintHash.Sum())
-		}
-		err = statsCollector.RecordStatementExecStats(stmtStatsKey, queryLevelStats)
-		if err != nil {
-			if log.V(2 /* level */) {
-				log.Warningf(ctx, "unable to record statement exec stats: %s", err)
+		// TODO(radu): this should be unified with other stmt stats accesses.
+		stmtStats, _ := appStats.getStatsForStmt(ih.fingerprint, ih.implicitTxn, p.SessionData().Database, retErr, false)
+		if stmtStats != nil {
+			stmtStats.recordExecStats(queryLevelStats)
+			if collectTxnExecStats || ih.implicitTxn {
+				// Only accumulate into the txn stats if we're collecting
+				// execution stats for all statements in the txn or the txn is
+				// implicit (indicating that it consists of a single statement).
+				//
+				// The goal is that we don't want to provide an incomplete
+				// picture for explicit txns for which we didn't decide to
+				// collect the execution stats on a txn level.
+				txnStats.Accumulate(queryLevelStats)
 			}
-		}
-		if collectTxnExecStats || ih.implicitTxn {
-			txnStats.Accumulate(queryLevelStats)
 		}
 	}
 
@@ -312,17 +295,19 @@ func (ih *instrumentationHelper) Finish(
 	if ih.collectBundle {
 		ie := p.extendedEvalCtx.InternalExecutor.(*InternalExecutor)
 		placeholders := p.extendedEvalCtx.Placeholders
-		ob := ih.emitExplainAnalyzePlanToOutputBuilder(
+		ob := ih.buildExplainAnalyzePlan(
 			explain.Flags{Verbose: true, ShowTypes: true},
-			statsCollector.PhaseTimes(),
+			&statsCollector.phaseTimes,
 			&queryLevelStats,
 		)
 		bundle = buildStatementBundle(
 			ih.origCtx, cfg.DB, ie, &p.curPlan, ob.BuildString(), trace, placeholders,
 		)
 		bundle.insert(ctx, ih.fingerprint, ast, cfg.StmtDiagnosticsRecorder, ih.diagRequestID)
-		ih.stmtDiagnosticsRecorder.RemoveOngoing(ih.diagRequestID)
-		telemetry.Inc(sqltelemetry.StatementDiagnosticsCollectedCounter)
+		if ih.finishCollectionDiagnostics != nil {
+			ih.finishCollectionDiagnostics()
+			telemetry.Inc(sqltelemetry.StatementDiagnosticsCollectedCounter)
+		}
 	}
 
 	// If there was a communication error already, no point in setting any
@@ -336,11 +321,12 @@ func (ih *instrumentationHelper) Finish(
 		return setExplainBundleResult(ctx, res, bundle, cfg)
 
 	case explainAnalyzePlanOutput, explainAnalyzeDistSQLOutput:
+		phaseTimes := &statsCollector.phaseTimes
 		var flows []flowInfo
 		if ih.outputMode == explainAnalyzeDistSQLOutput {
 			flows = p.curPlan.distSQLFlowInfos
 		}
-		return ih.setExplainAnalyzeResult(ctx, res, statsCollector.PhaseTimes(), &queryLevelStats, flows, trace)
+		return ih.setExplainAnalyzeResult(ctx, res, phaseTimes, &queryLevelStats, flows, trace)
 
 	default:
 		return nil
@@ -431,19 +417,19 @@ func (ih *instrumentationHelper) PlanForStats(ctx context.Context) *roachpb.Expl
 	return ob.BuildProtoTree()
 }
 
-// emitExplainAnalyzePlanToOutputBuilder creates an explain.OutputBuilder and
-// populates it with the EXPLAIN ANALYZE plan. BuildString/BuildStringRows can
-// be used on the result.
-func (ih *instrumentationHelper) emitExplainAnalyzePlanToOutputBuilder(
-	flags explain.Flags, phaseTimes *sessionphase.Times, queryStats *execstats.QueryLevelStats,
+// buildExplainAnalyzePlan creates an explain.OutputBuilder and populates it
+// with the EXPLAIN ANALYZE plan. BuildString/BuildStringRows can be used on the
+// result.
+func (ih *instrumentationHelper) buildExplainAnalyzePlan(
+	flags explain.Flags, phaseTimes *phaseTimes, queryStats *execstats.QueryLevelStats,
 ) *explain.OutputBuilder {
 	ob := explain.NewOutputBuilder(flags)
 	if ih.explainPlan == nil {
 		// Return an empty builder if there is no plan.
 		return ob
 	}
-	ob.AddPlanningTime(phaseTimes.GetPlanningLatency())
-	ob.AddExecutionTime(phaseTimes.GetRunLatency())
+	ob.AddPlanningTime(phaseTimes.getPlanningLatency())
+	ob.AddExecutionTime(phaseTimes.getRunLatency())
 	ob.AddDistribution(ih.distribution.String())
 	ob.AddVectorized(ih.vectorized)
 
@@ -459,7 +445,6 @@ func (ih *instrumentationHelper) emitExplainAnalyzePlanToOutputBuilder(
 
 	ob.AddMaxMemUsage(queryStats.MaxMemUsage)
 	ob.AddNetworkStats(queryStats.NetworkMessages, queryStats.NetworkBytesSent)
-	ob.AddMaxDiskUsage(queryStats.MaxDiskUsage)
 
 	if len(ih.regions) > 0 {
 		ob.AddRegionsStats(ih.regions)
@@ -478,7 +463,7 @@ func (ih *instrumentationHelper) emitExplainAnalyzePlanToOutputBuilder(
 func (ih *instrumentationHelper) setExplainAnalyzeResult(
 	ctx context.Context,
 	res RestrictedCommandResult,
-	phaseTimes *sessionphase.Times,
+	phaseTimes *phaseTimes,
 	queryLevelStats *execstats.QueryLevelStats,
 	distSQLFlowInfos []flowInfo,
 	trace tracing.Recording,
@@ -491,7 +476,7 @@ func (ih *instrumentationHelper) setExplainAnalyzeResult(
 		return nil //nolint:returnerrcheck
 	}
 
-	ob := ih.emitExplainAnalyzePlanToOutputBuilder(ih.explainFlags, phaseTimes, queryLevelStats)
+	ob := ih.buildExplainAnalyzePlan(ih.explainFlags, phaseTimes, queryLevelStats)
 	rows := ob.BuildStringRows()
 	if distSQLFlowInfos != nil {
 		rows = append(rows, "")
@@ -581,17 +566,9 @@ func (m execNodeTraceMetadata) annotateExplain(
 					break
 				}
 				nodeStats.RowCount.MaybeAdd(stats.Output.NumTuples)
-				nodeStats.KVTime.MaybeAdd(stats.KV.KVTime)
-				nodeStats.KVContentionTime.MaybeAdd(stats.KV.ContentionTime)
 				nodeStats.KVBytesRead.MaybeAdd(stats.KV.BytesRead)
 				nodeStats.KVRowsRead.MaybeAdd(stats.KV.TuplesRead)
-				nodeStats.StepCount.MaybeAdd(stats.KV.NumInterfaceSteps)
-				nodeStats.InternalStepCount.MaybeAdd(stats.KV.NumInternalSteps)
-				nodeStats.SeekCount.MaybeAdd(stats.KV.NumInterfaceSeeks)
-				nodeStats.InternalSeekCount.MaybeAdd(stats.KV.NumInternalSeeks)
 				nodeStats.VectorizedBatchCount.MaybeAdd(stats.Output.NumBatches)
-				nodeStats.MaxAllocatedMem.MaybeAdd(stats.Exec.MaxAllocatedMem)
-				nodeStats.MaxAllocatedDisk.MaybeAdd(stats.Exec.MaxAllocatedDisk)
 			}
 			// If we didn't get statistics for all processors, we don't show the
 			// incomplete results. In the future, we may consider an incomplete flag

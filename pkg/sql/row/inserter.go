@@ -19,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -28,7 +29,7 @@ import (
 // Inserter abstracts the key/value operations for inserting table rows.
 type Inserter struct {
 	Helper                rowHelper
-	InsertCols            []catalog.Column
+	InsertCols            []descpb.ColumnDescriptor
 	InsertColIDtoRowIndex catalog.TableColMap
 
 	// For allocation avoidance.
@@ -47,26 +48,30 @@ func MakeInserter(
 	txn *kv.Txn,
 	codec keys.SQLCodec,
 	tableDesc catalog.TableDescriptor,
-	insertCols []catalog.Column,
+	insertCols []descpb.ColumnDescriptor,
 	alloc *rowenc.DatumAlloc,
 	sv *settings.Values,
 	internal bool,
 	metrics *Metrics,
 ) (Inserter, error) {
+	writableIndexes := tableDesc.WritableNonPrimaryIndexes()
+	writableIndexDescs := make([]descpb.IndexDescriptor, len(writableIndexes))
+	for i, index := range writableIndexes {
+		writableIndexDescs[i] = *index.IndexDesc()
+	}
+
 	ri := Inserter{
-		Helper: newRowHelper(
-			codec, tableDesc, tableDesc.WritableNonPrimaryIndexes(), sv, internal, metrics,
-		),
+		Helper: newRowHelper(codec, tableDesc, writableIndexDescs, sv, internal, metrics),
 
 		InsertCols:            insertCols,
 		InsertColIDtoRowIndex: ColIDtoRowIndexFromCols(insertCols),
 		marshaled:             make([]roachpb.Value, len(insertCols)),
 	}
 
-	for i := 0; i < tableDesc.GetPrimaryIndex().NumKeyColumns(); i++ {
-		colID := tableDesc.GetPrimaryIndex().GetKeyColumnID(i)
+	for i := 0; i < tableDesc.GetPrimaryIndex().NumColumns(); i++ {
+		colID := tableDesc.GetPrimaryIndex().GetColumnID(i)
 		if _, ok := ri.InsertColIDtoRowIndex.Get(colID); !ok {
-			return Inserter{}, fmt.Errorf("missing %q primary key column", tableDesc.GetPrimaryIndex().GetKeyColumnName(i))
+			return Inserter{}, fmt.Errorf("missing %q primary key column", tableDesc.GetPrimaryIndex().GetColumnName(i))
 		}
 	}
 
@@ -146,7 +151,7 @@ func (ri *Inserter) InsertRow(
 	for i, val := range values {
 		// Make sure the value can be written to the column before proceeding.
 		var err error
-		if ri.marshaled[i], err = rowenc.MarshalColumnValue(ri.InsertCols[i], val); err != nil {
+		if ri.marshaled[i], err = rowenc.MarshalColumnValue(&ri.InsertCols[i], val); err != nil {
 			return err
 		}
 	}
@@ -180,17 +185,9 @@ func (ri *Inserter) InsertRow(
 	}
 
 	putFn = insertInvertedPutFn
-
-	// For determinism, add the entries for the secondary indexes in the same
-	// order as they appear in the helper.
-	for idx := range ri.Helper.Indexes {
-		entries, ok := secondaryIndexEntries[ri.Helper.Indexes[idx]]
-		if ok {
-			for i := range entries {
-				e := &entries[i]
-				putFn(ctx, b, &e.Key, &e.Value, traceKV)
-			}
-		}
+	for i := range secondaryIndexEntries {
+		e := &secondaryIndexEntries[i]
+		putFn(ctx, b, &e.Key, &e.Value, traceKV)
 	}
 
 	return nil

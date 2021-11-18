@@ -10,12 +10,9 @@ package streamingest
 
 import (
 	"context"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
-	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
@@ -23,26 +20,17 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/span"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
-)
-
-// PartitionProgressFrequency controls the frequency of partition progress checkopints.
-var PartitionProgressFrequency = settings.RegisterDurationSetting(
-	"streaming.partition_progress_frequency",
-	"controls the frequency with which partitions update their progress; if 0, disabled.",
-	10*time.Second,
-	settings.NonNegativeDuration,
 )
 
 const streamIngestionFrontierProcName = `ingestfntr`
 
 type streamIngestionFrontier struct {
 	execinfra.ProcessorBase
+	execinfra.StreamingProcessor
 
 	flowCtx *execinfra.FlowCtx
 	spec    execinfrapb.StreamIngestionFrontierSpec
@@ -57,9 +45,6 @@ type streamIngestionFrontier struct {
 	// frontier contains the current resolved timestamp high-water for the tracked
 	// span set.
 	frontier *span.Frontier
-
-	lastPartitionUpdate time.Time
-	partitionProgress   map[string]jobspb.StreamIngestionProgress_PartitionProgress
 }
 
 var _ execinfra.Processor = &streamIngestionFrontier{}
@@ -77,17 +62,12 @@ func newStreamIngestionFrontierProcessor(
 	post *execinfrapb.PostProcessSpec,
 	output execinfra.RowReceiver,
 ) (execinfra.Processor, error) {
-	frontier, err := span.MakeFrontier(spec.TrackedSpans...)
-	if err != nil {
-		return nil, err
-	}
 	sf := &streamIngestionFrontier{
-		flowCtx:           flowCtx,
-		spec:              spec,
-		input:             input,
-		highWaterAtStart:  spec.HighWaterAtStart,
-		frontier:          frontier,
-		partitionProgress: make(map[string]jobspb.StreamIngestionProgress_PartitionProgress),
+		flowCtx:          flowCtx,
+		spec:             spec,
+		input:            input,
+		highWaterAtStart: spec.HighWaterAtStart,
+		frontier:         span.MakeFrontier(spec.TrackedSpans...),
 	}
 	if err := sf.Init(
 		sf,
@@ -104,11 +84,6 @@ func newStreamIngestionFrontierProcessor(
 		return nil, err
 	}
 	return sf, nil
-}
-
-// MustBeStreaming implements the execinfra.Processor interface.
-func (sf *streamIngestionFrontier) MustBeStreaming() bool {
-	return true
 }
 
 // Start is part of the RowSource interface.
@@ -130,11 +105,6 @@ func (sf *streamIngestionFrontier) Next() (rowenc.EncDatumRow, *execinfrapb.Prod
 		if row == nil {
 			sf.MoveToDraining(nil /* err */)
 			break
-		}
-
-		if err := sf.maybeUpdatePartitionProgress(); err != nil {
-			// Updating the partition progress isn't a fatal error.
-			log.Errorf(sf.Ctx, "failed to update partition progress: %+v", err)
 		}
 
 		var frontierChanged bool
@@ -164,17 +134,15 @@ func (sf *streamIngestionFrontier) Next() (rowenc.EncDatumRow, *execinfrapb.Prod
 
 // noteResolvedTimestamps processes a batch of resolved timestamp events, and
 // returns whether the frontier has moved forward after processing the batch.
-func (sf *streamIngestionFrontier) noteResolvedTimestamps(
-	resolvedSpanDatums rowenc.EncDatum,
-) (bool, error) {
+func (sf *streamIngestionFrontier) noteResolvedTimestamps(d rowenc.EncDatum) (bool, error) {
 	var frontierChanged bool
-	if err := resolvedSpanDatums.EnsureDecoded(streamIngestionResultTypes[0], &sf.alloc); err != nil {
+	if err := d.EnsureDecoded(streamIngestionResultTypes[0], &sf.alloc); err != nil {
 		return frontierChanged, err
 	}
-	raw, ok := resolvedSpanDatums.Datum.(*tree.DBytes)
+	raw, ok := d.Datum.(*tree.DBytes)
 	if !ok {
-		return frontierChanged, errors.AssertionFailedf(`unexpected datum type %T: %s`,
-			resolvedSpanDatums.Datum, resolvedSpanDatums.Datum)
+		return frontierChanged, errors.AssertionFailedf(`unexpected datum type %T: %s`, d.Datum,
+			d.Datum)
 	}
 	var resolvedSpans jobspb.ResolvedSpans
 	if err := protoutil.Unmarshal([]byte(*raw), &resolvedSpans); err != nil {
@@ -192,59 +160,26 @@ func (sf *streamIngestionFrontier) noteResolvedTimestamps(
 				redact.Safe(resolved.Timestamp), redact.Safe(sf.highWaterAtStart))
 		}
 
-		if changed, err := sf.frontier.Forward(resolved.Span, resolved.Timestamp); err == nil {
-			frontierChanged = frontierChanged || changed
-		} else {
-			return false, err
+		if sf.maybeMoveFrontier(resolved.Span, resolved.Timestamp) {
+			frontierChanged = true
 		}
 	}
 
 	return frontierChanged, nil
 }
 
-// maybeUpdatePartitionProgress polls the frontier and updates the job progress with
-// partition-specific information to track the status of each partition.
-func (sf *streamIngestionFrontier) maybeUpdatePartitionProgress() error {
-	ctx := sf.Ctx
-	updateFreq := PartitionProgressFrequency.Get(&sf.flowCtx.Cfg.Settings.SV)
-	if updateFreq == 0 || timeutil.Since(sf.lastPartitionUpdate) < updateFreq {
-		return nil
-	}
-	registry := sf.flowCtx.Cfg.JobRegistry
-	jobID := jobspb.JobID(sf.spec.JobID)
-	f := sf.frontier
-	allSpans := roachpb.Span{
-		Key:    keys.MinKey,
-		EndKey: keys.MaxKey,
-	}
-	partitionFrontiers := sf.partitionProgress
-	job, err := registry.LoadJob(ctx, jobID)
-	if err != nil {
-		return err
-	}
+// maybeMoveFrontier updates the resolved ts for the provided span, and returns
+// true if the update causes the frontier to move to higher resolved ts.
+func (sf *streamIngestionFrontier) maybeMoveFrontier(
+	span roachpb.Span, resolved hlc.Timestamp,
+) bool {
+	prevResolved := sf.frontier.Frontier()
+	sf.frontier.Forward(span, resolved)
+	return prevResolved.Less(sf.frontier.Frontier())
+}
 
-	f.SpanEntries(allSpans, func(span roachpb.Span, timestamp hlc.Timestamp) (done span.OpResult) {
-		partitionKey := span.Key
-		partition := string(partitionKey)
-		if curFrontier, ok := partitionFrontiers[partition]; !ok {
-			partitionFrontiers[partition] = jobspb.StreamIngestionProgress_PartitionProgress{
-				IngestedTimestamp: timestamp,
-			}
-		} else if curFrontier.IngestedTimestamp.Less(timestamp) {
-			curFrontier.IngestedTimestamp = timestamp
-		}
-		return true
-	})
-
-	sf.lastPartitionUpdate = timeutil.Now()
-	// TODO(pbardea): Only update partitions that have changed.
-	return job.FractionProgressed(ctx, nil, /* txn */
-		func(ctx context.Context, details jobspb.ProgressDetails) float32 {
-			prog := details.(*jobspb.Progress_StreamIngest).StreamIngest
-			prog.PartitionProgress = partitionFrontiers
-			// "FractionProgressed" isn't relevant on jobs that are streaming in
-			// changes.
-			return 0.0
-		},
-	)
+// ConsumerClosed is part of the RowSource interface.
+func (sf *streamIngestionFrontier) ConsumerClosed() {
+	// The consumer is done, Next() will not be called again.
+	sf.InternalClose()
 }

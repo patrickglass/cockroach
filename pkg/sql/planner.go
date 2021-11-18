@@ -17,10 +17,12 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/migration"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
-	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -28,7 +30,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
-	"github.com/cockroachdb/cockroach/pkg/sql/idxusage"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/querycache"
@@ -37,10 +38,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/persistedsqlstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
@@ -51,6 +52,8 @@ import (
 // distsql planning.
 type extendedEvalContext struct {
 	tree.EvalContext
+
+	SessionMutator *sessionDataMutator
 
 	// SessionID for this connection.
 	SessionID ClusterWideID
@@ -65,9 +68,6 @@ type extendedEvalContext struct {
 	// NodesStatusServer gives access to the NodesStatus service. Unavailable to
 	// tenants.
 	NodesStatusServer serverpb.OptionalNodesStatusServer
-
-	// RegionsServer gives access to valid regions in the cluster.
-	RegionsServer serverpb.RegionsServer
 
 	// SQLStatusServer gives access to a subset of the serverpb.Status service
 	// that is available to both system and non-system tenants.
@@ -91,12 +91,12 @@ type extendedEvalContext struct {
 	// jobsCollection.
 	Jobs *jobsCollection
 
-	// SchemaChangeJobRecords refers to schemaChangeJobsCache in extraTxnState.
-	SchemaChangeJobRecords map[descpb.ID]*jobs.Record
+	// SchemaChangeJobCache refers to schemaChangeJobsCache in extraTxnState.
+	SchemaChangeJobCache map[descpb.ID]*jobs.Job
 
-	statsProvider *persistedsqlstats.PersistedSQLStats
+	schemaAccessors *schemaInterface
 
-	indexUsageStats *idxusage.LocalIndexUsageStats
+	sqlStatsCollector *sqlStatsCollector
 
 	SchemaChangerState *SchemaChangerState
 }
@@ -127,6 +127,12 @@ func (evalCtx *extendedEvalContext) QueueJob(
 	return job, nil
 }
 
+// schemaInterface provides access to the database and table descriptors.
+// See schema_accessors.go.
+type schemaInterface struct {
+	logical catalog.Accessor
+}
+
 // planner is the centerpiece of SQL statement execution combining session
 // state and database state with the logic for SQL execution. It is logically
 // scoped to the execution of a single statement, and should not be used to
@@ -151,9 +157,9 @@ type planner struct {
 	semaCtx         tree.SemaContext
 	extendedEvalCtx extendedEvalContext
 
-	// sessionDataMutatorIterator is used to mutate the session variables. Read
+	// sessionDataMutator is used to mutate the session variables. Read
 	// access to them is provided through evalCtx.
-	sessionDataMutatorIterator *sessionDataMutatorIterator
+	sessionDataMutator *sessionDataMutator
 
 	// execCfg is used to access the server configuration for the Executor.
 	execCfg *ExecutorConfig
@@ -184,7 +190,7 @@ type planner struct {
 
 	// cancelChecker is used by planNodes to check for cancellation of the associated
 	// query.
-	cancelChecker cancelchecker.CancelChecker
+	cancelChecker *cancelchecker.CancelChecker
 
 	// isPreparing is true if this planner is currently preparing.
 	isPreparing bool
@@ -281,11 +287,17 @@ func newInternalPlanner(
 	opts ...InternalPlannerParamsOption,
 ) (*planner, func()) {
 	// Default parameters which may be override by the supplied options.
-	params := &internalPlannerParams{}
+	params := &internalPlannerParams{
+		// The table collection used by the internal planner does not rely on the
+		// deprecatedDatabaseCache and there are no subscribers to the
+		// deprecatedDatabaseCache, so we can leave it uninitialized.
+		// Furthermore, we're not concerned about the efficiency of querying tables
+		// with user-defined types, hence the nil hydratedTables.
+		collection: descs.NewCollection(execCfg.Settings, execCfg.LeaseManager, nil /* hydratedTables */),
+	}
 	for _, opt := range opts {
 		opt(params)
 	}
-	callerSuppliedDescsCollection := params.collection != nil
 
 	// We need a context that outlives all the uses of the planner (since the
 	// planner captures it in the EvalCtx, and so does the cleanup function that
@@ -305,10 +317,15 @@ func newInternalPlanner(
 	sd.SessionData.Database = "system"
 	sd.SessionData.UserProto = user.EncodeProto()
 	sd.SessionData.Internal = true
-	sds := sessiondata.NewStack(sd)
-
-	if params.collection == nil {
-		params.collection = execCfg.CollectionFactory.NewCollection(descs.NewTemporarySchemaProvider(sds))
+	dataMutator := &sessionDataMutator{
+		data: sd,
+		defaults: SessionDefaults(map[string]string{
+			"application_name": "crdb-internal",
+			"database":         "system",
+		}),
+		settings:           execCfg.Settings,
+		paramStatusUpdater: &noopParamStatusUpdater{},
+		setCurTxnReadOnly:  func(bool) {},
 	}
 
 	var ts time.Time
@@ -324,16 +341,12 @@ func newInternalPlanner(
 
 	p.txn = txn
 	p.stmt = Statement{}
-	p.cancelChecker.Reset(ctx)
+	p.cancelChecker = cancelchecker.NewCancelChecker(ctx)
 	p.isInternalPlanner = true
 
 	p.semaCtx = tree.MakeSemaContext()
 	p.semaCtx.SearchPath = sd.SearchPath
-	p.semaCtx.IntervalStyleEnabled = sd.IntervalStyleEnabled
-	p.semaCtx.DateStyleEnabled = sd.DateStyleEnabled
 	p.semaCtx.TypeResolver = p
-	p.semaCtx.DateStyle = sd.GetDateStyle()
-	p.semaCtx.IntervalStyle = sd.GetIntervalStyle()
 
 	plannerMon := mon.NewMonitor(fmt.Sprintf("internal-planner.%s.%s", user, opName),
 		mon.MemoryResource,
@@ -342,33 +355,21 @@ func newInternalPlanner(
 		noteworthyInternalMemoryUsageBytes, execCfg.Settings)
 	plannerMon.Start(ctx, execCfg.RootMemoryMonitor, mon.BoundAccount{})
 
-	smi := &sessionDataMutatorIterator{
-		sds: sds,
-		sessionDataMutatorBase: sessionDataMutatorBase{
-			defaults: SessionDefaults(map[string]string{
-				"application_name": "crdb-internal",
-				"database":         "system",
-			}),
-			settings: execCfg.Settings,
-		},
-		sessionDataMutatorCallbacks: sessionDataMutatorCallbacks{},
-	}
-
-	p.extendedEvalCtx = internalExtendedEvalCtx(ctx, sds, params.collection, txn, ts, ts, execCfg, plannerMon)
+	p.extendedEvalCtx = internalExtendedEvalCtx(
+		ctx, sd, dataMutator, params.collection, txn, ts, ts, execCfg, plannerMon,
+	)
 	p.extendedEvalCtx.Planner = p
 	p.extendedEvalCtx.PrivilegedAccessor = p
 	p.extendedEvalCtx.SessionAccessor = p
 	p.extendedEvalCtx.ClientNoticeSender = p
 	p.extendedEvalCtx.Sequence = p
 	p.extendedEvalCtx.Tenant = p
-	p.extendedEvalCtx.Regions = p
-	p.extendedEvalCtx.JoinTokenCreator = p
 	p.extendedEvalCtx.ClusterID = execCfg.ClusterID()
 	p.extendedEvalCtx.ClusterName = execCfg.RPCContext.ClusterName()
 	p.extendedEvalCtx.NodeID = execCfg.NodeID
 	p.extendedEvalCtx.Locality = execCfg.Locality
 
-	p.sessionDataMutatorIterator = smi
+	p.sessionDataMutator = dataMutator
 	p.autoCommit = false
 
 	p.extendedEvalCtx.MemMetrics = memMetrics
@@ -383,16 +384,15 @@ func newInternalPlanner(
 	return p, func() {
 		// Note that we capture ctx here. This is only valid as long as we create
 		// the context as explained at the top of the method.
-		if !callerSuppliedDescsCollection {
-			// The collection will accumulate descriptors read during planning as well
-			// as type descriptors read during execution on the local node. Many users
-			// of the internal planner do set the `skipCache` flag on the resolver but
-			// this is not respected by type resolution underneath execution. That
-			// subtle details means that the type descriptor used by execution may be
-			// stale, but that must be okay. Correctness concerns aside, we must release
-			// the leases to ensure that we don't leak a descriptor lease.
-			p.Descriptors().ReleaseAll(ctx)
-		}
+
+		// The collection will accumulate descriptors read during planning as well
+		// as type descriptors read during execution on the local node. Many users
+		// of the internal planner do set the `skipCache` flag on the resolver but
+		// this is not respected by type resolution underneath execution. That
+		// subtle details means that the type descriptor used by execution may be
+		// stale, but that must be okay. Correctness concerns aside, we must release
+		// the leases to ensure that we don't leak a descriptor lease.
+		p.Descriptors().ReleaseAll(ctx)
 
 		// Stop the memory monitor.
 		plannerMon.Stop(ctx)
@@ -405,7 +405,8 @@ func newInternalPlanner(
 // keep the tests using the internal planner passing.
 func internalExtendedEvalCtx(
 	ctx context.Context,
-	sds *sessiondata.Stack,
+	sd *sessiondata.SessionData,
+	dataMutator *sessionDataMutator,
 	tables *descs.Collection,
 	txn *kv.Txn,
 	txnTimestamp time.Time,
@@ -415,57 +416,41 @@ func internalExtendedEvalCtx(
 ) extendedEvalContext {
 	evalContextTestingKnobs := execCfg.EvalContextTestingKnobs
 
-	var indexUsageStats *idxusage.LocalIndexUsageStats
-	var sqlStatsController tree.SQLStatsController
-	var indexUsageStatsController tree.IndexUsageStatsController
+	var sqlStatsResetter tree.SQLStatsResetter
 	if execCfg.InternalExecutor != nil {
-		if execCfg.InternalExecutor.s != nil {
-			indexUsageStats = execCfg.InternalExecutor.s.indexUsageStats
-			sqlStatsController = execCfg.InternalExecutor.s.sqlStatsController
-			indexUsageStatsController = execCfg.InternalExecutor.s.indexUsageStatsController
-		} else {
-			// If the indexUsageStats is nil from the sql.Server, we create a dummy
-			// index usage stats collector. The sql.Server in the ExecutorConfig
-			// is only nil during tests.
-			indexUsageStats = idxusage.NewLocalIndexUsageStats(&idxusage.Config{
-				Setting: execCfg.Settings,
-			})
-			sqlStatsController = &persistedsqlstats.Controller{}
-			indexUsageStatsController = &idxusage.Controller{}
-		}
+		sqlStatsResetter = execCfg.InternalExecutor.s
 	}
+
 	return extendedEvalContext{
 		EvalContext: tree.EvalContext{
-			Txn:                       txn,
-			SessionDataStack:          sds,
-			TxnReadOnly:               false,
-			TxnImplicit:               true,
-			Settings:                  execCfg.Settings,
-			Codec:                     execCfg.Codec,
-			Tracer:                    execCfg.AmbientCtx.Tracer,
-			Context:                   ctx,
-			Mon:                       plannerMon,
-			TestingKnobs:              evalContextTestingKnobs,
-			StmtTimestamp:             stmtTimestamp,
-			TxnTimestamp:              txnTimestamp,
-			InternalExecutor:          execCfg.InternalExecutor,
-			SQLStatsController:        sqlStatsController,
-			IndexUsageStatsController: indexUsageStatsController,
+			Txn:              txn,
+			SessionData:      sd,
+			TxnReadOnly:      false,
+			TxnImplicit:      true,
+			Settings:         execCfg.Settings,
+			Codec:            execCfg.Codec,
+			Context:          ctx,
+			Mon:              plannerMon,
+			TestingKnobs:     evalContextTestingKnobs,
+			StmtTimestamp:    stmtTimestamp,
+			TxnTimestamp:     txnTimestamp,
+			InternalExecutor: execCfg.InternalExecutor,
+			SQLStatsResetter: sqlStatsResetter,
 		},
+		SessionMutator:    dataMutator,
 		VirtualSchemas:    execCfg.VirtualSchemas,
 		Tracing:           &SessionTracing{},
 		NodesStatusServer: execCfg.NodesStatusServer,
-		RegionsServer:     execCfg.RegionsServer,
 		Descs:             tables,
 		ExecCfg:           execCfg,
+		schemaAccessors:   newSchemaInterface(tables, execCfg.VirtualSchemas),
 		DistSQLPlanner:    execCfg.DistSQLPlanner,
-		indexUsageStats:   indexUsageStats,
 	}
 }
 
 // LogicalSchemaAccessor is part of the resolver.SchemaResolver interface.
-func (p *planner) Accessor() catalog.Accessor {
-	return p.Descriptors()
+func (p *planner) LogicalSchemaAccessor() catalog.Accessor {
+	return p.extendedEvalCtx.schemaAccessors.logical
 }
 
 // SemaCtx provides access to the planner's SemaCtx.
@@ -509,19 +494,15 @@ func (p *planner) ExecCfg() *ExecutorConfig {
 // GetOrInitSequenceCache returns the sequence cache for the session.
 // If the sequence cache has not been used yet, it initializes the cache
 // inside the session data.
-func (p *planner) GetOrInitSequenceCache() sessiondatapb.SequenceCache {
+func (p *planner) GetOrInitSequenceCache() sessiondata.SequenceCache {
 	if p.SessionData().SequenceCache == nil {
-		p.sessionDataMutatorIterator.applyOnEachMutator(
-			func(m sessionDataMutator) {
-				m.initSequenceCache()
-			},
-		)
+		p.sessionDataMutator.initSequenceCache()
 	}
 	return p.SessionData().SequenceCache
 }
 
 func (p *planner) LeaseMgr() *lease.Manager {
-	return p.execCfg.LeaseManager
+	return p.Descriptors().LeaseManager()
 }
 
 func (p *planner) Txn() *kv.Txn {
@@ -546,11 +527,6 @@ func (p *planner) MigrationJobDeps() migration.JobDeps {
 	return p.execCfg.MigrationJobDeps
 }
 
-// SpanConfigReconciliationJobDeps returns the spanconfig.ReconciliationJobDeps.
-func (p *planner) SpanConfigReconciliationJobDeps() spanconfig.ReconciliationDependencies {
-	return p.execCfg.SpanConfigReconciliationJobDeps
-}
-
 // GetTypeFromValidSQLSyntax implements the tree.EvalPlanner interface.
 // We define this here to break the dependency from eval.go to the parser.
 func (p *planner) GetTypeFromValidSQLSyntax(sql string) (*types.T, error) {
@@ -573,7 +549,7 @@ func (p *planner) ParseQualifiedTableName(sql string) (*tree.TableName, error) {
 // ResolveTableName implements the tree.EvalDatabase interface.
 func (p *planner) ResolveTableName(ctx context.Context, tn *tree.TableName) (tree.ID, error) {
 	flags := tree.ObjectLookupFlagsWithRequiredTableKind(tree.ResolveAnyTableKind)
-	_, desc, err := resolver.ResolveExistingTableObject(ctx, p, tn, flags)
+	desc, err := resolver.ResolveExistingTableObject(ctx, p, tn, flags)
 	if err != nil {
 		return 0, err
 	}
@@ -581,21 +557,22 @@ func (p *planner) ResolveTableName(ctx context.Context, tn *tree.TableName) (tre
 }
 
 // LookupTableByID looks up a table, by the given descriptor ID. Based on the
-// CommonLookupFlags, it could use or skip the Collection cache.
+// CommonLookupFlags, it could use or skip the Collection cache. See
+// Collection.getTableVersionByID for how it's used.
+// TODO (SQLSchema): This should call into the set of SchemaAccessors instead
+//  of having its own logic for lookups.
 func (p *planner) LookupTableByID(
 	ctx context.Context, tableID descpb.ID,
 ) (catalog.TableDescriptor, error) {
-	const required = true // lookups by ID are always "required"
-	table, err := p.Descriptors().GetImmutableTableByID(ctx, p.txn, tableID, p.ObjectLookupFlags(
-		required, false /* requireMutable */))
+	if entry, err := p.getVirtualTabler().getVirtualTableEntryByID(tableID); err == nil {
+		return entry.desc, nil
+	}
+	flags := tree.ObjectLookupFlags{CommonLookupFlags: tree.CommonLookupFlags{AvoidCached: p.avoidCachedDescriptors}}
+	table, err := p.Descriptors().GetImmutableTableByID(ctx, p.txn, tableID, flags)
 	if err != nil {
 		return nil, err
 	}
 	return table, nil
-}
-
-func (p *planner) JobRegistry() interface{} {
-	return p.ExecCfg().JobRegistry
 }
 
 // TypeAsString enforces (not hints) that the given expression typechecks as a
@@ -782,12 +759,7 @@ func (p *planner) TypeAsStringArray(
 
 // SessionData is part of the PlanHookState interface.
 func (p *planner) SessionData() *sessiondata.SessionData {
-	return p.EvalContext().SessionData()
-}
-
-// SessionDataMutatorIterator is part of the PlanHookState interface.
-func (p *planner) SessionDataMutatorIterator() *sessionDataMutatorIterator {
-	return p.sessionDataMutatorIterator
+	return p.EvalContext().SessionData
 }
 
 // Ann is a shortcut for the Annotations from the eval context.
@@ -802,6 +774,29 @@ type txnModesSetter interface {
 	// transaction.
 	// asOfTs, if not empty, is the evaluation of modes.AsOf.
 	setTransactionModes(modes tree.TransactionModes, asOfTs hlc.Timestamp) error
+}
+
+// CompactEngineSpan is part of the EvalPlanner interface.
+func (p *planner) CompactEngineSpan(
+	ctx context.Context, nodeID int32, storeID int32, startKey []byte, endKey []byte,
+) error {
+	if !p.ExecCfg().Codec.ForSystemTenant() {
+		return errorutil.UnsupportedWithMultiTenancy(errorutil.FeatureNotAvailableToNonSystemTenantsIssue)
+	}
+	conn, err := p.ExecCfg().DistSender.NodeDialer().Dial(ctx, roachpb.NodeID(nodeID), rpc.DefaultClass)
+	if err != nil {
+		return errors.Wrapf(err, "could not dial node ID %d", nodeID)
+	}
+	client := kvserver.NewPerStoreClient(conn)
+	req := &kvserver.CompactEngineSpanRequest{
+		StoreRequestHeader: kvserver.StoreRequestHeader{
+			NodeID:  roachpb.NodeID(nodeID),
+			StoreID: roachpb.StoreID(storeID),
+		},
+		Span: roachpb.Span{Key: roachpb.Key(startKey), EndKey: roachpb.Key(endKey)},
+	}
+	_, err = client.CompactEngineSpan(ctx, req)
+	return err
 }
 
 // validateDescriptor is a convenience function for validating

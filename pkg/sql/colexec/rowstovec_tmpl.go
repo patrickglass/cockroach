@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for rowstovec.eg.go. It's formatted in a
 // special way, so it's both valid Go and a valid text/template input. This
@@ -31,7 +29,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 )
 
 // Workaround for bazel auto-generated code. goimports does not automatically
@@ -41,7 +38,6 @@ var (
 	_ apd.Context
 	_ duration.Duration
 	_ encoding.Direction
-	_ json.JSON
 )
 
 // {{/*
@@ -78,7 +74,7 @@ func _ROWS_TO_COL_VEC(
 				//gcassert:bce
 				// {{end}}
 				// {{end}}
-				col.Set(i, castV)
+				_SET(col, i, castV)
 			}
 		}
 	}

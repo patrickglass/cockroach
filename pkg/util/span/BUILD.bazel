@@ -7,7 +7,8 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/keys",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
+        "//pkg/sql/covering",
         "//pkg/util/hlc",
         "//pkg/util/interval",
     ],
@@ -19,12 +20,9 @@ go_test(
     srcs = ["frontier_test.go"],
     embed = [":span"],
     deps = [
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/util/hlc",
-        "//pkg/util/interval",
         "//pkg/util/leaktest",
-        "//pkg/util/log",
-        "//pkg/util/randutil",
         "@com_github_stretchr_testify//require",
     ],
 )

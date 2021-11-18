@@ -20,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -70,13 +71,7 @@ func performGC(
 
 		// Drop database zone config when all the tables have been GCed.
 		if details.ParentID != descpb.InvalidID && isDoneGC(progress) {
-			if err := deleteDatabaseZoneConfig(
-				ctx,
-				execCfg.DB,
-				execCfg.Codec,
-				execCfg.Settings,
-				details.ParentID,
-			); err != nil {
+			if err := deleteDatabaseZoneConfig(ctx, execCfg.DB, execCfg.Codec, details.ParentID); err != nil {
 				return errors.Wrap(err, "deleting database zone config")
 			}
 		}
@@ -88,7 +83,7 @@ func performGC(
 func (r schemaChangeGCResumer) Resume(ctx context.Context, execCtx interface{}) (err error) {
 	defer func() {
 		if err != nil && !r.isPermanentGCError(err) {
-			err = jobs.MarkAsRetryJobError(err)
+			err = errors.Mark(err, jobs.NewRetryJobError("gc"))
 		}
 	}()
 	p := execCtx.(sql.JobExecContext)
@@ -102,6 +97,24 @@ func (r schemaChangeGCResumer) Resume(ctx context.Context, execCtx interface{}) 
 	details, progress, err := initDetailsAndProgress(ctx, execCfg, r.jobID)
 	if err != nil {
 		return err
+	}
+
+	// If there are any interleaved indexes to drop as part of a table TRUNCATE
+	// operation, then drop the indexes before waiting on the GC timer.
+	if len(details.InterleavedIndexes) > 0 {
+		// Before deleting any indexes, ensure that old versions of the table
+		// descriptor are no longer in use.
+		if err := sql.WaitToUpdateLeases(ctx, execCfg.LeaseManager, details.InterleavedTable.ID); err != nil {
+			return err
+		}
+		if err := sql.TruncateInterleavedIndexes(
+			ctx,
+			execCfg,
+			tabledesc.NewBuilder(details.InterleavedTable).BuildImmutableTable(),
+			details.InterleavedIndexes,
+		); err != nil {
+			return err
+		}
 	}
 
 	tableDropTimes, indexDropTimes := getDropTimes(details)

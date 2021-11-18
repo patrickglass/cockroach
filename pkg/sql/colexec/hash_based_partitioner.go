@@ -117,7 +117,6 @@ const (
 // seem to make progress in reducing the size of the partitions).
 type hashBasedPartitioner struct {
 	colexecop.NonExplainable
-	colexecop.InitHelper
 	colexecop.CloserHelper
 
 	unlimitedAllocator                 *colmem.Allocator
@@ -250,12 +249,12 @@ func newHashBasedPartitioner(
 	}
 	maxNumberActivePartitions := calculateMaxNumberActivePartitions(flowCtx, args, numRequiredActivePartitions)
 	diskQueuesMemUsed := maxNumberActivePartitions * diskQueueCfg.BufferSizeBytes
-	memoryLimit := execinfra.GetWorkMemLimit(flowCtx)
+	memoryLimit := execinfra.GetWorkMemLimit(flowCtx.Cfg)
 	if memoryLimit == 1 {
 		// If memory limit is 1, we're likely in a "force disk spill"
 		// scenario, but we don't want to artificially limit batches when we
 		// have already spilled, so we'll use a larger limit.
-		memoryLimit = execinfra.DefaultMemoryLimit
+		memoryLimit = colexecop.DefaultMemoryLimit
 	}
 	maxPartitionSizeToProcessUsingMain := memoryLimit - int64(diskQueuesMemUsed)
 	if maxPartitionSizeToProcessUsingMain < hbpMinimalMaxPartitionSizeForMain {
@@ -297,7 +296,7 @@ func calculateMaxNumberActivePartitions(
 	// support the caches of this number of partitions.
 	// TODO(yuzefovich): this number should be tuned.
 	maxNumberActivePartitions := args.FDSemaphore.GetLimit() / 16
-	memoryLimit := execinfra.GetWorkMemLimit(flowCtx)
+	memoryLimit := execinfra.GetWorkMemLimit(flowCtx.Cfg)
 	if args.DiskQueueCfg.BufferSizeBytes > 0 {
 		diskQueuesTotalMemLimit := int(float64(memoryLimit) * hbpDiskQueuesMemFraction)
 		numDiskQueuesThatFit := diskQueuesTotalMemLimit / args.DiskQueueCfg.BufferSizeBytes
@@ -311,12 +310,9 @@ func calculateMaxNumberActivePartitions(
 	return maxNumberActivePartitions
 }
 
-func (op *hashBasedPartitioner) Init(ctx context.Context) {
-	if !op.InitHelper.Init(ctx) {
-		return
-	}
+func (op *hashBasedPartitioner) Init() {
 	for i := range op.inputs {
-		op.inputs[i].Init(op.Ctx)
+		op.inputs[i].Init()
 	}
 	op.partitionsToProcessUsingMain = make(map[int]*hbpPartitionInfo)
 	// If we are initializing the hash-based partitioner, it means that we had
@@ -348,19 +344,18 @@ func (op *hashBasedPartitioner) Init(ctx context.Context) {
 	op.tupleDistributor = colexechash.NewTupleHashDistributor(
 		colexechash.DefaultInitHashValue+1, op.numBuckets,
 	)
-	op.tupleDistributor.Init(op.Ctx)
 	op.state = hbpInitialPartitioning
 }
 
 func (op *hashBasedPartitioner) partitionBatch(
-	batch coldata.Batch, inputIdx int, parentMemSize int64,
+	ctx context.Context, batch coldata.Batch, inputIdx int, parentMemSize int64,
 ) {
 	batchLen := batch.Length()
 	if batchLen == 0 {
 		return
 	}
 	scratchBatch := op.scratch.batches[inputIdx]
-	selections := op.tupleDistributor.Distribute(batch, op.hashCols[inputIdx])
+	selections := op.tupleDistributor.Distribute(ctx, batch, op.hashCols[inputIdx])
 	for idx, sel := range selections {
 		partitionIdx := op.partitionIdxOffset + idx
 		if len(sel) > 0 {
@@ -371,15 +366,17 @@ func (op *hashBasedPartitioner) partitionBatch(
 			colVecs := scratchBatch.ColVecs()
 			op.unlimitedAllocator.PerformOperation(colVecs, func() {
 				for i, colvec := range colVecs {
-					colvec.Copy(coldata.SliceArgs{
-						Src:       batch.ColVec(i),
-						Sel:       sel,
-						SrcEndIdx: len(sel),
+					colvec.Copy(coldata.CopySliceArgs{
+						SliceArgs: coldata.SliceArgs{
+							Src:       batch.ColVec(i),
+							Sel:       sel,
+							SrcEndIdx: len(sel),
+						},
 					})
 				}
 				scratchBatch.SetLength(len(sel))
 			})
-			if err := op.partitioners[inputIdx].Enqueue(op.Ctx, partitionIdx, scratchBatch); err != nil {
+			if err := op.partitioners[inputIdx].Enqueue(ctx, partitionIdx, scratchBatch); err != nil {
 				colexecutils.HandleErrorFromDiskQueue(err)
 			}
 			partitionInfo, ok := op.partitionsToProcessUsingMain[partitionIdx]
@@ -398,7 +395,7 @@ func (op *hashBasedPartitioner) partitionBatch(
 	}
 }
 
-func (op *hashBasedPartitioner) Next() coldata.Batch {
+func (op *hashBasedPartitioner) Next(ctx context.Context) coldata.Batch {
 	var batches [2]coldata.Batch
 StateChanged:
 	for {
@@ -406,7 +403,7 @@ StateChanged:
 		case hbpInitialPartitioning:
 			allZero := true
 			for i := range op.inputs {
-				batches[i] = op.inputs[i].Next()
+				batches[i] = op.inputs[i].Next(ctx)
 				allZero = allZero && batches[i].Length() == 0
 			}
 			if allZero {
@@ -426,31 +423,31 @@ StateChanged:
 				// from before doing that to exempt them from releasing their
 				// FDs to the semaphore.
 				for i := range op.inputs {
-					if err := op.partitioners[i].CloseAllOpenWriteFileDescriptors(op.Ctx); err != nil {
+					if err := op.partitioners[i].CloseAllOpenWriteFileDescriptors(ctx); err != nil {
 						colexecerror.InternalError(err)
 					}
 				}
-				op.inMemMainOp.Init(op.Ctx)
+				op.inMemMainOp.Init()
 				op.partitionIdxOffset += op.numBuckets
 				op.state = hbpProcessNewPartitionUsingMain
-				log.VEventf(op.Ctx, 1, "%s consumed its input", op.name)
+				log.VEventf(ctx, 1, "%s consumed its input", op.name)
 				continue
 			}
 			if !op.testingKnobs.delegateFDAcquisitions && op.fdState.acquiredFDs == 0 {
 				toAcquire := op.maxNumberActivePartitions
-				if err := op.fdState.fdSemaphore.Acquire(op.Ctx, toAcquire); err != nil {
+				if err := op.fdState.fdSemaphore.Acquire(ctx, toAcquire); err != nil {
 					colexecerror.InternalError(err)
 				}
 				op.fdState.acquiredFDs = toAcquire
 			}
 			for i := range op.inputs {
-				op.partitionBatch(batches[i], i, math.MaxInt64)
+				op.partitionBatch(ctx, batches[i], i, math.MaxInt64)
 			}
 
 		case hbpRecursivePartitioning:
 			op.numRepartitions++
 			if op.numRepartitions%10 == 0 {
-				log.VEventf(op.Ctx, 2,
+				log.VEventf(ctx, 2,
 					"%s is performing %d'th repartition", op.name, op.numRepartitions,
 				)
 			}
@@ -471,18 +468,18 @@ StateChanged:
 					partitioner := op.partitioners[i]
 					for {
 						op.unlimitedAllocator.PerformOperation(batch.ColVecs(), func() {
-							if err := partitioner.Dequeue(op.Ctx, parentPartitionIdx, batch); err != nil {
+							if err := partitioner.Dequeue(ctx, parentPartitionIdx, batch); err != nil {
 								colexecerror.InternalError(err)
 							}
 						})
 						if batch.Length() == 0 {
 							break
 						}
-						op.partitionBatch(batch, i, parentPartitionInfo.memSize)
+						op.partitionBatch(ctx, batch, i, parentPartitionInfo.memSize)
 					}
 					// We're done reading from this partition, and it will never
 					// be read from again, so we can close it.
-					if err := partitioner.CloseInactiveReadPartitions(op.Ctx); err != nil {
+					if err := partitioner.CloseInactiveReadPartitions(ctx); err != nil {
 						colexecerror.InternalError(err)
 					}
 					// We're done writing to the newly created partitions.
@@ -496,7 +493,7 @@ StateChanged:
 					// descriptors and whatever number of write partitions we
 					// want. This will allow us to remove the call to
 					// CloseAllOpen... in the first state as well.
-					if err := partitioner.CloseAllOpenWriteFileDescriptors(op.Ctx); err != nil {
+					if err := partitioner.CloseAllOpenWriteFileDescriptors(ctx); err != nil {
 						colexecerror.InternalError(err)
 					}
 				}
@@ -535,14 +532,14 @@ StateChanged:
 			// recursively repartition.
 			for partitionIdx, partitionInfo := range op.partitionsToProcessUsingMain {
 				if partitionInfo.memSize <= op.maxPartitionSizeToProcessUsingMain {
-					log.VEventf(op.Ctx, 2,
+					log.VEventf(ctx, 2,
 						`%s processes partition with idx %d of size %s using the "main" strategy`,
-						op.name, partitionIdx, humanizeutil.IBytes(partitionInfo.memSize),
+						op.name, partitionIdx, redact.SafeString(humanizeutil.IBytes(partitionInfo.memSize)),
 					)
 					for i := range op.partitionedInputs {
 						op.partitionedInputs[i].partitionIdx = partitionIdx
 					}
-					op.inMemMainOp.Reset(op.Ctx)
+					op.inMemMainOp.Reset(ctx)
 					delete(op.partitionsToProcessUsingMain, partitionIdx)
 					op.state = hbpProcessingUsingMain
 					continue StateChanged
@@ -554,8 +551,8 @@ StateChanged:
 				if len(op.partitionsToProcessUsingFallback) > 0 {
 					// But there are still some partitions to process using the
 					// "fallback" strategy.
-					op.diskBackedFallbackOp.Init(op.Ctx)
-					log.VEventf(op.Ctx, 1,
+					op.diskBackedFallbackOp.Init()
+					log.VEventf(ctx, 1,
 						`%s will process %d partitions using the "fallback" strategy`,
 						op.name, len(op.partitionsToProcessUsingFallback),
 					)
@@ -573,12 +570,12 @@ StateChanged:
 			continue
 
 		case hbpProcessingUsingMain:
-			b := op.inMemMainOp.Next()
+			b := op.inMemMainOp.Next(ctx)
 			if b.Length() == 0 {
 				// We're done processing these partitions, so we close them and
 				// transition to processing new ones.
 				for i := range op.inputs {
-					if err := op.partitioners[i].CloseInactiveReadPartitions(op.Ctx); err != nil {
+					if err := op.partitioners[i].CloseInactiveReadPartitions(ctx); err != nil {
 						colexecerror.InternalError(err)
 					}
 				}
@@ -599,17 +596,17 @@ StateChanged:
 			for i := range op.partitionedInputs {
 				op.partitionedInputs[i].partitionIdx = partitionIdx
 			}
-			op.diskBackedFallbackOp.Reset(op.Ctx)
+			op.diskBackedFallbackOp.Reset(ctx)
 			op.state = hbpProcessingUsingFallback
 			continue
 
 		case hbpProcessingUsingFallback:
-			b := op.diskBackedFallbackOp.Next()
+			b := op.diskBackedFallbackOp.Next(ctx)
 			if b.Length() == 0 {
 				// We're done processing these partitions, so we close them and
 				// transition to processing new ones.
 				for i := range op.inputs {
-					if err := op.partitioners[i].CloseInactiveReadPartitions(op.Ctx); err != nil {
+					if err := op.partitioners[i].CloseInactiveReadPartitions(ctx); err != nil {
 						colexecerror.InternalError(err)
 					}
 				}
@@ -619,7 +616,7 @@ StateChanged:
 			return b
 
 		case hbpFinished:
-			if err := op.Close(); err != nil {
+			if err := op.Close(ctx); err != nil {
 				colexecerror.InternalError(err)
 			}
 			return coldata.ZeroBatch
@@ -630,11 +627,10 @@ StateChanged:
 	}
 }
 
-func (op *hashBasedPartitioner) Close() error {
+func (op *hashBasedPartitioner) Close(ctx context.Context) error {
 	if !op.CloserHelper.Close() {
 		return nil
 	}
-	ctx := op.EnsureCtx()
 	log.VEventf(ctx, 1, "%s is closed", op.name)
 	var retErr error
 	for i := range op.inputs {
@@ -645,7 +641,7 @@ func (op *hashBasedPartitioner) Close() error {
 	// The in-memory main operator might be a Closer (e.g. the in-memory hash
 	// aggregator), and we need to close it if so.
 	if c, ok := op.inMemMainOp.(colexecop.Closer); ok {
-		if err := c.Close(); err != nil {
+		if err := c.Close(ctx); err != nil {
 			retErr = err
 		}
 	}
@@ -653,7 +649,7 @@ func (op *hashBasedPartitioner) Close() error {
 	// it will still be closed appropriately because we accumulate all closers
 	// in NewColOperatorResult.
 	if c, ok := op.diskBackedFallbackOp.(colexecop.Closer); ok {
-		if err := c.Close(); err != nil {
+		if err := c.Close(ctx); err != nil {
 			retErr = err
 		}
 	}

@@ -1,2 +1,0 @@
-alter_partition_stmt ::=
-	alter_zone_partition_stmt

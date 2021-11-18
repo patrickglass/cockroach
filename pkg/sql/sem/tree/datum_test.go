@@ -140,23 +140,17 @@ func TestCompareTimestamps(t *testing.T) {
 			tc.desc,
 			func(t *testing.T) {
 				ctx := &EvalContext{
-					SessionDataStack: sessiondata.NewStack(
-						&sessiondata.SessionData{
-							Location: tc.location,
-						},
-					),
+					SessionData: &sessiondata.SessionData{
+						Location: tc.location,
+					},
 				}
-				res, err := compareTimestamps(ctx, tc.left, tc.right)
-				assert.NoError(t, err)
-				assert.Equal(t, tc.expected, res)
-				res, err = compareTimestamps(ctx, tc.right, tc.left)
-				assert.NoError(t, err)
-				assert.Equal(t, -tc.expected, res)
+				assert.Equal(t, tc.expected, compareTimestamps(ctx, tc.left, tc.right))
+				assert.Equal(t, -tc.expected, compareTimestamps(ctx, tc.right, tc.left))
 			},
 		)
 	}
-	_, err = compareTimestamps(nil /* ctx */, dMaxDate, dMinDate)
-	assert.Error(t, err, "should not be able to compare infinite timestamps")
+
+	assert.Panics(t, func() { compareTimestamps(nil /* ctx */, dMaxDate, dMinDate) })
 }
 
 func TestCastStringToRegClassTableName(t *testing.T) {

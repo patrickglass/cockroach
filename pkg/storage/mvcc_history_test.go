@@ -11,17 +11,17 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"math/rand"
 	"strconv"
 	"strings"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -32,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/datadriven"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/redact"
 )
 
 // TestMVCCHistories verifies that sequences of MVCC reads and writes
@@ -57,7 +56,7 @@ import (
 // get       [t=<name>] [ts=<int>[,<int>]] [resolve [status=<txnstatus>]] k=<key> [inconsistent] [tombstones] [failOnMoreRecent] [localUncertaintyLimit=<int>[,<int>]]
 // increment [t=<name>] [ts=<int>[,<int>]] [resolve [status=<txnstatus>]] k=<key> [inc=<val>]
 // put       [t=<name>] [ts=<int>[,<int>]] [resolve [status=<txnstatus>]] k=<key> v=<string> [raw]
-// scan      [t=<name>] [ts=<int>[,<int>]] [resolve [status=<txnstatus>]] k=<key> [end=<key>] [inconsistent] [tombstones] [reverse] [failOnMoreRecent] [localUncertaintyLimit=<int>[,<int>]] [max=<max>] [targetbytes=<target>] [avoidExcess] [allowEmpty]
+// scan      [t=<name>] [ts=<int>[,<int>]] [resolve [status=<txnstatus>]] k=<key> [end=<key>] [inconsistent] [tombstones] [reverse] [failOnMoreRecent] [localUncertaintyLimit=<int>[,<int>]] [max=<max>] [targetbytes=<target>]
 //
 // merge     [ts=<int>[,<int>]] k=<key> v=<string> [raw]
 //
@@ -95,51 +94,35 @@ func TestMVCCHistories(t *testing.T) {
 	datadriven.Walk(t, "testdata/mvcc_histories", func(t *testing.T, path string) {
 		// Default to random behavior wrt cluster version and separated
 		// intents.
+		oldClusterVersion := rand.Intn(2) == 0
 		enabledSeparated := rand.Intn(2) == 0
 		overridden := false
 		if strings.Contains(path, "_disallow_separated") {
+			oldClusterVersion = true
+			enabledSeparated = false
+			overridden = true
+		}
+		if strings.Contains(path, "_allow_separated") {
+			oldClusterVersion = false
 			enabledSeparated = false
 			overridden = true
 		}
 		if strings.Contains(path, "_enable_separated") {
+			oldClusterVersion = false
 			enabledSeparated = true
 			overridden = true
 		}
 		if !overridden {
 			log.Infof(context.Background(),
-				"randomly setting enableSeparated: %t", enabledSeparated)
+				"randomly setting oldClusterVersion: %t, enableSeparated: %t",
+				oldClusterVersion, enabledSeparated)
 		}
+		settings := makeSettingsForSeparatedIntents(oldClusterVersion, enabledSeparated)
 		// We start from a clean slate in every test file.
-		engine, err := Open(ctx, InMemory(), CacheSize(1<<20 /* 1 MiB */),
-			SetSeparatedIntents(!enabledSeparated),
-			func(cfg *engineConfig) error {
-				if !overridden {
-					// Latest cluster version, since these tests are not ones where we
-					// are examining differences related to separated intents.
-					cfg.Settings = cluster.MakeTestingClusterSettings()
-				} else {
-					if !enabledSeparated {
-						// 21.1, which has the old code that is unaware about the changes
-						// we have made for OverrideTxnDidNotUpdateMetaToFalse. By using
-						// the latest cluster version, we effectively undo these changes.
-						cfg.Settings = cluster.MakeTestingClusterSettings()
-					} else if strings.Contains(path, "mixed_cluster") {
-						v21_1 := clusterversion.ByKey(clusterversion.V21_1)
-						cfg.Settings =
-							cluster.MakeTestingClusterSettingsWithVersions(v21_1, v21_1, true)
-					} else {
-						// Latest cluster version.
-						cfg.Settings = cluster.MakeTestingClusterSettings()
-					}
-				}
-				return nil
-			})
-		if err != nil {
-			t.Fatal(err)
-		}
+		engine := createTestPebbleEngineWithSettings(settings)
 		defer engine.Close()
 
-		reportDataEntries := func(buf *redact.StringBuilder) error {
+		reportDataEntries := func(buf *bytes.Buffer) error {
 			hasData := false
 			err := engine.MVCCIterate(span.Key, span.EndKey, MVCCKeyAndIntentsIterKind, func(r MVCCKeyValue) error {
 				hasData = true
@@ -147,17 +130,17 @@ func TestMVCCHistories(t *testing.T) {
 					// Meta is at timestamp zero.
 					meta := enginepb.MVCCMetadata{}
 					if err := protoutil.Unmarshal(r.Value, &meta); err != nil {
-						buf.Printf("meta: %v -> error decoding proto from %v: %v\n", r.Key, r.Value, err)
+						fmt.Fprintf(buf, "meta: %v -> error decoding proto from %v: %v\n", r.Key, r.Value, err)
 					} else {
-						buf.Printf("meta: %v -> %+v\n", r.Key, &meta)
+						fmt.Fprintf(buf, "meta: %v -> %+v\n", r.Key, &meta)
 					}
 				} else {
-					buf.Printf("data: %v -> %s\n", r.Key, roachpb.Value{RawBytes: r.Value}.PrettyPrint())
+					fmt.Fprintf(buf, "data: %v -> %s\n", r.Key, roachpb.Value{RawBytes: r.Value}.PrettyPrint())
 				}
 				return nil
 			})
 			if !hasData {
-				buf.SafeString("<no data>\n")
+				buf.WriteString("<no data>\n")
 			}
 			return err
 		}
@@ -208,7 +191,7 @@ func TestMVCCHistories(t *testing.T) {
 				// buf will accumulate the actual output, which the
 				// datadriven driver will use to compare to the expected
 				// output.
-				var buf redact.StringBuilder
+				var buf bytes.Buffer
 				e.results.buf = &buf
 				e.results.traceIntentWrites = trace
 
@@ -234,7 +217,7 @@ func TestMVCCHistories(t *testing.T) {
 
 				reportResults := func(printTxn, printData bool) {
 					if printTxn && e.results.txn != nil {
-						buf.Printf("txn: %v\n", e.results.txn)
+						fmt.Fprintf(&buf, "txn: %v\n", e.results.txn)
 					}
 					if printData {
 						err := reportDataEntries(&buf)
@@ -243,7 +226,7 @@ func TestMVCCHistories(t *testing.T) {
 								// Handle the error below.
 								foundErr = err
 							} else {
-								buf.Printf("error reading data: (%T:) %v\n", err, err)
+								fmt.Fprintf(&buf, "error reading data: (%T:) %v\n", err, err)
 							}
 						}
 					}
@@ -320,11 +303,11 @@ func TestMVCCHistories(t *testing.T) {
 					if trace {
 						// If tracing is also requested by the datadriven input,
 						// we'll trace the statement in the actual results too.
-						buf.Printf(">> %s", d.Cmd)
+						fmt.Fprintf(&buf, ">> %s", d.Cmd)
 						for i := range d.CmdArgs {
-							buf.Printf(" %s", &d.CmdArgs[i])
+							fmt.Fprintf(&buf, " %s", &d.CmdArgs[i])
 						}
-						_ = buf.WriteByte('\n')
+						buf.WriteByte('\n')
 					}
 
 					// Run the command.
@@ -347,7 +330,7 @@ func TestMVCCHistories(t *testing.T) {
 				if !trace {
 					// If we were not tracing, no results were printed yet. Do it now.
 					if txnChange || dataChange {
-						buf.SafeString(">> at end:\n")
+						buf.WriteString(">> at end:\n")
 					}
 					reportResults(txnChange, dataChange)
 				}
@@ -366,7 +349,7 @@ func TestMVCCHistories(t *testing.T) {
 					return d.Expected
 				} else if foundErr != nil {
 					if expectError {
-						buf.Printf("error: (%T:) %v\n", foundErr, foundErr)
+						fmt.Fprintf(&buf, "error: (%T:) %v\n", foundErr, foundErr)
 					} else /* !expectError */ {
 						signalError("%s: expected success, found: (%T:) %v", d.Pos, foundErr, foundErr)
 						return d.Expected
@@ -541,7 +524,7 @@ func cmdTxnUpdate(e *evalCtx) error {
 
 type intentPrintingReadWriter struct {
 	ReadWriter
-	buf *redact.StringBuilder
+	buf io.Writer
 }
 
 func (rw intentPrintingReadWriter) PutIntent(
@@ -552,7 +535,7 @@ func (rw intentPrintingReadWriter) PutIntent(
 	txnDidNotUpdateMeta bool,
 	txnUUID uuid.UUID,
 ) (int, error) {
-	rw.buf.Printf("called PutIntent(%v, _, %v, TDNUM(%t), %v)\n",
+	fmt.Fprintf(rw.buf, "called PutIntent(%v, _, %v, TDNUM(%t), %v)\n",
 		key, state, txnDidNotUpdateMeta, txnUUID)
 	return rw.ReadWriter.PutIntent(ctx, key, value, state, txnDidNotUpdateMeta, txnUUID)
 }
@@ -560,7 +543,7 @@ func (rw intentPrintingReadWriter) PutIntent(
 func (rw intentPrintingReadWriter) ClearIntent(
 	key roachpb.Key, state PrecedingIntentState, txnDidNotUpdateMeta bool, txnUUID uuid.UUID,
 ) (int, error) {
-	rw.buf.Printf("called ClearIntent(%v, %v, TDNUM(%t), %v)\n",
+	fmt.Fprintf(rw.buf, "called ClearIntent(%v, %v, TDNUM(%t), %v)\n",
 		key, state, txnDidNotUpdateMeta, txnUUID)
 	return rw.ReadWriter.ClearIntent(key, state, txnDidNotUpdateMeta, txnUUID)
 }
@@ -604,7 +587,7 @@ func cmdCheckIntent(e *evalCtx) error {
 		return errors.Newf("meta: %v -> expected intent, found none", key)
 	}
 	if ok {
-		e.results.buf.Printf("meta: %v -> %+v\n", key, &meta)
+		fmt.Fprintf(e.results.buf, "meta: %v -> %+v\n", key, &meta)
 		if !wantIntent {
 			return errors.Newf("meta: %v -> expected no intent, found one", key)
 		}
@@ -678,12 +661,12 @@ func cmdDeleteRange(e *evalCtx) error {
 		if err != nil {
 			return err
 		}
-		e.results.buf.Printf("del_range: %v-%v -> deleted %d key(s)\n", key, endKey, num)
+		fmt.Fprintf(e.results.buf, "del_range: %v-%v -> deleted %d key(s)\n", key, endKey, num)
 		for _, key := range deleted {
-			e.results.buf.Printf("del_range: returned %v\n", key)
+			fmt.Fprintf(e.results.buf, "del_range: returned %v\n", key)
 		}
 		if resumeSpan != nil {
-			e.results.buf.Printf("del_range: resume span [%s,%s)\n", resumeSpan.Key, resumeSpan.EndKey)
+			fmt.Fprintf(e.results.buf, "del_range: resume span [%s,%s)\n", resumeSpan.Key, resumeSpan.EndKey)
 		}
 
 		if resolve {
@@ -716,12 +699,12 @@ func cmdGet(e *evalCtx) error {
 	// ascertain no result is populated in the intent when an error
 	// occurs.
 	if intent != nil {
-		e.results.buf.Printf("get: %v -> intent {%s}\n", key, intent.Txn)
+		fmt.Fprintf(e.results.buf, "get: %v -> intent {%s}\n", key, intent.Txn)
 	}
 	if val != nil {
-		e.results.buf.Printf("get: %v -> %v @%v\n", key, val.PrettyPrint(), val.Timestamp)
+		fmt.Fprintf(e.results.buf, "get: %v -> %v @%v\n", key, val.PrettyPrint(), val.Timestamp)
 	} else {
-		e.results.buf.Printf("get: %v -> <no data>\n", key)
+		fmt.Fprintf(e.results.buf, "get: %v -> <no data>\n", key)
 	}
 	return err
 }
@@ -745,7 +728,7 @@ func cmdIncrement(e *evalCtx) error {
 		if err != nil {
 			return err
 		}
-		e.results.buf.Printf("inc: current value = %d\n", curVal)
+		fmt.Fprintf(e.results.buf, "inc: current value = %d\n", curVal)
 		if resolve {
 			return e.resolveIntent(rw, key, txn, resolveStatus)
 		}
@@ -820,30 +803,24 @@ func cmdScan(e *evalCtx) error {
 		e.scanArg(key, &tb)
 		opts.TargetBytes = int64(tb)
 	}
-	if e.hasArg("avoidExcess") {
-		opts.TargetBytesAvoidExcess = true
-	}
-	if e.hasArg("allowEmpty") {
-		opts.TargetBytesAllowEmpty = true
-	}
 	res, err := MVCCScan(e.ctx, e.engine, key, endKey, ts, opts)
 	// NB: the error is returned below. This ensures the test can
 	// ascertain no result is populated in the intents when an error
 	// occurs.
 	for _, intent := range res.Intents {
-		e.results.buf.Printf("scan: %v -> intent {%s}\n", key, intent.Txn)
+		fmt.Fprintf(e.results.buf, "scan: %v -> intent {%s}\n", key, intent.Txn)
 	}
 	for _, val := range res.KVs {
-		e.results.buf.Printf("scan: %v -> %v @%v\n", val.Key, val.Value.PrettyPrint(), val.Value.Timestamp)
+		fmt.Fprintf(e.results.buf, "scan: %v -> %v @%v\n", val.Key, val.Value.PrettyPrint(), val.Value.Timestamp)
 	}
 	if res.ResumeSpan != nil {
-		e.results.buf.Printf("scan: resume span [%s,%s) %s nextBytes=%d\n", res.ResumeSpan.Key, res.ResumeSpan.EndKey, res.ResumeReason, res.ResumeNextBytes)
+		fmt.Fprintf(e.results.buf, "scan: resume span [%s,%s)\n", res.ResumeSpan.Key, res.ResumeSpan.EndKey)
 	}
 	if opts.TargetBytes > 0 {
-		e.results.buf.Printf("scan: %d bytes (target %d)\n", res.NumBytes, opts.TargetBytes)
+		fmt.Fprintf(e.results.buf, "scan: %d bytes (target %d)\n", res.NumBytes, opts.TargetBytes)
 	}
 	if len(res.KVs) == 0 {
-		e.results.buf.Printf("scan: %v-%v -> <no data>\n", key, endKey)
+		fmt.Fprintf(e.results.buf, "scan: %v-%v -> <no data>\n", key, endKey)
 	}
 	return err
 }
@@ -852,7 +829,7 @@ func cmdScan(e *evalCtx) error {
 // script.
 type evalCtx struct {
 	results struct {
-		buf               *redact.StringBuilder
+		buf               io.Writer
 		txn               *roachpb.Transaction
 		traceIntentWrites bool
 	}
@@ -982,7 +959,7 @@ func (e *evalCtx) withWriter(cmd string, fn func(_ ReadWriter) error) error {
 		if batch.Empty() {
 			batchStatus = "empty"
 		}
-		e.results.buf.Printf("%s: batch after write is %s\n", cmd, batchStatus)
+		fmt.Fprintf(e.results.buf, "%s: batch after write is %s\n", cmd, batchStatus)
 	}
 	if origErr != nil {
 		return origErr

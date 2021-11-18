@@ -21,8 +21,7 @@ import (
 )
 
 func TestReduceGo(t *testing.T) {
-	reduce.Walk(t, "testdata", nil /* filter */, isInterestingGo, reduce.ModeInteresting,
-		nil /* chunkReducer */, goPasses)
+	reduce.Walk(t, "testdata", nil /* filter */, isInterestingGo, reduce.ModeInteresting, goPasses)
 }
 
 var (
@@ -52,11 +51,11 @@ var (
 )
 
 func isInterestingGo(contains string) reduce.InterestingFn {
-	return func(ctx context.Context, f string) (bool, func()) {
-		_, err := parser.ParseExpr(f)
+	return func(ctx context.Context, f reduce.File) bool {
+		_, err := parser.ParseExpr(string(f))
 		if err == nil {
-			return false, nil
+			return false
 		}
-		return strings.Contains(err.Error(), contains), nil
+		return strings.Contains(err.Error(), contains)
 	}
 }

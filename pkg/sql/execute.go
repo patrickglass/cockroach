@@ -17,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/errors"
 )
 
@@ -24,8 +25,12 @@ import (
 // a prepared statement returning
 // the referenced prepared statement and correctly updated placeholder info.
 // See https://www.postgresql.org/docs/current/static/sql-execute.html for details.
-func (p *planner) fillInPlaceholders(
-	ctx context.Context, ps *PreparedStatement, name string, params tree.Exprs,
+func fillInPlaceholders(
+	ctx context.Context,
+	ps *PreparedStatement,
+	name string,
+	params tree.Exprs,
+	searchPath sessiondata.SearchPath,
 ) (*tree.PlaceholderInfo, error) {
 	if len(ps.Types) != len(params) {
 		return nil, pgerror.Newf(pgcode.Syntax,
@@ -41,16 +46,6 @@ func (p *planner) fillInPlaceholders(
 		typ, ok := ps.ValueType(idx)
 		if !ok {
 			return nil, errors.AssertionFailedf("no type for placeholder %s", idx)
-		}
-
-		// For user-defined types, we need to resolve the type to make sure we get
-		// the latest changes to the type.
-		if typ.UserDefined() {
-			var err error
-			typ, err = p.ResolveTypeByOID(ctx, typ.Oid())
-			if err != nil {
-				return nil, err
-			}
 		}
 		typedExpr, err := schemaexpr.SanitizeVarFreeExpr(
 			ctx, e, typ, "EXECUTE parameter" /* context */, &semaCtx, tree.VolatilityVolatile,

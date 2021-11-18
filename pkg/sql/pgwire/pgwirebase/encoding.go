@@ -38,7 +38,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uint128"
 	"github.com/cockroachdb/errors"
 	"github.com/dustin/go-humanize"
-	"github.com/jackc/pgtype"
+	"github.com/jackc/pgx/pgtype"
 	"github.com/lib/pq/oid"
 )
 
@@ -403,7 +403,7 @@ func DecodeDatum(
 			}
 			return d, nil
 		case oid.T_interval:
-			d, err := tree.ParseDInterval(evalCtx.GetIntervalStyle(), string(b))
+			d, err := tree.ParseDInterval(string(b))
 			if err != nil {
 				return nil, pgerror.Newf(pgcode.Syntax, "could not parse string %q as interval", b)
 			}
@@ -493,8 +493,6 @@ func DecodeDatum(
 		}
 	case FormatBinary:
 		switch id {
-		case oid.T_record:
-			return decodeBinaryTuple(evalCtx, t, b)
 		case oid.T_bool:
 			if len(b) > 0 {
 				switch b[0] {
@@ -649,13 +647,6 @@ func DecodeDatum(
 			case 0xc000:
 				// https://github.com/postgres/postgres/blob/ffa4cbd623dd69f9fa99e5e92426928a5782cf1a/src/backend/utils/adt/numeric.c#L169
 				return tree.ParseDDecimal("NaN")
-			case 0xd000:
-				// https://github.com/postgres/postgres/blob/a57d312a7706321d850faa048a562a0c0c01b835/src/backend/utils/adt/numeric.c#L201
-				return tree.ParseDDecimal("Inf")
-
-			case 0xf000:
-				// https://github.com/postgres/postgres/blob/a57d312a7706321d850faa048a562a0c0c01b835/src/backend/utils/adt/numeric.c#L200
-				return tree.ParseDDecimal("-Inf")
 			default:
 				return nil, pgerror.Newf(pgcode.Syntax, "unsupported numeric sign: %d", alloc.pgNum.Sign)
 			}
@@ -783,7 +774,7 @@ func DecodeDatum(
 		return tree.MakeDEnumFromLogicalRepresentation(t, string(b))
 	}
 	switch id {
-	case oid.T_text, oid.T_varchar, oid.T_unknown:
+	case oid.T_text, oid.T_varchar:
 		if err := validateStringBytes(b); err != nil {
 			return nil, err
 		}
@@ -794,17 +785,6 @@ func DecodeDatum(
 		}
 		// Trim the trailing spaces
 		sv := strings.TrimRight(string(b), " ")
-		return tree.NewDString(sv), nil
-	case oid.T_char:
-		sv := string(b)
-		// Always truncate to 1 byte, and handle the null byte specially.
-		if len(b) >= 1 {
-			if b[0] == 0 {
-				sv = ""
-			} else {
-				sv = string(b[:1])
-			}
-		}
 		return tree.NewDString(sv), nil
 	case oid.T_name:
 		if err := validateStringBytes(b); err != nil {
@@ -935,7 +915,7 @@ func decodeBinaryArray(
 		return nil, err
 	}
 	if t.Oid() != oid.Oid(hdr.ElemOid) {
-		return nil, pgerror.Newf(pgcode.ProtocolViolation, "wrong element type")
+		return nil, pgerror.Newf(pgcode.DatatypeMismatch, "wrong element type")
 	}
 	arr := tree.NewDArray(t)
 	if hdr.Ndims == 0 {
@@ -968,60 +948,6 @@ func decodeBinaryArray(
 		}
 	}
 	return arr, nil
-}
-
-func decodeBinaryTuple(evalCtx *tree.EvalContext, t *types.T, b []byte) (tree.Datum, error) {
-	if len(b) < 4 {
-		return nil, pgerror.Newf(pgcode.Syntax, "tuple requires a 4 byte header for binary format")
-	}
-
-	totalLength := int32(len(b))
-	numberOfElements := int32(binary.BigEndian.Uint32(b[0:4]))
-	typs := make([]*types.T, numberOfElements)
-	datums := make(tree.Datums, numberOfElements)
-	curByte := int32(4)
-	curIdx := int32(0)
-
-	for curIdx < numberOfElements {
-
-		if totalLength < curByte+4 {
-			return nil, pgerror.Newf(pgcode.Syntax, "tuple requires 4 bytes for each element OID for binary format")
-		}
-
-		elementOID := int32(binary.BigEndian.Uint32(b[curByte : curByte+4]))
-		elementType := types.OidToType[oid.Oid(elementOID)]
-		typs[curIdx] = elementType
-		curByte = curByte + 4
-
-		if totalLength < curByte+4 {
-			return nil, pgerror.Newf(pgcode.Syntax, "tuple requires 4 bytes for the size of each element for binary format")
-		}
-
-		elementLength := int32(binary.BigEndian.Uint32(b[curByte : curByte+4]))
-		curByte = curByte + 4
-
-		if elementLength == -1 {
-			datums[curIdx] = tree.DNull
-		} else {
-			if totalLength < curByte+elementLength {
-				return nil, pgerror.Newf(pgcode.Syntax, "tuple requires %d bytes for element %d for binary format", elementLength, curIdx)
-			}
-
-			colDatum, err := DecodeDatum(evalCtx, elementType, FormatBinary, b[curByte:curByte+elementLength])
-
-			if err != nil {
-				return nil, err
-			}
-
-			curByte = curByte + elementLength
-			datums[curIdx] = colDatum
-		}
-		curIdx++
-	}
-
-	tupleTyps := types.MakeTuple(typs)
-	return tree.NewDTuple(tupleTyps, datums...), nil
-
 }
 
 var invalidUTF8Error = pgerror.Newf(pgcode.CharacterNotInRepertoire, "invalid UTF-8 sequence")

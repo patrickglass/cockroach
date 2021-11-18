@@ -8,7 +8,6 @@ go_library(
     deps = [
         "//pkg/scheduledjobs",
         "//pkg/sql/catalog/systemschema",
-        "//pkg/sql/sem/tree",
         "//pkg/util/syncutil",
     ],
 )

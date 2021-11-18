@@ -33,7 +33,6 @@ func constructPlan(
 	subqueries []exec.Subquery,
 	cascades []exec.Cascade,
 	checks []exec.Node,
-	rootRowCount int64,
 ) (exec.Plan, error) {
 	res := &planComponents{}
 	assignPlan := func(plan *planMaybePhysical, node exec.Node) {
@@ -47,7 +46,6 @@ func constructPlan(
 		}
 	}
 	assignPlan(&res.main, root)
-	res.mainRowCount = rootRowCount
 	if len(subqueries) > 0 {
 		res.subqueryPlans = make([]subquery, len(subqueries))
 		for i := range subqueries {
@@ -67,7 +65,6 @@ func constructPlan(
 				return nil, errors.Errorf("invalid SubqueryMode %d", in.Mode)
 			}
 			out.expanded = true
-			out.rowCount = in.RowCount
 			assignPlan(&out.plan, in.Root)
 		}
 	}
@@ -104,11 +101,11 @@ func makeScanColumnsConfig(table cat.Table, cols exec.TableColumnOrdinalSet) sca
 	for ord, ok := cols.Next(0); ok; ord, ok = cols.Next(ord + 1) {
 		col := table.Column(ord)
 		colOrd := ord
-		if col.Kind() == cat.Inverted {
+		if col.Kind() == cat.VirtualInverted {
 			typ := col.DatumType()
 			colOrd = col.InvertedSourceColumnOrdinal()
 			col = table.Column(colOrd)
-			colCfg.invertedColumn = &struct {
+			colCfg.virtualColumn = &struct {
 				colID tree.ColumnID
 				typ   *types.T
 			}{
@@ -230,10 +227,10 @@ func constructVirtualScan(
 	if !canQueryVirtualTable(p.EvalContext(), virtual) {
 		return nil, newUnimplementedVirtualTableError(tn.Schema(), tn.Table())
 	}
-	idx := index.(*optVirtualIndex).idx
+	indexDesc := index.(*optVirtualIndex).desc
 	columns, constructor := virtual.getPlanInfo(
 		table.(*optVirtualTable).desc,
-		idx, params.IndexConstraint, p.execCfg.DistSQLPlanner.stopper)
+		indexDesc, params.IndexConstraint, p.execCfg.DistSQLPlanner.stopper)
 
 	n, err := delayedNodeCallback(&delayedNode{
 		name:            fmt.Sprintf("%s@%s", table.Name(), index.Name()),

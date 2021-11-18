@@ -27,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/colcontainerutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/stretchr/testify/require"
 )
 
@@ -189,7 +190,7 @@ func getCJTestCases() []*joinTestCase {
 			leftTypes:   []*types.T{types.Int},
 			rightTypes:  []*types.T{types.Int},
 			leftTuples:  colexectestutils.Tuples{{0}, {1}, {2}},
-			rightTuples: colexectestutils.Tuples{{3}, {4}},
+			rightTuples: colexectestutils.Tuples{{3}},
 			leftOutCols: []uint32{0},
 			joinType:    descpb.LeftSemiJoin,
 			expected:    colexectestutils.Tuples{{0}, {1}, {2}},
@@ -253,21 +254,11 @@ func getCJTestCases() []*joinTestCase {
 			expected:    colexectestutils.Tuples{{0}, {1}, {2}, {3}},
 		},
 		{
-			description: "intersect all join, right smaller",
+			description: "intersect all join, right non-empty",
 			leftTypes:   []*types.T{types.Int},
 			rightTypes:  []*types.T{types.Int},
 			leftTuples:  colexectestutils.Tuples{{0}, {1}, {2}, {3}, {4}},
 			rightTuples: colexectestutils.Tuples{{3}, {nil}, {3}},
-			leftOutCols: []uint32{0},
-			joinType:    descpb.IntersectAllJoin,
-			expected:    colexectestutils.Tuples{{0}, {1}, {2}},
-		},
-		{
-			description: "intersect all join, right larger",
-			leftTypes:   []*types.T{types.Int},
-			rightTypes:  []*types.T{types.Int},
-			leftTuples:  colexectestutils.Tuples{{0}, {1}, {2}},
-			rightTuples: colexectestutils.Tuples{{3}, {nil}, {3}, {3}, {4}},
 			leftOutCols: []uint32{0},
 			joinType:    descpb.IntersectAllJoin,
 			expected:    colexectestutils.Tuples{{0}, {1}, {2}},
@@ -297,26 +288,14 @@ func getCJTestCases() []*joinTestCase {
 			expected:              colexectestutils.Tuples{},
 		},
 		{
-			description: "except all join, right smaller",
+			description: "except all join, right non-empty",
 			leftTypes:   []*types.T{types.Int},
 			rightTypes:  []*types.T{types.Int},
 			leftTuples:  colexectestutils.Tuples{{0}, {1}, {2}, {3}, {4}},
 			rightTuples: colexectestutils.Tuples{{3}, {nil}, {3}},
 			leftOutCols: []uint32{0},
 			joinType:    descpb.ExceptAllJoin,
-			expected:    colexectestutils.Tuples{{3}, {4}},
-		},
-		{
-			description: "except all join, right larger",
-			leftTypes:   []*types.T{types.Int},
-			rightTypes:  []*types.T{types.Int},
-			leftTuples:  colexectestutils.Tuples{{0}, {1}, {2}},
-			rightTuples: colexectestutils.Tuples{{3}, {nil}, {3}, {3}, {4}},
-			leftOutCols: []uint32{0},
-			joinType:    descpb.ExceptAllJoin,
-			// Injecting nulls into the right input won't change the output.
-			skipAllNullsInjection: true,
-			expected:              colexectestutils.Tuples{},
+			expected:    colexectestutils.Tuples{{0}, {1}},
 		},
 		{
 			description: "except all join, left empty",
@@ -380,8 +359,10 @@ func TestCrossJoiner(t *testing.T) {
 	}
 	queueCfg, cleanup := colcontainerutils.NewTestingDiskQueueCfg(t, true /* inMem */)
 	defer cleanup()
-	var monitorRegistry colexecargs.MonitorRegistry
-	defer monitorRegistry.Close(ctx)
+	var (
+		accounts []*mon.BoundAccount
+		monitors []*mon.BytesMonitor
+	)
 
 	for _, spillForced := range []bool{false, true} {
 		flowCtx.Cfg.TestingKnobs.ForceDiskSpill = spillForced
@@ -392,20 +373,28 @@ func TestCrossJoiner(t *testing.T) {
 					spec := createSpecForHashJoiner(tc)
 					args := &colexecargs.NewColOperatorArgs{
 						Spec:                spec,
-						Inputs:              colexectestutils.MakeInputs(sources),
+						Inputs:              sources,
 						StreamingMemAccount: testMemAcc,
 						DiskQueueCfg:        queueCfg,
 						FDSemaphore:         colexecop.NewTestingSemaphore(externalHJMinPartitions),
-						MonitorRegistry:     &monitorRegistry,
 					}
 					result, err := colexecargs.TestNewColOperator(ctx, flowCtx, args)
 					if err != nil {
 						return nil, err
 					}
-					return result.Root, nil
+					accounts = append(accounts, result.OpAccounts...)
+					monitors = append(monitors, result.OpMonitors...)
+					return result.Op, nil
 				})
 			}
 		}
+	}
+
+	for _, acc := range accounts {
+		acc.Close(ctx)
+	}
+	for _, mon := range monitors {
+		mon.Stop(ctx)
 	}
 }
 
@@ -428,11 +417,12 @@ func BenchmarkCrossJoiner(b *testing.B) {
 		sourceTypes[colIdx] = types.Int
 	}
 
+	var (
+		accounts []*mon.BoundAccount
+		monitors []*mon.BytesMonitor
+	)
 	queueCfg, cleanup := colcontainerutils.NewTestingDiskQueueCfg(b, false /* inMem */)
 	defer cleanup()
-	var monitorRegistry colexecargs.MonitorRegistry
-	defer monitorRegistry.Close(ctx)
-
 	for _, spillForced := range []bool{false, true} {
 		flowCtx.Cfg.TestingKnobs.ForceDiskSpill = spillForced
 		for _, joinType := range []descpb.JoinType{descpb.InnerJoin, descpb.LeftSemiJoin} {
@@ -454,11 +444,10 @@ func BenchmarkCrossJoiner(b *testing.B) {
 				args := &colexecargs.NewColOperatorArgs{
 					Spec: spec,
 					// Inputs will be set below.
-					Inputs:              []colexecargs.OpWithMetaInfo{{}, {}},
+					Inputs:              []colexecop.Operator{nil, nil},
 					StreamingMemAccount: testMemAcc,
 					DiskQueueCfg:        queueCfg,
 					FDSemaphore:         colexecop.NewTestingSemaphore(VecMaxOpenFDsLimit),
-					MonitorRegistry:     &monitorRegistry,
 				}
 				b.Run(fmt.Sprintf("spillForced=%t/type=%s/rows=%d", spillForced, joinType, nRows), func(b *testing.B) {
 					var nOutputRows int
@@ -470,17 +459,26 @@ func BenchmarkCrossJoiner(b *testing.B) {
 					b.SetBytes(int64(8 * nOutputRows * (len(tc.leftOutCols) + len(tc.rightOutCols))))
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
-						args.Inputs[0].Root = colexectestutils.NewChunkingBatchSource(testAllocator, sourceTypes, cols, nRows)
-						args.Inputs[1].Root = colexectestutils.NewChunkingBatchSource(testAllocator, sourceTypes, cols, nRows)
+						args.Inputs[0] = colexectestutils.NewChunkingBatchSource(testAllocator, sourceTypes, cols, nRows)
+						args.Inputs[1] = colexectestutils.NewChunkingBatchSource(testAllocator, sourceTypes, cols, nRows)
 						result, err := colexecargs.TestNewColOperator(ctx, flowCtx, args)
 						require.NoError(b, err)
-						cj := result.Root
-						cj.Init(ctx)
-						for b := cj.Next(); b.Length() > 0; b = cj.Next() {
+						accounts = append(accounts, result.OpAccounts...)
+						monitors = append(monitors, result.OpMonitors...)
+						require.NoError(b, err)
+						cj := result.Op
+						cj.Init()
+						for b := cj.Next(ctx); b.Length() > 0; b = cj.Next(ctx) {
 						}
 					}
 				})
 			}
 		}
+	}
+	for _, acc := range accounts {
+		acc.Close(ctx)
+	}
+	for _, mon := range monitors {
+		mon.Stop(ctx)
 	}
 }

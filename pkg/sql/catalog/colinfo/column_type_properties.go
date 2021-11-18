@@ -11,7 +11,7 @@
 package colinfo
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -26,19 +26,19 @@ import (
 // scalar type String).
 //
 // This is used by the UPDATE, INSERT and UPSERT code.
-func CheckDatumTypeFitsColumnType(col catalog.Column, typ *types.T) error {
+func CheckDatumTypeFitsColumnType(col *descpb.ColumnDescriptor, typ *types.T) error {
 	if typ.Family() == types.UnknownFamily {
 		return nil
 	}
-	if !typ.Equivalent(col.GetType()) {
+	if !typ.Equivalent(col.Type) {
 		return pgerror.Newf(pgcode.DatatypeMismatch,
 			"value type %s doesn't match type %s of column %q",
-			typ.String(), col.GetType().String(), tree.ErrNameString(col.GetName()))
+			typ.String(), col.Type.String(), tree.ErrNameString(col.Name))
 	}
 	return nil
 }
 
-// CanHaveCompositeKeyEncoding returns true if key columns of the given kind can
+// HasCompositeKeyEncoding returns true if key columns of the given kind can
 // have a composite encoding. For such types, it can be decided on a
 // case-by-base basis whether a given Datum requires the composite encoding.
 //
@@ -47,45 +47,14 @@ func CheckDatumTypeFitsColumnType(col catalog.Column, typ *types.T) error {
 // key, so that different strings that collate equal cannot both be used as
 // keys. The value part is the usual UTF-8 encoding of the string, stored so
 // that it can be recovered later for inspection/display.
-func CanHaveCompositeKeyEncoding(typ *types.T) bool {
+func HasCompositeKeyEncoding(typ *types.T) bool {
 	switch typ.Family() {
-	case types.FloatFamily,
-		types.DecimalFamily,
-		types.CollatedStringFamily:
+	case types.CollatedStringFamily,
+		types.FloatFamily,
+		types.DecimalFamily:
 		return true
 	case types.ArrayFamily:
-		return CanHaveCompositeKeyEncoding(typ.ArrayContents())
-	case types.TupleFamily:
-		for _, t := range typ.TupleContents() {
-			if CanHaveCompositeKeyEncoding(t) {
-				return true
-			}
-		}
-		return false
-	case types.BoolFamily,
-		types.IntFamily,
-		types.DateFamily,
-		types.TimestampFamily,
-		types.IntervalFamily,
-		types.StringFamily,
-		types.BytesFamily,
-		types.TimestampTZFamily,
-		types.OidFamily,
-		types.UuidFamily,
-		types.INetFamily,
-		types.TimeFamily,
-		types.JsonFamily,
-		types.TimeTZFamily,
-		types.BitFamily,
-		types.GeometryFamily,
-		types.GeographyFamily,
-		types.EnumFamily,
-		types.Box2DFamily:
-		return false
-	case types.UnknownFamily,
-		types.AnyFamily:
-		fallthrough
-	default:
-		return true
+		return HasCompositeKeyEncoding(typ.ArrayContents())
 	}
+	return false
 }

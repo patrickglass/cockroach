@@ -56,7 +56,7 @@ func unregister(s *Stopper) {
 	sl := trackedStoppers.stoppers
 	for i, tracked := range sl {
 		if tracked.s == s {
-			trackedStoppers.stoppers = append(sl[:i], sl[i+1:]...)
+			trackedStoppers.stoppers = sl[:i+copy(sl[i:], sl[i+1:])]
 			return
 		}
 	}
@@ -158,7 +158,6 @@ type Stopper struct {
 	quiescer chan struct{}     // Closed when quiescing
 	stopped  chan struct{}     // Closed when stopped completely
 	onPanic  func(interface{}) // called with recover() on panic on any goroutine
-	tracer   *tracing.Tracer   // tracer used to create spans for tasks
 
 	mu struct {
 		syncutil.RWMutex
@@ -188,8 +187,6 @@ type Option interface {
 
 type optionPanicHandler func(interface{})
 
-var _ Option = optionPanicHandler(nil)
-
 func (oph optionPanicHandler) apply(stopper *Stopper) {
 	stopper.onPanic = oph
 }
@@ -203,23 +200,6 @@ func OnPanic(handler func(interface{})) Option {
 	return optionPanicHandler(handler)
 }
 
-type withTracer struct {
-	tr *tracing.Tracer
-}
-
-var _ Option = withTracer{}
-
-func (o withTracer) apply(stopper *Stopper) {
-	stopper.tracer = o.tr
-}
-
-// WithTracer is an option for NewStopper() supplying the Tracer to use for
-// creating spans for tasks. Note that for tasks asking for a child span, the
-// parent's tracer is used instead of this one.
-func WithTracer(t *tracing.Tracer) Option {
-	return withTracer{t}
-}
-
 // NewStopper returns an instance of Stopper.
 func NewStopper(options ...Option) *Stopper {
 	s := &Stopper{
@@ -229,9 +209,6 @@ func NewStopper(options ...Option) *Stopper {
 
 	for _, opt := range options {
 		opt.apply(s)
-	}
-	if s.tracer == nil {
-		s.tracer = tracing.NewTracer()
 	}
 
 	register(s)
@@ -289,6 +266,10 @@ func (s *Stopper) AddCloser(c Closer) {
 // Canceling this context releases resources associated with it, so code should
 // call cancel as soon as the operations running in this Context complete.
 func (s *Stopper) WithCancelOnQuiesce(ctx context.Context) (context.Context, func()) {
+	return s.withCancel(ctx)
+}
+
+func (s *Stopper) withCancel(ctx context.Context) (context.Context, func()) {
 	var cancel func()
 	ctx, cancel = context.WithCancel(ctx)
 	s.mu.RLock()
@@ -357,47 +338,12 @@ func (s *Stopper) RunAsyncTask(
 	return s.RunAsyncTaskEx(ctx,
 		TaskOpts{
 			TaskName:   taskName,
-			SpanOpt:    FollowsFromSpan,
+			ChildSpan:  false,
 			Sem:        nil,
 			WaitForSem: false,
 		},
 		f)
 }
-
-// SpanOption specifies the type of tracing span that a task will run in.
-type SpanOption int
-
-const (
-	// FollowsFromSpan makes the task run in a span that's not included in the
-	// caller's recording (if any). For external tracers, the task's span will
-	// still reference the caller's span through a FollowsFrom relationship. If
-	// the caller doesn't have a span, then the task will execute in a root span.
-	//
-	// Use this when the caller will not wait for the task to finish, but a
-	// relationship between the caller and the task might still be useful to
-	// visualize in a trace collector.
-	FollowsFromSpan SpanOption = iota
-
-	// ChildSpan makes the task run in a span that's a child of the caller's span
-	// (if any). The child is included in the parent's recording. For external
-	// tracers, the child references the parent through a ChildOf relationship.
-	// If the caller doesn't have a span, then the task will execute in a root
-	// span.
-	//
-	// ChildSpan has consequences on memory usage: the memory lifetime of
-	// the task's span becomes tied to the lifetime of the parent. Generally
-	// ChildSpan should be used when the parent usually waits for the task to
-	// complete, and the parent is not a long-running process.
-	ChildSpan
-
-	// SterileRootSpan makes the task run in a root span that doesn't get any
-	// children. Anybody trying to create a child of the task's span will get a
-	// root span. This is suitable for long-running tasks: connecting children to
-	// these tasks would lead to infinitely-long traces, and connecting the
-	// long-running task to its parent is also problematic because of the
-	// different lifetimes.
-	SterileRootSpan
-)
 
 // TaskOpts groups the task execution options for RunAsyncTaskEx.
 type TaskOpts struct {
@@ -405,8 +351,24 @@ type TaskOpts struct {
 	// the tracing span.
 	TaskName string
 
-	// SpanOpt controls the kind of span that the task will run in.
-	SpanOpt SpanOption
+	// ChildSpan, if set, creates the tracing span for the task via
+	// tracing.ChildSpan() instead of tracing.ForkSpan. This makes the task's span
+	// be part of the parent span's recording (it is created with the
+	// WithParentAndAutoCollection option instead of
+	// WithParentAndManualCollection). It also leads to a ChildOf relationship
+	// instead of a FollowsFrom relationship to be used for the task's span, which
+	// typically implies a non-binding expectation that the parent span will
+	// outlive the task's span, i.e. that the parent will wait for the task to
+	// complete.
+	//
+	// Regardless of this setting, if the caller doesn't have a span, the task
+	// doesn't get a span either.
+	//
+	// Setting ChildSpan can have consequences on memory usage. The lifetime of
+	// the task's span becomes tied to the lifetime of the parent. Generally
+	// ChildSpan should be used when the parent waits for the task to complete,
+	// and the parent is not a long-running process.
+	ChildSpan bool
 
 	// If set, Sem is used as a semaphore limiting the concurrency (each task has
 	// weight 1).
@@ -464,16 +426,11 @@ func (s *Stopper) RunAsyncTaskEx(ctx context.Context, opt TaskOpts, f func(conte
 	}
 
 	// If the caller has a span, the task gets a child span.
-	var sp *tracing.Span
-	switch opt.SpanOpt {
-	case FollowsFromSpan:
-		ctx, sp = tracing.EnsureForkSpan(ctx, s.tracer, opt.TaskName)
-	case ChildSpan:
-		ctx, sp = tracing.EnsureChildSpan(ctx, s.tracer, opt.TaskName)
-	case SterileRootSpan:
-		ctx, sp = s.tracer.StartSpanCtx(ctx, opt.TaskName, tracing.WithSterile())
-	default:
-		panic(fmt.Sprintf("unsupported SpanOption: %v", opt.SpanOpt))
+	var span *tracing.Span
+	if opt.ChildSpan {
+		ctx, span = tracing.ChildSpan(ctx, opt.TaskName)
+	} else {
+		ctx, span = tracing.ForkSpan(ctx, opt.TaskName)
 	}
 
 	// Call f on another goroutine.
@@ -481,9 +438,7 @@ func (s *Stopper) RunAsyncTaskEx(ctx context.Context, opt TaskOpts, f func(conte
 	go func() {
 		defer s.Recover(ctx)
 		defer s.runPostlude()
-		if sp != nil {
-			defer sp.Finish()
-		}
+		defer span.Finish()
 		if alloc != nil {
 			defer alloc.Release()
 		}
@@ -608,15 +563,4 @@ func (s *Stopper) Quiesce(ctx context.Context) {
 	for s.NumTasks() > 0 {
 		time.Sleep(5 * time.Millisecond)
 	}
-}
-
-// SetTracer sets the tracer to be used for task spans. This cannot be called
-// concurrently with starting tasks.
-//
-// Note that for tasks asking for a child span, the parent's tracer is used
-// instead of this one.
-//
-// When possible, prefer supplying the tracer to the ctor through WithTracer.
-func (s *Stopper) SetTracer(tr *tracing.Tracer) {
-	s.tracer = tr
 }

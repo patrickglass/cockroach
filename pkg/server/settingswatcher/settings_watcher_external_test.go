@@ -43,10 +43,14 @@ func TestSettingWatcher(t *testing.T) {
 
 	tdb := sqlutils.MakeSQLRunner(tc.ServerConn(0))
 
+	// Interleaved tables are overridden to be on in testservers even though
+	// that is not the default value.
+	tdb.Exec(t, "SET CLUSTER SETTING sql.defaults.interleaved_tables.enabled = false")
+
 	toSet := map[string][]interface{}{
 		"sql.defaults.experimental_hash_sharded_indexes.enabled": {true, false},
 		"kv.queue.process.guaranteed_time_budget":                {"17s", "20s"},
-		"sql.txn_stats.sample_rate":                              {.23, .55},
+		"kv.closed_timestamp.close_fraction":                     {.23, .55},
 		"cluster.organization":                                   {"foobar", "bazbax"},
 	}
 	fakeTenant := roachpb.MakeTenantID(2)

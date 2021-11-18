@@ -10,6 +10,8 @@
 package colexec
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
@@ -28,10 +30,10 @@ func newSubstringOperator(
 	startType := typs[argumentCols[1]]
 	lengthType := typs[argumentCols[2]]
 	base := substringFunctionBase{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
-		allocator:      allocator,
-		argumentCols:   argumentCols,
-		outputIdx:      outputIdx,
+		OneInputNode: colexecop.NewOneInputNode(input),
+		allocator:    allocator,
+		argumentCols: argumentCols,
+		outputIdx:    outputIdx,
 	}
 	if startType.Family() != types.IntFamily {
 		colexecerror.InternalError(errors.AssertionFailedf("non-int start argument type %s", startType))
@@ -78,10 +80,14 @@ func newSubstringOperator(
 }
 
 type substringFunctionBase struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator    *colmem.Allocator
 	argumentCols []int
 	outputIdx    int
+}
+
+func (s *substringFunctionBase) Init() {
+	s.Input.Init()
 }
 
 type substringInt64Int16Operator struct {
@@ -90,8 +96,8 @@ type substringInt64Int16Operator struct {
 
 var _ colexecop.Operator = &substringInt64Int16Operator{}
 
-func (s *substringInt64Int16Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt64Int16Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -172,8 +178,8 @@ type substringInt64Int32Operator struct {
 
 var _ colexecop.Operator = &substringInt64Int32Operator{}
 
-func (s *substringInt64Int32Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt64Int32Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -254,8 +260,8 @@ type substringInt64Int64Operator struct {
 
 var _ colexecop.Operator = &substringInt64Int64Operator{}
 
-func (s *substringInt64Int64Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt64Int64Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -336,8 +342,8 @@ type substringInt16Int16Operator struct {
 
 var _ colexecop.Operator = &substringInt16Int16Operator{}
 
-func (s *substringInt16Int16Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt16Int16Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -418,8 +424,8 @@ type substringInt16Int32Operator struct {
 
 var _ colexecop.Operator = &substringInt16Int32Operator{}
 
-func (s *substringInt16Int32Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt16Int32Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -500,8 +506,8 @@ type substringInt16Int64Operator struct {
 
 var _ colexecop.Operator = &substringInt16Int64Operator{}
 
-func (s *substringInt16Int64Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt16Int64Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -582,8 +588,8 @@ type substringInt32Int16Operator struct {
 
 var _ colexecop.Operator = &substringInt32Int16Operator{}
 
-func (s *substringInt32Int16Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt32Int16Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -664,8 +670,8 @@ type substringInt32Int32Operator struct {
 
 var _ colexecop.Operator = &substringInt32Int32Operator{}
 
-func (s *substringInt32Int32Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt32Int32Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -746,8 +752,8 @@ type substringInt32Int64Operator struct {
 
 var _ colexecop.Operator = &substringInt32Int64Operator{}
 
-func (s *substringInt32Int64Operator) Next() coldata.Batch {
-	batch := s.Input.Next()
+func (s *substringInt32Int64Operator) Next(ctx context.Context) coldata.Batch {
+	batch := s.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch

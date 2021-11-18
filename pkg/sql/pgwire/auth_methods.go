@@ -69,7 +69,7 @@ type AuthMethod func(
 	c AuthConn,
 	tlsState tls.ConnectionState,
 	pwRetrieveFn PasswordRetrievalFn,
-	pwValidUntil *tree.DTimestamp,
+	pwValidUntilFn PasswordValidUntilFn,
 	execCfg *sql.ExecutorConfig,
 	entry *hba.Entry,
 ) (security.UserAuthHook, error)
@@ -78,12 +78,16 @@ type AuthMethod func(
 // password for the user logging in.
 type PasswordRetrievalFn = func(context.Context) ([]byte, error)
 
+// PasswordValidUntilFn defines a method to retrieve the expiration time
+// of the user's password.
+type PasswordValidUntilFn = func(context.Context) (*tree.DTimestamp, error)
+
 func authPassword(
 	ctx context.Context,
 	c AuthConn,
 	_ tls.ConnectionState,
 	pwRetrieveFn PasswordRetrievalFn,
-	pwValidUntil *tree.DTimestamp,
+	pwValidUntilFn PasswordValidUntilFn,
 	_ *sql.ExecutorConfig,
 	_ *hba.Entry,
 ) (security.UserAuthHook, error) {
@@ -106,8 +110,12 @@ func authPassword(
 		c.LogAuthInfof(ctx, "user has no password defined")
 	}
 
-	if pwValidUntil != nil {
-		if pwValidUntil.Sub(timeutil.Now()) < 0 {
+	validUntil, err := pwValidUntilFn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if validUntil != nil {
+		if validUntil.Sub(timeutil.Now()) < 0 {
 			c.LogAuthFailed(ctx, eventpb.AuthFailReason_CREDENTIALS_EXPIRED, nil)
 			return nil, errors.New("password is expired")
 		}
@@ -131,7 +139,7 @@ func authCert(
 	_ AuthConn,
 	tlsState tls.ConnectionState,
 	_ PasswordRetrievalFn,
-	_ *tree.DTimestamp,
+	_ PasswordValidUntilFn,
 	_ *sql.ExecutorConfig,
 	_ *hba.Entry,
 ) (security.UserAuthHook, error) {
@@ -150,7 +158,7 @@ func authCertPassword(
 	c AuthConn,
 	tlsState tls.ConnectionState,
 	pwRetrieveFn PasswordRetrievalFn,
-	pwValidUntil *tree.DTimestamp,
+	pwValidUntilFn PasswordValidUntilFn,
 	execCfg *sql.ExecutorConfig,
 	entry *hba.Entry,
 ) (security.UserAuthHook, error) {
@@ -162,7 +170,7 @@ func authCertPassword(
 		c.LogAuthInfof(ctx, "client presented certificate, proceeding with certificate validation")
 		fn = authCert
 	}
-	return fn(ctx, c, tlsState, pwRetrieveFn, pwValidUntil, execCfg, entry)
+	return fn(ctx, c, tlsState, pwRetrieveFn, pwValidUntilFn, execCfg, entry)
 }
 
 func authTrust(
@@ -170,7 +178,7 @@ func authTrust(
 	_ AuthConn,
 	_ tls.ConnectionState,
 	_ PasswordRetrievalFn,
-	_ *tree.DTimestamp,
+	_ PasswordValidUntilFn,
 	_ *sql.ExecutorConfig,
 	_ *hba.Entry,
 ) (security.UserAuthHook, error) {
@@ -182,7 +190,7 @@ func authReject(
 	_ AuthConn,
 	_ tls.ConnectionState,
 	_ PasswordRetrievalFn,
-	_ *tree.DTimestamp,
+	_ PasswordValidUntilFn,
 	_ *sql.ExecutorConfig,
 	_ *hba.Entry,
 ) (security.UserAuthHook, error) {

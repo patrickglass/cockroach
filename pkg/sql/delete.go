@@ -73,7 +73,7 @@ func (d *deleteNode) startExec(params runParams) error {
 			params.EvalContext().Mon.MakeBoundAccount(),
 			colinfo.ColTypeInfoFromResCols(d.columns))
 	}
-	return d.run.td.init(params.ctx, params.p.txn, params.EvalContext(), &params.EvalContext().Settings.SV)
+	return d.run.td.init(params.ctx, params.p.txn, params.EvalContext())
 }
 
 // Next is required because batchedPlanNode inherits from planNode, but
@@ -134,7 +134,7 @@ func (d *deleteNode) BatchedNext(params runParams) (bool, error) {
 	}
 
 	if lastBatch {
-		d.run.td.setRowsWrittenLimit(params.extendedEvalCtx.SessionData())
+		d.run.td.setRowsWrittenLimit(params.extendedEvalCtx.SessionData)
 		if err := d.run.td.finalize(params.ctx); err != nil {
 			return false, err
 		}
@@ -143,7 +143,10 @@ func (d *deleteNode) BatchedNext(params runParams) (bool, error) {
 	}
 
 	// Possibly initiate a run of CREATE STATISTICS.
-	params.ExecCfg().StatsRefresher.NotifyMutation(d.run.td.tableDesc(), d.run.td.lastBatchSize)
+	params.ExecCfg().StatsRefresher.NotifyMutation(
+		d.run.td.tableDesc().GetID(),
+		d.run.td.lastBatchSize,
+	)
 
 	return d.run.td.lastBatchSize > 0, nil
 }

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/apache/arrow/go/arrow"
 	"github.com/apache/arrow/go/arrow/array"
@@ -29,13 +30,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
-	"github.com/cockroachdb/cockroach/pkg/sql/memsize"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -186,27 +184,12 @@ func randomDataFromType(rng *rand.Rand, t *types.T, n int, nullProbability float
 	case types.IntervalFamily:
 		builder = array.NewBinaryBuilder(memory.DefaultAllocator, arrow.BinaryTypes.Binary)
 		data := make([][]byte, n)
-		sizeOfInt64 := int(memsize.Int64)
+		sizeOfInt64 := int(unsafe.Sizeof(int64(0)))
 		for i := range data {
 			data[i] = make([]byte, sizeOfInt64*3)
 			binary.LittleEndian.PutUint64(data[i][0:sizeOfInt64], rng.Uint64())
 			binary.LittleEndian.PutUint64(data[i][sizeOfInt64:sizeOfInt64*2], rng.Uint64())
 			binary.LittleEndian.PutUint64(data[i][sizeOfInt64*2:sizeOfInt64*3], rng.Uint64())
-		}
-		builder.(*array.BinaryBuilder).AppendValues(data, valid)
-	case types.JsonFamily:
-		builder = array.NewBinaryBuilder(memory.DefaultAllocator, arrow.BinaryTypes.Binary)
-		data := make([][]byte, n)
-		for i := range data {
-			j, err := json.Random(20, rng)
-			if err != nil {
-				panic(err)
-			}
-			bytes, err := json.EncodeJSON(nil, j)
-			if err != nil {
-				panic(err)
-			}
-			data[i] = bytes
 		}
 		builder.(*array.BinaryBuilder).AppendValues(data, valid)
 	case typeconv.DatumVecCanonicalTypeFamily:
@@ -217,7 +200,7 @@ func randomDataFromType(rng *rand.Rand, t *types.T, n int, nullProbability float
 			err     error
 		)
 		for i := range data {
-			d := randgen.RandDatum(rng, t, false /* nullOk */)
+			d := rowenc.RandDatum(rng, t, false /* nullOk */)
 			data[i], err = rowenc.EncodeTableValue(data[i], descpb.ColumnID(encoding.NoColumnID), d, scratch)
 			if err != nil {
 				panic(err)
@@ -251,7 +234,7 @@ func TestRecordBatchSerializer(t *testing.T) {
 func TestRecordBatchSerializerSerializeDeserializeRandom(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	const (
 		maxTypes   = 16
@@ -267,7 +250,7 @@ func TestRecordBatchSerializerSerializeDeserializeRandom(t *testing.T) {
 	)
 
 	for i := range typs {
-		typs[i] = randgen.RandType(rng)
+		typs[i] = rowenc.RandType(rng)
 		data[i] = randomDataFromType(rng, typs[i], dataLen, nullProbability)
 	}
 
@@ -317,7 +300,7 @@ func TestRecordBatchSerializerDeserializeMemoryEstimate(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	var err error
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	typs := []*types.T{types.Bytes}
 	src := testAllocator.NewMemBatchWithMaxCapacity(typs)
@@ -354,7 +337,7 @@ func TestRecordBatchSerializerDeserializeMemoryEstimate(t *testing.T) {
 }
 
 func BenchmarkRecordBatchSerializerInt64(b *testing.B) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	var (
 		typs             = []*types.T{types.Int}
@@ -369,15 +352,11 @@ func BenchmarkRecordBatchSerializerInt64(b *testing.B) {
 		// Only calculate useful bytes.
 		numBytes := int64(dataLen * 8)
 		data := []*array.Data{randomDataFromType(rng, typs[0], dataLen, 0 /* nullProbability */)}
-		dataCopy := make([]*array.Data, len(data))
 		b.Run(fmt.Sprintf("Serialize/dataLen=%d", dataLen), func(b *testing.B) {
 			b.SetBytes(numBytes)
 			for i := 0; i < b.N; i++ {
 				buf.Reset()
-				// Since Serialize eagerly nils things out, we have to make a shallow
-				// copy each time.
-				copy(dataCopy, data)
-				if _, _, err := s.Serialize(&buf, dataCopy, dataLen); err != nil {
+				if _, _, err := s.Serialize(&buf, data, dataLen); err != nil {
 					b.Fatal(err)
 				}
 			}

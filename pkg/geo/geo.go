@@ -115,8 +115,8 @@ type Geometry struct {
 // MakeGeometry returns a new Geometry. Assumes the input EWKB is validated and in little endian.
 func MakeGeometry(spatialObject geopb.SpatialObject) (Geometry, error) {
 	if spatialObject.SRID != 0 {
-		if _, err := geoprojbase.Projection(spatialObject.SRID); err != nil {
-			return Geometry{}, err
+		if _, ok := geoprojbase.Projection(spatialObject.SRID); !ok {
+			return Geometry{}, errors.Newf("unknown SRID for Geometry: %d", spatialObject.SRID)
 		}
 	}
 	if spatialObject.Type != geopb.SpatialObjectType_GeometryType {
@@ -342,10 +342,10 @@ func (g *Geometry) BoundingBoxRef() *geopb.BoundingBox {
 // SpaceCurveIndex returns an uint64 index to use representing an index into a space-filling curve.
 // This will return 0 for empty spatial objects, and math.MaxUint64 for any object outside
 // the defined bounds of the given SRID projection.
-func (g *Geometry) SpaceCurveIndex() (uint64, error) {
+func (g *Geometry) SpaceCurveIndex() uint64 {
 	bbox := g.CartesianBoundingBox()
 	if bbox == nil {
-		return 0, nil
+		return 0
 	}
 	centerX := (bbox.BoundingBox.LoX + bbox.BoundingBox.HiX) / 2
 	centerY := (bbox.BoundingBox.LoY + bbox.BoundingBox.HiY) / 2
@@ -356,16 +356,12 @@ func (g *Geometry) SpaceCurveIndex() (uint64, error) {
 		MinY: math.MinInt32,
 		MaxY: math.MaxInt32,
 	}
-	if g.SRID() != 0 {
-		proj, err := geoprojbase.Projection(g.SRID())
-		if err != nil {
-			return 0, err
-		}
+	if proj, ok := geoprojbase.Projection(g.SRID()); ok {
 		bounds = proj.Bounds
 	}
 	// If we're out of bounds, give up and return a large number.
 	if centerX > bounds.MaxX || centerY > bounds.MaxY || centerX < bounds.MinX || centerY < bounds.MinY {
-		return math.MaxUint64, nil
+		return math.MaxUint64
 	}
 
 	const boxLength = 1 << 32
@@ -376,23 +372,15 @@ func (g *Geometry) SpaceCurveIndex() (uint64, error) {
 	// hilbertInverse returns values in the interval [0, boxLength^2-1], so return [0, 2^64-1].
 	xPos := uint64(((centerX - bounds.MinX) / xBounds) * boxLength)
 	yPos := uint64(((centerY - bounds.MinY) / yBounds) * boxLength)
-	return hilbertInverse(boxLength, xPos, yPos), nil
+	return hilbertInverse(boxLength, xPos, yPos)
 }
 
 // Compare compares a Geometry against another.
 // It compares using SpaceCurveIndex, followed by the byte representation of the Geometry.
 // This must produce the same ordering as the index mechanism.
 func (g *Geometry) Compare(o Geometry) int {
-	lhs, err := g.SpaceCurveIndex()
-	if err != nil {
-		// We should always be able to compare a valid geometry.
-		panic(err)
-	}
-	rhs, err := o.SpaceCurveIndex()
-	if err != nil {
-		// We should always be able to compare a valid geometry.
-		panic(err)
-	}
+	lhs := g.SpaceCurveIndex()
+	rhs := o.SpaceCurveIndex()
 	if lhs > rhs {
 		return 1
 	}
@@ -413,9 +401,9 @@ type Geography struct {
 
 // MakeGeography returns a new Geography. Assumes the input EWKB is validated and in little endian.
 func MakeGeography(spatialObject geopb.SpatialObject) (Geography, error) {
-	projection, err := geoprojbase.Projection(spatialObject.SRID)
-	if err != nil {
-		return Geography{}, err
+	projection, ok := geoprojbase.Projection(spatialObject.SRID)
+	if !ok {
+		return Geography{}, errors.Newf("unknown SRID for Geography: %d", spatialObject.SRID)
 	}
 	if !projection.IsLatLng {
 		return Geography{}, errors.Newf(
@@ -592,9 +580,9 @@ func (g *Geography) ShapeType2D() geopb.ShapeType {
 
 // Spheroid returns the spheroid represented by the given Geography.
 func (g *Geography) Spheroid() (*geographiclib.Spheroid, error) {
-	proj, err := geoprojbase.Projection(g.SRID())
-	if err != nil {
-		return nil, err
+	proj, ok := geoprojbase.Projection(g.SRID())
+	if !ok {
+		return nil, errors.Newf("expected spheroid for SRID %d", g.SRID())
 	}
 	return proj.Spheroid, nil
 }
@@ -842,7 +830,7 @@ func normalizeLngLat(lng float64, lat float64) (float64, float64) {
 }
 
 // normalizeGeographyGeomT limits geography coordinates to spherical coordinates
-// by converting geom.T coordinates inplace
+// by converting geom.T cordinates inplace
 func normalizeGeographyGeomT(t geom.T) {
 	switch repr := t.(type) {
 	case *geom.GeometryCollection:

@@ -108,7 +108,7 @@ func newInvertedFilterer(
 
 	ctx := flowCtx.EvalCtx.Ctx()
 	// Initialize memory monitor and row container for input rows.
-	ifr.MemMonitor = execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx, "inverted-filterer-limited")
+	ifr.MemMonitor = execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx.Cfg, "inverter-filterer-limited")
 	ifr.diskMonitor = execinfra.NewMonitor(ctx, flowCtx.DiskMonitor, "inverted-filterer-disk")
 	ifr.rc = rowcontainer.NewDiskBackedNumberedRowContainer(
 		true, /* deDup */
@@ -227,7 +227,7 @@ func (ifr *invertedFilterer) readInput() (invertedFiltererState, *execinfrapb.Pr
 			return ifrStateUnknown, ifr.DrainHelper()
 		}
 		if row[ifr.invertedColIdx].Datum.ResolvedType().Family() != types.BytesFamily {
-			ifr.MoveToDraining(errors.New("inverted column should have type bytes"))
+			ifr.MoveToDraining(errors.New("virtual inverted column should have type bytes"))
 			return ifrStateUnknown, ifr.DrainHelper()
 		}
 		enc = []byte(*row[ifr.invertedColIdx].Datum.(*tree.DBytes))
@@ -321,7 +321,7 @@ func (ifr *invertedFilterer) execStatsForTrace() *execinfrapb.ComponentStats {
 			MaxAllocatedMem:  optional.MakeUint(uint64(ifr.MemMonitor.MaximumBytes())),
 			MaxAllocatedDisk: optional.MakeUint(uint64(ifr.diskMonitor.MaximumBytes())),
 		},
-		Output: ifr.OutputHelper.Stats(),
+		Output: ifr.Out.Stats(),
 	}
 }
 

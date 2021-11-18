@@ -115,9 +115,3 @@ func (it *GeomTIterator) next() (geom.T, bool, error) {
 		return nil, false, errors.Newf("unknown type: %T", t)
 	}
 }
-
-// Reset resets an iterator back to the first element.
-func (it *GeomTIterator) Reset() {
-	it.idx = 0
-	it.subIt = nil
-}

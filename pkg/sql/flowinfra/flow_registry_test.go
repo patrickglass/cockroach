@@ -21,12 +21,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/distsqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
@@ -73,8 +71,7 @@ func lookupStreamInfo(
 
 func TestFlowRegistry(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	reg := NewFlowRegistry()
+	reg := NewFlowRegistry(0)
 
 	id1 := execinfrapb.FlowID{UUID: uuid.MakeV4()}
 	f1 := &FlowBase{}
@@ -213,8 +210,7 @@ func TestFlowRegistry(t *testing.T) {
 // are propagated to their consumers and future attempts to connect them fail.
 func TestStreamConnectionTimeout(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	reg := NewFlowRegistry()
+	reg := NewFlowRegistry(0)
 
 	jiffy := time.Nanosecond
 
@@ -281,9 +277,8 @@ func TestStreamConnectionTimeout(t *testing.T) {
 // - once the consumer connects, another Handshake message is sent.
 func TestHandshake(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
-	reg := NewFlowRegistry()
+	reg := NewFlowRegistry(0)
 
 	tests := []struct {
 		name                   string
@@ -380,10 +375,9 @@ func TestHandshake(t *testing.T) {
 // subtests for more details.
 func TestFlowRegistryDrain(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	reg := NewFlowRegistry()
+	reg := NewFlowRegistry(0)
 
 	flow := &FlowBase{}
 	id := execinfrapb.FlowID{UUID: uuid.MakeV4()}
@@ -527,12 +521,11 @@ func TestFlowRegistryDrain(t *testing.T) {
 // TODO(asubiotto): This error should also be considered retryable by clients.
 func TestInboundStreamTimeoutIsRetryable(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
-	fr := NewFlowRegistry()
+	fr := NewFlowRegistry(0)
 	wg := sync.WaitGroup{}
 	rc := &execinfra.RowChannel{}
-	rc.InitWithBufSizeAndNumSenders(types.OneIntCol, 1 /* chanBufSize */, 1 /* numSenders */)
+	rc.InitWithBufSizeAndNumSenders(rowenc.OneIntCol, 1 /* chanBufSize */, 1 /* numSenders */)
 	inboundStreams := map[execinfrapb.StreamID]*InboundStreamInfo{
 		0: {
 			receiver:  RowInboundStreamHandler{rc},
@@ -557,15 +550,14 @@ func TestInboundStreamTimeoutIsRetryable(t *testing.T) {
 // error, we are still able to register flows while Pushing the error (#34041).
 func TestTimeoutPushDoesntBlockRegister(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	fr := NewFlowRegistry()
+	fr := NewFlowRegistry(0)
 	// pushChan is used to be able to tell when a Push on the RowBuffer has
 	// occurred.
 	pushChan := make(chan *execinfrapb.ProducerMetadata)
 	rc := distsqlutils.NewRowBuffer(
-		types.OneIntCol,
+		rowenc.OneIntCol,
 		nil, /* rows */
 		distsqlutils.RowBufferArgs{
 			OnPush: func(_ rowenc.EncDatumRow, meta *execinfrapb.ProducerMetadata) {
@@ -613,10 +605,9 @@ func TestTimeoutPushDoesntBlockRegister(t *testing.T) {
 // into a flow even if one of the inbound streams are blocked (#35859).
 func TestFlowCancelPartiallyBlocked(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	fr := NewFlowRegistry()
+	fr := NewFlowRegistry(0)
 	left := &execinfra.RowChannel{}
 	left.InitWithBufSizeAndNumSenders(nil /* types */, 1, 1)
 	right := &execinfra.RowChannel{}

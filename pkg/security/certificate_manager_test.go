@@ -80,7 +80,7 @@ func TestManagerWithPrincipalMap(t *testing.T) {
 
 	defer func() { _ = security.SetCertPrincipalMap(nil) }()
 	defer func() {
-		_ = os.Unsetenv("COCKROACH_CERT_NODE_USER")
+		_ = os.Setenv("COCKROACH_CERT_NODE_USER", security.NodeUser)
 		envutil.ClearEnvCache()
 	}()
 	require.NoError(t, os.Setenv("COCKROACH_CERT_NODE_USER", "node.crdb.io"))

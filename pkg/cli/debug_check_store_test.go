@@ -81,10 +81,12 @@ func TestDebugCheckStore(t *testing.T) {
 
 	// Introduce a stats divergence on s1.
 	func() {
-		eng, err := storage.Open(ctx,
-			storage.Filesystem(storePaths[0]),
-			storage.CacheSize(10<<20 /* 10 MiB */),
-			storage.MustExist)
+		eng, err := storage.NewDefaultEngine(
+			10<<20, /* 10mb */
+			base.StorageConfig{
+				Dir:       storePaths[0],
+				MustExist: true,
+			})
 		require.NoError(t, err)
 		defer eng.Close()
 		sl := stateloader.Make(1)

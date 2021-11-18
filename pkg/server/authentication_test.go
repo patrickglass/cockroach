@@ -654,13 +654,9 @@ func TestAuthenticationMux(t *testing.T) {
 	}
 
 	runRequest := func(
-		client http.Client, method string, path string, body []byte, cookieHeader string, expected int,
+		client http.Client, method string, path string, body []byte, expected int,
 	) error {
 		req, err := http.NewRequest(method, tsrv.AdminURL()+path, bytes.NewBuffer(body))
-		if cookieHeader != "" {
-			// The client still attaches its own cookies to this one.
-			req.Header.Set("cookie", cookieHeader)
-		}
 		if err != nil {
 			return err
 		}
@@ -692,24 +688,22 @@ func TestAuthenticationMux(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		method       string
-		path         string
-		body         []byte
-		cookieHeader string
+		method string
+		path   string
+		body   []byte
 	}{
-		{"GET", adminPrefix + "users", nil, ""},
-		{"GET", adminPrefix + "users", nil, "session=badcookie"},
-		{"GET", statusPrefix + "sessions", nil, ""},
-		{"POST", ts.URLPrefix + "query", tsReqBuffer.Bytes(), ""},
+		{"GET", adminPrefix + "users", nil},
+		{"GET", statusPrefix + "sessions", nil},
+		{"POST", ts.URLPrefix + "query", tsReqBuffer.Bytes()},
 	} {
 		t.Run("path="+tc.path, func(t *testing.T) {
 			// Verify normal client returns 401 Unauthorized.
-			if err := runRequest(normalClient, tc.method, tc.path, tc.body, tc.cookieHeader, http.StatusUnauthorized); err != nil {
+			if err := runRequest(normalClient, tc.method, tc.path, tc.body, http.StatusUnauthorized); err != nil {
 				t.Fatalf("request %s failed when not authorized: %s", tc.path, err)
 			}
 
 			// Verify authenticated client returns 200 OK.
-			if err := runRequest(authClient, tc.method, tc.path, tc.body, tc.cookieHeader, http.StatusOK); err != nil {
+			if err := runRequest(authClient, tc.method, tc.path, tc.body, http.StatusOK); err != nil {
 				t.Fatalf("request %s failed when authorized: %s", tc.path, err)
 			}
 		})
@@ -759,20 +753,20 @@ func TestGRPCAuthentication(t *testing.T) {
 			return err
 		}},
 		{"closedTimestamp", func(ctx context.Context, conn *grpc.ClientConn) error {
-			stream, err := ctpb.NewSideTransportClient(conn).PushUpdates(ctx)
+			stream, err := ctpb.NewClosedTimestampClient(conn).Get(ctx)
 			if err != nil {
 				return err
 			}
-			_ = stream.Send(&ctpb.Update{})
+			_ = stream.Send(&ctpb.Reaction{})
 			_, err = stream.Recv()
 			return err
 		}},
 		{"distSQL", func(ctx context.Context, conn *grpc.ClientConn) error {
-			stream, err := execinfrapb.NewDistSQLClient(conn).FlowStream(ctx)
+			stream, err := execinfrapb.NewDistSQLClient(conn).RunSyncFlow(ctx)
 			if err != nil {
 				return err
 			}
-			_ = stream.Send(&execinfrapb.ProducerMessage{})
+			_ = stream.Send(&execinfrapb.ConsumerSignal{})
 			_, err = stream.Recv()
 			return err
 		}},

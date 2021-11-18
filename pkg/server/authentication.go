@@ -254,12 +254,8 @@ func (s *authenticationServer) UserLoginFromSSO(
 	// without further normalization.
 	username, _ := security.MakeSQLUsernameFromUserInput(reqUsername, security.UsernameValidation)
 
-	exists, canLogin, _, _, _, _, err := sql.GetUserSessionInitInfo(
-		ctx,
-		s.server.sqlServer.execCfg,
-		s.server.sqlServer.execCfg.InternalExecutor,
-		username,
-		"", /* databaseName */
+	exists, canLogin, _, _, err := sql.GetUserHashedPassword(
+		ctx, s.server.sqlServer.execCfg.InternalExecutor, username,
 	)
 
 	if err != nil {
@@ -417,12 +413,8 @@ WHERE id = $1`
 func (s *authenticationServer) verifyPassword(
 	ctx context.Context, username security.SQLUsername, password string,
 ) (valid bool, expired bool, err error) {
-	exists, canLogin, _, validUntil, _, pwRetrieveFn, err := sql.GetUserSessionInitInfo(
-		ctx,
-		s.server.sqlServer.execCfg,
-		s.server.sqlServer.execCfg.InternalExecutor,
-		username,
-		"", /* databaseName */
+	exists, canLogin, pwRetrieveFn, validUntilFn, err := sql.GetUserHashedPassword(
+		ctx, s.server.sqlServer.execCfg.InternalExecutor, username,
 	)
 	if err != nil {
 		return false, false, err
@@ -435,6 +427,10 @@ func (s *authenticationServer) verifyPassword(
 		return false, false, err
 	}
 
+	validUntil, err := validUntilFn(ctx)
+	if err != nil {
+		return false, false, err
+	}
 	if validUntil != nil {
 		if validUntil.Time.Sub(timeutil.Now()) < 0 {
 			return false, true, nil
@@ -593,29 +589,16 @@ func makeCookieWithValue(value string, forHTTPSOnly bool) *http.Cookie {
 func (am *authenticationMux) getSession(
 	w http.ResponseWriter, req *http.Request,
 ) (string, *serverpb.SessionCookie, error) {
-	ctx := req.Context()
 	// Validate the returned cookie.
-	cookies := req.Cookies()
-	found := false
-	var cookie *serverpb.SessionCookie
-	var err error
-	for _, c := range cookies {
-		if c.Name != SessionCookieName {
-			continue
-		}
-		found = true
-		cookie, err = decodeSessionCookie(c)
-		if err != nil {
-			// Multiple cookies with the same name may be included in the
-			// header. We continue searching even if we find a matching
-			// name with an invalid value
-			log.Infof(ctx, "found a matching cookie that failed decoding: %v", err)
-			continue
-		}
-		break
+	rawCookie, err := req.Cookie(SessionCookieName)
+	if err != nil {
+		return "", nil, err
 	}
-	if err != nil || !found {
-		return "", nil, http.ErrNoCookie
+
+	cookie, err := decodeSessionCookie(rawCookie)
+	if err != nil {
+		err = errors.Wrap(err, "a valid authentication cookie is required")
+		return "", nil, err
 	}
 
 	valid, username, err := am.server.verifySession(req.Context(), cookie)

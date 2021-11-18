@@ -16,7 +16,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts/ptpb"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
 
@@ -95,16 +94,4 @@ func (s *storageWithDatabase) GetState(
 		return state, err
 	}
 	return s.s.GetState(ctx, txn)
-}
-
-func (s *storageWithDatabase) UpdateTimestamp(
-	ctx context.Context, txn *kv.Txn, id uuid.UUID, timestamp hlc.Timestamp,
-) (err error) {
-	if txn == nil {
-		err = s.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-			return s.s.UpdateTimestamp(ctx, txn, id, timestamp)
-		})
-		return err
-	}
-	return s.s.UpdateTimestamp(ctx, txn, id, timestamp)
 }

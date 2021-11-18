@@ -41,7 +41,7 @@ var UnitTestFormatter = IssueFormatter{
 		r.Escaped(`:
 
 `)
-		if fop, ok := data.CondensedMessage.FatalOrPanic(50); ok {
+		if fop := data.CondensedMessage.FatalOrPanic(50); fop != (FatalOrPanic{}) {
 			if fop.Error != "" {
 				r.Escaped("Fatal error:")
 				r.CodeBlock("", fop.Error)
@@ -54,31 +54,28 @@ var UnitTestFormatter = IssueFormatter{
 			r.Collapsed("Log preceding fatal error", func() {
 				r.CodeBlock("", fop.LastLines)
 			})
-		} else if rsgCrash, ok := data.CondensedMessage.RSGCrash(100); ok {
-			r.Escaped("Random syntax error:")
-			r.CodeBlock("", rsgCrash.Error)
-			r.Escaped("Query:")
-			r.CodeBlock("", rsgCrash.Query)
-			if rsgCrash.Schema != "" {
-				r.Escaped("Schema:")
-				r.CodeBlock("", rsgCrash.Schema)
-			}
 		} else {
 			r.CodeBlock("", data.CondensedMessage.Digest(50))
 		}
 
-		r.Collapsed("Help", func() {
-			if data.HelpCommand != nil {
-				data.HelpCommand(r)
+		r.Collapsed("Reproduce", func() {
+			// TODO(tbg): this should be generated here.
+			if data.ReproductionCommand != "" {
+				r.P(func() {
+					r.Escaped("To reproduce, try:\n")
+					r.CodeBlock("bash", data.ReproductionCommand)
+				})
 			}
 
 			if len(data.Parameters) != 0 {
-				r.Escaped("Parameters in this failure:\n")
-				for _, p := range data.Parameters {
-					r.Escaped("\n- ")
-					r.Escaped(p)
-					r.Escaped("\n")
-				}
+				r.P(func() {
+					r.Escaped("Parameters in this failure:\n")
+					for _, p := range data.Parameters {
+						r.Escaped("\n- ")
+						r.Escaped(p)
+						r.Escaped("\n")
+					}
+				})
 			}
 		})
 
@@ -104,9 +101,9 @@ var UnitTestFormatter = IssueFormatter{
 			r.Escaped("\n")
 		}
 
-		if len(data.MentionOnCreate) > 0 {
+		if len(data.Mention) > 0 {
 			r.Escaped("/cc")
-			for _, handle := range data.MentionOnCreate {
+			for _, handle := range data.Mention {
 				r.Escaped(" ")
 				r.Escaped(handle)
 			}

@@ -176,7 +176,7 @@ func newCopyMachine(
 	}
 
 	flags := tree.ObjectLookupFlagsWithRequiredTableKind(tree.ResolveRequireTableDesc)
-	_, tableDesc, err := resolver.ResolveExistingTableObject(ctx, &c.p, &n.Table, flags)
+	tableDesc, err := resolver.ResolveExistingTableObject(ctx, &c.p, &n.Table, flags)
 	if err != nil {
 		return nil, err
 	}
@@ -261,25 +261,6 @@ Loop:
 				_, slurpErr := readBuf.SlurpBytes(c.conn.Rd(), pgwirebase.GetMessageTooBigSize(err))
 				if slurpErr != nil {
 					return errors.CombineErrors(err, errors.Wrapf(slurpErr, "error slurping remaining bytes in COPY"))
-				}
-
-				// As per the pgwire spec, we must continue reading until we encounter
-				// CopyDone or CopyFail. We don't support COPY in the extended
-				// protocol, so we don't need to look for Sync messages. See
-				// https://www.postgresql.org/docs/13/protocol-flow.html#PROTOCOL-COPY
-				for {
-					typ, _, slurpErr = readBuf.ReadTypedMsg(c.conn.Rd())
-					if typ == pgwirebase.ClientMsgCopyDone || typ == pgwirebase.ClientMsgCopyFail {
-						break
-					}
-					if slurpErr != nil && !pgwirebase.IsMessageTooBigError(slurpErr) {
-						return errors.CombineErrors(err, errors.Wrapf(slurpErr, "error slurping remaining bytes in COPY"))
-					}
-
-					_, slurpErr = readBuf.SlurpBytes(c.conn.Rd(), pgwirebase.GetMessageTooBigSize(slurpErr))
-					if slurpErr != nil {
-						return errors.CombineErrors(err, errors.Wrapf(slurpErr, "error slurping remaining bytes in COPY"))
-					}
 				}
 			}
 			return err
@@ -463,7 +444,7 @@ func (c *copyMachine) readCSVTuple(ctx context.Context, record []string) error {
 			exprs[i] = tree.DNull
 			continue
 		}
-		d, _, err := tree.ParseAndRequireString(c.resultColumns[i].Typ, s, c.parsingEvalCtx)
+		d, err := rowenc.ParseDatumStringAs(c.resultColumns[i].Typ, s, c.parsingEvalCtx)
 		if err != nil {
 			return err
 		}
@@ -719,16 +700,7 @@ func (c *copyMachine) readTextTuple(ctx context.Context, line []byte) error {
 			types.UuidFamily:
 			s = decodeCopy(s)
 		}
-
-		var d tree.Datum
-		var err error
-		switch c.resultColumns[i].Typ.Family() {
-		case types.BytesFamily:
-			d = tree.NewDBytes(tree.DBytes(s))
-		default:
-			d, _, err = tree.ParseAndRequireString(c.resultColumns[i].Typ, s, c.parsingEvalCtx)
-		}
-
+		d, err := rowenc.ParseDatumStringAsWithRawBytes(c.resultColumns[i].Typ, s, c.parsingEvalCtx)
 		if err != nil {
 			return err
 		}

@@ -13,12 +13,8 @@ package tabledesc
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catprivilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
 )
@@ -100,8 +96,7 @@ func (tdb *tableDescriptorBuilder) DescriptorType() catalog.DescriptorType {
 // interface.
 func (tdb *tableDescriptorBuilder) RunPostDeserializationChanges(
 	ctx context.Context, dg catalog.DescGetter,
-) error {
-	var err error
+) (err error) {
 	tdb.maybeModified = protoutil.Clone(tdb.original).(*descpb.TableDescriptor)
 	tdb.changes, err = maybeFillInDescriptor(ctx, dg, tdb.maybeModified, tdb.skipFKsWithNoMatchingTable)
 	return err
@@ -190,32 +185,24 @@ func maybeFillInDescriptor(
 ) (changes PostDeserializationTableDescriptorChanges, err error) {
 	changes.UpgradedFormatVersion = maybeUpgradeFormatVersion(desc)
 
-	changes.FixedIndexEncodingType = maybeFixPrimaryIndexEncoding(&desc.PrimaryIndex)
-	changes.UpgradedIndexFormatVersion = maybeUpgradePrimaryIndexFormatVersion(desc)
+	changes.UpgradedIndexFormatVersion = maybeUpgradeIndexFormatVersion(&desc.PrimaryIndex)
 	for i := range desc.Indexes {
-		idx := &desc.Indexes[i]
-		isUpgraded := maybeUpgradeSecondaryIndexFormatVersion(idx)
-		changes.UpgradedIndexFormatVersion = changes.UpgradedIndexFormatVersion || isUpgraded
+		changes.UpgradedIndexFormatVersion = changes.UpgradedIndexFormatVersion || maybeUpgradeIndexFormatVersion(&desc.Indexes[i])
 	}
 	for i := range desc.Mutations {
 		if idx := desc.Mutations[i].GetIndex(); idx != nil {
-			isUpgraded := maybeUpgradeSecondaryIndexFormatVersion(idx)
-			changes.UpgradedIndexFormatVersion = changes.UpgradedIndexFormatVersion || isUpgraded
+			changes.UpgradedIndexFormatVersion = changes.UpgradedIndexFormatVersion || maybeUpgradeIndexFormatVersion(idx)
 		}
 	}
-	changes.UpgradedNamespaceName = maybeUpgradeNamespaceName(desc)
 
-	parentSchemaID := desc.GetUnexposedParentSchemaID()
-	if parentSchemaID == descpb.InvalidID {
-		parentSchemaID = keys.PublicSchemaID
-	}
-	changes.UpgradedPrivileges = catprivilege.MaybeFixPrivileges(
-		&desc.Privileges,
-		desc.GetParentID(),
-		parentSchemaID,
-		privilege.Table,
-		desc.GetName(),
-	)
+	// Fill in any incorrect privileges that may have been missed due to mixed-versions.
+	// TODO(mberhault): remove this in 2.1 (maybe 2.2) when privilege-fixing migrations have been
+	// run again and mixed-version clusters always write "good" descriptors.
+	changes.FixedPrivileges = descpb.MaybeFixPrivileges(desc.ID, &desc.Privileges)
+
+	fixedUsagePrivilege := descpb.MaybeFixUsagePrivForTablesAndDBs(&desc.Privileges)
+
+	changes.FixedPrivileges = changes.FixedPrivileges || fixedUsagePrivilege
 
 	if dg != nil {
 		changes.UpgradedForeignKeyRepresentation, err = maybeUpgradeForeignKeyRepresentation(
@@ -312,9 +299,9 @@ func maybeUpgradeForeignKeyRepOnIndex(
 			numCols := ref.SharedPrefixLen
 			outFK := descpb.ForeignKeyConstraint{
 				OriginTableID:       desc.ID,
-				OriginColumnIDs:     idx.KeyColumnIDs[:numCols],
+				OriginColumnIDs:     idx.ColumnIDs[:numCols],
 				ReferencedTableID:   ref.Table,
-				ReferencedColumnIDs: referencedIndex.IndexDesc().KeyColumnIDs[:numCols],
+				ReferencedColumnIDs: referencedIndex.IndexDesc().ColumnIDs[:numCols],
 				Name:                ref.Name,
 				Validity:            ref.Validity,
 				OnDelete:            ref.OnDelete,
@@ -365,7 +352,7 @@ func maybeUpgradeForeignKeyRepOnIndex(
 					// referenced table ID, and that the index we point to is a valid
 					// index to satisfy the columns in the foreign key.
 					if otherFK.ReferencedTableID == desc.ID &&
-						descpb.ColumnIDs(originIndex.KeyColumnIDs).HasPrefix(otherFK.OriginColumnIDs) {
+						descpb.ColumnIDs(originIndex.ColumnIDs).HasPrefix(otherFK.OriginColumnIDs) {
 						// Found a match.
 						forwardFK = otherFK
 					}
@@ -395,9 +382,9 @@ func maybeUpgradeForeignKeyRepOnIndex(
 				numCols := originIndex.ForeignKey.SharedPrefixLen
 				inFK = descpb.ForeignKeyConstraint{
 					OriginTableID:       ref.Table,
-					OriginColumnIDs:     originIndex.KeyColumnIDs[:numCols],
+					OriginColumnIDs:     originIndex.ColumnIDs[:numCols],
 					ReferencedTableID:   desc.ID,
-					ReferencedColumnIDs: idx.KeyColumnIDs[:numCols],
+					ReferencedColumnIDs: idx.ColumnIDs[:numCols],
 					Name:                originIndex.ForeignKey.Name,
 					Validity:            originIndex.ForeignKey.Validity,
 					OnDelete:            originIndex.ForeignKey.OnDelete,
@@ -417,26 +404,22 @@ func maybeUpgradeForeignKeyRepOnIndex(
 // FormatVersion (if it's not already there) and returns true if any changes
 // were made.
 // This method should be called through maybeFillInDescriptor, not directly.
-func maybeUpgradeFormatVersion(desc *descpb.TableDescriptor) (wasUpgraded bool) {
-	for _, pair := range []struct {
-		targetVersion descpb.FormatVersion
-		upgradeFn     func(*descpb.TableDescriptor)
-	}{
-		{descpb.FamilyFormatVersion, upgradeToFamilyFormatVersion},
-		{descpb.InterleavedFormatVersion, func(_ *descpb.TableDescriptor) {}},
-	} {
-		if desc.FormatVersion < pair.targetVersion {
-			pair.upgradeFn(desc)
-			desc.FormatVersion = pair.targetVersion
-			wasUpgraded = true
-		}
+func maybeUpgradeFormatVersion(desc *descpb.TableDescriptor) bool {
+	if desc.FormatVersion >= descpb.InterleavedFormatVersion {
+		return false
 	}
-	return wasUpgraded
+	maybeUpgradeToFamilyFormatVersion(desc)
+	desc.FormatVersion = descpb.InterleavedFormatVersion
+	return true
 }
 
-func upgradeToFamilyFormatVersion(desc *descpb.TableDescriptor) {
+func maybeUpgradeToFamilyFormatVersion(desc *descpb.TableDescriptor) bool {
+	if desc.FormatVersion >= descpb.FamilyFormatVersion {
+		return false
+	}
+
 	var primaryIndexColumnIDs catalog.TableColSet
-	for _, colID := range desc.PrimaryIndex.KeyColumnIDs {
+	for _, colID := range desc.PrimaryIndex.ColumnIDs {
 		primaryIndexColumnIDs.Add(colID)
 	}
 
@@ -473,74 +456,21 @@ func upgradeToFamilyFormatVersion(desc *descpb.TableDescriptor) {
 			addFamilyForCol(c)
 		}
 	}
-}
 
-// maybeUpgradePrimaryIndexFormatVersion tries to promote a primary index to
-// version descpb.PrimaryIndexWithStoredColumnsVersion whenever possible.
-func maybeUpgradePrimaryIndexFormatVersion(desc *descpb.TableDescriptor) (hasChanged bool) {
-	// Always set the correct encoding type for the primary index.
-	desc.PrimaryIndex.EncodingType = descpb.PrimaryIndexEncoding
-	// Check if primary index needs updating.
-	switch desc.PrimaryIndex.Version {
-	case descpb.PrimaryIndexWithStoredColumnsVersion:
-		return false
-	default:
-		break
-	}
-	// Update primary index by populating StoreColumnIDs/Names slices.
-	nonVirtualCols := make([]*descpb.ColumnDescriptor, 0, len(desc.Columns)+len(desc.Mutations))
-	maybeAddCol := func(col *descpb.ColumnDescriptor) {
-		if col == nil || col.Virtual {
-			return
-		}
-		nonVirtualCols = append(nonVirtualCols, col)
-	}
-	for i := range desc.Columns {
-		maybeAddCol(&desc.Columns[i])
-	}
-	for _, m := range desc.Mutations {
-		maybeAddCol(m.GetColumn())
-	}
+	desc.FormatVersion = descpb.FamilyFormatVersion
 
-	newStoreColumnIDs := make([]descpb.ColumnID, 0, len(nonVirtualCols))
-	newStoreColumnNames := make([]string, 0, len(nonVirtualCols))
-	keyColIDs := catalog.TableColSet{}
-	for _, colID := range desc.PrimaryIndex.KeyColumnIDs {
-		keyColIDs.Add(colID)
-	}
-	for _, col := range nonVirtualCols {
-		if keyColIDs.Contains(col.ID) {
-			continue
-		}
-		newStoreColumnIDs = append(newStoreColumnIDs, col.ID)
-		newStoreColumnNames = append(newStoreColumnNames, col.Name)
-	}
-	if len(newStoreColumnIDs) == 0 {
-		newStoreColumnIDs = nil
-		newStoreColumnNames = nil
-	}
-	desc.PrimaryIndex.StoreColumnIDs = newStoreColumnIDs
-	desc.PrimaryIndex.StoreColumnNames = newStoreColumnNames
-	desc.PrimaryIndex.Version = descpb.PrimaryIndexWithStoredColumnsVersion
 	return true
 }
 
-// maybeUpgradeSecondaryIndexFormatVersion tries to promote a secondary index to
-// version descpb.StrictIndexColumnIDGuaranteesVersion whenever possible.
-func maybeUpgradeSecondaryIndexFormatVersion(idx *descpb.IndexDescriptor) (hasChanged bool) {
-	switch idx.Version {
-	case descpb.SecondaryIndexFamilyFormatVersion:
-		if idx.Type == descpb.IndexDescriptor_INVERTED {
-			return false
-		}
-	case descpb.EmptyArraysInInvertedIndexesVersion:
-		break
-	default:
+// maybeUpgradeIndexFormatVersion tries to promote an index to version
+// descpb.StrictIndexColumnIDGuaranteesVersion whenever possible.
+func maybeUpgradeIndexFormatVersion(idx *descpb.IndexDescriptor) (hasChanged bool) {
+	if idx.Version != descpb.EmptyArraysInInvertedIndexesVersion {
 		return false
 	}
-	slice := make([]descpb.ColumnID, 0, len(idx.KeyColumnIDs)+len(idx.KeySuffixColumnIDs)+len(idx.StoreColumnIDs))
-	slice = append(slice, idx.KeyColumnIDs...)
-	slice = append(slice, idx.KeySuffixColumnIDs...)
+	slice := make([]descpb.ColumnID, 0, len(idx.ColumnIDs)+len(idx.ExtraColumnIDs)+len(idx.StoreColumnIDs))
+	slice = append(slice, idx.ColumnIDs...)
+	slice = append(slice, idx.ExtraColumnIDs...)
 	slice = append(slice, idx.StoreColumnIDs...)
 	set := catalog.MakeTableColSet(slice...)
 	if len(slice) != set.Len() {
@@ -550,27 +480,5 @@ func maybeUpgradeSecondaryIndexFormatVersion(idx *descpb.IndexDescriptor) (hasCh
 		return false
 	}
 	idx.Version = descpb.StrictIndexColumnIDGuaranteesVersion
-	return true
-}
-
-// maybeUpgradeNamespaceName deals with upgrading the name field of the
-// namespace table (30) to be "namespace" rather than "namespace2". This
-// occurs in clusters which were bootstrapped before 21.2 and have not
-// run the corresponding migration.
-func maybeUpgradeNamespaceName(d *descpb.TableDescriptor) (hasChanged bool) {
-	if d.ID != keys.NamespaceTableID || d.Name != catconstants.PreMigrationNamespaceTableName {
-		return false
-	}
-	d.Name = string(catconstants.NamespaceTableName)
-	return true
-}
-
-// maybeFixPrimaryIndexEncoding ensures that the index descriptor for a primary
-// index has the correct encoding type set.
-func maybeFixPrimaryIndexEncoding(idx *descpb.IndexDescriptor) (hasChanged bool) {
-	if idx.EncodingType == descpb.PrimaryIndexEncoding {
-		return false
-	}
-	idx.EncodingType = descpb.PrimaryIndexEncoding
 	return true
 }

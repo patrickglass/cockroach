@@ -1100,8 +1100,13 @@ func TestDecodeKey(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	e, err := Open(context.Background(), InMemory(), CacheSize(1<<20 /* 1 MiB */))
-	assert.NoError(t, err)
+	e := newPebbleInMem(
+		context.Background(),
+		roachpb.Attributes{},
+		1<<20,   /* cacheSize */
+		512<<20, /* storeSize */
+		nil,     /* settings */
+	)
 	defer e.Close()
 
 	tests := []MVCCKey{

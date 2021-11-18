@@ -18,46 +18,32 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/config"
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
+	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/gc"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/intentresolver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
-	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
 
 const (
 	// gcQueueTimerDuration is the duration between GCs of queued replicas.
 	gcQueueTimerDuration = 1 * time.Second
-	// gcQueueTimeout is the timeout for a single GC run.
-	gcQueueTimeout = 10 * time.Minute
-	// gcQueueIntentBatchTimeout is the timeout for resolving a single batch of
-	// intents. It is used to ensure progress in the face of unavailable ranges
-	// (since intent resolution may touch other ranges), but can prevent progress
-	// for ranged intent resolution if it exceeds the timeout.
-	gcQueueIntentBatchTimeout = 2 * time.Minute
-
-	// gcQueueIntentCooldownDuration is the duration to wait between GC attempts
-	// of the same range when triggered solely by intents. This is to prevent
-	// continually spinning on intents that belong to active transactions, which
-	// can't be cleaned up.
-	gcQueueIntentCooldownDuration = 2 * time.Hour
 	// intentAgeNormalization is the average age of outstanding intents
 	// which amount to a score of "1" added to total replica priority.
-	intentAgeNormalization = 8 * time.Hour
+	intentAgeNormalization = 24 * time.Hour // 1 day
 
 	// Thresholds used to decide whether to queue for GC based
 	// on keys and intents.
 	gcKeyScoreThreshold    = 2
-	gcIntentScoreThreshold = 1
+	gcIntentScoreThreshold = 10
 
 	probablyLargeAbortSpanSysCountThreshold = 10000
 	largeAbortSpanBytesThreshold            = 16 * (1 << 20) // 16mb
@@ -108,26 +94,19 @@ type gcQueue struct {
 }
 
 // newGCQueue returns a new instance of gcQueue.
-func newGCQueue(store *Store) *gcQueue {
+func newGCQueue(store *Store, gossip *gossip.Gossip) *gcQueue {
 	gcq := &gcQueue{}
 	gcq.baseQueue = newBaseQueue(
-		"gc", gcq, store,
+		"gc", gcq, store, gossip,
 		queueConfig{
 			maxSize:              defaultQueueMaxSize,
 			needsLease:           true,
 			needsSystemConfig:    true,
 			acceptsUnsplitRanges: false,
-			processTimeoutFunc: func(st *cluster.Settings, _ replicaInQueue) time.Duration {
-				timeout := gcQueueTimeout
-				if d := queueGuaranteedProcessingTimeBudget.Get(&st.SV); d > timeout {
-					timeout = d
-				}
-				return timeout
-			},
-			successes:       store.metrics.GCQueueSuccesses,
-			failures:        store.metrics.GCQueueFailures,
-			pending:         store.metrics.GCQueuePending,
-			processingNanos: store.metrics.GCQueueProcessingNanos,
+			successes:            store.metrics.GCQueueSuccesses,
+			failures:             store.metrics.GCQueueFailures,
+			pending:              store.metrics.GCQueuePending,
+			processingNanos:      store.metrics.GCQueueProcessingNanos,
 		},
 	)
 	return gcq
@@ -138,7 +117,7 @@ func newGCQueue(store *Store) *gcQueue {
 // makeGCQueueScoreImpl.
 type gcQueueScore struct {
 	TTL                 time.Duration
-	LastGC              time.Duration
+	LikelyLastGC        time.Duration
 	DeadFraction        float64
 	ValuesScalableScore float64
 	IntentScore         float64
@@ -158,14 +137,14 @@ func (r gcQueueScore) String() string {
 	if r.ExpMinGCByteAgeReduction < 0 {
 		r.ExpMinGCByteAgeReduction = 0
 	}
-	lastGC := "never"
-	if r.LastGC != 0 {
-		lastGC = fmt.Sprintf("%s ago", r.LastGC)
+	likelyLastGC := "never"
+	if r.LikelyLastGC != 0 {
+		likelyLastGC = fmt.Sprintf("%s ago", r.LikelyLastGC)
 	}
 	return fmt.Sprintf("queue=%t with %.2f/fuzz(%.2f)=%.2f=valScaleScore(%.2f)*deadFrac(%.2f)+intentScore(%.2f)\n"+
 		"likely last GC: %s, %s non-live, curr. age %s*s, min exp. reduction: %s*s",
 		r.ShouldQueue, r.FinalScore, r.FuzzFactor, r.FinalScore/r.FuzzFactor, r.ValuesScalableScore,
-		r.DeadFraction, r.IntentScore, lastGC, humanizeutil.IBytes(r.GCBytes),
+		r.DeadFraction, r.IntentScore, likelyLastGC, humanizeutil.IBytes(r.GCBytes),
 		humanizeutil.IBytes(r.GCByteAge), humanizeutil.IBytes(r.ExpMinGCByteAgeReduction))
 }
 
@@ -174,46 +153,38 @@ func (r gcQueueScore) String() string {
 // in the event that the cumulative ages of GC'able bytes or extant
 // intents exceed thresholds.
 func (gcq *gcQueue) shouldQueue(
-	ctx context.Context, now hlc.ClockTimestamp, repl *Replica, _ spanconfig.StoreReader,
+	ctx context.Context, now hlc.ClockTimestamp, repl *Replica, _ *config.SystemConfig,
 ) (bool, float64) {
+
 	// Consult the protected timestamp state to determine whether we can GC and
 	// the timestamp which can be used to calculate the score.
-	_, conf := repl.DescAndSpanConfig()
-	canGC, _, gcTimestamp, oldThreshold, newThreshold := repl.checkProtectedTimestampsForGC(ctx, conf.TTL())
+	_, zone := repl.DescAndZone()
+	canGC, _, gcTimestamp, oldThreshold, newThreshold := repl.checkProtectedTimestampsForGC(ctx, *zone.GC)
 	if !canGC {
 		return false, 0
 	}
-	canAdvanceGCThreshold := !newThreshold.Equal(oldThreshold)
-	lastGC, err := repl.getQueueLastProcessed(ctx, gcq.name)
-	if err != nil {
-		log.VErrEventf(ctx, 2, "failed to fetch last processed time: %v", err)
+	// If performing a GC will not advance the GC threshold, there's no reason
+	// to GC again.
+	if newThreshold.Equal(oldThreshold) {
 		return false, 0
 	}
-	r := makeGCQueueScore(ctx, repl, gcTimestamp, lastGC, conf.TTL(), canAdvanceGCThreshold)
+	r := makeGCQueueScore(ctx, repl, gcTimestamp, *zone.GC)
 	return r.ShouldQueue, r.FinalScore
 }
 
 func makeGCQueueScore(
-	ctx context.Context,
-	repl *Replica,
-	now hlc.Timestamp,
-	lastGC hlc.Timestamp,
-	gcTTL time.Duration,
-	canAdvanceGCThreshold bool,
+	ctx context.Context, repl *Replica, now hlc.Timestamp, policy zonepb.GCPolicy,
 ) gcQueueScore {
 	repl.mu.Lock()
 	ms := *repl.mu.state.Stats
+	gcThreshold := *repl.mu.state.GCThreshold
 	repl.mu.Unlock()
-
-	if repl.store.cfg.TestingKnobs.DisableLastProcessedCheck {
-		lastGC = hlc.Timestamp{}
-	}
 
 	// Use desc.RangeID for fuzzing the final score, so that different ranges
 	// have slightly different priorities and even symmetrical workloads don't
 	// trigger GC at the same time.
 	r := makeGCQueueScoreImpl(
-		ctx, int64(repl.RangeID), now, ms, gcTTL, lastGC, canAdvanceGCThreshold,
+		ctx, int64(repl.RangeID), now, ms, policy, gcThreshold,
 	)
 	return r
 }
@@ -225,8 +196,7 @@ func makeGCQueueScore(
 // additionally weigh it so that GC is delayed when a large proportion of the
 // data in the replica is live. Additionally, returned scores are slightly
 // perturbed to avoid groups of replicas becoming eligible for GC at the same
-// time repeatedly. We also use gcQueueIntentCooldownTimer to avoid spinning
-// when GCing solely based on intents, since we may not be able to GC them.
+// time repeatedly.
 //
 // More details below.
 //
@@ -312,18 +282,16 @@ func makeGCQueueScoreImpl(
 	fuzzSeed int64,
 	now hlc.Timestamp,
 	ms enginepb.MVCCStats,
-	gcTTL time.Duration,
-	lastGC hlc.Timestamp,
-	canAdvanceGCThreshold bool,
+	policy zonepb.GCPolicy,
+	gcThreshold hlc.Timestamp,
 ) gcQueueScore {
 	ms.Forward(now.WallTime)
 	var r gcQueueScore
-
-	if !lastGC.IsEmpty() {
-		r.LastGC = time.Duration(now.WallTime - lastGC.WallTime)
+	if !gcThreshold.IsEmpty() {
+		r.LikelyLastGC = time.Duration(now.WallTime - gcThreshold.Add(r.TTL.Nanoseconds(), 0).WallTime)
 	}
 
-	r.TTL = gcTTL
+	r.TTL = policy.TTL()
 
 	// Treat a zero TTL as a one-second TTL, which avoids a priority of infinity
 	// and otherwise behaves indistinguishable given that we can't possibly hope
@@ -382,22 +350,11 @@ func makeGCQueueScoreImpl(
 
 	// Compute priority.
 	valScore := r.DeadFraction * r.ValuesScalableScore
+	r.ShouldQueue = r.FuzzFactor*valScore > gcKeyScoreThreshold || r.FuzzFactor*r.IntentScore > gcIntentScoreThreshold
 	r.FinalScore = r.FuzzFactor * (valScore + r.IntentScore)
 
-	// First determine whether we should queue based on MVCC score alone.
-	r.ShouldQueue = canAdvanceGCThreshold && r.FuzzFactor*valScore > gcKeyScoreThreshold
-
-	// Next, determine whether we should queue based on intent score. For
-	// intents, we also enforce a cooldown time since we may not actually
-	// be able to clean up any intents (for active transactions).
-	if !r.ShouldQueue && r.FuzzFactor*r.IntentScore > gcIntentScoreThreshold &&
-		(r.LastGC == 0 || r.LastGC >= gcQueueIntentCooldownDuration) {
-		r.ShouldQueue = true
-	}
-
-	// Finally, queue if we find large abort spans for abandoned transactions.
 	if largeAbortSpan(ms) && !r.ShouldQueue &&
-		(r.LastGC == 0 || r.LastGC > kvserverbase.TxnCleanupThreshold) {
+		(r.LikelyLastGC == 0 || r.LikelyLastGC > kvserverbase.TxnCleanupThreshold) {
 		r.ShouldQueue = true
 		r.FinalScore++
 	}
@@ -406,10 +363,8 @@ func makeGCQueueScoreImpl(
 }
 
 type replicaGCer struct {
-	repl                *Replica
-	count               int32 // update atomically
-	admissionController KVAdmissionController
-	storeID             roachpb.StoreID
+	repl  *Replica
+	count int32 // update atomically
 }
 
 var _ gc.GCer = &replicaGCer{}
@@ -433,37 +388,8 @@ func (r *replicaGCer) send(ctx context.Context, req roachpb.GCRequest) error {
 	ba.RangeID = r.repl.Desc().RangeID
 	ba.Timestamp = r.repl.Clock().Now()
 	ba.Add(&req)
-	// Since we are talking directly to the replica, we need to explicitly do
-	// admission control here, as we are bypassing server.Node.
-	var admissionHandle interface{}
-	if r.admissionController != nil {
-		ba.AdmissionHeader = roachpb.AdmissionHeader{
-			// GC is currently assigned NormalPri.
-			//
-			// TODO(kv): GC could be expected to be LowPri, so that it does not
-			// impact user-facing traffic when resources (e.g. CPU, write capacity
-			// of the store) are scarce. However long delays in GC can slow down
-			// user-facing traffic due to more versions in the store, and can
-			// increase write amplification of the store since there is more live
-			// data. Ideally, we should adjust this priority based on how far behind
-			// we are wrt GCing in this range.
-			Priority:                 int32(admission.NormalPri),
-			CreateTime:               timeutil.Now().UnixNano(),
-			Source:                   roachpb.AdmissionHeader_ROOT_KV,
-			NoMemoryReservedAtSource: true,
-		}
-		ba.Replica.StoreID = r.storeID
-		var err error
-		admissionHandle, err = r.admissionController.AdmitKVWork(ctx, roachpb.SystemTenantID, &ba)
-		if err != nil {
-			return err
-		}
-	}
-	_, pErr := r.repl.Send(ctx, ba)
-	if r.admissionController != nil {
-		r.admissionController.AdmittedKVWorkDone(admissionHandle)
-	}
-	if pErr != nil {
+
+	if _, pErr := r.repl.Send(ctx, ba); pErr != nil {
 		log.VErrEventf(ctx, 2, "%v", pErr.String())
 		return pErr.GoError()
 	}
@@ -515,27 +441,18 @@ func (r *replicaGCer) GC(ctx context.Context, keys []roachpb.GCRequest_GCKey) er
 // 7) push these transactions (again, recreating txn entries).
 // 8) send a GCRequest.
 func (gcq *gcQueue) process(
-	ctx context.Context, repl *Replica, _ spanconfig.StoreReader,
+	ctx context.Context, repl *Replica, sysCfg *config.SystemConfig,
 ) (processed bool, err error) {
 	// Lookup the descriptor and GC policy for the zone containing this key range.
-	desc, conf := repl.DescAndSpanConfig()
-
+	desc, zone := repl.DescAndZone()
 	// Consult the protected timestamp state to determine whether we can GC and
 	// the timestamp which can be used to calculate the score and updated GC
 	// threshold.
-	canGC, cacheTimestamp, gcTimestamp, oldThreshold, newThreshold := repl.checkProtectedTimestampsForGC(ctx, conf.TTL())
+	canGC, cacheTimestamp, gcTimestamp, _, newThreshold := repl.checkProtectedTimestampsForGC(ctx, *zone.GC)
 	if !canGC {
 		return false, nil
 	}
-	canAdvanceGCThreshold := !newThreshold.Equal(oldThreshold)
-	// We don't recheck ShouldQueue here, since the range may have been enqueued
-	// manually e.g. via the admin server.
-	lastGC, err := repl.getQueueLastProcessed(ctx, gcq.name)
-	if err != nil {
-		lastGC = hlc.Timestamp{}
-		log.VErrEventf(ctx, 2, "failed to fetch last processed time: %v", err)
-	}
-	r := makeGCQueueScore(ctx, repl, gcTimestamp, lastGC, conf.TTL(), canAdvanceGCThreshold)
+	r := makeGCQueueScore(ctx, repl, gcTimestamp, *zone.GC)
 	log.VEventf(ctx, 2, "processing replica %s with score %s", repl.String(), r)
 	// Synchronize the new GC threshold decision with concurrent
 	// AdminVerifyProtectedTimestamp requests.
@@ -543,11 +460,6 @@ func (gcq *gcQueue) process(
 		log.VEventf(ctx, 1, "not gc'ing replica %v due to pending protection: %v", repl, err)
 		return false, nil
 	}
-	// Update the last processed timestamp.
-	if err := repl.setQueueLastProcessed(ctx, gcq.name, repl.store.Clock().Now()); err != nil {
-		log.VErrEventf(ctx, 2, "failed to update last processed time: %v", err)
-	}
-
 	snap := repl.store.Engine().NewSnapshot()
 	defer snap.Close()
 
@@ -561,17 +473,12 @@ func (gcq *gcQueue) process(
 			MaxIntentsPerIntentCleanupBatch:        maxIntentsPerCleanupBatch,
 			MaxIntentKeyBytesPerIntentCleanupBatch: maxIntentKeyBytesPerCleanupBatch,
 			MaxTxnsPerIntentCleanupBatch:           intentresolver.MaxTxnsPerIntentCleanupBatch,
-			IntentCleanupBatchTimeout:              gcQueueIntentBatchTimeout,
 		},
-		conf.TTL(),
-		&replicaGCer{
-			repl:                repl,
-			admissionController: gcq.store.cfg.KVAdmissionController,
-			storeID:             gcq.store.StoreID(),
-		},
+		*zone.GC,
+		&replicaGCer{repl: repl},
 		func(ctx context.Context, intents []roachpb.Intent) error {
 			intentCount, err := repl.store.intentResolver.
-				CleanupIntents(ctx, intents, gcTimestamp, roachpb.PUSH_TOUCH)
+				CleanupIntents(ctx, intents, gcTimestamp, roachpb.PUSH_ABORT)
 			if err == nil {
 				gcq.store.metrics.GCResolveSuccess.Inc(int64(intentCount))
 			} else {
@@ -603,8 +510,7 @@ func (gcq *gcQueue) process(
 	}
 
 	log.Eventf(ctx, "MVCC stats after GC: %+v", repl.GetMVCCStats())
-	log.Eventf(ctx, "GC score after GC: %s", makeGCQueueScore(
-		ctx, repl, repl.store.Clock().Now(), lastGC, conf.TTL(), canAdvanceGCThreshold))
+	log.Eventf(ctx, "GC score after GC: %s", makeGCQueueScore(ctx, repl, repl.store.Clock().Now(), *zone.GC))
 	updateStoreMetricsWithGCInfo(gcq.store.metrics, info)
 	return true, nil
 }

@@ -24,9 +24,9 @@ import (
 // - base - the overload base that will be shared among all new overloads.
 // - opOutputTypes - mapping from a pair of types to the output type, it should
 //   contain an entry for all supported type pairs.
-// - overrideOverloadFuncs - a function that could update AssignFunc and/or
-//   CompareFunc fields of a newly created lastArgWidthOverload based on a
-//   typeCustomizer.
+// - overrideOverloadFuncs - a function that could update AssignFunc,
+//   CompareFunc and/or CastFunc fields of a newly created lastArgWidthOverload
+//   based on a typeCustomizer.
 // It returns all new overloads that have the same type (which will be empty
 // for cast operator).
 func populateTwoArgsOverloads(
@@ -41,8 +41,10 @@ func populateTwoArgsOverloads(
 		combinableCanonicalTypeFamilies = compatibleCanonicalTypeFamilies
 	case comparisonOverload:
 		combinableCanonicalTypeFamilies = comparableCanonicalTypeFamilies
+	case castOverload:
+		combinableCanonicalTypeFamilies = castableCanonicalTypeFamilies
 	default:
-		colexecerror.InternalError(errors.AssertionFailedf("unexpectedly overload is neither binary nor comparison"))
+		colexecerror.InternalError(errors.AssertionFailedf("unexpectedly overload is neither binary, comparison, nor cast"))
 	}
 	for _, leftFamily := range supportedCanonicalTypeFamilies {
 		leftWidths, found := supportedWidthsByCanonicalTypeFamily[leftFamily]
@@ -60,8 +62,7 @@ func populateTwoArgsOverloads(
 				for _, rightWidth := range rightWidths {
 					customizer, ok := customizers[typePair{leftFamily, leftWidth, rightFamily, rightWidth}]
 					if !ok {
-						colexecerror.InternalError(errors.AssertionFailedf(
-							"unexpectedly didn't find a type customizer for %s %d %s %d", leftFamily, leftWidth, rightFamily, rightWidth))
+						colexecerror.InternalError(errors.AssertionFailedf("unexpectedly didn't find a type customizer"))
 					}
 					// Skip overloads that don't have associated output types.
 					retType, ok := opOutputTypes[typePair{leftFamily, leftWidth, rightFamily, rightWidth}]
@@ -95,6 +96,14 @@ func populateTwoArgsOverloads(
 								overloadBase: base,
 							}
 							twoArgsResolvedOverloadsInfo.CmpOps = append(twoArgsResolvedOverloadsInfo.CmpOps, info)
+						}
+					case castOverload:
+						info = twoArgsResolvedOverloadsInfo.CastOverloads
+						if info == nil {
+							info = &twoArgsResolvedOverloadInfo{
+								overloadBase: base,
+							}
+							twoArgsResolvedOverloadsInfo.CastOverloads = info
 						}
 					}
 					var leftFamilies *twoArgsResolvedOverloadLeftFamilyInfo

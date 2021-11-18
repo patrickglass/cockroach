@@ -1,3 +1,0 @@
-explainable_stmt ::=
-	preparable_stmt
-	| execute_stmt

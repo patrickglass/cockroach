@@ -135,12 +135,12 @@ func benchmarkBuiltinFunctions(b *testing.B, useSelectionVector bool, hasNulls b
 		"abs(@1)" /* projectingExpr */, false /* canFallbackToRowexec */, testMemAcc,
 	)
 	require.NoError(b, err)
-	op.Init(ctx)
+	op.Init()
 
 	b.SetBytes(int64(8 * coldata.BatchSize()))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		op.Next()
+		op.Next(ctx)
 	}
 }
 
@@ -193,31 +193,31 @@ func BenchmarkCompareSpecializedOperators(b *testing.B) {
 		b.Fatal(err)
 	}
 	defaultOp := &defaultBuiltinFuncOperator{
-		OneInputHelper:      colexecop.MakeOneInputHelper(source),
+		OneInputNode:        colexecop.NewOneInputNode(source),
 		allocator:           testAllocator,
 		evalCtx:             evalCtx,
 		funcExpr:            typedExpr.(*tree.FuncExpr),
 		outputIdx:           outputIdx,
 		columnTypes:         typs,
 		outputType:          types.String,
-		toDatumConverter:    colconv.NewVecToDatumConverter(len(typs), inputCols, false /* willRelease */),
+		toDatumConverter:    colconv.NewVecToDatumConverter(len(typs), inputCols),
 		datumToVecConverter: colconv.GetDatumToPhysicalFn(types.String),
 		row:                 make(tree.Datums, outputIdx),
 		argumentCols:        inputCols,
 	}
-	defaultOp.Init(ctx)
+	defaultOp.Init()
 
 	// Set up the specialized substring operator.
 	specOp := newSubstringOperator(
 		testAllocator, typs, inputCols, outputIdx, source,
 	)
-	specOp.Init(ctx)
+	specOp.Init()
 
 	b.Run("DefaultBuiltinOperator", func(b *testing.B) {
 		b.SetBytes(int64(len("hello there") * coldata.BatchSize()))
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			b := defaultOp.Next()
+			b := defaultOp.Next(ctx)
 			// Due to the flat byte updates, we have to reset the output
 			// bytes col after each next call.
 			b.ColVec(outputIdx).Bytes().Reset()
@@ -228,7 +228,7 @@ func BenchmarkCompareSpecializedOperators(b *testing.B) {
 		b.SetBytes(int64(len("hello there") * coldata.BatchSize()))
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			b := specOp.Next()
+			b := specOp.Next(ctx)
 			// Due to the flat byte updates, we have to reset the output
 			// bytes col after each next call.
 			b.ColVec(outputIdx).Bytes().Reset()

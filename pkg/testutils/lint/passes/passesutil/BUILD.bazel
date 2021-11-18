@@ -15,13 +15,8 @@ go_test(
     name = "passesutil_test",
     size = "small",
     srcs = ["passes_util_test.go"],
-    data = [
-        "//pkg/testutils/lint/passes/forbiddenmethod:testdata",
-        "//pkg/testutils/lint/passes/unconvert:testdata",
-        "@go_sdk//:files",
-    ],
+    tags = ["broken_in_bazel"],
     deps = [
-        "//pkg/build/bazel",
         "//pkg/testutils/lint/passes/forbiddenmethod",
         "//pkg/testutils/lint/passes/unconvert",
         "//pkg/testutils/skip",

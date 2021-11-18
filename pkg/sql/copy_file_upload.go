@@ -16,9 +16,10 @@ import (
 	"io"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -40,8 +41,8 @@ var _ copyMachineInterface = &fileUploadMachine{}
 
 type fileUploadMachine struct {
 	c              *copyMachine
-	w              io.WriteCloser
-	cancel         func()
+	writeToFile    *io.PipeWriter
+	wg             *sync.WaitGroup
 	failureCleanup func()
 }
 
@@ -92,7 +93,8 @@ func newFileUploadMachine(
 		p: planner{execCfg: execCfg, alloc: &rowenc.DatumAlloc{}},
 	}
 	f = &fileUploadMachine{
-		c: c,
+		c:  c,
+		wg: &sync.WaitGroup{},
 	}
 
 	// We need a planner to do the initial planning, even if a planner
@@ -121,6 +123,7 @@ func newFileUploadMachine(
 		return nil, err
 	}
 
+	pr, pw := io.Pipe()
 	store, err := c.p.execCfg.DistSQLSrv.ExternalStorageFromURI(ctx, dest, c.p.User())
 	if err != nil {
 		return nil, err
@@ -131,13 +134,15 @@ func newFileUploadMachine(
 		return nil, err
 	}
 
-	writeCtx, canecelWriteCtx := context.WithCancel(ctx)
-	f.cancel = canecelWriteCtx
-	f.w, err = store.Writer(writeCtx, "")
-	if err != nil {
-		return nil, err
-	}
-
+	f.wg.Add(1)
+	go func() {
+		err := store.WriteFile(ctx, "", &noopReadSeeker{pr})
+		if err != nil {
+			_ = pr.CloseWithError(err)
+		}
+		f.wg.Done()
+	}()
+	f.writeToFile = pw
 	f.failureCleanup = func() {
 		// Ignoring this error because deletion would only fail
 		// if the file was not created in the first place.
@@ -164,27 +169,24 @@ func CopyInFileStmt(destination, schema, table string) string {
 		`COPY %s.%s FROM STDIN WITH destination = %s`,
 		pq.QuoteIdentifier(schema),
 		pq.QuoteIdentifier(table),
-		lexbase.EscapeSQLString(destination),
+		lex.EscapeSQLString(destination),
 	)
 }
 
-func (f *fileUploadMachine) run(ctx context.Context) error {
-	err := f.c.run(ctx)
-	if err != nil && f.cancel != nil {
-		f.cancel()
-	}
-	err = errors.CombineErrors(f.w.Close(), err)
-
+func (f *fileUploadMachine) run(ctx context.Context) (err error) {
+	err = f.c.run(ctx)
+	_ = f.writeToFile.Close()
 	if err != nil {
 		f.failureCleanup()
 	}
-	return err
+	f.wg.Wait()
+	return
 }
 
 func (f *fileUploadMachine) writeFile(ctx context.Context) error {
 	for _, r := range f.c.rows {
 		b := []byte(*r[0].(*tree.DBytes))
-		n, err := f.w.Write(b)
+		n, err := f.writeToFile.Write(b)
 		if err != nil {
 			return err
 		}
@@ -194,7 +196,7 @@ func (f *fileUploadMachine) writeFile(ctx context.Context) error {
 	}
 
 	// Issue a final zero-byte write to ensure we observe any errors in the pipe.
-	_, err := f.w.Write(nil)
+	_, err := f.writeToFile.Write(nil)
 	if err != nil {
 		return err
 	}

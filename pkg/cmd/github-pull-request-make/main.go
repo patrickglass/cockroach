@@ -11,8 +11,8 @@
 // This utility detects new tests added in a given pull request, and runs them
 // under stress in our CI infrastructure.
 //
-// Note that this program will directly invoke the build system, so there is no
-// need to process its output. See build/teamcity-support.sh for usage examples.
+// Note that this program will directly exec `make`, so there is no need to
+// process its output. See build/teamcity-test{,race}.sh for usage examples.
 //
 // Note that our CI infrastructure has no notion of "pull requests", forcing
 // the approach taken here be quite brute-force with respect to its use of the
@@ -24,6 +24,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"go/build"
 	"io"
 	"log"
 	"net/http"
@@ -31,62 +32,36 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/build/bazel"
 	_ "github.com/cockroachdb/cockroach/pkg/testutils/buildutil"
 	"github.com/google/go-github/github"
 	"golang.org/x/oauth2"
 )
 
-const (
-	githubAPITokenEnv    = "GITHUB_API_TOKEN"
-	teamcityVCSNumberEnv = "BUILD_VCS_NUMBER"
-	targetEnv            = "TARGET"
-	// The following environment variables are for testing and are
-	// prefixed with GHM_ to help prevent accidentally triggering
-	// test code inside the CI pipeline.
-	packageEnv    = "GHM_PACKAGES"
-	forceBazelEnv = "GHM_FORCE_BAZEL"
-)
+const githubAPITokenEnv = "GITHUB_API_TOKEN"
+const teamcityVCSNumberEnv = "BUILD_VCS_NUMBER"
+const makeTargetEnv = "TARGET"
 
 // https://github.com/golang/go/blob/go1.7.3/src/cmd/go/test.go#L1260:L1262
 //
 // It is a Test (say) if there is a character after Test that is not a lower-case letter.
 // We don't want TesticularCancer.
 const goTestStr = `func (Test[^a-z]\w*)\(.*\*testing\.TB?\) {$`
-
-const bazelStressTarget = "@com_github_cockroachdb_stress//:stress"
+const goBenchmarkStr = `func (Benchmark[^a-z]\w*)\(.*\*testing\.T?B\) {$`
 
 var currentGoTestRE = regexp.MustCompile(`.*` + goTestStr)
+var currentGoBenchmarkRE = regexp.MustCompile(`.*` + goBenchmarkStr)
 var newGoTestRE = regexp.MustCompile(`^\+\s*` + goTestStr)
+var newGoBenchmarkRE = regexp.MustCompile(`^\+\s*` + goBenchmarkStr)
 
 type pkg struct {
-	tests []string
-}
-
-func pkgsFromGithubPRForSHA(
-	ctx context.Context, org string, repo string, sha string,
-) (map[string]pkg, error) {
-	client := ghClient(ctx)
-	currentPull := findPullRequest(ctx, client, org, repo, sha)
-	if currentPull == nil {
-		log.Printf("SHA %s not found in open pull requests, skipping stress", sha)
-		return nil, nil
-	}
-
-	diff, err := getDiff(ctx, client, org, repo, *currentPull.Number)
-	if err != nil {
-		return nil, err
-	}
-
-	return pkgsFromDiff(strings.NewReader(diff))
+	tests, benchmarks []string
 }
 
 // pkgsFromDiff parses a git-style diff and returns a mapping from directories
-// to tests added in those directories in the given diff.
+// to tests and benchmarks added in those directories in the given diff.
 func pkgsFromDiff(r io.Reader) (map[string]pkg, error) {
 	const newFilePrefix = "+++ b/"
 	const replacement = "$1"
@@ -95,6 +70,7 @@ func pkgsFromDiff(r io.Reader) (map[string]pkg, error) {
 
 	var curPkgName string
 	var curTestName string
+	var curBenchmarkName string
 	var inPrefix bool
 	for reader := bufio.NewReader(r); ; {
 		line, isPrefix, err := reader.ReadLine()
@@ -121,16 +97,36 @@ func pkgsFromDiff(r io.Reader) (map[string]pkg, error) {
 			curPkg := pkgs[curPkgName]
 			curPkg.tests = append(curPkg.tests, string(newGoTestRE.ReplaceAll(line, []byte(replacement))))
 			pkgs[curPkgName] = curPkg
+		case newGoBenchmarkRE.Match(line):
+			curPkg := pkgs[curPkgName]
+			curPkg.benchmarks = append(curPkg.benchmarks, string(newGoBenchmarkRE.ReplaceAll(line, []byte(replacement))))
+			pkgs[curPkgName] = curPkg
 		case currentGoTestRE.Match(line):
 			curTestName = ""
+			curBenchmarkName = ""
 			if !bytes.HasPrefix(line, []byte{'-'}) {
 				curTestName = string(currentGoTestRE.ReplaceAll(line, []byte(replacement)))
 			}
+		case currentGoBenchmarkRE.Match(line):
+			curTestName = ""
+			curBenchmarkName = ""
+			if !bytes.HasPrefix(line, []byte{'-'}) {
+				curBenchmarkName = string(currentGoBenchmarkRE.ReplaceAll(line, []byte(replacement)))
+			}
 		case bytes.HasPrefix(line, []byte{'-'}) && bytes.Contains(line, []byte(".Skip")):
-			if curPkgName != "" && len(curTestName) > 0 {
-				curPkg := pkgs[curPkgName]
-				curPkg.tests = append(curPkg.tests, curTestName)
-				pkgs[curPkgName] = curPkg
+			if curPkgName != "" {
+				switch {
+				case len(curTestName) > 0:
+					if !(curPkgName == "build" && curTestName == "TestStyle") {
+						curPkg := pkgs[curPkgName]
+						curPkg.tests = append(curPkg.tests, curTestName)
+						pkgs[curPkgName] = curPkg
+					}
+				case len(curBenchmarkName) > 0:
+					curPkg := pkgs[curPkgName]
+					curPkg.benchmarks = append(curPkg.benchmarks, curBenchmarkName)
+					pkgs[curPkgName] = curPkg
+				}
 			}
 		}
 	}
@@ -186,145 +182,109 @@ func getDiff(
 	return diff, err
 }
 
-func parsePackagesFromEnvironment(input string) (map[string]pkg, error) {
-	const expectedFormat = "PACKAGE_NAME=TEST_NAME[,TEST_NAME...][;PACKAGE_NAME=...]"
-	pkgTestStrs := strings.Split(input, ";")
-	pkgs := make(map[string]pkg, len(pkgTestStrs))
-	for _, pts := range pkgTestStrs {
-		ptsParts := strings.Split(pts, "=")
-		if len(ptsParts) < 2 {
-			return nil, fmt.Errorf("invalid format for package environment variable: %q (expected format: %s)",
-				input, expectedFormat)
-		}
-		pkgName := ptsParts[0]
-		tests := ptsParts[1]
-		pkgs[pkgName] = pkg{
-			tests: strings.Split(tests, ","),
-		}
-	}
-	return pkgs, nil
-}
-
 func main() {
 	sha, ok := os.LookupEnv(teamcityVCSNumberEnv)
 	if !ok {
 		log.Fatalf("VCS number environment variable %s is not set", teamcityVCSNumberEnv)
 	}
 
-	target, ok := os.LookupEnv(targetEnv)
+	target, ok := os.LookupEnv(makeTargetEnv)
 	if !ok {
-		log.Fatalf("target variable %s is not set", targetEnv)
-	}
-	if target != "stress" && target != "stressrace" {
-		log.Fatalf("environment variable %s is %s; expected 'stress' or 'stressrace'", targetEnv, target)
+		log.Fatalf("make target variable %s is not set", makeTargetEnv)
 	}
 
-	forceBazel := false
-	if forceBazelStr, ok := os.LookupEnv(forceBazelEnv); ok {
-		forceBazel, _ = strconv.ParseBool(forceBazelStr)
-	}
+	const org = "cockroachdb"
+	const repo = "cockroach"
 
-	crdb, err := os.Getwd()
+	crdb, err := build.Import(fmt.Sprintf("github.com/%s/%s", org, repo), "", build.FindOnly)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	var pkgs map[string]pkg
-	if pkgStr, ok := os.LookupEnv(packageEnv); ok {
-		log.Printf("Using packages from environment variable %s", packageEnv)
-		pkgs, err = parsePackagesFromEnvironment(pkgStr)
-		if err != nil {
-			log.Fatal(err)
-		}
+	ctx := context.Background()
+	client := ghClient(ctx)
 
-	} else {
-		ctx := context.Background()
-		const org = "cockroachdb"
-		const repo = "cockroach"
-		pkgs, err = pkgsFromGithubPRForSHA(ctx, org, repo, sha)
-		if err != nil {
-			log.Fatal(err)
-		}
+	currentPull := findPullRequest(ctx, client, org, repo, sha)
+	if currentPull == nil {
+		log.Printf("SHA %s not found in open pull requests, skipping stress", sha)
+		return
 	}
 
-	if len(pkgs) > 0 {
-		for name, pkg := range pkgs {
-			// 20 minutes total seems OK, but at least 2 minutes per test.
-			// This should be reduced. See #46941.
-			duration := (20 * time.Minute) / time.Duration(len(pkgs))
-			minDuration := (2 * time.Minute) * time.Duration(len(pkg.tests))
-			if duration < minDuration {
-				duration = minDuration
-			}
-			// Use a timeout shorter than the duration so that hanging tests don't
-			// get a free pass.
-			timeout := (3 * duration) / 4
+	diff, err := getDiff(ctx, client, org, repo, *currentPull.Number)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-			// The stress -p flag defaults to the number of CPUs, which is too
-			// aggressive on big machines and can cause tests to fail. Under nightly
-			// stress, we usually use 4 or 2, so run with 8 here to make sure the
-			// test becomes an obvious candidate for skipping under race before it
-			// has to deal with the nightlies.
-			parallelism := 16
-			if target == "stressrace" {
-				parallelism = 8
+	if target == "checkdeps" {
+		var vendorChanged bool
+		for _, path := range []string{"Gopkg.lock", "vendor"} {
+			if strings.Contains(diff, fmt.Sprintf("\n--- a/%[1]s\n+++ b/%[1]s\n", path)) {
+				vendorChanged = true
+				break
+			}
+		}
+		if vendorChanged {
+			cmd := exec.Command("dep", "ensure", "-v")
+			cmd.Dir = crdb.Dir
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			log.Println(cmd.Args)
+			if err := cmd.Run(); err != nil {
+				log.Fatal(err)
 			}
 
-			var args []string
-			if bazel.BuiltWithBazel() || forceBazel {
-				args = append(args, "test")
-				// NB: We use a pretty dumb technique to list the bazel test
-				// targets: we ask bazel query to enumerate all the tests in this
-				// package. bazel queries can take a second or so to run, so it's
-				// conceivable that the delay introduced by this could be
-				// noticeable. For packages that have two or more test targets, the
-				// test filters should mean that we don't execute more tests than
-				// we need to. This should be refactored to improve performance and
-				// to strip out the unnecessary calls to `bazel`, but that might
-				// better be saved for when we no longer need `make` support and
-				// don't have to worry about accidentally breaking it.
-				out, err := exec.Command("bazel", "query", fmt.Sprintf("kind(go_test, //%s:all)", name), "--output=label").Output()
-				if err != nil {
-					log.Fatal(err)
+			// Check for diffs.
+			var foundDiff bool
+			for _, dir := range []string{filepath.Join(crdb.Dir, "vendor"), crdb.Dir} {
+				cmd := exec.Command("git", "diff")
+				cmd.Dir = dir
+				log.Println(cmd.Dir, cmd.Args)
+				if output, err := cmd.CombinedOutput(); err != nil {
+					log.Fatalf("%s: %s", err, string(output))
+				} else if len(output) > 0 {
+					foundDiff = true
+					log.Printf("unexpected diff:\n%s", output)
 				}
-				for _, target := range strings.Split(string(out), "\n") {
-					target = strings.TrimSpace(target)
-					if target != "" {
-						args = append(args, target)
-					}
+			}
+			if foundDiff {
+				os.Exit(1)
+			}
+		}
+	} else {
+		pkgs, err := pkgsFromDiff(strings.NewReader(diff))
+		if err != nil {
+			log.Fatal(err)
+		}
+		if len(pkgs) > 0 {
+			for name, pkg := range pkgs {
+				// 20 minutes total seems OK, but at least 2 minutes per test.
+				// This should be reduced. See #46941.
+				duration := (20 * time.Minute) / time.Duration(len(pkgs))
+				minDuration := (2 * time.Minute) * time.Duration(len(pkg.tests))
+				if duration < minDuration {
+					duration = minDuration
 				}
-				args = append(args, "--")
-				var filters []string
-				for _, test := range pkg.tests {
-					filters = append(filters, "^"+test+"$")
-				}
-				args = append(args, fmt.Sprintf("--test_filter=%s", strings.Join(filters, "|")))
-				args = append(args, "--test_env=COCKROACH_NIGHTLY_STRESS=true")
-				args = append(args, "--test_arg=-test.timeout", fmt.Sprintf("--test_arg=%s", timeout))
-				// Give the entire test 1 more minute than the duration to wrap up.
-				args = append(args, fmt.Sprintf("--test_timeout=%d", int((duration+1*time.Minute).Seconds())))
-				args = append(args, "--run_under", fmt.Sprintf("%s -stderr -maxfails 1 -maxtime %s -p %d", bazelStressTarget, duration, parallelism))
-				if target == "stressrace" {
-					args = append(args, "--config=race")
-				} else {
-					args = append(args, "--test_sharding_strategy=disabled")
-				}
-				// NB: bazci is expected to be put in `PATH` by the caller.
-				cmd := exec.Command("bazci", args...)
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				log.Println(cmd.Args)
-				if err := cmd.Run(); err != nil {
-					log.Fatal(err)
-				}
-			} else {
+				// Use a timeout shorter than the duration so that hanging tests don't
+				// get a free pass.
+				timeout := (3 * duration) / 4
+
 				tests := "-"
 				if len(pkg.tests) > 0 {
 					tests = "(" + strings.Join(pkg.tests, "$$|") + "$$)"
 				}
 
-				args = append(
-					args,
+				// The stress -p flag defaults to the number of CPUs, which is too
+				// aggressive on big machines and can cause tests to fail. Under nightly
+				// stress, we usually use 4 or 2, so run with 8 here to make sure the
+				// test becomes an obvious candidate for skipping under race before it
+				// has to deal with the nightlies.
+				parallelism := 16
+				if target == "stressrace" {
+					parallelism = 8
+				}
+
+				cmd := exec.Command(
+					"make",
 					target,
 					fmt.Sprintf("PKG=./%s", name),
 					fmt.Sprintf("TESTS=%s", tests),
@@ -332,9 +292,8 @@ func main() {
 					"GOTESTFLAGS=-json", // allow TeamCity to parse failures
 					fmt.Sprintf("STRESSFLAGS=-stderr -maxfails 1 -maxtime %s -p %d", duration, parallelism),
 				)
-				cmd := exec.Command("make", args...)
 				cmd.Env = append(os.Environ(), "COCKROACH_NIGHTLY_STRESS=true")
-				cmd.Dir = crdb
+				cmd.Dir = crdb.Dir
 				cmd.Stdout = os.Stdout
 				cmd.Stderr = os.Stderr
 				log.Println(cmd.Args)

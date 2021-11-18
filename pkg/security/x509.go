@@ -191,19 +191,18 @@ func GenerateUIServerCert(
 	return certBytes, nil
 }
 
-// GenerateTenantCert generates a tenant client certificate and returns the cert bytes.
+// GenerateTenantClientCert generates a tenant client certificate and returns the cert bytes.
 // Takes in the CA cert and private key, the tenant client public key, the certificate lifetime,
 // and the tenant id.
 //
 // Tenant client certificates add OU=Tenants in the subject field to prevent
 // using them as user certificates.
-func GenerateTenantCert(
+func GenerateTenantClientCert(
 	caCert *x509.Certificate,
 	caPrivateKey crypto.PrivateKey,
 	clientPublicKey crypto.PublicKey,
 	lifetime time.Duration,
 	tenantID uint64,
-	hosts []string,
 ) ([]byte, error) {
 
 	if tenantID == 0 {
@@ -222,10 +221,8 @@ func GenerateTenantCert(
 	}
 
 	// Set client-specific fields.
-	// Client authentication to authenticate to KV nodes.
-	// Server authentication to authenticate to other SQL servers.
-	template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}
-	addHostsToTemplate(template, hosts)
+	// Client authentication only.
+	template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
 
 	certBytes, err := x509.CreateCertificate(rand.Reader, template, caCert, clientPublicKey, caPrivateKey)
 	if err != nil {

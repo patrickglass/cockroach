@@ -13,46 +13,15 @@ package delegate
 import (
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
-	"github.com/cockroachdb/errors"
 )
 
 func (d *delegator) delegateShowCreate(n *tree.ShowCreate) (tree.Statement, error) {
 	sqltelemetry.IncrementShowCounter(sqltelemetry.Create)
 
-	switch n.Mode {
-	case tree.ShowCreateModeTable, tree.ShowCreateModeView, tree.ShowCreateModeSequence:
-		return d.delegateShowCreateTable(n)
-	case tree.ShowCreateModeDatabase:
-		return d.delegateShowCreateDatabase(n)
-	default:
-		return nil, errors.Newf("unknown show create mode: %d", n.Mode)
-	}
-}
-
-func (d *delegator) delegateShowCreateDatabase(n *tree.ShowCreate) (tree.Statement, error) {
-	const showCreateQuery = `
-SELECT
-	name AS database_name,
-	create_statement
-FROM crdb_internal.databases
-WHERE name = %s
-;
-`
-
-	// Checking if the database exists before running the sql.
-	_, err := d.getSpecifiedOrCurrentDatabase(tree.Name(n.Name.Object()))
-	if err != nil {
-		return nil, err
-	}
-
-	return parse(fmt.Sprintf(showCreateQuery, lexbase.EscapeSQLString(n.Name.Object())))
-}
-
-func (d *delegator) delegateShowCreateTable(n *tree.ShowCreate) (tree.Statement, error) {
 	const showCreateQuery = `
 WITH zone_configs AS (
 		SELECT
@@ -195,7 +164,7 @@ ORDER BY
 
 func (d *delegator) delegateShowConstraints(n *tree.ShowConstraints) (tree.Statement, error) {
 	sqltelemetry.IncrementShowCounter(sqltelemetry.Constraints)
-	getConstraintsQuery := `
+	const getConstraintsQuery = `
     SELECT
         t.relname AS table_name,
         c.conname AS constraint_name,
@@ -204,17 +173,11 @@ func (d *delegator) delegateShowConstraints(n *tree.ShowConstraints) (tree.State
            WHEN 'u' THEN 'UNIQUE'
            WHEN 'c' THEN 'CHECK'
            WHEN 'f' THEN 'FOREIGN KEY'
-           ELSE c.contype::TEXT
+           ELSE c.contype
         END AS constraint_type,
         c.condef AS details,
-        c.convalidated AS validated`
-
-	if n.WithComment {
-		getConstraintsQuery += `,
-	obj_description(c.oid) AS comment`
-	}
-	getConstraintsQuery += `
-FROM
+        c.convalidated AS validated
+    FROM
        %[4]s.pg_catalog.pg_class t,
        %[4]s.pg_catalog.pg_namespace n,
        %[4]s.pg_catalog.pg_constraint c
@@ -232,10 +195,10 @@ func (d *delegator) delegateShowCreateAllTables() (tree.Statement, error) {
 	const showCreateAllTablesQuery = `
 	SELECT crdb_internal.show_create_all_tables(%[1]s) AS create_statement;
 `
-	databaseLiteral := d.evalCtx.SessionData().Database
+	databaseLiteral := d.evalCtx.SessionData.Database
 
 	query := fmt.Sprintf(showCreateAllTablesQuery,
-		lexbase.EscapeSQLString(databaseLiteral),
+		lex.EscapeSQLString(databaseLiteral),
 	)
 
 	return parse(query)
@@ -266,11 +229,11 @@ func (d *delegator) showTableDetails(
 	}
 
 	fullQuery := fmt.Sprintf(query,
-		lexbase.EscapeSQLString(resName.Catalog()),
-		lexbase.EscapeSQLString(resName.Table()),
-		lexbase.EscapeSQLString(resName.String()),
+		lex.EscapeSQLString(resName.Catalog()),
+		lex.EscapeSQLString(resName.Table()),
+		lex.EscapeSQLString(resName.String()),
 		resName.CatalogName.String(), // note: CatalogName.String() != Catalog()
-		lexbase.EscapeSQLString(resName.Schema()),
+		lex.EscapeSQLString(resName.Schema()),
 		dataSource.PostgresDescriptorID(),
 	)
 

@@ -16,20 +16,18 @@ package geos
 
 import (
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"sync"
 	"unsafe"
 
-	"github.com/cockroachdb/cockroach/pkg/build/bazel"
 	"github.com/cockroachdb/cockroach/pkg/docs"
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/errors"
 )
 
 // #cgo CXXFLAGS: -std=c++14
-// #cgo !windows LDFLAGS: -ldl -lm
+// #cgo !windows LDFLAGS: -ldl
 //
 // #include "geos.h"
 import "C"
@@ -137,12 +135,6 @@ func findLibraryDirectories(flagLibraryDirectoryValue string, crdbBinaryLoc stri
 		),
 		findLibraryDirectoriesInParentingDirectories(cwd)...,
 	)
-	// Account for the libraries to be in a bazel runfile path.
-	if bazel.BuiltWithBazel() {
-		if p, err := bazel.Runfile(path.Join("c-deps", "libgeos", "lib")); err == nil {
-			locs = append(locs, p)
-		}
-	}
 	return locs
 }
 
@@ -194,10 +186,10 @@ func initGEOS(dirs []string) (*C.CR_GEOS, string, error) {
 		}
 		err = errors.CombineErrors(
 			err,
-			errors.Wrapf(
-				newErr,
-				"geos: cannot load GEOS from dir %q",
+			errors.Newf(
+				"geos: cannot load GEOS from dir %q: %s",
 				dir,
+				newErr,
 			),
 		)
 	}

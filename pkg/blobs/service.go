@@ -27,7 +27,6 @@ package blobs
 
 import (
 	"context"
-	"io"
 
 	"github.com/cockroachdb/cockroach/pkg/blobs/blobspb"
 	"github.com/cockroachdb/errors"
@@ -72,20 +71,7 @@ func (s *Service) PutStream(stream blobspb.Blob_PutStreamServer) error {
 	}
 	reader := newPutStreamReader(stream)
 	defer reader.Close()
-	ctx, cancel := context.WithCancel(stream.Context())
-	defer cancel()
-
-	w, err := s.localStorage.Writer(ctx, filename[0])
-	if err != nil {
-		cancel()
-		return err
-	}
-	if _, err := io.Copy(w, reader); err != nil {
-		cancel()
-		return errors.CombineErrors(w.Close(), err)
-	}
-	err = w.Close()
-	cancel()
+	err := s.localStorage.WriteFile(filename[0], reader)
 	return err
 }
 

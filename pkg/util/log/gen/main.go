@@ -149,7 +149,7 @@ func readInput(protoName string) (chans []info, sevs []info, err error) {
 				NameLower:  strings.ToLower(key),
 			})
 		}
-		if inChans && key != "CHANNEL_MAX" {
+		if inChans {
 			comment := "// The `" + key + "` channel" + strings.TrimPrefix(rawComment, "// "+key)
 			chans = append(chans, info{
 				RawComment: rawComment,
@@ -167,16 +167,16 @@ func readInput(protoName string) (chans []info, sevs []info, err error) {
 }
 
 var templates = map[string]string{
-	"logging.md": `## Logging levels (severities)
+	"logging.md": `# Logging levels (severities)
 {{range .Severities}}{{if eq .NAME "NONE" "UNKNOWN" "DEFAULT"|not}}
-### {{.NAME}}
+## {{.NAME}}
 
 {{.PComment}}
 {{- end}}{{- end}}
 
-## Logging channels
+# Logging channels
 {{range .Channels}}
-### ` + "`" + `{{.NAME}}` + "`" + `
+## ` + "`" + `{{.NAME}}` + "`" + `
 
 {{.PComment}}
 {{- end}}

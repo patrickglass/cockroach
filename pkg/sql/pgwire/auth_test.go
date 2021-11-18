@@ -170,10 +170,8 @@ func hbaRunTest(t *testing.T, insecure bool) {
 		bt := true
 		cfg.Sinks.FileGroups = map[string]*logconfig.FileSinkConfig{
 			"auth": {
-				FileDefaults: logconfig.FileDefaults{
-					CommonSinkConfig: logconfig.CommonSinkConfig{Auditable: &bt},
-				},
-				Channels: logconfig.SelectChannels(channel.SESSIONS),
+				CommonSinkConfig: logconfig.CommonSinkConfig{Auditable: &bt},
+				Channels:         logconfig.ChannelList{Channels: []log.Channel{channel.SESSIONS}},
 			}}
 		dir := sc.GetDirectory()
 		if err := cfg.Validate(&dir); err != nil {
@@ -203,7 +201,7 @@ func hbaRunTest(t *testing.T, insecure bool) {
 		}
 		httpHBAUrl := httpScheme + s.HTTPAddr() + "/debug/hba_conf"
 
-		if _, err := conn.ExecContext(context.Background(), fmt.Sprintf(`CREATE USER %s`, security.TestUser)); err != nil {
+		if _, err := conn.ExecContext(context.Background(), `CREATE USER $1`, security.TestUser); err != nil {
 			t.Fatal(err)
 		}
 
@@ -275,7 +273,7 @@ func hbaRunTest(t *testing.T, insecure bool) {
 					return "ok", err
 
 				case "authlog":
-					if len(td.CmdArgs) < 1 {
+					if len(td.CmdArgs) < 0 {
 						t.Fatal("not enough arguments")
 					}
 					numEntries, err := strconv.Atoi(td.CmdArgs[0].Key)
@@ -314,11 +312,13 @@ func hbaRunTest(t *testing.T, insecure bool) {
 								entry := &entries[i]
 								// t.Logf("found log entry: %+v", *entry)
 
-								if entry.StructuredEnd == 0 {
+								if !strings.HasPrefix(entry.Message, "={") {
+									// TODO(knz): Enhance this when the log file
+									// contains proper markers for structured entries.
 									t.Errorf("malformed structured message: %q", entry.Message)
 								}
 
-								jsonPayload := []byte(entry.Message)
+								jsonPayload := []byte(entry.Message[1:])
 								if entry.Redactable {
 									jsonPayload = redact.RedactableBytes(jsonPayload).StripMarkers()
 								}
@@ -497,7 +497,7 @@ func TestClientAddrOverride(t *testing.T) {
 	defer cleanupFunc()
 
 	// Ensure the test user exists.
-	if _, err := db.Exec(fmt.Sprintf(`CREATE USER %s`, security.TestUser)); err != nil {
+	if _, err := db.Exec(`CREATE USER $1`, security.TestUser); err != nil {
 		t.Fatal(err)
 	}
 

@@ -16,11 +16,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/abortspan"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/spanset"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -78,7 +76,6 @@ func TestDeclareKeysResolveIntent(t *testing.T) {
 	}
 	ctx := context.Background()
 	engine := storage.NewDefaultInMemForTesting()
-	st := makeClusterSettingsUsingEngineIntentsSetting(engine)
 	defer engine.Close()
 	testutils.RunTrueAndFalse(t, "ranged", func(t *testing.T, ranged bool) {
 		for _, test := range tests {
@@ -100,26 +97,25 @@ func TestDeclareKeysResolveIntent(t *testing.T) {
 				as := abortspan.New(desc.RangeID)
 
 				var latchSpans, lockSpans spanset.SpanSet
+				batch := engine.NewBatch()
+				batch = spanset.NewBatch(batch, &latchSpans)
+				defer batch.Close()
 
 				var h roachpb.Header
 				h.RangeID = desc.RangeID
 
 				cArgs := CommandArgs{Header: h}
-				cArgs.EvalCtx = (&MockEvalCtx{ClusterSettings: st, AbortSpan: as}).EvalContext()
+				cArgs.EvalCtx = (&MockEvalCtx{AbortSpan: as}).EvalContext()
 
 				if !ranged {
 					cArgs.Args = &ri
 					declareKeysResolveIntent(&desc, h, &ri, &latchSpans, &lockSpans)
-					batch := spanset.NewBatch(engine.NewBatch(), &latchSpans)
-					defer batch.Close()
 					if _, err := ResolveIntent(ctx, batch, cArgs, &roachpb.ResolveIntentResponse{}); err != nil {
 						t.Fatal(err)
 					}
 				} else {
 					cArgs.Args = &rir
 					declareKeysResolveIntentRange(&desc, h, &rir, &latchSpans, &lockSpans)
-					batch := spanset.NewBatch(engine.NewBatch(), &latchSpans)
-					defer batch.Close()
 					if _, err := ResolveIntentRange(ctx, batch, cArgs, &roachpb.ResolveIntentRangeResponse{}); err != nil {
 						t.Fatal(err)
 					}
@@ -161,7 +157,6 @@ func TestResolveIntentAfterPartialRollback(t *testing.T) {
 		defer db.Close()
 		batch := db.NewBatch()
 		defer batch.Close()
-		st := makeClusterSettingsUsingEngineIntentsSetting(db)
 
 		var v roachpb.Value
 		// Write a first value at key.
@@ -188,11 +183,10 @@ func TestResolveIntentAfterPartialRollback(t *testing.T) {
 			Timestamp: ts,
 		}
 
-		// The spans will be used for validating that reads and writes are
-		// consistent with the declared spans. We initialize spans below, before
-		// performing reads and writes.
 		var spans spanset.SpanSet
-		var rbatch storage.Batch
+		rbatch := db.NewBatch()
+		rbatch = spanset.NewBatch(rbatch, &spans)
+		defer rbatch.Close()
 
 		if !ranged {
 			// Resolve a point intent.
@@ -204,13 +198,11 @@ func TestResolveIntentAfterPartialRollback(t *testing.T) {
 			ri.Key = k
 
 			declareKeysResolveIntent(&desc, h, &ri, &spans, nil)
-			rbatch = spanset.NewBatch(db.NewBatch(), &spans)
-			defer rbatch.Close()
 
 			if _, err := ResolveIntent(ctx, rbatch,
 				CommandArgs{
 					Header:  h,
-					EvalCtx: (&MockEvalCtx{ClusterSettings: st}).EvalContext(),
+					EvalCtx: (&MockEvalCtx{}).EvalContext(),
 					Args:    &ri,
 				},
 				&roachpb.ResolveIntentResponse{},
@@ -228,14 +220,12 @@ func TestResolveIntentAfterPartialRollback(t *testing.T) {
 			rir.EndKey = endKey
 
 			declareKeysResolveIntentRange(&desc, h, &rir, &spans, nil)
-			rbatch = spanset.NewBatch(db.NewBatch(), &spans)
-			defer rbatch.Close()
 
 			h.MaxSpanRequestKeys = 10
 			if _, err := ResolveIntentRange(ctx, rbatch,
 				CommandArgs{
 					Header:  h,
-					EvalCtx: (&MockEvalCtx{ClusterSettings: st}).EvalContext(),
+					EvalCtx: (&MockEvalCtx{}).EvalContext(),
 					Args:    &rir,
 				},
 				&roachpb.ResolveIntentRangeResponse{},
@@ -270,14 +260,4 @@ func TestResolveIntentAfterPartialRollback(t *testing.T) {
 			require.Equal(t, "a", string(s), "at key %s", k)
 		}
 	})
-}
-
-func makeClusterSettingsUsingEngineIntentsSetting(engine storage.Engine) *cluster.Settings {
-	version := clusterversion.TestingBinaryVersion
-	if !engine.IsSeparatedIntentsEnabledForTesting(context.Background()) {
-		// Before SeparatedIntentsMigration, so intent resolution will not assume
-		// only separated intents.
-		version = clusterversion.ByKey(clusterversion.SeparatedIntentsMigration - 1)
-	}
-	return cluster.MakeTestingClusterSettingsWithVersions(version, version, true)
 }

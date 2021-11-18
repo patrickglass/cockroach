@@ -12,6 +12,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/errors"
 )
 
@@ -45,7 +46,7 @@ func ValidateTable(targets jobspb.ChangefeedTargets, tableDesc catalog.TableDesc
 			tableDesc.GetName(), len(tableDesc.GetFamilies()))
 	}
 
-	if tableDesc.Dropped() {
+	if tableDesc.GetState() == descpb.DescriptorState_DROP {
 		return errors.Errorf(`"%s" was dropped`, t.StatementTimeName)
 	}
 

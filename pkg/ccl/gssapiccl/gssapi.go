@@ -10,7 +10,6 @@
 // linux-gnu targets (i.e., not musl). Since go doesn't have a builtin way
 // to do that, we have to set this in the top-level Makefile.
 
-//go:build gss
 // +build gss
 
 package gssapiccl
@@ -26,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/hba"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/errors"
 )
 
@@ -48,7 +46,7 @@ func authGSS(
 	c pgwire.AuthConn,
 	tlsState tls.ConnectionState,
 	_ pgwire.PasswordRetrievalFn,
-	_ *tree.DTimestamp,
+	_ pgwire.PasswordValidUntilFn,
 	execCfg *sql.ExecutorConfig,
 	entry *hba.Entry,
 ) (security.UserAuthHook, error) {

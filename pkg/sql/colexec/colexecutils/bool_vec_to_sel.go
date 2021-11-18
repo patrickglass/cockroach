@@ -40,26 +40,22 @@ func BoolOrUnknownToSelOp(
 // BoolVecToSelOp transforms a boolean column into a selection vector by adding
 // an index to the selection for each true value in the boolean column.
 type BoolVecToSelOp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	colexecop.NonExplainable
 
 	// OutputCol is the boolean output column. It should be shared by other
 	// operators that write to it.
 	OutputCol []bool
-	// ProcessOnlyOneBatch indicates whether BoolVecToSelOp should always return
-	// a batch after it has processed the input batch (even if all tuples are
-	// deselected).
-	ProcessOnlyOneBatch bool
 }
 
 var _ colexecop.ResettableOperator = &BoolVecToSelOp{}
 
 // Next implements the colexecop.Operator interface.
-func (p *BoolVecToSelOp) Next() coldata.Batch {
+func (p *BoolVecToSelOp) Next(ctx context.Context) coldata.Batch {
 	// Loop until we have non-zero amount of output to return, or our input's been
 	// exhausted.
 	for {
-		batch := p.Input.Next()
+		batch := p.Input.Next(ctx)
 		n := batch.Length()
 		if n == 0 {
 			return batch
@@ -99,11 +95,18 @@ func (p *BoolVecToSelOp) Next() coldata.Batch {
 			}
 		}
 
-		if idx > 0 || p.ProcessOnlyOneBatch {
-			batch.SetLength(idx)
-			return batch
+		if idx == 0 {
+			continue
 		}
+
+		batch.SetLength(idx)
+		return batch
 	}
+}
+
+// Init implements the colexecop.Operator interface.
+func (p *BoolVecToSelOp) Init() {
+	p.Input.Init()
 }
 
 // Reset implements the colexecop.Resetter interface.
@@ -123,8 +126,8 @@ func (p *BoolVecToSelOp) Reset(ctx context.Context) {
 // NOTE: if the column can be of a type other than boolean,
 // BoolOrUnknownToSelOp *must* be used instead.
 func NewBoolVecToSelOp(input colexecop.Operator, colIdx int) colexecop.Operator {
-	d := &selBoolOp{OneInputHelper: colexecop.MakeOneInputHelper(input), colIdx: colIdx}
-	ret := &BoolVecToSelOp{OneInputHelper: colexecop.MakeOneInputHelper(d)}
+	d := selBoolOp{OneInputNode: colexecop.NewOneInputNode(input), colIdx: colIdx}
+	ret := &BoolVecToSelOp{OneInputNode: colexecop.NewOneInputNode(&d)}
 	d.boolVecToSelOp = ret
 	return ret
 }
@@ -132,14 +135,18 @@ func NewBoolVecToSelOp(input colexecop.Operator, colIdx int) colexecop.Operator 
 // selBoolOp is a small helper operator that transforms a BoolVecToSelOp into
 // an operator that can see the inside of its input batch for NewBoolVecToSelOp.
 type selBoolOp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	colexecop.NonExplainable
 	boolVecToSelOp *BoolVecToSelOp
 	colIdx         int
 }
 
-func (d *selBoolOp) Next() coldata.Batch {
-	batch := d.Input.Next()
+func (d selBoolOp) Init() {
+	d.Input.Init()
+}
+
+func (d selBoolOp) Next(ctx context.Context) coldata.Batch {
+	batch := d.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return batch

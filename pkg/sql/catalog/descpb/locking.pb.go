@@ -3,11 +3,9 @@
 
 package descpb
 
-import (
-	fmt "fmt"
-	proto "github.com/gogo/protobuf/proto"
-	math "math"
-)
+import proto "github.com/gogo/protobuf/proto"
+import fmt "fmt"
+import math "math"
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
@@ -18,7 +16,7 @@ var _ = math.Inf
 // is compatible with the proto package it is being compiled against.
 // A compilation error at this line likely means your copy of the
 // proto package needs to be updated.
-const _ = proto.GoGoProtoPackageIsVersion3 // please upgrade the proto package
+const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
 
 // ScanLockingStrength controls the row-level locking mode used by scans.
 //
@@ -129,7 +127,6 @@ var ScanLockingStrength_name = map[int32]string{
 	3: "FOR_NO_KEY_UPDATE",
 	4: "FOR_UPDATE",
 }
-
 var ScanLockingStrength_value = map[string]int32{
 	"FOR_NONE":          0,
 	"FOR_KEY_SHARE":     1,
@@ -143,11 +140,9 @@ func (x ScanLockingStrength) Enum() *ScanLockingStrength {
 	*p = x
 	return p
 }
-
 func (x ScanLockingStrength) String() string {
 	return proto.EnumName(ScanLockingStrength_name, int32(x))
 }
-
 func (x *ScanLockingStrength) UnmarshalJSON(data []byte) error {
 	value, err := proto.UnmarshalJSONEnum(ScanLockingStrength_value, data, "ScanLockingStrength")
 	if err != nil {
@@ -156,9 +151,8 @@ func (x *ScanLockingStrength) UnmarshalJSON(data []byte) error {
 	*x = ScanLockingStrength(value)
 	return nil
 }
-
 func (ScanLockingStrength) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_484351bd13f4281f, []int{0}
+	return fileDescriptor_locking_ea30425e3ab7b450, []int{0}
 }
 
 // LockingWaitPolicy controls the policy used for handling conflicting locks
@@ -183,7 +177,6 @@ var ScanLockingWaitPolicy_name = map[int32]string{
 	1: "SKIP",
 	2: "ERROR",
 }
-
 var ScanLockingWaitPolicy_value = map[string]int32{
 	"BLOCK": 0,
 	"SKIP":  1,
@@ -195,11 +188,9 @@ func (x ScanLockingWaitPolicy) Enum() *ScanLockingWaitPolicy {
 	*p = x
 	return p
 }
-
 func (x ScanLockingWaitPolicy) String() string {
 	return proto.EnumName(ScanLockingWaitPolicy_name, int32(x))
 }
-
 func (x *ScanLockingWaitPolicy) UnmarshalJSON(data []byte) error {
 	value, err := proto.UnmarshalJSONEnum(ScanLockingWaitPolicy_value, data, "ScanLockingWaitPolicy")
 	if err != nil {
@@ -208,9 +199,8 @@ func (x *ScanLockingWaitPolicy) UnmarshalJSON(data []byte) error {
 	*x = ScanLockingWaitPolicy(value)
 	return nil
 }
-
 func (ScanLockingWaitPolicy) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_484351bd13f4281f, []int{1}
+	return fileDescriptor_locking_ea30425e3ab7b450, []int{1}
 }
 
 func init() {
@@ -218,9 +208,11 @@ func init() {
 	proto.RegisterEnum("cockroach.sql.sqlbase.ScanLockingWaitPolicy", ScanLockingWaitPolicy_name, ScanLockingWaitPolicy_value)
 }
 
-func init() { proto.RegisterFile("sql/catalog/descpb/locking.proto", fileDescriptor_484351bd13f4281f) }
+func init() {
+	proto.RegisterFile("sql/catalog/descpb/locking.proto", fileDescriptor_locking_ea30425e3ab7b450)
+}
 
-var fileDescriptor_484351bd13f4281f = []byte{
+var fileDescriptor_locking_ea30425e3ab7b450 = []byte{
 	// 248 bytes of a gzipped FileDescriptorProto
 	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xe2, 0x52, 0x28, 0x2e, 0xcc, 0xd1,
 	0x4f, 0x4e, 0x2c, 0x49, 0xcc, 0xc9, 0x4f, 0xd7, 0x4f, 0x49, 0x2d, 0x4e, 0x2e, 0x48, 0xd2, 0xcf,

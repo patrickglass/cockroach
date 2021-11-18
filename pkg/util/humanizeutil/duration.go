@@ -13,8 +13,6 @@ package humanizeutil
 import (
 	"fmt"
 	"time"
-
-	"github.com/cockroachdb/redact"
 )
 
 // Duration formats a duration in a user-friendly way. The result is not exact
@@ -26,7 +24,7 @@ import (
 //   12345678ns     ->  "12ms"
 //   12345678912ns  ->  "1.2s"
 //
-func Duration(val time.Duration) redact.SafeString {
+func Duration(val time.Duration) string {
 	val = val.Round(time.Microsecond)
 	if val == 0 {
 		return "0µs"
@@ -34,19 +32,19 @@ func Duration(val time.Duration) redact.SafeString {
 
 	// Everything under 1ms will show up as µs.
 	if val < time.Millisecond {
-		return redact.SafeString(val.String())
+		return val.String()
 	}
 	// Everything in-between 1ms and 1s will show up as ms.
 	if val < time.Second {
-		return redact.SafeString(val.Round(time.Millisecond).String())
+		return val.Round(time.Millisecond).String()
 	}
 	// Everything in-between 1s and 1m will show up as seconds with one decimal.
 	if val < time.Minute {
-		return redact.SafeString(val.Round(100 * time.Millisecond).String())
+		return val.Round(100 * time.Millisecond).String()
 	}
 
 	// Everything larger is rounded to the nearest second.
-	return redact.SafeString(val.Round(time.Second).String())
+	return val.Round(time.Second).String()
 }
 
 // LongDuration formats a duration that is expected to be on the order of
@@ -60,7 +58,7 @@ func Duration(val time.Duration) redact.SafeString {
 //  - 1 hour
 //  - 5 days
 //  - 1000 days
-func LongDuration(val time.Duration) redact.SafeString {
+func LongDuration(val time.Duration) string {
 	var round time.Duration
 	var unit string
 
@@ -87,5 +85,5 @@ func LongDuration(val time.Duration) redact.SafeString {
 	if n != 1 {
 		s = "s"
 	}
-	return redact.SafeString(fmt.Sprintf("%d %s%s", n, unit, s))
+	return fmt.Sprintf("%d %s%s", n, unit, s)
 }

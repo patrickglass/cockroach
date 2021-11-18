@@ -14,7 +14,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -38,24 +37,24 @@ func init() {
 	// the functions depend on scalarBuildFuncMap which in turn depends on the
 	// functions).
 	scalarBuildFuncMap = [opt.NumOperators]buildFunc{
-		opt.VariableOp:       (*Builder).buildVariable,
-		opt.ConstOp:          (*Builder).buildTypedExpr,
-		opt.NullOp:           (*Builder).buildNull,
-		opt.PlaceholderOp:    (*Builder).buildTypedExpr,
-		opt.TupleOp:          (*Builder).buildTuple,
-		opt.FunctionOp:       (*Builder).buildFunction,
-		opt.CaseOp:           (*Builder).buildCase,
-		opt.CastOp:           (*Builder).buildCast,
-		opt.AssignmentCastOp: (*Builder).buildAssignmentCast,
-		opt.CoalesceOp:       (*Builder).buildCoalesce,
-		opt.ColumnAccessOp:   (*Builder).buildColumnAccess,
-		opt.ArrayOp:          (*Builder).buildArray,
-		opt.AnyOp:            (*Builder).buildAny,
-		opt.AnyScalarOp:      (*Builder).buildAnyScalar,
-		opt.IndirectionOp:    (*Builder).buildIndirection,
-		opt.CollateOp:        (*Builder).buildCollate,
-		opt.ArrayFlattenOp:   (*Builder).buildArrayFlatten,
-		opt.IfErrOp:          (*Builder).buildIfErr,
+		opt.VariableOp:        (*Builder).buildVariable,
+		opt.ConstOp:           (*Builder).buildTypedExpr,
+		opt.NullOp:            (*Builder).buildNull,
+		opt.PlaceholderOp:     (*Builder).buildTypedExpr,
+		opt.TupleOp:           (*Builder).buildTuple,
+		opt.FunctionOp:        (*Builder).buildFunction,
+		opt.CaseOp:            (*Builder).buildCase,
+		opt.CastOp:            (*Builder).buildCast,
+		opt.CoalesceOp:        (*Builder).buildCoalesce,
+		opt.ColumnAccessOp:    (*Builder).buildColumnAccess,
+		opt.ArrayOp:           (*Builder).buildArray,
+		opt.AnyOp:             (*Builder).buildAny,
+		opt.AnyScalarOp:       (*Builder).buildAnyScalar,
+		opt.IndirectionOp:     (*Builder).buildIndirection,
+		opt.CollateOp:         (*Builder).buildCollate,
+		opt.ArrayFlattenOp:    (*Builder).buildArrayFlatten,
+		opt.IfErrOp:           (*Builder).buildIfErr,
+		opt.UnsupportedExprOp: (*Builder).buildUnsupportedExpr,
 
 		// Item operators.
 		opt.ProjectionsItemOp:  (*Builder).buildItem,
@@ -112,7 +111,7 @@ func (b *Builder) buildTypedExpr(
 }
 
 func (b *Builder) buildNull(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.TypedExpr, error) {
-	if scalar.DataType().Family() == types.TupleFamily && !scalar.DataType().UserDefined() {
+	if scalar.DataType().Family() == types.TupleFamily {
 		// See comment in buildCast.
 		return tree.DNull, nil
 	}
@@ -242,7 +241,7 @@ func (b *Builder) buildComparison(
 	}
 
 	operator := opt.ComparisonOpReverseMap[scalar.Op()]
-	return tree.NewTypedComparisonExpr(tree.MakeComparisonOperator(operator), left, right), nil
+	return tree.NewTypedComparisonExpr(operator, left, right), nil
 }
 
 func (b *Builder) buildUnary(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.TypedExpr, error) {
@@ -251,7 +250,7 @@ func (b *Builder) buildUnary(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.T
 		return nil, err
 	}
 	operator := opt.UnaryOpReverseMap[scalar.Op()]
-	return tree.NewTypedUnaryExpr(tree.MakeUnaryOperator(operator), input, scalar.DataType()), nil
+	return tree.NewTypedUnaryExpr(operator, input, scalar.DataType()), nil
 }
 
 func (b *Builder) buildBinary(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.TypedExpr, error) {
@@ -264,7 +263,7 @@ func (b *Builder) buildBinary(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.
 		return nil, err
 	}
 	operator := opt.BinaryOpReverseMap[scalar.Op()]
-	return tree.NewTypedBinaryExpr(tree.MakeBinaryOperator(operator), left, right, scalar.DataType()), nil
+	return tree.NewTypedBinaryExpr(operator, left, right, scalar.DataType()), nil
 }
 
 func (b *Builder) buildFunction(
@@ -337,48 +336,14 @@ func (b *Builder) buildCast(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.Ty
 	if err != nil {
 		return nil, err
 	}
-	if cast.Typ.Family() == types.TupleFamily && !cast.Typ.UserDefined() {
+	if cast.Typ.Family() == types.TupleFamily {
 		// TODO(radu): casts to Tuple are not supported (they can't be serialized
-		// for distsql) unless they are user-defined, in which case they have an
-		// OID and can be serialized with the ::@<id> syntax. This should only
-		// happen when the input is always NULL so the expression should still be
-		// valid without the cast (though there could be cornercases where the type
-		// does matter).
+		// for distsql). This should only happen when the input is always NULL so
+		// the expression should still be valid without the cast (though there could
+		// be cornercases where the type does matter).
 		return input, nil
 	}
 	return tree.NewTypedCastExpr(input, cast.Typ), nil
-}
-
-// buildAssignmentCast builds an AssignmentCastExpr with input i and type T into
-// a built-in function call crdb_internal.assignment_cast(i, NULL::T).
-func (b *Builder) buildAssignmentCast(
-	ctx *buildScalarCtx, scalar opt.ScalarExpr,
-) (tree.TypedExpr, error) {
-	cast := scalar.(*memo.AssignmentCastExpr)
-	input, err := b.buildScalar(ctx, cast.Input)
-	if err != nil {
-		return nil, err
-	}
-	if cast.Typ.Family() == types.TupleFamily {
-		// TODO(radu): casts to Tuple are not supported (they can't be
-		// serialized for distsql). This should only happen when the input is
-		// always NULL so the expression should still be valid without the cast
-		// (though there could be cornercases where the type does matter).
-		return input, nil
-	}
-	const fnName = "crdb_internal.assignment_cast"
-	funcRef := tree.WrapFunction(fnName)
-	props, overloads := builtins.GetBuiltinProperties(fnName)
-	return tree.NewTypedFuncExpr(
-		funcRef,
-		0, /* aggQualifier */
-		tree.TypedExprs{input, tree.NewTypedCastExpr(tree.DNull, cast.Typ)},
-		nil, /* filter */
-		nil, /* windowDef */
-		cast.Typ,
-		props,
-		&overloads[0],
-	), nil
 }
 
 func (b *Builder) buildCoalesce(
@@ -445,12 +410,7 @@ func (b *Builder) buildAnyScalar(
 	}
 
 	cmp := opt.ComparisonOpReverseMap[any.Cmp]
-	return tree.NewTypedComparisonExprWithSubOp(
-		tree.MakeComparisonOperator(tree.Any),
-		tree.MakeComparisonOperator(cmp),
-		left,
-		right,
-	), nil
+	return tree.NewTypedComparisonExprWithSubOp(tree.Any, cmp, left, right), nil
 }
 
 func (b *Builder) buildIndirection(
@@ -495,10 +455,7 @@ func (b *Builder) buildArrayFlatten(
 	}
 
 	typ := b.mem.Metadata().ColumnMeta(af.RequestedCol).Type
-	e := b.addSubquery(
-		exec.SubqueryAllRows, typ, root.root, af.OriginalExpr,
-		int64(af.Input.Relational().Stats.RowCountIfAvailable()),
-	)
+	e := b.addSubquery(exec.SubqueryAllRows, typ, root.root, af.OriginalExpr)
 
 	return tree.NewTypedArrayFlattenExpr(e), nil
 }
@@ -529,6 +486,12 @@ func (b *Builder) buildIfErr(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.T
 	return tree.NewTypedIfErrExpr(cond, orElse, errCode), nil
 }
 
+func (b *Builder) buildUnsupportedExpr(
+	ctx *buildScalarCtx, scalar opt.ScalarExpr,
+) (tree.TypedExpr, error) {
+	return scalar.(*memo.UnsupportedExprExpr).Value, nil
+}
+
 func (b *Builder) buildItem(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.TypedExpr, error) {
 	return b.buildScalar(ctx, scalar.Child(0).(opt.ScalarExpr))
 }
@@ -552,10 +515,7 @@ func (b *Builder) buildAny(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.Typ
 		contents[val] = b.mem.Metadata().ColumnMeta(opt.ColumnID(key)).Type
 	})
 	typs := types.MakeTuple(contents)
-	subqueryExpr := b.addSubquery(
-		exec.SubqueryAnyRows, typs, plan.root, any.OriginalExpr,
-		int64(any.Input.Relational().Stats.RowCountIfAvailable()),
-	)
+	subqueryExpr := b.addSubquery(exec.SubqueryAnyRows, typs, plan.root, any.OriginalExpr)
 
 	// Build the scalar value that is compared against each row.
 	scalarExpr, err := b.buildScalar(ctx, any.Scalar)
@@ -564,12 +524,7 @@ func (b *Builder) buildAny(ctx *buildScalarCtx, scalar opt.ScalarExpr) (tree.Typ
 	}
 
 	cmp := opt.ComparisonOpReverseMap[any.Cmp]
-	return tree.NewTypedComparisonExprWithSubOp(
-		tree.MakeComparisonOperator(tree.Any),
-		tree.MakeComparisonOperator(cmp),
-		scalarExpr,
-		subqueryExpr,
-	), nil
+	return tree.NewTypedComparisonExprWithSubOp(tree.Any, cmp, scalarExpr, subqueryExpr), nil
 }
 
 func (b *Builder) buildExistsSubquery(
@@ -588,10 +543,7 @@ func (b *Builder) buildExistsSubquery(
 		return nil, err
 	}
 
-	return b.addSubquery(
-		exec.SubqueryExists, types.Bool, plan.root, exists.OriginalExpr,
-		int64(exists.Input.Relational().Stats.RowCountIfAvailable()),
-	), nil
+	return b.addSubquery(exec.SubqueryExists, types.Bool, plan.root, exists.OriginalExpr), nil
 }
 
 func (b *Builder) buildSubquery(
@@ -618,16 +570,13 @@ func (b *Builder) buildSubquery(
 		return nil, err
 	}
 
-	return b.addSubquery(
-		exec.SubqueryOneRow, subquery.Typ, plan.root, subquery.OriginalExpr,
-		int64(input.Relational().Stats.RowCountIfAvailable()),
-	), nil
+	return b.addSubquery(exec.SubqueryOneRow, subquery.Typ, plan.root, subquery.OriginalExpr), nil
 }
 
 // addSubquery adds an entry to b.subqueries and creates a tree.Subquery
 // expression node associated with it.
 func (b *Builder) addSubquery(
-	mode exec.SubqueryMode, typ *types.T, root exec.Node, originalExpr *tree.Subquery, rowCount int64,
+	mode exec.SubqueryMode, typ *types.T, root exec.Node, originalExpr *tree.Subquery,
 ) *tree.Subquery {
 	var originalSelect tree.SelectStatement
 	if originalExpr != nil {
@@ -642,7 +591,6 @@ func (b *Builder) addSubquery(
 		ExprNode: exprNode,
 		Mode:     mode,
 		Root:     root,
-		RowCount: rowCount,
 	})
 	// Associate the tree.Subquery expression node with this subquery
 	// by index (1-based).

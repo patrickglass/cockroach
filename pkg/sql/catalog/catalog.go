@@ -11,8 +11,6 @@
 package catalog
 
 import (
-	"math"
-
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 )
@@ -28,15 +26,8 @@ type MutableDescriptor interface {
 	// descriptor should increment the version on the mutable copy from the
 	// outset.
 	MaybeIncrementVersion()
-
 	// SetDrainingNames sets the draining names for the descriptor.
-	//
-	// TODO(postamar): remove SetDrainingNames method in 22.2
-	SetDrainingNames([]descpb.NameInfo) // Deprecated
-	// AddDrainingName adds a draining name to the descriptor.
-	//
-	// TODO(postamar): remove AddDrainingName method in 22.2
-	AddDrainingName(descpb.NameInfo) // Deprecated
+	SetDrainingNames([]descpb.NameInfo)
 
 	// Accessors for the original state of the descriptor prior to the mutations.
 	OriginalName() string
@@ -53,21 +44,16 @@ type MutableDescriptor interface {
 	SetDropped()
 	// SetOffline sets the descriptor's state to offline, with the provided reason.
 	SetOffline(reason string)
-	// HasPostDeserializationChanges returns if the MutableDescriptor was changed after running
-	// RunPostDeserializationChanges.
-	HasPostDeserializationChanges() bool
 }
 
 // VirtualSchemas is a collection of VirtualSchemas.
 type VirtualSchemas interface {
 	GetVirtualSchema(schemaName string) (VirtualSchema, bool)
-	GetVirtualSchemaByID(id descpb.ID) (VirtualSchema, bool)
-	GetVirtualObjectByID(id descpb.ID) (VirtualObject, bool)
 }
 
 // VirtualSchema represents a collection of VirtualObjects.
 type VirtualSchema interface {
-	Desc() SchemaDescriptor
+	Desc() Descriptor
 	NumTables() int
 	VisitTables(func(object VirtualObject))
 	GetObjectByName(name string, flags tree.ObjectLookupFlags) (VirtualObject, error)
@@ -81,37 +67,43 @@ type VirtualObject interface {
 // ResolvedObjectPrefix represents the resolved components of an object name
 // prefix. It contains the parent database and schema.
 type ResolvedObjectPrefix struct {
-	// ExplicitDatabase and ExplicitSchema configure what is returned
-	// in the NamePrefix call.
-	ExplicitDatabase, ExplicitSchema bool
-
 	// Database is the parent database descriptor.
 	Database DatabaseDescriptor
 	// Schema is the parent schema.
-	Schema SchemaDescriptor
+	Schema ResolvedSchema
 }
 
-// NamePrefix returns the tree.ObjectNamePrefix with the appropriate names
-// and indications about which of those names were provided explicitly.
-func (p ResolvedObjectPrefix) NamePrefix() tree.ObjectNamePrefix {
-	var n tree.ObjectNamePrefix
-	n.ExplicitCatalog = p.ExplicitDatabase
-	n.ExplicitSchema = p.ExplicitSchema
-	if p.Database != nil {
-		n.CatalogName = tree.Name(p.Database.GetName())
-	}
-	if p.Schema != nil {
-		n.SchemaName = tree.Name(p.Schema.GetName())
-	}
-	return n
+// SchemaMeta implements the SchemaMeta interface.
+func (*ResolvedObjectPrefix) SchemaMeta() {}
+
+// ResolvedSchemaKind is an enum that represents what kind of schema
+// has been resolved.
+type ResolvedSchemaKind int
+
+const (
+	// SchemaPublic represents the public schema.
+	SchemaPublic ResolvedSchemaKind = iota
+	// SchemaVirtual represents a virtual schema.
+	SchemaVirtual
+	// SchemaTemporary represents a temporary schema.
+	SchemaTemporary
+	// SchemaUserDefined represents a user defined schema.
+	SchemaUserDefined
+)
+
+// ResolvedSchema represents the result of resolving a schema name, or an
+// object prefix of <db>.<schema>. Due to historical reasons, some schemas
+// don't have unique IDs (public and virtual schemas), and others aren't backed
+// by descriptors. The ResolvedSchema struct encapsulates the different cases.
+type ResolvedSchema struct {
+	// Marks what kind of schema this is. It is always set.
+	Kind ResolvedSchemaKind
+	// Name of the resolved schema. It is always set.
+	Name string
+	// The ID of the resolved schema. This field is only set for schema kinds
+	// SchemaPublic, SchemaUserDefined and SchemaTemporary.
+	ID descpb.ID
+	// The descriptor backing the resolved schema. It is only set for
+	// SchemaUserDefined.
+	Desc SchemaDescriptor
 }
-
-// NumSystemColumns defines the number of supported system columns and must be
-// equal to len(colinfo.AllSystemColumnDescs) (enforced in colinfo package to
-// avoid an import cycle).
-const NumSystemColumns = 2
-
-// SmallestSystemColumnColumnID is a descpb.ColumnID with the smallest value
-// among all system columns (enforced in colinfo package to avoid an import
-// cycle).
-const SmallestSystemColumnColumnID = math.MaxUint32 - 1

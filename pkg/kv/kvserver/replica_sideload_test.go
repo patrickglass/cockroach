@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
@@ -413,9 +415,9 @@ func TestRaftSSTableSideloadingInline(t *testing.T) {
 	}
 
 	runOne := func(k string, test testCase) {
-		ctx, getRecAndFinish := tracing.ContextWithRecordingSpan(
+		ctx, collect, cancel := tracing.ContextWithRecordingSpan(
 			context.Background(), tracing.NewTracer(), "test-recording")
-		defer getRecAndFinish()
+		defer cancel()
 
 		eng := storage.NewDefaultInMemForTesting()
 		defer eng.Close()
@@ -444,7 +446,7 @@ func TestRaftSSTableSideloadingInline(t *testing.T) {
 			t.Fatalf("%s: %+v", k, err)
 		}
 
-		if dump := getRecAndFinish().String(); test.expTrace != "" {
+		if dump := collect().String(); test.expTrace != "" {
 			if ok, err := regexp.MatchString(test.expTrace, dump); err != nil {
 				t.Fatalf("%s: %+v", k, err)
 			} else if !ok {
@@ -581,10 +583,10 @@ func testRaftSSTableSideloadingProposal(t *testing.T, eng storage.Engine) {
 	defer stopper.Stop(context.Background())
 	tc.Start(t, stopper)
 
-	tr := tc.store.cfg.AmbientCtx.Tracer
-	tr.TestingRecordAsyncSpans() // we assert on async span traces in this test
-	ctx, getRecAndFinish := tracing.ContextWithRecordingSpan(context.Background(), tr, "test-recording")
-	defer getRecAndFinish()
+	tr := tc.store.ClusterSettings().Tracer
+	tr.TestingIncludeAsyncSpansInRecordings() // we assert on async span traces in this test
+	ctx, collect, cancel := tracing.ContextWithRecordingSpan(context.Background(), tr, "test-recording")
+	defer cancel()
 
 	const (
 		key       = "foo"
@@ -624,7 +626,7 @@ func testRaftSSTableSideloadingProposal(t *testing.T, eng storage.Engine) {
 		defer tc.repl.raftMu.Unlock()
 
 		if err := testutils.MatchInOrder(
-			getRecAndFinish().String(), "sideloadable proposal detected", "ingested SSTable",
+			collect().String(), "sideloadable proposal detected", "ingested SSTable",
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -667,21 +669,50 @@ func testRaftSSTableSideloadingProposal(t *testing.T, eng storage.Engine) {
 	verifyLogSizeInSync(t, tc.repl)
 }
 
+type mockSender struct {
+	logEntries [][]byte
+	done       bool
+}
+
+func (mr *mockSender) Send(req *SnapshotRequest) error {
+	if req.LogEntries != nil {
+		if mr.logEntries != nil {
+			return errors.New("already have log entries")
+		}
+		mr.logEntries = req.LogEntries
+	}
+	return nil
+}
+
+func (mr *mockSender) Recv() (*SnapshotResponse, error) {
+	if mr.done {
+		return nil, io.EOF
+	}
+	status := SnapshotResponse_ACCEPTED
+	if len(mr.logEntries) > 0 {
+		status = SnapshotResponse_APPLIED
+		mr.done = true
+	}
+	return &SnapshotResponse{Status: status}, nil
+}
+
 func newOnDiskEngine(t *testing.T) (func(), storage.Engine) {
 	dir, cleanup := testutils.TempDir(t)
-	eng, err := storage.Open(
-		context.Background(),
-		storage.Filesystem(dir),
-		storage.CacheSize(1<<20 /* 1 MiB */))
+	eng, err := storage.NewDefaultEngine(
+		1<<20,
+		base.StorageConfig{
+			Dir:       dir,
+			MustExist: false,
+		})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return cleanup, eng
 }
 
-// This test verifies that sideloaded proposals are
-// inlined correctly and can be read back.
-func TestRaftSSTableSideloading(t *testing.T) {
+// This test verifies that when a snapshot is sent, sideloaded proposals are
+// inlined.
+func TestRaftSSTableSideloadingSnapshot(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	defer SetMockAddSSTable()()
@@ -689,15 +720,21 @@ func TestRaftSSTableSideloading(t *testing.T) {
 	ctx := context.Background()
 	tc := testContext{}
 
+	cleanup, eng := newOnDiskEngine(t)
+	tc.engine = eng
+	defer cleanup()
+	defer eng.Close()
+
 	stopper := stop.NewStopper()
 	defer stopper.Stop(ctx)
 	tc.Start(t, stopper)
 
-	// Disable log truncation to make sure our proposal stays in the log.
-	tc.store.SetRaftLogQueueActive(false)
-
 	var ba roachpb.BatchRequest
 	ba.RangeID = tc.repl.RangeID
+
+	// Disable log truncation as we want to be sure that we get to create
+	// snapshots that have our sideloaded proposal in them.
+	tc.store.SetRaftLogQueueActive(false)
 
 	// Put a sideloaded proposal on the Range.
 	key, val := "don't", "care"
@@ -716,60 +753,151 @@ func TestRaftSSTableSideloading(t *testing.T) {
 		}
 	}
 
-	// Check the `entries()` method which has special handling to accommodate
-	// `term()`: when an empty sideload storage is passed in, `entries()` should
-	// not inline, and in turn also not populate the entries cache (since its
-	// contents must always be fully inlined).
-	tc.repl.raftMu.Lock()
-	defer tc.repl.raftMu.Unlock()
-	tc.repl.mu.Lock()
-	defer tc.repl.mu.Unlock()
-	testutils.RunTrueAndFalse(t, "withSS", func(t *testing.T, withSS bool) {
-		rsl := stateloader.Make(tc.repl.RangeID)
-		lo := tc.repl.mu.state.TruncatedState.Index + 1
-		hi := tc.repl.mu.lastIndex + 1
+	// Run a happy case snapshot. Check that it properly inlines the payload in
+	// the contained log entries.
+	inlinedEntry := func() raftpb.Entry {
+		os, err := tc.repl.GetSnapshot(ctx, SnapshotRequest_VIA_SNAPSHOT_QUEUE, tc.store.StoreID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Close()
 
-		var ss SideloadStorage
-		if withSS {
-			ss = tc.repl.raftMu.sideloaded
+		mockSender := &mockSender{}
+		if err := sendSnapshot(
+			ctx,
+			tc.store.cfg.Settings,
+			mockSender,
+			&fakeStorePool{},
+			SnapshotRequest_Header{State: os.State, Priority: SnapshotRequest_RECOVERY},
+			os,
+			tc.repl.store.Engine().NewBatch,
+			func() {},
+		); err != nil {
+			t.Fatal(err)
 		}
 
-		tc.store.raftEntryCache.Clear(tc.repl.RangeID, hi)
-		ents, err := entries(
-			ctx, rsl, tc.store.Engine(), tc.repl.RangeID, tc.store.raftEntryCache,
-			ss, lo, hi, math.MaxUint64,
-		)
-		require.NoError(t, err)
-		require.Len(t, ents, int(hi-lo))
-
-		// Raft entry cache only gets populated when sideloaded storage provided.
-		_, okLo := tc.store.raftEntryCache.Get(tc.repl.RangeID, lo)
-		_, okHi := tc.store.raftEntryCache.Get(tc.repl.RangeID, hi-1)
-		if withSS {
-			require.True(t, okLo)
-			require.True(t, okHi)
-		} else {
-			require.False(t, okLo)
-			require.False(t, okHi)
-		}
-
-		// The rest of the test is the same in both cases. We find the sideloaded entry
-		// and check the sideloaded storage for the payload.
-		var idx int
-		for idx = 0; idx < len(ents); idx++ {
-			// Get the SST back from the raft log.
-			if !sniffSideloadedRaftCommand(ents[idx].Data) {
-				continue
+		var ent raftpb.Entry
+		var cmd kvserverpb.RaftCommand
+		var finalEnt raftpb.Entry
+		for _, entryBytes := range mockSender.logEntries {
+			if err := protoutil.Unmarshal(entryBytes, &ent); err != nil {
+				t.Fatal(err)
 			}
-			ent, err := maybeInlineSideloadedRaftCommand(ctx, tc.repl.RangeID, ents[idx], tc.repl.raftMu.sideloaded, tc.store.raftEntryCache)
-			require.NoError(t, err)
-			sst, err := tc.repl.raftMu.sideloaded.Get(ctx, ent.Index, ent.Term)
-			require.NoError(t, err)
-			require.Equal(t, origSSTData, sst)
-			break
+			if sniffSideloadedRaftCommand(ent.Data) {
+				_, cmdBytes := DecodeRaftCommand(ent.Data)
+				if err := protoutil.Unmarshal(cmdBytes, &cmd); err != nil {
+					t.Fatal(err)
+				}
+				if as := cmd.ReplicatedEvalResult.AddSSTable; as == nil {
+					t.Fatalf("no AddSSTable found in sideloaded command %+v", cmd)
+				} else if len(as.Data) == 0 {
+					t.Fatalf("empty payload in sideloaded command: %+v", cmd)
+				}
+				finalEnt = ent
+			}
 		}
-		require.Less(t, idx, len(ents)) // there was an SST
-	})
+		if finalEnt.Index == 0 {
+			t.Fatal("no sideloaded command found")
+		}
+		return finalEnt
+	}()
+
+	sideloadedIndex := inlinedEntry.Index
+
+	// This happens to be a good point in time to check the `entries()` method
+	// which has special handling to accommodate `term()`: when an empty
+	// sideload storage is passed in, `entries()` should not inline, and in turn
+	// also not populate the entries cache (since its contents must always be
+	// fully inlined).
+	func() {
+		tc.repl.raftMu.Lock()
+		defer tc.repl.raftMu.Unlock()
+		tc.repl.mu.Lock()
+		defer tc.repl.mu.Unlock()
+		for _, withSS := range []bool{false, true} {
+			tc.store.raftEntryCache.Clear(tc.repl.RangeID, sideloadedIndex+1)
+
+			var ss SideloadStorage
+			if withSS {
+				ss = tc.repl.raftMu.sideloaded
+			}
+			rsl := stateloader.Make(tc.repl.RangeID)
+			entries, err := entries(
+				ctx, rsl, tc.store.Engine(), tc.repl.RangeID, tc.store.raftEntryCache,
+				ss, sideloadedIndex, sideloadedIndex+1, 1<<20,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 {
+				t.Fatalf("no or too many entries returned from cache: %+v", entries)
+			}
+			ents, _, _, _ := tc.store.raftEntryCache.Scan(nil, tc.repl.RangeID, sideloadedIndex, sideloadedIndex+1, 1<<20)
+			if withSS {
+				// We passed the sideload storage, so we expect to get our
+				// inlined index back from the cache.
+				if len(ents) != 1 {
+					t.Fatalf("no or too many entries returned from cache: %+v", ents)
+				}
+				if err := entryEq(inlinedEntry, ents[0]); err != nil {
+					t.Fatalf("withSS=%t: %+v", withSS, err)
+				}
+			} else {
+				// Without sideload storage, expect the cache to remain
+				// unpopulated and the entry returned from entries() to not have
+				// been inlined.
+				if len(ents) != 0 {
+					t.Fatalf("expected no cached entries, but got %+v", ents)
+				}
+				if expErr, err := `ReplicatedEvalResult.AddSSTable.Data: \[\]uint8\[\d+\] != \[\]uint8\[0\]`,
+					entryEq(inlinedEntry, entries[0]); !testutils.IsError(
+					err,
+					expErr,
+				) {
+					t.Fatalf("expected specific mismatch on `Data` field, but got %v\nwanted: %s", err, expErr)
+				}
+			}
+		}
+	}()
+
+	// Now run a snapshot that will fail since it doesn't find one of its on-disk
+	// payloads. This can happen if the Raft log queue runs between the time the
+	// (engine) snapshot is taken and the log entries are actually read from the
+	// (engine) snapshot. We didn't run this before because we wanted the file
+	// to stay in sideloaded storage for the previous test.
+	func() {
+		failingOS, err := tc.repl.GetSnapshot(ctx, SnapshotRequest_VIA_SNAPSHOT_QUEUE, tc.store.StoreID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer failingOS.Close()
+
+		// Remove the actual file.
+		tc.repl.raftMu.Lock()
+		if err := tc.repl.raftMu.sideloaded.Clear(ctx); err != nil {
+			tc.repl.raftMu.Unlock()
+			t.Fatal(err)
+		}
+		tc.repl.raftMu.Unlock()
+		// Additionally we need to clear out the entry from the cache because
+		// that would still save the day.
+		tc.store.raftEntryCache.Clear(tc.repl.RangeID, sideloadedIndex+1)
+
+		mockSender := &mockSender{}
+		err = sendSnapshot(
+			ctx,
+			tc.store.cfg.Settings,
+			mockSender,
+			&fakeStorePool{},
+			SnapshotRequest_Header{State: failingOS.State, Priority: SnapshotRequest_RECOVERY},
+			failingOS,
+			tc.repl.store.Engine().NewBatch,
+			func() {},
+		)
+		if !errors.HasType(err, (*errMustRetrySnapshotDueToTruncation)(nil)) {
+			t.Fatal(err)
+		}
+	}()
 }
 
 func TestRaftSSTableSideloadingTruncation(t *testing.T) {

@@ -13,7 +13,6 @@ package kvserver
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcostmodel"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 )
 
@@ -28,7 +27,19 @@ func (r *Replica) maybeRateLimitBatch(ctx context.Context, ba *roachpb.BatchRequ
 	if !ok || tenantID == roachpb.SystemTenantID {
 		return nil
 	}
-	return r.tenantLimiter.Wait(ctx, tenantcostmodel.MakeRequestInfo(ba))
+	return r.tenantLimiter.Wait(ctx, ba.IsWrite(), bytesWrittenFromRequest(ba))
+}
+
+// bytesWrittenFromBatchRequest returns an approximation of the number of bytes
+// written by a batch request.
+func bytesWrittenFromRequest(ba *roachpb.BatchRequest) int64 {
+	var writeBytes int64
+	for _, ru := range ba.Requests {
+		if swr, isSizedWrite := ru.GetInner().(roachpb.SizedWriteRequest); isSizedWrite {
+			writeBytes += swr.WriteBytes()
+		}
+	}
+	return writeBytes
 }
 
 // recordImpactOnRateLimiter is used to record a read against the tenant rate limiter.
@@ -37,5 +48,13 @@ func (r *Replica) recordImpactOnRateLimiter(ctx context.Context, br *roachpb.Bat
 		return
 	}
 
-	r.tenantLimiter.RecordRead(ctx, tenantcostmodel.MakeResponseInfo(br))
+	r.tenantLimiter.RecordRead(ctx, bytesReadFromResponse(br))
+}
+
+func bytesReadFromResponse(br *roachpb.BatchResponse) int64 {
+	var readBytes int64
+	for _, ru := range br.Responses {
+		readBytes += ru.GetInner().Header().NumBytes
+	}
+	return readBytes
 }

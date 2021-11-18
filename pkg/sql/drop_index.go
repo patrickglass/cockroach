@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
+	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
@@ -95,7 +97,7 @@ func (n *dropIndexNode) startExec(params runParams) error {
 		// the list: when two or more index names refer to the same table,
 		// the mutation list and new version number created by the first
 		// drop need to be visible to the second drop.
-		_, tableDesc, err := params.p.ResolveMutableTableDescriptor(
+		tableDesc, err := params.p.ResolveMutableTableDescriptor(
 			ctx, index.tn, true /*required*/, tree.ResolveRequireTableOrViewDesc)
 		if sqlerrors.IsUndefinedRelationError(err) {
 			// Somehow the descriptor we had during planning is not there
@@ -123,26 +125,6 @@ func (n *dropIndexNode) startExec(params runParams) error {
 			shardColName = idx.GetShardColumnName()
 		}
 
-		// Drop inaccessible indexed columns. They are created for expression
-		// indexes. They cannot be referenced in constraints, computed columns,
-		// or other indexes, so they are safe to drop.
-		columnsDropped := false
-		if idx != nil {
-			for i, count := 0, idx.NumKeyColumns(); i < count; i++ {
-				id := idx.GetKeyColumnID(i)
-				col, err := tableDesc.FindColumnWithID(id)
-				if err != nil {
-					return err
-				}
-				if col.IsExpressionIndexColumn() {
-					n.queueDropColumn(tableDesc, col)
-					columnsDropped = true
-				}
-			}
-		}
-
-		// CAUTION: After dropIndexByName returns, idx will be a pointer to a
-		// different index than the one being dropped.
 		if err := params.p.dropIndexByName(
 			ctx, index.tn, index.idxName, tableDesc, n.n.IfExists, n.n.DropBehavior, checkIdxConstraint,
 			tree.AsStringWithFQNames(n.n, params.Ann()),
@@ -151,77 +133,22 @@ func (n *dropIndexNode) startExec(params runParams) error {
 		}
 
 		if shardColName != "" {
-			ok, err := n.maybeQueueDropShardColumn(tableDesc, shardColName)
-			if err != nil {
-				return err
-			}
-			columnsDropped = columnsDropped || ok
-		}
-
-		if columnsDropped {
-			if err := n.finalizeDropColumn(params, tableDesc); err != nil {
+			if err := n.maybeDropShardColumn(params, tableDesc, shardColName); err != nil {
 				return err
 			}
 		}
-
 	}
 	return nil
-}
-
-// queueDropColumn queues a column to be dropped. Once all columns to drop are
-// queued, call finalizeDropColumn.
-func (n *dropIndexNode) queueDropColumn(tableDesc *tabledesc.Mutable, col catalog.Column) {
-	tableDesc.AddColumnMutation(col.ColumnDesc(), descpb.DescriptorMutation_DROP)
-	for i := range tableDesc.Columns {
-		if tableDesc.Columns[i].ID == col.GetID() {
-			// Note the third slice parameter which will force a copy of the backing
-			// array if the column being removed is not the last column.
-			tableDesc.Columns = append(tableDesc.Columns[:i:i],
-				tableDesc.Columns[i+1:]...)
-			break
-		}
-	}
-}
-
-// maybeDropShardColumn drops the given shard column, if there aren't any other
-// indexes referring to it. It returns true if the column was queued to be
-// dropped.
-//
-// Assumes that the given index is sharded.
-func (n *dropIndexNode) maybeQueueDropShardColumn(
-	tableDesc *tabledesc.Mutable, shardColName string,
-) (bool, error) {
-	shardColDesc, err := tableDesc.FindColumnWithName(tree.Name(shardColName))
-	if err != nil {
-		return false, err
-	}
-	if shardColDesc.Dropped() {
-		return false, nil
-	}
-	if catalog.FindNonDropIndex(tableDesc, func(otherIdx catalog.Index) bool {
-		colIDs := otherIdx.CollectKeyColumnIDs()
-		if !otherIdx.Primary() {
-			colIDs.UnionWith(otherIdx.CollectSecondaryStoredColumnIDs())
-			colIDs.UnionWith(otherIdx.CollectKeySuffixColumnIDs())
-		}
-		return colIDs.Contains(shardColDesc.GetID())
-	}) != nil {
-		return false, nil
-	}
-	if err := n.dropShardColumnAndConstraint(tableDesc, shardColDesc); err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 // dropShardColumnAndConstraint drops the given shard column and its associated check
 // constraint.
 func (n *dropIndexNode) dropShardColumnAndConstraint(
-	tableDesc *tabledesc.Mutable, shardCol catalog.Column,
+	params runParams, tableDesc *tabledesc.Mutable, shardColDesc *descpb.ColumnDescriptor,
 ) error {
 	validChecks := tableDesc.Checks[:0]
 	for _, check := range tableDesc.AllActiveAndInactiveChecks() {
-		if used, err := tableDesc.CheckConstraintUsesColumn(check, shardCol.GetID()); err != nil {
+		if used, err := tableDesc.CheckConstraintUsesColumn(check, shardColDesc.ID); err != nil {
 			return err
 		} else if used {
 			if check.Validity == descpb.ConstraintValidity_Validating {
@@ -237,13 +164,17 @@ func (n *dropIndexNode) dropShardColumnAndConstraint(
 		tableDesc.Checks = validChecks
 	}
 
-	n.queueDropColumn(tableDesc, shardCol)
-	return nil
-}
+	tableDesc.AddColumnMutation(shardColDesc, descpb.DescriptorMutation_DROP)
+	for i := range tableDesc.Columns {
+		if tableDesc.Columns[i].ID == shardColDesc.ID {
+			// Note the third slice parameter which will force a copy of the backing
+			// array if the column being removed is not the last column.
+			tableDesc.Columns = append(tableDesc.Columns[:i:i],
+				tableDesc.Columns[i+1:]...)
+			break
+		}
+	}
 
-// finalizeDropColumn finalizes the dropping of one or more columns. It should
-// only be called if queueDropColumn has been called at least once.
-func (n *dropIndexNode) finalizeDropColumn(params runParams, tableDesc *tabledesc.Mutable) error {
 	if err := tableDesc.AllocateIDs(params.ctx); err != nil {
 		return err
 	}
@@ -254,6 +185,28 @@ func (n *dropIndexNode) finalizeDropColumn(params runParams, tableDesc *tabledes
 		return err
 	}
 	return nil
+}
+
+// maybeDropShardColumn drops the given shard column, if there aren't any other indexes
+// referring to it.
+//
+// Assumes that the given index is sharded.
+func (n *dropIndexNode) maybeDropShardColumn(
+	params runParams, tableDesc *tabledesc.Mutable, shardColName string,
+) error {
+	shardColDesc, err := tableDesc.FindColumnWithName(tree.Name(shardColName))
+	if err != nil {
+		return err
+	}
+	if shardColDesc.Dropped() {
+		return nil
+	}
+	if catalog.FindNonDropIndex(tableDesc, func(otherIdx catalog.Index) bool {
+		return otherIdx.ContainsColumnID(shardColDesc.GetID())
+	}) != nil {
+		return nil
+	}
+	return n.dropShardColumnAndConstraint(params, tableDesc, shardColDesc.ColumnDesc())
 }
 
 func (*dropIndexNode) Next(runParams) (bool, error) { return false, nil }
@@ -287,7 +240,7 @@ func (p *planner) dropIndexByName(
 	constraintBehavior dropIndexConstraintBehavior,
 	jobDesc string,
 ) error {
-	idx, err := tableDesc.FindIndexWithName(string(idxName))
+	idxI, err := tableDesc.FindIndexWithName(string(idxName))
 	if err != nil {
 		// Only index names of the form "table@idx" throw an error here if they
 		// don't exist.
@@ -298,7 +251,7 @@ func (p *planner) dropIndexByName(
 		// Index does not exist, but we want it to: error out.
 		return pgerror.WithCandidateCode(err, pgcode.UndefinedObject)
 	}
-	if idx.Dropped() {
+	if idxI.Dropped() {
 		return nil
 	}
 
@@ -312,26 +265,26 @@ func (p *planner) dropIndexByName(
 		}
 	}
 
-	if idx.IsUnique() && behavior != tree.DropCascade && constraintBehavior != ignoreIdxConstraint && !idx.IsCreatedExplicitly() {
+	idx := idxI.IndexDesc()
+	if idx.Unique && behavior != tree.DropCascade && constraintBehavior != ignoreIdxConstraint && !idx.CreatedExplicitly {
 		return errors.WithHint(
 			pgerror.Newf(pgcode.DependentObjectsStillExist,
-				"index %q is in use as unique constraint", idx.GetName()),
+				"index %q is in use as unique constraint", idx.Name),
 			"use CASCADE if you really want to drop it.",
 		)
 	}
 
-	// Check if requires CCL binary for eventual zone config removal. This is only
-	// required if `system.zones` exists.
-	if ZonesTableExists(ctx, p.ExecCfg().Codec, p.ExecCfg().Settings.Version) {
-		_, zone, _, err := GetZoneConfigInTxn(
-			ctx, p.txn, p.ExecCfg().Codec, tableDesc.ID, nil /* index */, "", false,
-		)
+	// Check if requires CCL binary for eventual zone config removal. Only
+	// necessary for the system tenant, because secondary tenants do not have
+	// zone configs for individual objects.
+	if p.ExecCfg().Codec.ForSystemTenant() {
+		_, zone, _, err := GetZoneConfigInTxn(ctx, p.txn, config.SystemTenantObjectID(tableDesc.ID), nil, "", false)
 		if err != nil {
 			return err
 		}
 
 		for _, s := range zone.Subzones {
-			if s.IndexID != uint32(idx.GetID()) {
+			if s.IndexID != uint32(idx.ID) {
 				_, err = GenerateSubzoneSpans(
 					p.ExecCfg().Settings,
 					p.ExecCfg().ClusterID(),
@@ -368,17 +321,17 @@ func (p *planner) dropIndexByName(
 	// Construct a list of all the remaining indexes, so that we can see if there
 	// is another index that could replace the one we are deleting for a given
 	// foreign key constraint.
-	remainingIndexes := make([]catalog.Index, 1, len(tableDesc.ActiveIndexes()))
-	remainingIndexes[0] = tableDesc.GetPrimaryIndex()
+	remainingIndexes := make([]*descpb.IndexDescriptor, 1, len(tableDesc.ActiveIndexes()))
+	remainingIndexes[0] = tableDesc.GetPrimaryIndex().IndexDesc()
 	for _, index := range tableDesc.PublicNonPrimaryIndexes() {
-		if index.GetID() != idx.GetID() {
-			remainingIndexes = append(remainingIndexes, index)
+		if index.GetID() != idx.ID {
+			remainingIndexes = append(remainingIndexes, index.IndexDesc())
 		}
 	}
 
 	// indexHasReplacementCandidate runs isValidIndex on each index in remainingIndexes and returns
 	// true if at least one index satisfies isValidIndex.
-	indexHasReplacementCandidate := func(isValidIndex func(index catalog.Index) bool) bool {
+	indexHasReplacementCandidate := func(isValidIndex func(*descpb.IndexDescriptor) bool) bool {
 		foundReplacement := false
 		for _, index := range remainingIndexes {
 			if isValidIndex(index) {
@@ -397,12 +350,42 @@ func (p *planner) dropIndexByName(
 			// foreign key mutation, then make sure that we have another index that
 			// could be used for this mutation.
 			idx.IsValidOriginIndex(c.ForeignKey.OriginColumnIDs) &&
-			!indexHasReplacementCandidate(func(idx catalog.Index) bool {
+			!indexHasReplacementCandidate(func(idx *descpb.IndexDescriptor) bool {
 				return idx.IsValidOriginIndex(c.ForeignKey.OriginColumnIDs)
 			}) {
 			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
 				"referencing constraint %q in the middle of being added, try again later", c.ForeignKey.Name)
 		}
+	}
+
+	if err := p.MaybeUpgradeDependentOldForeignKeyVersionTables(ctx, tableDesc); err != nil {
+		return err
+	}
+
+	// If the we aren't at a high enough version to drop indexes on the origin
+	// side then we have to attempt to delete them.
+	if !p.ExecCfg().Settings.Version.IsActive(ctx, clusterversion.NoOriginFKIndexes) {
+		// Index for updating the FK slices in place when removing FKs.
+		sliceIdx := 0
+		for i := range tableDesc.OutboundFKs {
+			tableDesc.OutboundFKs[sliceIdx] = tableDesc.OutboundFKs[i]
+			sliceIdx++
+			fk := &tableDesc.OutboundFKs[i]
+			canReplace := func(idx *descpb.IndexDescriptor) bool {
+				return idx.IsValidOriginIndex(fk.OriginColumnIDs)
+			}
+			// The index being deleted could be used as the origin index for this foreign key.
+			if idx.IsValidOriginIndex(fk.OriginColumnIDs) && !indexHasReplacementCandidate(canReplace) {
+				if behavior != tree.DropCascade && constraintBehavior != ignoreIdxConstraint {
+					return errors.Errorf("index %q is in use as a foreign key constraint", idx.Name)
+				}
+				sliceIdx--
+				if err := p.removeFKBackReference(ctx, tableDesc, fk); err != nil {
+					return err
+				}
+			}
+		}
+		tableDesc.OutboundFKs = tableDesc.OutboundFKs[:sliceIdx]
 	}
 
 	// If this index is used on the referencing side of any FK constraints, try
@@ -418,23 +401,34 @@ func (p *planner) dropIndexByName(
 		return err
 	}
 
+	if len(idx.Interleave.Ancestors) > 0 {
+		if err := p.removeInterleaveBackReference(ctx, tableDesc, idx); err != nil {
+			return err
+		}
+	}
+	for _, ref := range idx.InterleavedBy {
+		if err := p.removeInterleave(ctx, ref); err != nil {
+			return err
+		}
+	}
+
 	var droppedViews []string
 	for _, tableRef := range tableDesc.DependedOnBy {
-		if tableRef.IndexID == idx.GetID() {
+		if tableRef.IndexID == idx.ID {
 			// Ensure that we have DROP privilege on all dependent views
 			err := p.canRemoveDependentViewGeneric(
-				ctx, "index", idx.GetName(), tableDesc.ParentID, tableRef, behavior)
+				ctx, "index", idx.Name, tableDesc.ParentID, tableRef, behavior)
 			if err != nil {
 				return err
 			}
 			viewDesc, err := p.getViewDescForCascade(
-				ctx, "index", idx.GetName(), tableDesc.ParentID, tableRef.ID, behavior,
+				ctx, "index", idx.Name, tableDesc.ParentID, tableRef.ID, behavior,
 			)
 			if err != nil {
 				return err
 			}
 			viewJobDesc := fmt.Sprintf("removing view %q dependent on index %q which is being dropped",
-				viewDesc.Name, idx.GetName())
+				viewDesc.Name, idx.Name)
 			cascadedViews, err := p.removeDependentView(ctx, tableDesc, viewDesc, viewJobDesc)
 			if err != nil {
 				return err
@@ -451,12 +445,12 @@ func (p *planner) dropIndexByName(
 	}
 
 	// Overwriting tableDesc.Index may mess up with the idx object we collected above. Make a copy.
-	idxCopy := *idx.IndexDesc()
-	idxDesc := &idxCopy
+	idxCopy := *idx
+	idx = &idxCopy
 
 	// Currently, a replacement primary index must be specified when dropping the primary index,
 	// and this cannot be done with DROP INDEX.
-	if idxDesc.ID == tableDesc.GetPrimaryIndexID() {
+	if idx.ID == tableDesc.GetPrimaryIndexID() {
 		return errors.WithHint(
 			pgerror.Newf(pgcode.FeatureNotSupported, "cannot drop the primary index of a table using DROP INDEX"),
 			"instead, use ALTER TABLE ... ALTER PRIMARY KEY or"+
@@ -465,7 +459,7 @@ func (p *planner) dropIndexByName(
 	}
 
 	foundIndex := catalog.FindPublicNonPrimaryIndex(tableDesc, func(idxEntry catalog.Index) bool {
-		return idxEntry.GetID() == idxDesc.ID
+		return idxEntry.GetID() == idx.ID
 	})
 
 	if foundIndex == nil {
@@ -518,7 +512,7 @@ func (p *planner) dropIndexByName(
 	}
 	tableDesc.RemovePublicNonPrimaryIndex(idxOrdinal)
 
-	if err := p.removeIndexComment(ctx, tableDesc.ID, idxDesc.ID); err != nil {
+	if err := p.removeIndexComment(ctx, tableDesc.ID, idx.ID); err != nil {
 		return err
 	}
 

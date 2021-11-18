@@ -30,6 +30,17 @@ import (
 	"google.golang.org/grpc"
 )
 
+// CallbackMetadataSource is a utility struct that implements the MetadataSource
+// interface by calling a provided callback.
+type CallbackMetadataSource struct {
+	DrainMetaCb func(context.Context) []ProducerMetadata
+}
+
+// DrainMeta is part of the MetadataSource interface.
+func (s CallbackMetadataSource) DrainMeta(ctx context.Context) []ProducerMetadata {
+	return s.DrainMetaCb(ctx)
+}
+
 func newInsecureRPCContext(stopper *stop.Stopper) *rpc.Context {
 	return rpc.NewContext(rpc.ContextOptions{
 		TenantID:   roachpb.SystemTenantID,
@@ -61,7 +72,8 @@ func StartMockDistSQLServer(
 // MockDistSQLServer implements the DistSQLServer (gRPC) interface and allows
 // clients to control the inbound streams.
 type MockDistSQLServer struct {
-	InboundStreams chan InboundStreamNotification
+	InboundStreams   chan InboundStreamNotification
+	RunSyncFlowCalls chan RunSyncFlowCall
 }
 
 // InboundStreamNotification is the MockDistSQLServer's way to tell its clients
@@ -72,13 +84,29 @@ type InboundStreamNotification struct {
 	Donec  chan<- error
 }
 
+// RunSyncFlowCall is the MockDistSQLServer's way to tell its clients that a
+// RunSyncFlowCall has arrived. The rpc handler is blocked until Donec is
+// signaled.
+type RunSyncFlowCall struct {
+	Stream DistSQL_RunSyncFlowServer
+	Donec  chan<- error
+}
+
 // MockDistSQLServer implements the DistSQLServer interface.
 var _ DistSQLServer = &MockDistSQLServer{}
 
 func newMockDistSQLServer() *MockDistSQLServer {
 	return &MockDistSQLServer{
-		InboundStreams: make(chan InboundStreamNotification),
+		InboundStreams:   make(chan InboundStreamNotification),
+		RunSyncFlowCalls: make(chan RunSyncFlowCall),
 	}
+}
+
+// RunSyncFlow is part of the DistSQLServer interface.
+func (ds *MockDistSQLServer) RunSyncFlow(stream DistSQL_RunSyncFlowServer) error {
+	donec := make(chan error)
+	ds.RunSyncFlowCalls <- RunSyncFlowCall{Stream: stream, Donec: donec}
+	return <-donec
 }
 
 // SetupFlow is part of the DistSQLServer interface.

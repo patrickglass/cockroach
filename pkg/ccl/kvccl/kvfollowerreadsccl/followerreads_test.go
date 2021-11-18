@@ -44,7 +44,11 @@ import (
 )
 
 const (
-	expectedFollowerReadOffset time.Duration = -4200 * time.Millisecond
+	defaultInterval                          = 3
+	defaultFraction                          = .2
+	defaultMultiple                          = 3
+	expectedFollowerReadOffset time.Duration = 1e9 * /* 1 second */
+		-defaultInterval * (1 + defaultFraction*defaultMultiple)
 )
 
 func TestEvalFollowerReadOffset(t *testing.T) {
@@ -68,10 +72,9 @@ func TestEvalFollowerReadOffset(t *testing.T) {
 func TestZeroDurationDisablesFollowerReadOffset(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer utilccl.TestingEnableEnterprise()()
-	ctx := context.Background()
 
 	st := cluster.MakeTestingClusterSettings()
-	closedts.TargetDuration.Override(ctx, &st.SV, 0)
+	closedts.TargetDuration.Override(&st.SV, 0)
 	if offset, err := evalFollowerReadOffset(uuid.MakeV4(), st); err != nil {
 		t.Fatal(err)
 	} else if offset != math.MinInt64 {
@@ -81,9 +84,6 @@ func TestZeroDurationDisablesFollowerReadOffset(t *testing.T) {
 
 func TestCanSendToFollower(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	skip.UnderDeadlock(t, "test is flaky under deadlock+stress")
-
-	ctx := context.Background()
 	clock := hlc.NewClock(hlc.UnixNano, base.DefaultMaxClockOffset)
 	stale := clock.Now().Add(2*expectedFollowerReadOffset.Nanoseconds(), 0)
 	current := clock.Now()
@@ -107,15 +107,6 @@ func TestCanSendToFollower(t *testing.T) {
 		ba.Add(req)
 		return ba
 	}
-	withBatchTimestamp := func(ba roachpb.BatchRequest, ts hlc.Timestamp) roachpb.BatchRequest {
-		ba.Timestamp = ts
-		return ba
-	}
-	withServerSideBatchTimestamp := func(ba roachpb.BatchRequest, ts hlc.Timestamp) roachpb.BatchRequest {
-		ba = withBatchTimestamp(ba, ts)
-		ba.TimestampFromServerClock = true
-		return ba
-	}
 
 	testCases := []struct {
 		name                  string
@@ -127,38 +118,8 @@ func TestCanSendToFollower(t *testing.T) {
 		exp                   bool
 	}{
 		{
-			name: "non-txn batch, without ts",
+			name: "non-txn batch",
 			ba:   batch(nil, &roachpb.GetRequest{}),
-			exp:  false,
-		},
-		{
-			name: "stale non-txn batch",
-			ba:   withBatchTimestamp(batch(nil, &roachpb.GetRequest{}), stale),
-			exp:  true,
-		},
-		{
-			name: "current-time non-txn batch",
-			ba:   withBatchTimestamp(batch(nil, &roachpb.GetRequest{}), current),
-			exp:  false,
-		},
-		{
-			name: "future non-txn batch",
-			ba:   withBatchTimestamp(batch(nil, &roachpb.GetRequest{}), future),
-			exp:  false,
-		},
-		{
-			name: "stale non-txn batch, server-side ts",
-			ba:   withServerSideBatchTimestamp(batch(nil, &roachpb.GetRequest{}), stale),
-			exp:  false,
-		},
-		{
-			name: "current-time non-txn batch, server-side ts",
-			ba:   withServerSideBatchTimestamp(batch(nil, &roachpb.GetRequest{}), current),
-			exp:  false,
-		},
-		{
-			name: "future non-txn batch, server-side ts",
-			ba:   withServerSideBatchTimestamp(batch(nil, &roachpb.GetRequest{}), future),
 			exp:  false,
 		},
 		{
@@ -218,44 +179,8 @@ func TestCanSendToFollower(t *testing.T) {
 			exp:  false,
 		},
 		{
-			name:     "non-txn batch, without ts, global reads policy",
+			name:     "non-txn batch, global reads policy",
 			ba:       batch(nil, &roachpb.GetRequest{}),
-			ctPolicy: roachpb.LEAD_FOR_GLOBAL_READS,
-			exp:      false,
-		},
-		{
-			name:     "stale non-txn batch, global reads policy",
-			ba:       withBatchTimestamp(batch(nil, &roachpb.GetRequest{}), stale),
-			ctPolicy: roachpb.LEAD_FOR_GLOBAL_READS,
-			exp:      true,
-		},
-		{
-			name:     "current-time non-txn batch, global reads policy",
-			ba:       withBatchTimestamp(batch(nil, &roachpb.GetRequest{}), current),
-			ctPolicy: roachpb.LEAD_FOR_GLOBAL_READS,
-			exp:      true,
-		},
-		{
-			name:     "future non-txn batch, global reads policy",
-			ba:       withBatchTimestamp(batch(nil, &roachpb.GetRequest{}), future),
-			ctPolicy: roachpb.LEAD_FOR_GLOBAL_READS,
-			exp:      false,
-		},
-		{
-			name:     "stale non-txn batch, server-side ts, global reads policy",
-			ba:       withServerSideBatchTimestamp(batch(nil, &roachpb.GetRequest{}), stale),
-			ctPolicy: roachpb.LEAD_FOR_GLOBAL_READS,
-			exp:      false,
-		},
-		{
-			name:     "current-time non-txn batch, server-side ts, global reads policy",
-			ba:       withServerSideBatchTimestamp(batch(nil, &roachpb.GetRequest{}), current),
-			ctPolicy: roachpb.LEAD_FOR_GLOBAL_READS,
-			exp:      false,
-		},
-		{
-			name:     "future non-txn batch, server-side ts, global reads policy",
-			ba:       withServerSideBatchTimestamp(batch(nil, &roachpb.GetRequest{}), future),
 			ctPolicy: roachpb.LEAD_FOR_GLOBAL_READS,
 			exp:      false,
 		},
@@ -348,15 +273,26 @@ func TestCanSendToFollower(t *testing.T) {
 				defer utilccl.TestingEnableEnterprise()()
 			}
 			st := cluster.MakeTestingClusterSettings()
-			kvserver.FollowerReadsEnabled.Override(ctx, &st.SV, !c.disabledFollowerReads)
+			kvserver.FollowerReadsEnabled.Override(&st.SV, !c.disabledFollowerReads)
 			if c.zeroTargetDuration {
-				closedts.TargetDuration.Override(ctx, &st.SV, 0)
+				closedts.TargetDuration.Override(&st.SV, 0)
 			}
 
 			can := canSendToFollower(uuid.MakeV4(), st, clock, c.ctPolicy, c.ba)
 			require.Equal(t, c.exp, can)
 		})
 	}
+}
+
+func TestFollowerReadMultipleValidation(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("expected panic from setting followerReadMultiple to .1")
+		}
+	}()
+	st := cluster.MakeTestingClusterSettings()
+	followerReadMultiple.Override(&st.SV, .1)
 }
 
 // mockNodeStore implements the kvcoord.NodeDescStore interface.
@@ -386,11 +322,11 @@ func TestOracle(t *testing.T) {
 
 	c := kv.NewDB(log.AmbientContext{Tracer: tracing.NewTracer()}, kv.MockTxnSenderFactory{}, clock, stopper)
 	staleTxn := kv.NewTxn(ctx, c, 0)
-	require.NoError(t, staleTxn.SetFixedTimestamp(ctx, stale))
+	staleTxn.SetFixedTimestamp(ctx, stale)
 	currentTxn := kv.NewTxn(ctx, c, 0)
-	require.NoError(t, currentTxn.SetFixedTimestamp(ctx, current))
+	currentTxn.SetFixedTimestamp(ctx, current)
 	futureTxn := kv.NewTxn(ctx, c, 0)
-	require.NoError(t, futureTxn.SetFixedTimestamp(ctx, future))
+	futureTxn.SetFixedTimestamp(ctx, future)
 
 	nodes := mockNodeStore{
 		{NodeID: 1, Address: util.MakeUnresolvedAddr("tcp", "1")},
@@ -534,7 +470,7 @@ func TestOracle(t *testing.T) {
 				defer utilccl.TestingEnableEnterprise()()
 			}
 			st := cluster.MakeTestingClusterSettings()
-			kvserver.FollowerReadsEnabled.Override(ctx, &st.SV, !c.disabledFollowerReads)
+			kvserver.FollowerReadsEnabled.Override(&st.SV, !c.disabledFollowerReads)
 
 			o := replicaoracle.NewOracle(followerReadOraclePolicy, replicaoracle.Config{
 				NodeDescs:  nodes,
@@ -556,6 +492,9 @@ func TestOracle(t *testing.T) {
 func TestFollowerReadsWithStaleDescriptor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
+	// This test sleeps for a few sec.
+	skip.UnderShort(t)
+
 	ctx := context.Background()
 	// The test uses follower_read_timestamp().
 	defer utilccl.TestingEnableEnterprise()()
@@ -576,13 +515,6 @@ func TestFollowerReadsWithStaleDescriptor(t *testing.T) {
 					UseDatabase: "t",
 					Knobs: base.TestingKnobs{
 						KVClient: &kvcoord.ClientTestingKnobs{
-							// Inhibit the checking of connection health done by the
-							// GRPCTransport. This test wants to control what replica (which
-							// follower) a request is sent to and, depending on timing, the
-							// connection from n4 to the respective follower might not be
-							// heartbeated by the time the test wants to use it. Without this
-							// knob, that would cause the transport to reorder replicas.
-							DontConsiderConnHealth: true,
 							LatencyFunc: func(addr string) (time.Duration, bool) {
 								if (addr == n2Addr.Get()) || (addr == n3Addr.Get()) {
 									return time.Millisecond, true
@@ -609,17 +541,19 @@ func TestFollowerReadsWithStaleDescriptor(t *testing.T) {
 	n1.Exec(t, `CREATE DATABASE t`)
 	n1.Exec(t, `CREATE TABLE test (k INT PRIMARY KEY)`)
 	n1.Exec(t, `ALTER TABLE test EXPERIMENTAL_RELOCATE VOTERS VALUES (ARRAY[1,2], 1)`)
-	// Speed up closing of timestamps, in order to sleep less below before we can
-	// use follower_read_timestamp(). follower_read_timestamp() uses the sum of
-	// the following settings.
-	n1.Exec(t, `SET CLUSTER SETTING kv.closed_timestamp.target_duration = '0.1s'`)
-	n1.Exec(t, `SET CLUSTER SETTING kv.closed_timestamp.side_transport_interval = '0.1s'`)
-	n1.Exec(t, `SET CLUSTER SETTING kv.closed_timestamp.propagation_slack = '0.1s'`)
+	// Speed up closing of timestamps, as we'll in order to be able to use
+	// follower_read_timestamp().
+	// Every 0.2s we'll close the timestamp from 0.4s ago. We'll attempt follower reads
+	// for anything below 0.4s * (1 + 0.5 * 20) = 4.4s.
+	n1.Exec(t, `SET CLUSTER SETTING kv.closed_timestamp.target_duration = '0.4s'`)
+	n1.Exec(t, `SET CLUSTER SETTING kv.closed_timestamp.close_fraction = 0.5`)
+	n1.Exec(t, `SET CLUSTER SETTING kv.follower_read.target_multiple = 20`)
 
 	// Sleep so that we can perform follower reads. The read timestamp needs to be
-	// above the timestamp when the table was created.
+	// above the timestamp when the table was created. See the calculation above
+	// for the sleep duration.
 	log.Infof(ctx, "test sleeping for the follower read timestamps to pass the table creation timestamp...")
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(4400 * time.Millisecond)
 	log.Infof(ctx, "test sleeping... done")
 
 	// Run a query on n4 to populate its cache.
@@ -627,7 +561,7 @@ func TestFollowerReadsWithStaleDescriptor(t *testing.T) {
 	n4.Exec(t, "SELECT * from test WHERE k=1")
 	// Check that the cache was indeed populated.
 	var tableID uint32
-	n1.QueryRow(t, `SELECT id from system.namespace WHERE name='test'`).Scan(&tableID)
+	n1.QueryRow(t, `SELECT id from system.namespace2 WHERE name='test'`).Scan(&tableID)
 	tablePrefix := keys.MustAddr(keys.SystemSQLCodec.TablePrefix(tableID))
 	n4Cache := tc.Server(3).DistSenderI().(*kvcoord.DistSender).RangeDescriptorCache()
 	entry := n4Cache.GetCached(ctx, tablePrefix, false /* inverted */)

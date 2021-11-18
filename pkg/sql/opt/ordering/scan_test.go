@@ -14,13 +14,12 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/constraint"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/testcat"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 )
@@ -32,8 +31,7 @@ func TestScan(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	st := cluster.MakeTestingClusterSettings()
-	evalCtx := tree.NewTestingEvalContext(st)
+	evalCtx := tree.NewTestingEvalContext(nil /* st */)
 	var f norm.Factory
 	f.Init(evalCtx, tc)
 	md := f.Metadata()
@@ -67,7 +65,6 @@ func TestScan(t *testing.T) {
 
 	type testGroup struct {
 		p     memo.ScanPrivate
-		c     *constraint.Constraint
 		cases []testCase
 	}
 
@@ -152,11 +149,11 @@ func TestScan(t *testing.T) {
 		},
 		{ // group 5: scan with constraint.
 			p: memo.ScanPrivate{
-				Table: tab,
-				Index: 1,
-				Cols:  opt.MakeColSet(1, 2, 3, 4),
+				Table:      tab,
+				Index:      1,
+				Cols:       opt.MakeColSet(1, 2, 3, 4),
+				Constraint: &c,
 			},
-			c: &c,
 			cases: []testCase{
 				{req: "-3", exp: "fwd", prov: ""},                   // case 1
 				{req: "-3,+4", exp: "fwd", prov: "+4"},              // case 2
@@ -171,8 +168,7 @@ func TestScan(t *testing.T) {
 		t.Run(fmt.Sprintf("group%d", gIdx+1), func(t *testing.T) {
 			for tcIdx, tc := range g.cases {
 				t.Run(fmt.Sprintf("case%d", tcIdx+1), func(t *testing.T) {
-					req := props.ParseOrderingChoice(tc.req)
-					g.p.SetConstraint(evalCtx, g.c)
+					req := physical.ParseOrderingChoice(tc.req)
 					ok, rev := ScanPrivateCanProvide(md, &g.p, &req)
 					res := "no"
 					if ok {

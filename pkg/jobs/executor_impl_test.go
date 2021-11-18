@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -26,12 +25,8 @@ import (
 func TestInlineExecutorFailedJobsHandling(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-
-	argsFn := func(args *base.TestServerArgs) {
-		args.Knobs.JobsTestingKnobs = NewTestingKnobsWithShortIntervals()
-	}
-
-	h, cleanup := newTestHelperWithServerArgs(t, argsFn)
+	defer TestingSetAdoptAndCancelIntervals(time.Millisecond, time.Microsecond)()
+	h, cleanup := newTestHelper(t)
 	defer cleanup()
 
 	var tests = []struct {

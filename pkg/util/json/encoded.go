@@ -571,22 +571,7 @@ func (j *jsonEncoded) AsDecimal() (*apd.Decimal, bool) {
 	return decoded.AsDecimal()
 }
 
-func (j *jsonEncoded) AsBool() (bool, bool) {
-	if dec := j.alreadyDecoded(); dec != nil {
-		return dec.AsBool()
-	}
-
-	decoded, err := j.decode()
-	if err != nil {
-		return false, false
-	}
-	return decoded.AsBool()
-}
-
 func (j *jsonEncoded) Compare(other JSON) (int, error) {
-	if other == nil {
-		return -1, nil
-	}
 	if cmp := cmpJSONTypes(j.Type(), other.Type()); cmp != 0 {
 		return cmp, nil
 	}
@@ -757,16 +742,6 @@ func (j *jsonEncoded) encodeContainingInvertedIndexSpans(
 		return nil, err
 	}
 	return decoded.encodeContainingInvertedIndexSpans(b, isRoot, isObjectValue)
-}
-
-func (j *jsonEncoded) encodeContainedInvertedIndexSpans(
-	b []byte, isRoot, isObjectValue bool,
-) (inverted.Expression, error) {
-	decoded, err := j.decode()
-	if err != nil {
-		return nil, err
-	}
-	return decoded.encodeContainedInvertedIndexSpans(b, isRoot, isObjectValue)
 }
 
 // numInvertedIndexEntries implements the JSON interface.

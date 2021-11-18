@@ -15,9 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/constraint"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowinfra"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/errors"
 )
 
 // GenerateIndexScans enumerates all non-inverted secondary indexes on the given
@@ -34,25 +32,13 @@ import (
 //       up", when the Scan operator is wrapped by an operator that constrains
 //       or limits scan output in some way (e.g. Select, Limit, InnerJoin).
 //       Index joins are only lower cost when their input does not include all
-//       rows from the table. See GenerateConstrainedScans,
-//       GenerateLimitedScans, and GenerateLimitedGroupByScans for cases where
+//       rows from the table. See ConstrainScans and LimitScans for cases where
 //       index joins are introduced into the memo.
 func (c *CustomFuncs) GenerateIndexScans(grp memo.RelExpr, scanPrivate *memo.ScanPrivate) {
 	// Iterate over all non-inverted and non-partial secondary indexes.
-	var pkCols opt.ColSet
 	var iter scanIndexIter
-	iter.Init(c.e.evalCtx, c.e.f, c.e.mem, &c.im, scanPrivate, nil /* filters */, rejectPrimaryIndex|rejectInvertedIndexes)
-	iter.ForEach(func(index cat.Index, filters memo.FiltersExpr, indexCols opt.ColSet, isCovering bool, constProj memo.ProjectionsExpr) {
-		// The iterator only produces pseudo-partial indexes (the predicate is
-		// true) because no filters are passed to iter.Init to imply a partial
-		// index predicate. constProj is a projection of constant values based
-		// on a partial index predicate. It should always be empty because a
-		// pseudo-partial index cannot hold a column constant. If it is not, we
-		// panic to avoid performing a logically incorrect transformation.
-		if len(constProj) != 0 {
-			panic(errors.AssertionFailedf("expected constProj to be empty"))
-		}
-
+	iter.Init(c.e.mem, &c.im, scanPrivate, nil /* filters */, rejectPrimaryIndex|rejectInvertedIndexes)
+	iter.ForEach(func(index cat.Index, filters memo.FiltersExpr, indexCols opt.ColSet, isCovering bool) {
 		// If the secondary index includes the set of needed columns, then construct
 		// a new Scan operator using that index.
 		if isCovering {
@@ -71,23 +57,18 @@ func (c *CustomFuncs) GenerateIndexScans(grp memo.RelExpr, scanPrivate *memo.Sca
 		}
 
 		var sb indexScanBuilder
-		sb.Init(c, scanPrivate.Table)
-
-		// Calculate the PK columns once.
-		if pkCols.Empty() {
-			pkCols = c.PrimaryKeyCols(scanPrivate.Table)
-		}
+		sb.init(c, scanPrivate.Table)
 
 		// Scan whatever columns we need which are available from the index, plus
 		// the PK columns.
 		newScanPrivate := *scanPrivate
 		newScanPrivate.Index = index.Ordinal()
 		newScanPrivate.Cols = indexCols.Intersection(scanPrivate.Cols)
-		newScanPrivate.Cols.UnionWith(pkCols)
-		sb.SetScan(&newScanPrivate)
+		newScanPrivate.Cols.UnionWith(sb.primaryKeyCols())
+		sb.setScan(&newScanPrivate)
 
-		sb.AddIndexJoin(scanPrivate.Cols)
-		sb.Build(grp)
+		sb.addIndexJoin(scanPrivate.Cols)
+		sb.build(grp)
 	})
 }
 
@@ -101,7 +82,7 @@ const regionKey = "region"
 // GenerateLocalityOptimizedScan rule for details.
 func (c *CustomFuncs) CanMaybeGenerateLocalityOptimizedScan(scanPrivate *memo.ScanPrivate) bool {
 	// Respect the session setting LocalityOptimizedSearch.
-	if !c.e.evalCtx.SessionData().LocalityOptimizedSearch {
+	if !c.e.evalCtx.SessionData.LocalityOptimizedSearch {
 		return false
 	}
 
@@ -148,13 +129,11 @@ func (c *CustomFuncs) CanMaybeGenerateLocalityOptimizedScan(scanPrivate *memo.Sc
 func (c *CustomFuncs) GenerateLocalityOptimizedScan(
 	grp memo.RelExpr, scanPrivate *memo.ScanPrivate,
 ) {
-	// We can only generate a locality optimized scan if we know there is a hard
-	// upper bound on the number of rows produced by the local spans. We use the
-	// kv batch size as the limit, since it's probably better to use DistSQL once
-	// we're scanning multiple batches.
-	// TODO(rytaft): Revisit this when we have a more accurate cost model for data
-	// distribution.
-	if rowinfra.KeyLimit(grp.Relational().Cardinality.Max) > rowinfra.ProductionKVBatchSize {
+	// We can only generate a locality optimized scan if we know there is at
+	// most one row produced by the local spans.
+	// TODO(rytaft): We may be able to expand this to allow any number of rows,
+	// as long as there is a hard upper bound.
+	if !grp.Relational().Cardinality.IsZeroOrOne() {
 		return
 	}
 
@@ -192,14 +171,14 @@ func (c *CustomFuncs) GenerateLocalityOptimizedScan(
 	localScanPrivate := c.DuplicateScanPrivate(scanPrivate)
 	localScanPrivate.LocalityOptimized = true
 	localConstraint.Columns = localConstraint.Columns.RemapColumns(scanPrivate.Table, localScanPrivate.Table)
-	localScanPrivate.SetConstraint(c.e.evalCtx, &localConstraint)
+	localScanPrivate.Constraint = &localConstraint
 	localScan := c.e.f.ConstructScan(localScanPrivate)
 
 	// Create the remote scan.
 	remoteScanPrivate := c.DuplicateScanPrivate(scanPrivate)
 	remoteScanPrivate.LocalityOptimized = true
 	remoteConstraint.Columns = remoteConstraint.Columns.RemapColumns(scanPrivate.Table, remoteScanPrivate.Table)
-	remoteScanPrivate.SetConstraint(c.e.evalCtx, &remoteConstraint)
+	remoteScanPrivate.Constraint = &remoteConstraint
 	remoteScan := c.e.f.ConstructScan(remoteScanPrivate)
 
 	// Add the LocalityOptimizedSearchExpr to the same group as the original scan.

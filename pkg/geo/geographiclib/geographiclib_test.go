@@ -19,8 +19,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const epsilon = 1e-8
-
 func TestInverse(t *testing.T) {
 	testCases := []struct {
 		desc     string
@@ -42,9 +40,9 @@ func TestInverse(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
 			s12, az1, az2 := tc.spheroid.Inverse(tc.a, tc.b)
-			require.InEpsilon(t, tc.s12, s12, epsilon)
-			require.InEpsilon(t, tc.az1, az1, epsilon)
-			require.InEpsilon(t, tc.az2, az2, epsilon)
+			require.Equal(t, tc.s12, s12)
+			require.Equal(t, tc.az1, az1)
+			require.Equal(t, tc.az2, az2)
 		})
 	}
 }
@@ -71,7 +69,7 @@ func TestInverseBatch(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
 			sum := tc.spheroid.InverseBatch(tc.points)
-			require.InEpsilon(t, tc.sum, sum, epsilon)
+			require.Equal(t, tc.sum, sum)
 		})
 	}
 }
@@ -100,8 +98,8 @@ func TestAreaAndPerimeter(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
 			area, perimeter := tc.spheroid.AreaAndPerimeter(tc.points)
-			require.InEpsilon(t, tc.area, area, epsilon)
-			require.InEpsilon(t, tc.perimeter, perimeter, epsilon)
+			require.Equal(t, tc.area, area)
+			require.Equal(t, tc.perimeter, perimeter)
 		})
 	}
 }

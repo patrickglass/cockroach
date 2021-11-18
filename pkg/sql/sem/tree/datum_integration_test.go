@@ -22,9 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
@@ -407,12 +405,12 @@ func TestParseDIntervalWithTypeMetadata(t *testing.T) {
 		{"1-2 3 4:56:07", year, "1 year"},
 	}
 	for _, td := range testData {
-		actual, err := tree.ParseDIntervalWithTypeMetadata(duration.IntervalStyle_POSTGRES, td.str, td.dtype)
+		actual, err := tree.ParseDIntervalWithTypeMetadata(td.str, td.dtype)
 		if err != nil {
 			t.Errorf("unexpected error while parsing INTERVAL %s %#v: %s", td.str, td.dtype, err)
 			continue
 		}
-		expected, err := tree.ParseDInterval(duration.IntervalStyle_POSTGRES, td.expected)
+		expected, err := tree.ParseDInterval(td.expected)
 		if err != nil {
 			t.Errorf("unexpected error while parsing expected value INTERVAL %s: %s", td.expected, err)
 			continue
@@ -429,7 +427,7 @@ func TestParseDDate(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	ctx := tree.NewParseTimeContext(
+	ctx := testParseTimeContext(
 		time.Date(2001, time.February, 3, 4, 5, 6, 1000, time.FixedZone("foo", -18000)),
 	)
 
@@ -552,7 +550,7 @@ func TestParseDTime(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	ctx := tree.NewParseTimeContext(
+	ctx := testParseTimeContext(
 		time.Date(2001, time.February, 3, 4, 5, 6, 1000, time.FixedZone("foo", -18000)),
 	)
 	// Since ParseDTime shares most of the underlying parsing logic to
@@ -625,7 +623,7 @@ func TestParseDTimeError(t *testing.T) {
 
 func TestParseDTimeTZ(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	ctx := tree.NewParseTimeContext(
+	ctx := testParseTimeContext(
 		time.Date(2001, time.February, 3, 4, 5, 6, 1000, time.FixedZone("foo", 18000)),
 	)
 
@@ -703,7 +701,7 @@ func TestParseDTimestamp(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	ctx := tree.NewParseTimeContext(
+	ctx := testParseTimeContext(
 		time.Date(2001, time.February, 3, 4, 5, 6, 1000, time.FixedZone("foo", -18000)),
 	)
 
@@ -739,34 +737,6 @@ func TestParseDTimestamp(t *testing.T) {
 		{"2001-02-03 4:05:0", time.Date(2001, time.February, 3, 4, 5, 0, 0, time.UTC), false},
 		{"2001-02-03 4:05:0-07:0:00", time.Date(2001, time.February, 3, 4, 5, 0, 0, time.UTC), false},
 		{"2001-02-03 4:0:6 +3:0:0", time.Date(2001, time.February, 3, 4, 0, 6, 0, time.UTC), false},
-		{"12-04-2011 04:05:06.123", time.Date(2011, time.December, 4, 4, 5, 6, 123000000, time.UTC), false},
-		{"12-04-2011 04:05", time.Date(2011, time.December, 4, 4, 5, 0, 0, time.UTC), false},
-		{"12-04-11 04:05", time.Date(2011, time.December, 4, 4, 5, 0, 0, time.UTC), false},
-		{"12-4-11 04:05", time.Date(2011, time.December, 4, 4, 5, 0, 0, time.UTC), false},
-		{"12/4/2011 4:0:6 +3:0:0", time.Date(2011, time.December, 4, 4, 0, 6, 0, time.UTC), false},
-		{"12/4/11 4:0:6 +3:0:0", time.Date(2011, time.December, 4, 4, 0, 6, 0, time.UTC), false},
-		{"2001/02/03 0:0:06", time.Date(2001, time.February, 3, 0, 0, 6, 0, time.UTC), false},
-		{"2001/02/03 4:05:0", time.Date(2001, time.February, 3, 4, 5, 0, 0, time.UTC), false},
-		{"2001/02/03 4:05:0-07:0:00", time.Date(2001, time.February, 3, 4, 5, 0, 0, time.UTC), false},
-		{"2001/02/03 4:0:6 +3:0:0", time.Date(2001, time.February, 3, 4, 0, 6, 0, time.UTC), false},
-		{"2001/2/03 0:0:06", time.Date(2001, time.February, 3, 0, 0, 6, 0, time.UTC), false},
-		{"2001/02/3 0:0:06", time.Date(2001, time.February, 3, 0, 0, 6, 0, time.UTC), false},
-		{"01/02/03 0:0:06", time.Date(2003, time.January, 2, 0, 0, 6, 0, time.UTC), false},
-		{"1/2/3 0:0:06", time.Date(2003, time.January, 2, 0, 0, 6, 0, time.UTC), false},
-		{"10-08-2019 15:03", time.Date(2019, time.October, 8, 15, 3, 0, 0, time.UTC), false},
-		{"10-08-2019 15:03:10", time.Date(2019, time.October, 8, 15, 3, 10, 0, time.UTC), false},
-		{"10-08-19 15:03", time.Date(2019, time.October, 8, 15, 3, 0, 0, time.UTC), false},
-		{"10-08-19 15:03:10", time.Date(2019, time.October, 8, 15, 3, 10, 0, time.UTC), false},
-		{"5-06-19 15:03", time.Date(2019, time.May, 6, 15, 3, 0, 0, time.UTC), false},
-		{"05-6-19 15:03", time.Date(2019, time.May, 6, 15, 3, 0, 0, time.UTC), false},
-		{"05-06-19 15:03", time.Date(2019, time.May, 6, 15, 3, 0, 0, time.UTC), false},
-		{"05-06-2019 15:03", time.Date(2019, time.May, 6, 15, 3, 0, 0, time.UTC), false},
-		{"02-03-2001 04:05:06.1", time.Date(2001, time.February, 3, 4, 5, 6, 100000000, time.UTC), false},
-		{"02-03-2001 04:05:06.12", time.Date(2001, time.February, 3, 4, 5, 6, 120000000, time.UTC), false},
-		{"02-03-2001 04:05:06.123", time.Date(2001, time.February, 3, 4, 5, 6, 123000000, time.UTC), false},
-		{"02-03-2001 04:05:06.1234", time.Date(2001, time.February, 3, 4, 5, 6, 123400000, time.UTC), false},
-		{"02-03-2001 04:05:06.12345", time.Date(2001, time.February, 3, 4, 5, 6, 123450000, time.UTC), false},
-		{"02-03-2001 04:05:06.123456", time.Date(2001, time.February, 3, 4, 5, 6, 123456000, time.UTC), false},
 	}
 	for _, td := range testData {
 		actual, depOnCtx, err := tree.ParseDTimestamp(ctx, td.str, time.Nanosecond)
@@ -787,7 +757,7 @@ func TestParseDTimestampTZ(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	local := time.FixedZone("foo", -18000)
-	ctx := tree.NewParseTimeContext(time.Date(2001, time.February, 3, 4, 5, 6, 1000, local))
+	ctx := testParseTimeContext(time.Date(2001, time.February, 3, 4, 5, 6, 1000, local))
 
 	testData := []struct {
 		str              string
@@ -821,31 +791,6 @@ func TestParseDTimestampTZ(t *testing.T) {
 		{"2001-02-03 4:05:0", time.Date(2001, time.February, 3, 4, 5, 0, 0, local), true},
 		{"2001-02-03 4:05:0-07:0:00", time.Date(2001, time.February, 3, 4, 5, 0, 0, time.FixedZone("", -7*3600)), false},
 		{"2001-02-03 4:0:6 +3:0:0", time.Date(2001, time.February, 3, 4, 0, 6, 0, time.FixedZone("", 3*3600)), false},
-		{"12-04-2011 04:05:06.123", time.Date(2011, time.December, 4, 4, 5, 6, 123000000, local), true},
-		{"12-04-2011 04:05", time.Date(2011, time.December, 4, 4, 5, 0, 0, local), true},
-		{"12-04-11 04:05", time.Date(2011, time.December, 4, 4, 5, 0, 0, local), true},
-		{"12-4-11 04:05", time.Date(2011, time.December, 4, 4, 5, 0, 0, local), true},
-		{"12/4/2011 4:0:6", time.Date(2011, time.December, 4, 4, 0, 6, 0, local), true},
-		{"12/4/11 4:0:6", time.Date(2011, time.December, 4, 4, 0, 6, 0, local), true},
-		{"2001/02/03 0:0:06", time.Date(2001, time.February, 3, 0, 0, 6, 0, local), true},
-		{"2001/02/03 4:05:0", time.Date(2001, time.February, 3, 4, 5, 0, 0, local), true},
-		{"2001/02/03 4:0:6", time.Date(2001, time.February, 3, 4, 0, 6, 0, local), true},
-		{"2001/2/03 0:0:06", time.Date(2001, time.February, 3, 0, 0, 6, 0, local), true},
-		{"2001/02/3 0:0:06", time.Date(2001, time.February, 3, 0, 0, 6, 0, local), true},
-		{"01/02/03 0:0:06", time.Date(2003, time.January, 2, 0, 0, 6, 0, local), true},
-		{"1/2/3 0:0:06", time.Date(2003, time.January, 2, 0, 0, 6, 0, local), true},
-		{"10-08-2019 15:03", time.Date(2019, time.October, 8, 15, 3, 0, 0, local), true},
-		{"10-08-2019 15:03:10", time.Date(2019, time.October, 8, 15, 3, 10, 0, local), true},
-		{"10-08-19 15:03", time.Date(2019, time.October, 8, 15, 3, 0, 0, local), true},
-		{"10-08-19 15:03:10", time.Date(2019, time.October, 8, 15, 3, 10, 0, local), true},
-		{"5-06-19 15:03", time.Date(2019, time.May, 6, 15, 3, 0, 0, local), true},
-		{"05-6-19 15:03", time.Date(2019, time.May, 6, 15, 3, 0, 0, local), true},
-		{"05-06-19 15:03", time.Date(2019, time.May, 6, 15, 3, 0, 0, local), true},
-		{"05-06-2019 15:03", time.Date(2019, time.May, 6, 15, 3, 0, 0, local), true},
-		{"02-03-2001 04:05:06.123-07", time.Date(2001, time.February, 3, 4, 5, 6, 123000000, time.FixedZone("", -7*3600)), false},
-		{"02-03-2001 04:05:06-07", time.Date(2001, time.February, 3, 4, 5, 6, 0, time.FixedZone("", -7*3600)), false},
-		{"02-03-2001 04:05:06-07:42", time.Date(2001, time.February, 3, 4, 5, 6, 0, time.FixedZone("", -7*3600-42*60)), false},
-		{"02-03-2001 04:05:06-07:30:09", time.Date(2001, time.February, 3, 4, 5, 6, 0, time.FixedZone("", -7*3600-30*60-9)), false},
 	}
 	for _, td := range testData {
 		actual, depOnCtx, err := tree.ParseDTimestampTZ(ctx, td.str, time.Nanosecond)
@@ -883,9 +828,9 @@ func TestDTimeTZ(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := &tree.EvalContext{
-		SessionDataStack: sessiondata.NewStack(&sessiondata.SessionData{
+		SessionData: &sessiondata.SessionData{
 			Location: time.UTC,
-		}),
+		},
 	}
 
 	maxTime, depOnCtx, err := tree.ParseDTimeTZ(ctx, "24:00:00-1559", time.Microsecond)
@@ -1106,11 +1051,7 @@ func TestAllTypesAsJSON(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	for _, typ := range types.Scalar {
 		d := tree.SampleDatum(typ)
-		_, err := tree.AsJSON(
-			d,
-			sessiondatapb.DataConversionConfig{},
-			time.UTC,
-		)
+		_, err := tree.AsJSON(d, time.UTC)
 		if err != nil {
 			t.Errorf("couldn't convert %s to JSON: %s", d, err)
 		}
@@ -1177,6 +1118,14 @@ func TestNewDefaultDatum(t *testing.T) {
 			}
 		})
 	}
+}
+
+type testParseTimeContext time.Time
+
+var _ tree.ParseTimeContext = testParseTimeContext{}
+
+func (t testParseTimeContext) GetRelativeParseTime() time.Time {
+	return time.Time(t)
 }
 
 func TestGeospatialSize(t *testing.T) {

@@ -15,8 +15,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 )
 
@@ -35,12 +34,8 @@ SELECT role AS role_name,
 
 	if n.Roles != nil {
 		var roles []string
-		sqlUsernames, err := n.Roles.ToSQLUsernames(d.evalCtx.SessionData(), security.UsernameValidation)
-		if err != nil {
-			return nil, err
-		}
-		for _, r := range sqlUsernames {
-			roles = append(roles, lexbase.EscapeSQLString(r.Normalized()))
+		for _, r := range n.Roles.ToStrings() {
+			roles = append(roles, lex.EscapeSQLString(r))
 		}
 		fmt.Fprintf(&query, ` WHERE "role" IN (%s)`, strings.Join(roles, ","))
 	}
@@ -55,12 +50,8 @@ SELECT role AS role_name,
 		}
 
 		var grantees []string
-		granteeSQLUsernames, err := n.Grantees.ToSQLUsernames(d.evalCtx.SessionData(), security.UsernameValidation)
-		if err != nil {
-			return nil, err
-		}
-		for _, g := range granteeSQLUsernames {
-			grantees = append(grantees, lexbase.EscapeSQLString(g.Normalized()))
+		for _, g := range n.Grantees.ToStrings() {
+			grantees = append(grantees, lex.EscapeSQLString(g))
 		}
 		fmt.Fprintf(&query, ` member IN (%s)`, strings.Join(grantees, ","))
 

@@ -1,4 +1,4 @@
-FROM alpine:3.14
+FROM alpine:3.9
 
 RUN apk add --no-cache \
   krb5-server \

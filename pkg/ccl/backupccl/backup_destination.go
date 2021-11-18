@@ -16,17 +16,18 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
 )
 
-// fetchPreviousBackups takes a list of URIs of previous backups and returns
+// fetchPreviousBackup takes a list of URIs of previous backups and returns
 // their manifest as well as the encryption options of the first backup in the
 // chain.
 func fetchPreviousBackups(
@@ -136,7 +137,7 @@ func resolveDest(
 			}
 
 			// Pick a piece-specific suffix and update the destination path(s).
-			partName := endTime.GoTime().Format(DateBasedIncFolderName)
+			partName := endTime.GoTime().Format(dateBasedIncFolderName)
 			partName = path.Join(chosenSuffix, partName)
 			defaultURI, urisByLocalityKV, err = getURIsByLocalityKV(to, partName)
 			if err != nil {
@@ -246,45 +247,32 @@ func resolveBackupCollection(
 	var chosenSuffix string
 	collectionURI := defaultURI
 	if appendToLatest {
-		latest, err := readLatestFile(ctx, collectionURI, makeCloudStorage, user)
+		collection, err := makeCloudStorage(ctx, collectionURI, user)
 		if err != nil {
 			return "", "", err
 		}
-		chosenSuffix = latest
+		defer collection.Close()
+		latestFile, err := collection.ReadFile(ctx, latestFileName)
+		if err != nil {
+			if errors.Is(err, cloudimpl.ErrFileDoesNotExist) {
+				return "", "", pgerror.Wrapf(err, pgcode.UndefinedFile, "path does not contain a completed latest backup")
+			}
+			return "", "", pgerror.WithCandidateCode(err, pgcode.Io)
+		}
+		latest, err := ioutil.ReadAll(latestFile)
+		if err != nil {
+			return "", "", err
+		}
+		if len(latest) == 0 {
+			return "", "", errors.Errorf("malformed LATEST file")
+		}
+		chosenSuffix = string(latest)
 	} else if subdir != "" {
 		// User has specified a subdir via `BACKUP INTO 'subdir' IN...`.
 		chosenSuffix = strings.TrimPrefix(subdir, "/")
 		chosenSuffix = "/" + chosenSuffix
 	} else {
-		chosenSuffix = endTime.GoTime().Format(DateBasedIntoFolderName)
+		chosenSuffix = endTime.GoTime().Format(dateBasedIntoFolderName)
 	}
 	return collectionURI, chosenSuffix, nil
-}
-
-func readLatestFile(
-	ctx context.Context,
-	collectionURI string,
-	makeCloudStorage cloud.ExternalStorageFromURIFactory,
-	user security.SQLUsername,
-) (string, error) {
-	collection, err := makeCloudStorage(ctx, collectionURI, user)
-	if err != nil {
-		return "", err
-	}
-	defer collection.Close()
-	latestFile, err := collection.ReadFile(ctx, latestFileName)
-	if err != nil {
-		if errors.Is(err, cloud.ErrFileDoesNotExist) {
-			return "", pgerror.Wrapf(err, pgcode.UndefinedFile, "path does not contain a completed latest backup")
-		}
-		return "", pgerror.WithCandidateCode(err, pgcode.Io)
-	}
-	latest, err := ioutil.ReadAll(latestFile)
-	if err != nil {
-		return "", err
-	}
-	if len(latest) == 0 {
-		return "", errors.Errorf("malformed LATEST file")
-	}
-	return string(latest), nil
 }

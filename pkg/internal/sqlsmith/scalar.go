@@ -11,9 +11,7 @@
 package sqlsmith
 
 import (
-	"strconv"
-
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
@@ -73,15 +71,6 @@ func makeScalarContext(s *Smither, ctx Context, typ *types.T, refs colRefs) tree
 
 func makeBoolExpr(s *Smither, refs colRefs) tree.TypedExpr {
 	return makeBoolExprContext(s, emptyCtx, refs)
-}
-
-func makeBoolExprWithPlaceholders(s *Smither, refs colRefs) (tree.Expr, []interface{}) {
-	expr := makeBoolExprContext(s, emptyCtx, refs)
-
-	// Replace constants with placeholders if the type is numeric or bool.
-	visitor := replaceDatumPlaceholderVisitor{}
-	exprFmt := expr.Walk(&visitor)
-	return exprFmt, visitor.Args
 }
 
 func makeBoolExprContext(s *Smither, ctx Context, refs colRefs) tree.TypedExpr {
@@ -181,9 +170,9 @@ func makeConstDatum(s *Smither, typ *types.T) tree.Datum {
 	if s.vectorizable {
 		nullChance = 0
 	}
-	datum = randgen.RandDatumWithNullChance(s.rnd, typ, nullChance)
+	datum = rowenc.RandDatumWithNullChance(s.rnd, typ, nullChance)
 	if f := datum.ResolvedType().Family(); f != types.UnknownFamily && s.simpleDatums {
-		datum = randgen.RandDatumSimple(s.rnd, typ)
+		datum = rowenc.RandDatumSimple(s.rnd, typ)
 	}
 	s.lock.Unlock()
 
@@ -265,7 +254,7 @@ func makeNot(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 }
 
 // TODO(mjibson): add the other operators somewhere.
-var compareOps = [...]tree.ComparisonOperatorSymbol{
+var compareOps = [...]tree.ComparisonOperator{
 	tree.EQ,
 	tree.LT,
 	tree.GT,
@@ -290,10 +279,10 @@ func makeCompareOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool
 	}
 	left := makeScalar(s, typ, refs)
 	right := makeScalar(s, typ, refs)
-	return typedParen(tree.NewTypedComparisonExpr(tree.MakeComparisonOperator(op), left, right), typ), true
+	return typedParen(tree.NewTypedComparisonExpr(op, left, right), typ), true
 }
 
-var vecBinOps = map[tree.BinaryOperatorSymbol]bool{
+var vecBinOps = map[tree.BinaryOperator]bool{
 	tree.Plus:  true,
 	tree.Minus: true,
 	tree.Mult:  true,
@@ -308,13 +297,13 @@ func makeBinOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 	}
 	n := s.rnd.Intn(len(ops))
 	op := ops[n]
-	if s.vectorizable && !vecBinOps[op.Operator.Symbol] {
+	if s.vectorizable && !vecBinOps[op.Operator] {
 		return nil, false
 	}
 	if s.postgres {
 		if ignorePostgresBinOps[binOpTriple{
 			op.LeftType.Family(),
-			op.Operator.Symbol,
+			op.Operator,
 			op.RightType.Family(),
 		}] {
 			return nil, false
@@ -323,7 +312,7 @@ func makeBinOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 	if s.postgres {
 		if transform, needTransform := postgresBinOpTransformations[binOpTriple{
 			op.LeftType.Family(),
-			op.Operator.Symbol,
+			op.Operator,
 			op.RightType.Family(),
 		}]; needTransform {
 			op.LeftType = transform.leftType
@@ -343,7 +332,7 @@ func makeBinOp(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 
 type binOpTriple struct {
 	left  types.Family
-	op    tree.BinaryOperatorSymbol
+	op    tree.BinaryOperator
 	right types.Family
 }
 
@@ -637,7 +626,7 @@ func makeIn(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr, bool) {
 		op = tree.NotIn
 	}
 	return tree.NewTypedComparisonExpr(
-		tree.MakeComparisonOperator(op),
+		op,
 		// Cast any NULLs to a concrete type.
 		castType(makeScalar(s, t, refs), t),
 		rhs,
@@ -649,9 +638,9 @@ func makeStringComparison(s *Smither, typ *types.T, refs colRefs) (tree.TypedExp
 	if s.vectorizable {
 		// Vectorized supports only tree.Like and tree.NotLike.
 		if s.coin() {
-			stringComparison = tree.MakeComparisonOperator(tree.Like)
+			stringComparison = tree.Like
 		} else {
-			stringComparison = tree.MakeComparisonOperator(tree.NotLike)
+			stringComparison = tree.NotLike
 		}
 	}
 	switch typ.Family() {
@@ -704,31 +693,3 @@ func makeScalarSubquery(s *Smither, typ *types.T, refs colRefs) (tree.TypedExpr,
 
 	return subq, true
 }
-
-// replaceDatumPlaceholderVisitor replaces occurrences of numeric and bool Datum
-// expressions with placeholders, and updates Args with the corresponding Datum
-// values. This is used to prepare and execute a statement with placeholders.
-type replaceDatumPlaceholderVisitor struct {
-	Args []interface{}
-}
-
-var _ tree.Visitor = &replaceDatumPlaceholderVisitor{}
-
-// VisitPre satisfies the tree.Visitor interface.
-func (v *replaceDatumPlaceholderVisitor) VisitPre(
-	expr tree.Expr,
-) (recurse bool, newExpr tree.Expr) {
-	switch t := expr.(type) {
-	case tree.Datum:
-		if t.ResolvedType().IsNumeric() || t.ResolvedType() == types.Bool {
-			v.Args = append(v.Args, expr)
-			placeholder, _ := tree.NewPlaceholder(strconv.Itoa(len(v.Args)))
-			return false, placeholder
-		}
-		return false, expr
-	}
-	return true, expr
-}
-
-// VisitPost satisfies the Visitor interface.
-func (*replaceDatumPlaceholderVisitor) VisitPost(expr tree.Expr) tree.Expr { return expr }

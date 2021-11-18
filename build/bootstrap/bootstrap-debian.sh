@@ -31,30 +31,29 @@ sudo apt-get install -y --no-install-recommends \
 sudo adduser "${USER}" docker
 
 # Configure environment variables.
-echo 'export PATH="/usr/lib/ccache:${PATH}:$HOME/go/src/github.com/cockroachdb/cockroach/bin:/usr/local/go/bin"' >> ~/.bashrc_bootstrap
+echo 'export PATH="/usr/lib/ccache:${PATH}:/usr/local/go/bin"' >> ~/.bashrc_bootstrap
 echo 'export COCKROACH_BUILDER_CCACHE=1' >> ~/.bashrc_bootstrap
 echo '. ~/.bashrc_bootstrap' >> ~/.bashrc
 . ~/.bashrc_bootstrap
 
 # Upgrade cmake.
 trap 'rm -f /tmp/cmake.tgz' EXIT
-curl -fsSL https://github.com/Kitware/CMake/releases/download/v3.20.3/cmake-3.20.3-Linux-x86_64.tar.gz > /tmp/cmake.tgz
+curl -fsSL https://github.com/Kitware/CMake/releases/download/v3.17.0/cmake-3.17.0-Linux-x86_64.tar.gz > /tmp/cmake.tgz
 sha256sum -c - <<EOF
-97bf730372f9900b2dfb9206fccbcf92f5c7f3b502148b832e77451aa0f9e0e6  /tmp/cmake.tgz
+b44685227b9f9be103e305efa2075a8ccf2415807fbcf1fc192da4d36aacc9f5  /tmp/cmake.tgz
 EOF
 sudo tar -C /usr -zxf /tmp/cmake.tgz && rm /tmp/cmake.tgz
 
 # Install Go.
 trap 'rm -f /tmp/go.tgz' EXIT
-curl -fsSL https://dl.google.com/go/go1.17.3.linux-amd64.tar.gz > /tmp/go.tgz
+curl -fsSL https://dl.google.com/go/go1.15.14.linux-amd64.tar.gz > /tmp/go.tgz
 sha256sum -c - <<EOF
-550f9845451c0c94be679faf116291e7807a8d78b43149f9506c1b15eb89008c /tmp/go.tgz
+6f5410c113b803f437d7a1ee6f8f124100e536cc7361920f7e640fedf7add72d /tmp/go.tgz
 EOF
 sudo tar -C /usr/local -zxf /tmp/go.tgz && rm /tmp/go.tgz
 
 # Clone CockroachDB.
 git clone https://github.com/cockroachdb/cockroach "$(go env GOPATH)/src/github.com/cockroachdb/cockroach"
-git -C "$(go env GOPATH)/src/github.com/cockroachdb/cockroach" submodule update --init
 
 # Install the Unison file-syncer.
 . bootstrap/bootstrap-unison.sh

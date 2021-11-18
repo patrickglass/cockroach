@@ -18,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
 	"golang.org/x/text/language"
@@ -42,11 +41,11 @@ func ColTypeInfoFromColTypes(colTypes []*types.T) ColTypeInfo {
 	return ColTypeInfo{colTypes: colTypes}
 }
 
-// ColTypeInfoFromColumns creates a ColTypeInfo from []catalog.Column.
-func ColTypeInfoFromColumns(columns []catalog.Column) ColTypeInfo {
-	colTypes := make([]*types.T, len(columns))
-	for i, col := range columns {
-		colTypes[i] = col.GetType()
+// ColTypeInfoFromColDescs creates a ColTypeInfo from []ColumnDescriptor.
+func ColTypeInfoFromColDescs(colDescs []descpb.ColumnDescriptor) ColTypeInfo {
+	colTypes := make([]*types.T, len(colDescs))
+	for i, colDesc := range colDescs {
+		colTypes[i] = colDesc.Type
 	}
 	return ColTypeInfoFromColTypes(colTypes)
 }
@@ -93,11 +92,6 @@ func ValidateColumnDefType(t *types.T) error {
 			// Nested arrays are not supported as a column type.
 			return errors.Errorf("nested array unsupported as column type: %s", t.String())
 		}
-		if t.ArrayContents().Family() == types.JsonFamily {
-			// JSON arrays are not supported as a column type.
-			return unimplemented.NewWithIssueDetailf(23468, t.String(),
-				"arrays of JSON unsupported as column type")
-		}
 		if err := types.CheckArrayElementType(t.ArrayContents()); err != nil {
 			return err
 		}
@@ -119,9 +113,6 @@ func ValidateColumnDefType(t *types.T) error {
 
 // ColumnTypeIsIndexable returns whether the type t is valid as an indexed column.
 func ColumnTypeIsIndexable(t *types.T) bool {
-	if t.IsAmbiguous() || t.Family() == types.TupleFamily {
-		return false
-	}
 	// Some inverted index types also have a key encoding, but we don't
 	// want to support those yet. See #50659.
 	return !MustBeValueEncoded(t) && !ColumnTypeIsInvertedIndexable(t)
@@ -130,9 +121,6 @@ func ColumnTypeIsIndexable(t *types.T) bool {
 // ColumnTypeIsInvertedIndexable returns whether the type t is valid to be indexed
 // using an inverted index.
 func ColumnTypeIsInvertedIndexable(t *types.T) bool {
-	if t.IsAmbiguous() || t.Family() == types.TupleFamily {
-		return false
-	}
 	family := t.Family()
 	return family == types.JsonFamily || family == types.ArrayFamily ||
 		family == types.GeographyFamily || family == types.GeometryFamily
@@ -183,7 +171,7 @@ func GetColumnTypes(
 // IDs into the outTypes slice, returning it. You must use the returned slice,
 // as this function might allocate a new slice.
 func GetColumnTypesFromColDescs(
-	cols []catalog.Column, columnIDs []descpb.ColumnID, outTypes []*types.T,
+	cols []descpb.ColumnDescriptor, columnIDs []descpb.ColumnID, outTypes []*types.T,
 ) []*types.T {
 	if cap(outTypes) < len(columnIDs) {
 		outTypes = make([]*types.T, len(columnIDs))
@@ -192,8 +180,8 @@ func GetColumnTypesFromColDescs(
 	}
 	for i, id := range columnIDs {
 		for j := range cols {
-			if id == cols[j].GetID() {
-				outTypes[i] = cols[j].GetType()
+			if id == cols[j].ID {
+				outTypes[i] = cols[j].Type
 				break
 			}
 		}

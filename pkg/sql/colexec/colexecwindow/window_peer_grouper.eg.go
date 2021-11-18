@@ -10,6 +10,8 @@
 package colexecwindow
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
@@ -35,7 +37,7 @@ func NewWindowPeerGrouper(
 	orderingCols []execinfrapb.Ordering_Column,
 	partitionColIdx int,
 	outputColIdx int,
-) colexecop.Operator {
+) (op colexecop.Operator, err error) {
 	allPeers := len(orderingCols) == 0
 	var distinctCol []bool
 	if !allPeers {
@@ -43,13 +45,16 @@ func NewWindowPeerGrouper(
 		for i, ordCol := range orderingCols {
 			orderIdxs[i] = ordCol.ColIdx
 		}
-		input, distinctCol = colexecbase.OrderedDistinctColsToOperators(
-			input, orderIdxs, typs, false, /* nullsAreDistinct */
+		input, distinctCol, err = colexecbase.OrderedDistinctColsToOperators(
+			input, orderIdxs, typs,
 		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	input = colexecutils.NewVectorTypeEnforcer(allocator, input, types.Bool, outputColIdx)
 	initFields := windowPeerGrouperInitFields{
-		OneInputHelper:  colexecop.MakeOneInputHelper(input),
+		OneInputNode:    colexecop.NewOneInputNode(input),
 		allocator:       allocator,
 		partitionColIdx: partitionColIdx,
 		distinctCol:     distinctCol,
@@ -59,24 +64,24 @@ func NewWindowPeerGrouper(
 		if partitionColIdx != tree.NoColumnIdx {
 			return &windowPeerGrouperAllPeersWithPartitionOp{
 				windowPeerGrouperInitFields: initFields,
-			}
+			}, nil
 		}
 		return &windowPeerGrouperAllPeersNoPartitionOp{
 			windowPeerGrouperInitFields: initFields,
-		}
+		}, nil
 	}
 	if partitionColIdx != tree.NoColumnIdx {
 		return &windowPeerGrouperWithPartitionOp{
 			windowPeerGrouperInitFields: initFields,
-		}
+		}, nil
 	}
 	return &windowPeerGrouperNoPartitionOp{
 		windowPeerGrouperInitFields: initFields,
-	}
+	}, nil
 }
 
 type windowPeerGrouperInitFields struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator       *colmem.Allocator
 	partitionColIdx int
@@ -93,8 +98,12 @@ type windowPeerGrouperNoPartitionOp struct {
 
 var _ colexecop.Operator = &windowPeerGrouperNoPartitionOp{}
 
-func (p *windowPeerGrouperNoPartitionOp) Next() coldata.Batch {
-	b := p.Input.Next()
+func (p *windowPeerGrouperNoPartitionOp) Init() {
+	p.Input.Init()
+}
+
+func (p *windowPeerGrouperNoPartitionOp) Next(ctx context.Context) coldata.Batch {
+	b := p.Input.Next(ctx)
 	n := b.Length()
 	if n == 0 {
 		return b
@@ -128,8 +137,12 @@ type windowPeerGrouperWithPartitionOp struct {
 
 var _ colexecop.Operator = &windowPeerGrouperWithPartitionOp{}
 
-func (p *windowPeerGrouperWithPartitionOp) Next() coldata.Batch {
-	b := p.Input.Next()
+func (p *windowPeerGrouperWithPartitionOp) Init() {
+	p.Input.Init()
+}
+
+func (p *windowPeerGrouperWithPartitionOp) Next(ctx context.Context) coldata.Batch {
+	b := p.Input.Next(ctx)
 	n := b.Length()
 	if n == 0 {
 		return b
@@ -174,8 +187,12 @@ type windowPeerGrouperAllPeersNoPartitionOp struct {
 
 var _ colexecop.Operator = &windowPeerGrouperAllPeersNoPartitionOp{}
 
-func (p *windowPeerGrouperAllPeersNoPartitionOp) Next() coldata.Batch {
-	b := p.Input.Next()
+func (p *windowPeerGrouperAllPeersNoPartitionOp) Init() {
+	p.Input.Init()
+}
+
+func (p *windowPeerGrouperAllPeersNoPartitionOp) Next(ctx context.Context) coldata.Batch {
+	b := p.Input.Next(ctx)
 	n := b.Length()
 	if n == 0 {
 		return b
@@ -211,8 +228,12 @@ type windowPeerGrouperAllPeersWithPartitionOp struct {
 
 var _ colexecop.Operator = &windowPeerGrouperAllPeersWithPartitionOp{}
 
-func (p *windowPeerGrouperAllPeersWithPartitionOp) Next() coldata.Batch {
-	b := p.Input.Next()
+func (p *windowPeerGrouperAllPeersWithPartitionOp) Init() {
+	p.Input.Init()
+}
+
+func (p *windowPeerGrouperAllPeersWithPartitionOp) Next(ctx context.Context) coldata.Batch {
+	b := p.Input.Next(ctx)
 	n := b.Length()
 	if n == 0 {
 		return b

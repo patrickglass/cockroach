@@ -14,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecjoin"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
@@ -93,12 +94,12 @@ func NewExternalHashJoiner(
 	// This memory limit will restrict the size of the batches output by the
 	// in-memory hash joiner in the main strategy as well as by the merge joiner
 	// in the fallback strategy.
-	memoryLimit := execinfra.GetWorkMemLimit(flowCtx)
+	memoryLimit := execinfra.GetWorkMemLimit(flowCtx.Cfg)
 	if memoryLimit == 1 {
 		// If memory limit is 1, we're likely in a "force disk spill"
 		// scenario, but we don't want to artificially limit batches when we
 		// have already spilled, so we'll use a larger limit.
-		memoryLimit = execinfra.DefaultMemoryLimit
+		memoryLimit = colexecop.DefaultMemoryLimit
 	}
 	inMemMainOpConstructor := func(partitionedInputs []*partitionerToOperator) colexecop.ResettableOperator {
 		// Note that the hash-based partitioner will make sure that partitions
@@ -109,7 +110,7 @@ func NewExternalHashJoiner(
 			unlimitedAllocator, unlimitedAllocator, spec, partitionedInputs[0], partitionedInputs[1],
 			// We start with relatively large initial number of buckets since we
 			// expect each partition to be of significant size.
-			uint64(coldata.BatchSize()),
+			uint64(coldata.BatchSize()), memoryLimit,
 		)
 	}
 	diskBackedFallbackOpConstructor := func(
@@ -129,11 +130,15 @@ func NewExternalHashJoiner(
 		rightPartitionSorter := createDiskBackedSorter(
 			partitionedInputs[1], spec.Right.SourceTypes, rightOrdering, externalSorterMaxNumberPartitions,
 		)
-		return colexecjoin.NewMergeJoinOp(
+		diskBackedSortMerge, err := colexecjoin.NewMergeJoinOp(
 			unlimitedAllocator, memoryLimit, args.DiskQueueCfg, fdSemaphore, spec.JoinType,
 			leftPartitionSorter, rightPartitionSorter, spec.Left.SourceTypes,
-			spec.Right.SourceTypes, leftOrdering, rightOrdering, diskAcc, flowCtx.EvalCtx,
+			spec.Right.SourceTypes, leftOrdering, rightOrdering, diskAcc,
 		)
+		if err != nil {
+			colexecerror.InternalError(err)
+		}
+		return diskBackedSortMerge
 	}
 	return newHashBasedPartitioner(
 		unlimitedAllocator,

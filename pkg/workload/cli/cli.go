@@ -11,9 +11,6 @@
 package cli
 
 import (
-	"fmt"
-
-	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
 	"github.com/cockroachdb/cockroach/pkg/workload"
 	"github.com/cockroachdb/errors"
@@ -24,20 +21,9 @@ import (
 // command tree.
 func WorkloadCmd(userFacing bool) *cobra.Command {
 	rootCmd := SetCmdDefaults(&cobra.Command{
-		Use:     `workload`,
-		Short:   `generators for data and query loads`,
-		Version: "details:\n" + build.GetInfo().Long(),
+		Use:   `workload`,
+		Short: `generators for data and query loads`,
 	})
-	rootCmd.AddCommand(&cobra.Command{
-		Use:   `version`,
-		Short: `print version information`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			info := build.GetInfo()
-			fmt.Println(info.Long())
-			return nil
-		}},
-	)
-
 	for _, subCmdFn := range subCmdFns {
 		rootCmd.AddCommand(subCmdFn(userFacing))
 	}

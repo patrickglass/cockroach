@@ -17,13 +17,11 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/scheduledjobs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 )
 
 // EnvTablesType tells JobSchedulerTestEnv whether to use the system tables,
-// or to use test tables. System tables such as system.jobs may be affected
-// by the system in the background, while test tables are completely isolated.
+// or to use test tables.
 type EnvTablesType bool
 
 // UseTestTables instructs JobSchedulerTestEnv to use test tables.
@@ -34,9 +32,7 @@ const UseSystemTables EnvTablesType = true
 
 // NewJobSchedulerTestEnv creates JobSchedulerTestEnv and initializes environments
 // current time to initial time.
-func NewJobSchedulerTestEnv(
-	whichTables EnvTablesType, t time.Time, allowedExecutors ...tree.ScheduledJobExecutorType,
-) *JobSchedulerTestEnv {
+func NewJobSchedulerTestEnv(whichTables EnvTablesType, t time.Time) *JobSchedulerTestEnv {
 	var env *JobSchedulerTestEnv
 	if whichTables == UseTestTables {
 		env = &JobSchedulerTestEnv{
@@ -50,13 +46,6 @@ func NewJobSchedulerTestEnv(
 		}
 	}
 	env.mu.now = t
-	if len(allowedExecutors) > 0 {
-		env.allowedExecutors = make(map[string]struct{}, len(allowedExecutors))
-		for _, e := range allowedExecutors {
-			env.allowedExecutors[e.InternalName()] = struct{}{}
-		}
-	}
-
 	return env
 }
 
@@ -65,7 +54,6 @@ func NewJobSchedulerTestEnv(
 type JobSchedulerTestEnv struct {
 	scheduledJobsTableName string
 	jobsTableName          string
-	allowedExecutors       map[string]struct{}
 	mu                     struct {
 		syncutil.Mutex
 		now time.Time
@@ -112,15 +100,6 @@ func (e *JobSchedulerTestEnv) NowExpr() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return fmt.Sprintf("TIMESTAMPTZ '%s'", e.mu.now.Format(timestampTZLayout))
-}
-
-// IsExecutorEnabled implements scheduledjobs.JobSchedulerEnv
-func (e *JobSchedulerTestEnv) IsExecutorEnabled(name string) bool {
-	enabled := e.allowedExecutors == nil
-	if !enabled {
-		_, enabled = e.allowedExecutors[name]
-	}
-	return enabled
 }
 
 // GetScheduledJobsTableSchema returns schema for the scheduled jobs table.

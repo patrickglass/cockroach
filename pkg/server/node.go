@@ -30,18 +30,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvtenant"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
-	"github.com/cockroachdb/cockroach/pkg/multitenant"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -56,7 +53,6 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 	"github.com/cockroachdb/redact"
-	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 )
@@ -65,6 +61,8 @@ const (
 	// gossipStatusInterval is the interval for logging gossip status.
 	gossipStatusInterval = 1 * time.Minute
 
+	// FirstNodeID is the node ID of the first node in a new cluster.
+	FirstNodeID         = 1
 	graphiteIntervalKey = "external.graphite.interval"
 	maxGraphiteInterval = 15 * time.Minute
 )
@@ -72,38 +70,20 @@ const (
 // Metric names.
 var (
 	metaExecLatency = metric.Metadata{
-		Name: "exec.latency",
-		Help: `Latency of batch KV requests (including errors) executed on this node.
-
-This measures requests already addressed to a single replica, from the moment
-at which they arrive at the internal gRPC endpoint to the moment at which the
-response (or an error) is returned.
-
-This latency includes in particular commit waits, conflict resolution and replication,
-and end-users can easily produce high measurements via long-running transactions that
-conflict with foreground traffic. This metric thus does not provide a good signal for
-understanding the health of the KV layer.
-`,
+		Name:        "exec.latency",
+		Help:        "Latency of batch KV requests executed on this node",
 		Measurement: "Latency",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
 	metaExecSuccess = metric.Metadata{
-		Name: "exec.success",
-		Help: `Number of batch KV requests executed successfully on this node.
-
-A request is considered to have executed 'successfully' if it either returns a result
-or a transaction restart/abort error.
-`,
+		Name:        "exec.success",
+		Help:        "Number of batch KV requests executed successfully on this node",
 		Measurement: "Batch KV Requests",
 		Unit:        metric.Unit_COUNT,
 	}
 	metaExecError = metric.Metadata{
-		Name: "exec.error",
-		Help: `Number of batch KV requests that failed to execute on this node.
-
-This count excludes transaction restart/abort errors. However, it will include
-other errors expected during normal operation, such as ConditionFailedError.
-This metric is thus not an indicator of KV health.`,
+		Name:        "exec.error",
+		Help:        "Number of batch KV requests that failed to execute on this node",
 		Measurement: "Batch KV Requests",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -183,23 +163,13 @@ type Node struct {
 	recorder     *status.MetricsRecorder
 	startedAt    int64
 	lastUp       int64
-	initialStart bool // true if this is the first time this node has started
+	initialStart bool // True if this is the first time this node has started.
 	txnMetrics   kvcoord.TxnMetrics
 
 	// Used to signal when additional stores, if any, have been initialized.
 	additionalStoreInitCh chan struct{}
 
 	perReplicaServer kvserver.Server
-
-	admissionController kvserver.KVAdmissionController
-
-	tenantUsage multitenant.TenantUsageServer
-
-	spanConfigAccessor spanconfig.KVAccessor // powers the span configuration RPCs
-
-	// Turns `Node.writeNodeStatus` into a no-op. This is a hack to enable the
-	// COCKROACH_DEBUG_TS_IMPORT_FILE env var.
-	suppressNodeStatus syncutil.AtomicBool
 }
 
 var _ roachpb.InternalServer = &Node{}
@@ -250,6 +220,7 @@ func bootstrapCluster(
 	// TODO(andrei): It'd be cool if this method wouldn't do anything to engines
 	// other than the first one, and let regular node startup code deal with them.
 	var bootstrapVersion clusterversion.ClusterVersion
+	const firstStoreID = 1
 	for i, eng := range engines {
 		cv, err := kvserver.ReadClusterVersion(ctx, eng)
 		if err != nil {
@@ -267,8 +238,8 @@ func bootstrapCluster(
 
 		sIdent := roachpb.StoreIdent{
 			ClusterID: clusterID,
-			NodeID:    kvserver.FirstNodeID,
-			StoreID:   kvserver.FirstStoreID + roachpb.StoreID(i),
+			NodeID:    FirstNodeID,
+			StoreID:   roachpb.StoreID(i + firstStoreID),
 		}
 
 		// Initialize the engine backing the store with the store ident and cluster
@@ -319,29 +290,21 @@ func NewNode(
 	stores *kvserver.Stores,
 	execCfg *sql.ExecutorConfig,
 	clusterID *base.ClusterIDContainer,
-	kvAdmissionQ *admission.WorkQueue,
-	storeGrantCoords *admission.StoreGrantCoordinators,
-	tenantUsage multitenant.TenantUsageServer,
-	spanConfigAccessor spanconfig.KVAccessor,
 ) *Node {
 	var sqlExec *sql.InternalExecutor
 	if execCfg != nil {
 		sqlExec = execCfg.InternalExecutor
 	}
 	n := &Node{
-		storeCfg:            cfg,
-		stopper:             stopper,
-		recorder:            recorder,
-		metrics:             makeNodeMetrics(reg, cfg.HistogramWindowInterval),
-		stores:              stores,
-		txnMetrics:          txnMetrics,
-		sqlExec:             sqlExec,
-		clusterID:           clusterID,
-		admissionController: kvserver.MakeKVAdmissionController(kvAdmissionQ, storeGrantCoords),
-		tenantUsage:         tenantUsage,
-		spanConfigAccessor:  spanConfigAccessor,
+		storeCfg:   cfg,
+		stopper:    stopper,
+		recorder:   recorder,
+		metrics:    makeNodeMetrics(reg, cfg.HistogramWindowInterval),
+		stores:     stores,
+		txnMetrics: txnMetrics,
+		sqlExec:    sqlExec,
+		clusterID:  clusterID,
 	}
-	n.storeCfg.KVAdmissionController = n.admissionController
 	n.perReplicaServer = kvserver.MakeServer(&n.Descriptor, n.stores)
 	return n
 }
@@ -411,6 +374,9 @@ func (n *Node) start(
 		return errors.Errorf("couldn't gossip descriptor for node %d: %s", n.Descriptor.NodeID, err)
 	}
 
+	// Start the closed timestamp subsystem.
+	n.storeCfg.ClosedTimestamp.Start(n.Descriptor.NodeID)
+
 	// Create stores from the engines that were already initialized.
 	for _, e := range state.initializedEngines {
 		s := kvserver.NewStore(ctx, n.storeCfg, e, &n.Descriptor)
@@ -449,7 +415,7 @@ func (n *Node) start(
 	// gossip can bootstrap using the most recently persisted set of
 	// node addresses.
 	if err := n.storeCfg.Gossip.SetStorage(n.stores); err != nil {
-		return errors.Wrap(err, "failed to initialize the gossip interface")
+		return fmt.Errorf("failed to initialize the gossip interface: %s", err)
 	}
 
 	// Initialize remaining stores/engines, if any.
@@ -652,12 +618,8 @@ func (n *Node) startGossiping(ctx context.Context, stopper *stop.Stopper) {
 		statusTicker := time.NewTicker(gossipStatusInterval)
 		storesTicker := time.NewTicker(gossip.StoresInterval)
 		nodeTicker := time.NewTicker(gossip.NodeDescriptorInterval)
-		defer func() {
-			nodeTicker.Stop()
-			storesTicker.Stop()
-			statusTicker.Stop()
-		}()
-
+		defer storesTicker.Stop()
+		defer nodeTicker.Stop()
 		n.gossipStores(ctx) // one-off run before going to sleep
 		for {
 			select {
@@ -716,18 +678,6 @@ func (n *Node) computePeriodicMetrics(ctx context.Context, tick int) error {
 		}
 		return nil
 	})
-}
-
-// GetPebbleMetrics implements admission.PebbleMetricsProvider.
-func (n *Node) GetPebbleMetrics() []admission.StoreMetrics {
-	var metrics []admission.StoreMetrics
-	_ = n.stores.VisitStores(func(store *kvserver.Store) error {
-		m := store.Engine().GetMetrics()
-		metrics = append(
-			metrics, admission.StoreMetrics{StoreID: int32(store.StoreID()), Metrics: m.Metrics})
-		return nil
-	})
-	return metrics
 }
 
 func (n *Node) startGraphiteStatsExporter(st *cluster.Settings) {
@@ -798,9 +748,6 @@ func (n *Node) startWriteNodeStatus(frequency time.Duration) error {
 // If mustExist is true the status key must already exist and must
 // not change during writing -- if false, the status is always written.
 func (n *Node) writeNodeStatus(ctx context.Context, alertTTL time.Duration, mustExist bool) error {
-	if n.suppressNodeStatus.Get() {
-		return nil
-	}
 	var err error
 	if runErr := n.stopper.RunTask(ctx, "node.Node: writing summary", func(ctx context.Context) {
 		nodeStatus := n.recorder.GenerateNodeStatus(ctx)
@@ -904,7 +851,7 @@ func checkNoUnknownRequest(reqs []roachpb.RequestUnion) *roachpb.UnsupportedRequ
 }
 
 func (n *Node) batchInternal(
-	ctx context.Context, tenID roachpb.TenantID, args *roachpb.BatchRequest,
+	ctx context.Context, args *roachpb.BatchRequest,
 ) (*roachpb.BatchResponse, error) {
 	if detail := checkNoUnknownRequest(args.Requests); detail != nil {
 		var br roachpb.BatchResponse
@@ -914,11 +861,11 @@ func (n *Node) batchInternal(
 
 	var br *roachpb.BatchResponse
 	if err := n.stopper.RunTaskWithErr(ctx, "node.Node: batch", func(ctx context.Context) error {
-		var finishSpan func(context.Context, *roachpb.BatchResponse)
+		var finishSpan func(*roachpb.BatchResponse)
 		// Shadow ctx from the outer function. Written like this to pass the linter.
-		ctx, finishSpan = n.setupSpanForIncomingRPC(ctx, tenID)
+		ctx, finishSpan = n.setupSpanForIncomingRPC(ctx, grpcutil.IsLocalRequestContext(ctx))
 		// NB: wrapped to delay br evaluation to its value when returning.
-		defer func() { finishSpan(ctx, br) }()
+		defer func() { finishSpan(br) }()
 		if log.HasSpanOrEvent(ctx) {
 			log.Eventf(ctx, "node received request: %s", args.Summary())
 		}
@@ -951,26 +898,7 @@ func (n *Node) Batch(
 	// log tags more expensive and makes local calls differ from remote calls.
 	ctx = n.storeCfg.AmbientCtx.ResetAndAnnotateCtx(ctx)
 
-	tenantID, ok := roachpb.TenantFromContext(ctx)
-	if !ok {
-		tenantID = roachpb.SystemTenantID
-	}
-
-	// Requests from tenants don't have gateway node id set but are required for
-	// the QPS based rebalancing to work. The GatewayNodeID is used as a proxy
-	// for the locality of the origin of the request. The replica stats aggregate
-	// all incoming BatchRequests and which localities they come from in order to
-	// compute per second stats used for the rebalancing decisions.
-	if args.GatewayNodeID == 0 && tenantID != roachpb.SystemTenantID {
-		args.GatewayNodeID = n.Descriptor.NodeID
-	}
-
-	handle, err := n.admissionController.AdmitKVWork(ctx, tenantID, args)
-	if err != nil {
-		return nil, err
-	}
-	br, err := n.batchInternal(ctx, tenantID, args)
-	n.admissionController.AdmittedKVWorkDone(handle)
+	br, err := n.batchInternal(ctx, args)
 
 	// We always return errors via BatchResponse.Error so structure is
 	// preserved; plain errors are presumed to be from the RPC
@@ -1003,16 +931,16 @@ func (n *Node) Batch(
 // in which the response is to serialized. The BatchResponse can
 // be nil in case no response is to be returned to the rpc caller.
 func (n *Node) setupSpanForIncomingRPC(
-	ctx context.Context, tenID roachpb.TenantID,
-) (context.Context, func(context.Context, *roachpb.BatchResponse)) {
+	ctx context.Context, isLocalRequest bool,
+) (context.Context, func(*roachpb.BatchResponse)) {
 	// The operation name matches the one created by the interceptor in the
 	// remoteTrace case below.
 	const opName = "/cockroach.roachpb.Internal/Batch"
 	tr := n.storeCfg.AmbientCtx.Tracer
 	var newSpan, grpcSpan *tracing.Span
-	if isLocalRequest := grpcutil.IsLocalRequestContext(ctx) && tenID == roachpb.SystemTenantID; isLocalRequest {
+	if isLocalRequest {
 		// This is a local request which circumvented gRPC. Start a span now.
-		ctx, newSpan = tracing.EnsureChildSpan(ctx, tr, opName, tracing.WithServerSpanKind)
+		ctx, newSpan = tracing.EnsureChildSpan(ctx, tr, opName)
 	} else {
 		grpcSpan = tracing.SpanFromContext(ctx)
 		if grpcSpan == nil {
@@ -1021,11 +949,11 @@ func (n *Node) setupSpanForIncomingRPC(
 			// disabled, this will be a noop span).
 			ctx, newSpan = tr.StartSpanCtx(ctx, opName)
 		} else {
-			grpcSpan.SetTag("node", attribute.IntValue(int(n.Descriptor.NodeID)))
+			grpcSpan.SetTag("node", n.Descriptor.NodeID)
 		}
 	}
 
-	finishSpan := func(ctx context.Context, br *roachpb.BatchResponse) {
+	finishSpan := func(br *roachpb.BatchResponse) {
 		if newSpan != nil {
 			newSpan.Finish()
 		}
@@ -1036,16 +964,8 @@ func (n *Node) setupSpanForIncomingRPC(
 			// If our local span descends from a parent on the other
 			// end of the RPC (i.e. the !isLocalRequest) case,
 			// attach the span recording to the batch response.
-			// Tenants get a redacted recording, i.e. with anything
-			// sensitive stripped out of the verbose messages. However,
-			// structured payloads stay untouched.
-			if rec := grpcSpan.GetRecording(grpcSpan.RecordingType()); rec != nil {
-				err := redactRecordingForTenant(tenID, rec)
-				if err == nil {
-					br.CollectedSpans = append(br.CollectedSpans, rec...)
-				} else {
-					log.Errorf(ctx, "error redacting trace recording: %s", err)
-				}
+			if rec := grpcSpan.GetRecording(); rec != nil {
+				br.CollectedSpans = append(br.CollectedSpans, rec...)
 			}
 		}
 	}
@@ -1316,7 +1236,7 @@ func (n *Node) Join(
 	defer span.Finish()
 
 	activeVersion := n.storeCfg.Settings.Version.ActiveVersion(ctx)
-	if req.BinaryVersion.Less(activeVersion.Version) {
+	if req.BinaryVersion.Less(activeVersion.Version) && !clusterversion.Is21Dot1Dot8Equiv(*req.BinaryVersion, activeVersion.Version) {
 		return nil, grpcstatus.Error(codes.PermissionDenied, ErrIncompatibleBinaryVersion.Error())
 	}
 
@@ -1350,95 +1270,4 @@ func (n *Node) Join(
 		StoreID:       int32(storeID),
 		ActiveVersion: &activeVersion.Version,
 	}, nil
-}
-
-// TokenBucket is part of the roachpb.InternalServer service.
-func (n *Node) TokenBucket(
-	ctx context.Context, in *roachpb.TokenBucketRequest,
-) (*roachpb.TokenBucketResponse, error) {
-	// Check tenant ID. Note that in production configuration, the tenant ID has
-	// already been checked in the RPC layer (see rpc.tenantAuthorizer).
-	if in.TenantID == 0 || in.TenantID == roachpb.SystemTenantID.ToUint64() {
-		return &roachpb.TokenBucketResponse{
-			Error: errors.EncodeError(ctx, errors.Errorf(
-				"token bucket request with invalid tenant ID %d", in.TenantID,
-			)),
-		}, nil
-	}
-	tenantID := roachpb.MakeTenantID(in.TenantID)
-	return n.tenantUsage.TokenBucketRequest(ctx, tenantID, in), nil
-}
-
-// NewTenantUsageServer is a hook for CCL code which implements the tenant usage
-// server.
-var NewTenantUsageServer = func(
-	settings *cluster.Settings,
-	db *kv.DB,
-	executor *sql.InternalExecutor,
-) multitenant.TenantUsageServer {
-	return dummyTenantUsageServer{}
-}
-
-// dummyTenantUsageServer is a stub implementation of TenantUsageServer that
-// errors out on all APIs.
-type dummyTenantUsageServer struct{}
-
-// TokenBucketRequest is defined in the TenantUsageServer interface.
-func (dummyTenantUsageServer) TokenBucketRequest(
-	ctx context.Context, tenantID roachpb.TenantID, in *roachpb.TokenBucketRequest,
-) *roachpb.TokenBucketResponse {
-	return &roachpb.TokenBucketResponse{
-		Error: errors.EncodeError(ctx, errors.New("tenant usage requires a CCL binary")),
-	}
-}
-
-// ReconfigureTokenBucket is defined in the TenantUsageServer interface.
-func (dummyTenantUsageServer) ReconfigureTokenBucket(
-	ctx context.Context,
-	txn *kv.Txn,
-	tenantID roachpb.TenantID,
-	availableRU float64,
-	refillRate float64,
-	maxBurstRU float64,
-	asOf time.Time,
-	asOfConsumedRequestUnits float64,
-) error {
-	return errors.Errorf("tenant resource limits require a CCL binary")
-}
-
-// Metrics is defined in the TenantUsageServer interface.
-func (dummyTenantUsageServer) Metrics() metric.Struct {
-	return emptyMetricStruct{}
-}
-
-type emptyMetricStruct struct{}
-
-var _ metric.Struct = emptyMetricStruct{}
-
-func (emptyMetricStruct) MetricStruct() {}
-
-// GetSpanConfigs implements the roachpb.InternalServer interface.
-func (n *Node) GetSpanConfigs(
-	ctx context.Context, req *roachpb.GetSpanConfigsRequest,
-) (*roachpb.GetSpanConfigsResponse, error) {
-	entries, err := n.spanConfigAccessor.GetSpanConfigEntriesFor(ctx, req.Spans)
-	if err != nil {
-		return nil, err
-	}
-
-	return &roachpb.GetSpanConfigsResponse{SpanConfigEntries: entries}, nil
-}
-
-// UpdateSpanConfigs implements the roachpb.InternalServer interface.
-func (n *Node) UpdateSpanConfigs(
-	ctx context.Context, req *roachpb.UpdateSpanConfigsRequest,
-) (*roachpb.UpdateSpanConfigsResponse, error) {
-	// TODO(irfansharif): We want to protect ourselves from tenants creating
-	// outlandishly large string buffers here and OOM-ing the host cluster. Is
-	// the maximum protobuf message size enough of a safeguard?
-	err := n.spanConfigAccessor.UpdateSpanConfigEntries(ctx, req.ToDelete, req.ToUpsert)
-	if err != nil {
-		return nil, err
-	}
-	return &roachpb.UpdateSpanConfigsResponse{}, nil
 }

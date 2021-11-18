@@ -33,9 +33,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
-	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -47,8 +47,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
@@ -64,8 +62,6 @@ var (
 	// ErrFloatOutOfRange is reported when float arithmetic overflows.
 	ErrFloatOutOfRange = pgerror.New(pgcode.NumericValueOutOfRange, "float out of range")
 	errDecOutOfRange   = pgerror.New(pgcode.NumericValueOutOfRange, "decimal out of range")
-	// errCharOutOfRange is reported when int cast to ASCII byte overflows.
-	errCharOutOfRange = pgerror.New(pgcode.NumericValueOutOfRange, "\"char\" out of range")
 
 	// ErrDivByZero is reported on a division by zero.
 	ErrDivByZero       = pgerror.New(pgcode.DivisionByZero, "division by zero")
@@ -112,9 +108,7 @@ func (*UnaryOp) preferred() bool {
 	return false
 }
 
-func unaryOpFixups(
-	ops map[UnaryOperatorSymbol]unaryOpOverload,
-) map[UnaryOperatorSymbol]unaryOpOverload {
+func unaryOpFixups(ops map[UnaryOperator]unaryOpOverload) map[UnaryOperator]unaryOpOverload {
 	for op, overload := range ops {
 		for i, impl := range overload {
 			casted := impl.(*UnaryOp)
@@ -130,42 +124,7 @@ func unaryOpFixups(
 type unaryOpOverload []overloadImpl
 
 // UnaryOps contains the unary operations indexed by operation type.
-var UnaryOps = unaryOpFixups(map[UnaryOperatorSymbol]unaryOpOverload{
-	UnaryPlus: {
-		&UnaryOp{
-			Typ:        types.Int,
-			ReturnType: types.Int,
-			Fn: func(_ *EvalContext, d Datum) (Datum, error) {
-				return d, nil
-			},
-			Volatility: VolatilityImmutable,
-		},
-		&UnaryOp{
-			Typ:        types.Float,
-			ReturnType: types.Float,
-			Fn: func(_ *EvalContext, d Datum) (Datum, error) {
-				return d, nil
-			},
-			Volatility: VolatilityImmutable,
-		},
-		&UnaryOp{
-			Typ:        types.Decimal,
-			ReturnType: types.Decimal,
-			Fn: func(_ *EvalContext, d Datum) (Datum, error) {
-				return d, nil
-			},
-			Volatility: VolatilityImmutable,
-		},
-		&UnaryOp{
-			Typ:        types.Interval,
-			ReturnType: types.Interval,
-			Fn: func(_ *EvalContext, d Datum) (Datum, error) {
-				return d, nil
-			},
-			Volatility: VolatilityImmutable,
-		},
-	},
-
+var UnaryOps = unaryOpFixups(map[UnaryOperator]unaryOpOverload{
 	UnaryMinus: {
 		&UnaryOp{
 			Typ:        types.Int,
@@ -287,13 +246,12 @@ type TwoArgFn func(*EvalContext, Datum, Datum) (Datum, error)
 
 // BinOp is a binary operator.
 type BinOp struct {
-	LeftType          *types.T
-	RightType         *types.T
-	ReturnType        *types.T
-	NullableArgs      bool
-	Fn                TwoArgFn
-	Volatility        Volatility
-	PreferredOverload bool
+	LeftType     *types.T
+	RightType    *types.T
+	ReturnType   *types.T
+	NullableArgs bool
+	Fn           TwoArgFn
+	Volatility   Volatility
 
 	types   TypeList
 	retType ReturnTyper
@@ -315,8 +273,8 @@ func (op *BinOp) returnType() ReturnTyper {
 	return op.retType
 }
 
-func (op *BinOp) preferred() bool {
-	return op.PreferredOverload
+func (*BinOp) preferred() bool {
+	return false
 }
 
 // AppendToMaybeNullArray appends an element to an array. If the first
@@ -541,22 +499,29 @@ func (o binOpOverload) lookupImpl(left, right *types.T) (*BinOp, bool) {
 	return nil, false
 }
 
-// GetJSONPath is used for the #> and #>> operators.
-func GetJSONPath(j json.JSON, ary DArray) (json.JSON, error) {
+// getJSONPath is used for the #> and #>> operators.
+func getJSONPath(j DJSON, ary DArray) (Datum, error) {
 	// TODO(justin): this is slightly annoying because we have to allocate
 	// a new array since the JSON package isn't aware of DArray.
 	path := make([]string, len(ary.Array))
 	for i, v := range ary.Array {
 		if v == DNull {
-			return nil, nil
+			return DNull, nil
 		}
 		path[i] = string(MustBeDString(v))
 	}
-	return json.FetchPath(j, path)
+	result, err := json.FetchPath(j.JSON, path)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return DNull, nil
+	}
+	return &DJSON{result}, nil
 }
 
 // BinOps contains the binary operations indexed by operation type.
-var BinOps = map[BinaryOperatorSymbol]binOpOverload{
+var BinOps = map[BinaryOperator]binOpOverload{
 	Bitand: {
 		&BinOp{
 			LeftType:   types.Int,
@@ -1895,8 +1860,7 @@ var BinOps = map[BinaryOperatorSymbol]binOpOverload{
 				}
 				return &DJSON{j}, nil
 			},
-			PreferredOverload: true,
-			Volatility:        VolatilityImmutable,
+			Volatility: VolatilityImmutable,
 		},
 		&BinOp{
 			LeftType:   types.Jsonb,
@@ -1922,14 +1886,7 @@ var BinOps = map[BinaryOperatorSymbol]binOpOverload{
 			RightType:  types.MakeArray(types.String),
 			ReturnType: types.Jsonb,
 			Fn: func(_ *EvalContext, left Datum, right Datum) (Datum, error) {
-				path, err := GetJSONPath(left.(*DJSON).JSON, *MustBeDArray(right))
-				if err != nil {
-					return nil, err
-				}
-				if path == nil {
-					return DNull, nil
-				}
-				return &DJSON{path}, nil
+				return getJSONPath(*left.(*DJSON), *MustBeDArray(right))
 			},
 			Volatility: VolatilityImmutable,
 		},
@@ -1957,8 +1914,7 @@ var BinOps = map[BinaryOperatorSymbol]binOpOverload{
 				}
 				return NewDString(*text), nil
 			},
-			PreferredOverload: true,
-			Volatility:        VolatilityImmutable,
+			Volatility: VolatilityImmutable,
 		},
 		&BinOp{
 			LeftType:   types.Jsonb,
@@ -1991,14 +1947,14 @@ var BinOps = map[BinaryOperatorSymbol]binOpOverload{
 			RightType:  types.MakeArray(types.String),
 			ReturnType: types.String,
 			Fn: func(_ *EvalContext, left Datum, right Datum) (Datum, error) {
-				res, err := GetJSONPath(left.(*DJSON).JSON, *MustBeDArray(right))
+				res, err := getJSONPath(*left.(*DJSON), *MustBeDArray(right))
 				if err != nil {
 					return nil, err
 				}
-				if res == nil {
+				if res == DNull {
 					return DNull, nil
 				}
-				text, err := res.AsText()
+				text, err := res.(*DJSON).JSON.AsText()
 				if err != nil {
 					return nil, err
 				}
@@ -2032,7 +1988,7 @@ type CmpOp struct {
 
 	Volatility Volatility
 
-	PreferredOverload bool
+	isPreferred bool
 }
 
 func (op *CmpOp) params() TypeList {
@@ -2050,13 +2006,11 @@ func (op *CmpOp) returnType() ReturnTyper {
 }
 
 func (op *CmpOp) preferred() bool {
-	return op.PreferredOverload
+	return op.isPreferred
 }
 
-func cmpOpFixups(
-	cmpOps map[ComparisonOperatorSymbol]cmpOpOverload,
-) map[ComparisonOperatorSymbol]cmpOpOverload {
-	findVolatility := func(op ComparisonOperatorSymbol, t *types.T) Volatility {
+func cmpOpFixups(cmpOps map[ComparisonOperator]cmpOpOverload) map[ComparisonOperator]cmpOpOverload {
+	findVolatility := func(op ComparisonOperator, t *types.T) Volatility {
 		for _, impl := range cmpOps[EQ] {
 			o := impl.(*CmpOp)
 			if o.LeftType.Equivalent(t) && o.RightType.Equivalent(t) {
@@ -2067,7 +2021,7 @@ func cmpOpFixups(
 	}
 
 	// Array equality comparisons.
-	for _, t := range append(types.Scalar, types.AnyEnum) {
+	for _, t := range types.Scalar {
 		cmpOps[EQ] = append(cmpOps[EQ], &CmpOp{
 			LeftType:   types.MakeArray(t),
 			RightType:  types.MakeArray(t),
@@ -2149,7 +2103,7 @@ func makeIsFn(a, b *types.T, v Volatility) *CmpOp {
 }
 
 // CmpOps contains the comparison operations indexed by operation type.
-var CmpOps = cmpOpFixups(map[ComparisonOperatorSymbol]cmpOpOverload{
+var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 	EQ: {
 		// Single-type comparisons.
 		makeEqFn(types.AnyEnum, types.AnyEnum, VolatilityImmutable),
@@ -2201,7 +2155,7 @@ var CmpOps = cmpOpFixups(map[ComparisonOperatorSymbol]cmpOpOverload{
 			LeftType:  types.AnyTuple,
 			RightType: types.AnyTuple,
 			Fn: func(ctx *EvalContext, left Datum, right Datum) (Datum, error) {
-				return cmpOpTupleFn(ctx, *left.(*DTuple), *right.(*DTuple), MakeComparisonOperator(EQ)), nil
+				return cmpOpTupleFn(ctx, *left.(*DTuple), *right.(*DTuple), EQ), nil
 			},
 			Volatility: VolatilityImmutable,
 		},
@@ -2214,10 +2168,10 @@ var CmpOps = cmpOpFixups(map[ComparisonOperatorSymbol]cmpOpOverload{
 		makeLtFn(types.Bytes, types.Bytes, VolatilityLeakProof),
 		makeLtFn(types.Date, types.Date, VolatilityLeakProof),
 		makeLtFn(types.Decimal, types.Decimal, VolatilityImmutable),
+		makeLtFn(types.AnyCollatedString, types.AnyCollatedString, VolatilityLeakProof),
 		// Note: it is an error to compare two strings with different collations;
 		// the operator is leak proof under the assumption that these cases will be
 		// detected during type checking.
-		makeLtFn(types.AnyCollatedString, types.AnyCollatedString, VolatilityLeakProof),
 		makeLtFn(types.Float, types.Float, VolatilityLeakProof),
 		makeLtFn(types.Box2D, types.Box2D, VolatilityLeakProof),
 		makeLtFn(types.Geography, types.Geography, VolatilityLeakProof),
@@ -2257,7 +2211,7 @@ var CmpOps = cmpOpFixups(map[ComparisonOperatorSymbol]cmpOpOverload{
 			LeftType:  types.AnyTuple,
 			RightType: types.AnyTuple,
 			Fn: func(ctx *EvalContext, left Datum, right Datum) (Datum, error) {
-				return cmpOpTupleFn(ctx, *left.(*DTuple), *right.(*DTuple), MakeComparisonOperator(LT)), nil
+				return cmpOpTupleFn(ctx, *left.(*DTuple), *right.(*DTuple), LT), nil
 			},
 			Volatility: VolatilityImmutable,
 		},
@@ -2313,7 +2267,7 @@ var CmpOps = cmpOpFixups(map[ComparisonOperatorSymbol]cmpOpOverload{
 			LeftType:  types.AnyTuple,
 			RightType: types.AnyTuple,
 			Fn: func(ctx *EvalContext, left Datum, right Datum) (Datum, error) {
-				return cmpOpTupleFn(ctx, *left.(*DTuple), *right.(*DTuple), MakeComparisonOperator(LE)), nil
+				return cmpOpTupleFn(ctx, *left.(*DTuple), *right.(*DTuple), LE), nil
 			},
 			Volatility: VolatilityImmutable,
 		},
@@ -2325,9 +2279,9 @@ var CmpOps = cmpOpFixups(map[ComparisonOperatorSymbol]cmpOpOverload{
 			RightType:    types.Unknown,
 			Fn:           cmpOpScalarIsFn,
 			NullableArgs: true,
-			// Avoids ambiguous comparison error for NULL IS NOT DISTINCT FROM NULL.
-			PreferredOverload: true,
-			Volatility:        VolatilityLeakProof,
+			// Avoids ambiguous comparison error for NULL IS NOT DISTINCT FROM NULL>
+			isPreferred: true,
+			Volatility:  VolatilityLeakProof,
 		},
 		&CmpOp{
 			LeftType:     types.AnyArray,
@@ -2390,7 +2344,7 @@ var CmpOps = cmpOpFixups(map[ComparisonOperatorSymbol]cmpOpOverload{
 				if left == DNull || right == DNull {
 					return MakeDBool(left == DNull && right == DNull), nil
 				}
-				return cmpOpTupleFn(ctx, *left.(*DTuple), *right.(*DTuple), MakeComparisonOperator(IsNotDistinctFrom)), nil
+				return cmpOpTupleFn(ctx, *left.(*DTuple), *right.(*DTuple), IsNotDistinctFrom), nil
 			},
 			Volatility: VolatilityImmutable,
 		},
@@ -2723,22 +2677,22 @@ func makeBox2DComparisonOperators(op func(lhs, rhs *geo.CartesianBoundingBox) bo
 
 // This map contains the inverses for operators in the CmpOps map that have
 // inverses.
-var cmpOpsInverse map[ComparisonOperatorSymbol]ComparisonOperatorSymbol
+var cmpOpsInverse map[ComparisonOperator]ComparisonOperator
 
 func init() {
-	cmpOpsInverse = make(map[ComparisonOperatorSymbol]ComparisonOperatorSymbol)
+	cmpOpsInverse = make(map[ComparisonOperator]ComparisonOperator)
 	for cmpOpIdx := range comparisonOpName {
-		cmpOp := ComparisonOperatorSymbol(cmpOpIdx)
-		newOp, _, _, _, _ := FoldComparisonExpr(MakeComparisonOperator(cmpOp), DNull, DNull)
-		if newOp.Symbol != cmpOp {
-			cmpOpsInverse[newOp.Symbol] = cmpOp
-			cmpOpsInverse[cmpOp] = newOp.Symbol
+		cmpOp := ComparisonOperator(cmpOpIdx)
+		newOp, _, _, _, _ := FoldComparisonExpr(cmpOp, DNull, DNull)
+		if newOp != cmpOp {
+			cmpOpsInverse[newOp] = cmpOp
+			cmpOpsInverse[cmpOp] = newOp
 		}
 	}
 }
 
 func boolFromCmp(cmp int, op ComparisonOperator) *DBool {
-	switch op.Symbol {
+	switch op {
 	case EQ, IsNotDistinctFrom:
 		return MakeDBool(cmp == 0)
 	case LT:
@@ -2755,7 +2709,7 @@ func cmpOpScalarFn(ctx *EvalContext, left, right Datum, op ComparisonOperator) D
 	// be handled differently during SQL comparison evaluation than they should when
 	// ordering Datum values.
 	if left == DNull || right == DNull {
-		switch op.Symbol {
+		switch op {
 		case IsNotDistinctFrom:
 			return MakeDBool((left == DNull) == (right == DNull))
 
@@ -2769,16 +2723,16 @@ func cmpOpScalarFn(ctx *EvalContext, left, right Datum, op ComparisonOperator) D
 }
 
 func cmpOpScalarEQFn(ctx *EvalContext, left, right Datum) (Datum, error) {
-	return cmpOpScalarFn(ctx, left, right, MakeComparisonOperator(EQ)), nil
+	return cmpOpScalarFn(ctx, left, right, EQ), nil
 }
 func cmpOpScalarLTFn(ctx *EvalContext, left, right Datum) (Datum, error) {
-	return cmpOpScalarFn(ctx, left, right, MakeComparisonOperator(LT)), nil
+	return cmpOpScalarFn(ctx, left, right, LT), nil
 }
 func cmpOpScalarLEFn(ctx *EvalContext, left, right Datum) (Datum, error) {
-	return cmpOpScalarFn(ctx, left, right, MakeComparisonOperator(LE)), nil
+	return cmpOpScalarFn(ctx, left, right, LE), nil
 }
 func cmpOpScalarIsFn(ctx *EvalContext, left, right Datum) (Datum, error) {
-	return cmpOpScalarFn(ctx, left, right, MakeComparisonOperator(IsNotDistinctFrom)), nil
+	return cmpOpScalarFn(ctx, left, right, IsNotDistinctFrom), nil
 }
 
 func cmpOpTupleFn(ctx *EvalContext, left, right DTuple, op ComparisonOperator) Datum {
@@ -2789,7 +2743,7 @@ func cmpOpTupleFn(ctx *EvalContext, left, right DTuple, op ComparisonOperator) D
 		// Like with cmpOpScalarFn, check for values that need to be handled
 		// differently than when ordering Datums.
 		if leftElem == DNull || rightElem == DNull {
-			switch op.Symbol {
+			switch op {
 			case EQ:
 				// If either Datum is NULL and the op is EQ, we continue the
 				// comparison and the result is only NULL if the other (non-NULL)
@@ -2877,7 +2831,7 @@ func makeEvalTupleIn(typ *types.T, v Volatility) *CmpOp {
 						sawNull = true
 					} else {
 						// Use the EQ function which properly handles NULLs.
-						if res := cmpOpTupleFn(ctx, *argTuple, *val.(*DTuple), MakeComparisonOperator(EQ)); res == DNull {
+						if res := cmpOpTupleFn(ctx, *argTuple, *val.(*DTuple), EQ); res == DNull {
 							sawNull = true
 						} else if res == DBoolTrue {
 							return DBoolTrue, nil
@@ -2912,7 +2866,7 @@ func makeEvalTupleIn(typ *types.T, v Volatility) *CmpOp {
 func evalDatumsCmp(
 	ctx *EvalContext, op, subOp ComparisonOperator, fn *CmpOp, left Datum, right Datums,
 ) (Datum, error) {
-	all := op.Symbol == All
+	all := op == All
 	any := !all
 	sawNull := false
 	for _, elem := range right {
@@ -2983,8 +2937,8 @@ func MatchLikeEscape(
 
 	like, err := optimizedLikeFunc(pattern, caseInsensitive, escapeRune)
 	if err != nil {
-		return DBoolFalse, pgerror.Wrap(
-			err, pgcode.InvalidRegularExpression, "LIKE regexp compilation failed")
+		return DBoolFalse, pgerror.Newf(
+			pgcode.InvalidRegularExpression, "LIKE regexp compilation failed: %v", err)
 	}
 
 	if like == nil {
@@ -3008,8 +2962,8 @@ func ConvertLikeToRegexp(
 	key := likeKey{s: pattern, caseInsensitive: caseInsensitive, escape: escape}
 	re, err := ctx.ReCache.GetRegexp(key)
 	if err != nil {
-		return nil, pgerror.Wrap(
-			err, pgcode.InvalidRegularExpression, "LIKE regexp compilation failed")
+		return nil, pgerror.Newf(
+			pgcode.InvalidRegularExpression, "LIKE regexp compilation failed: %v", err)
 	}
 	return re, nil
 }
@@ -3033,8 +2987,8 @@ func matchLike(ctx *EvalContext, left, right Datum, caseInsensitive bool) (Datum
 
 	like, err := optimizedLikeFunc(pattern, caseInsensitive, '\\')
 	if err != nil {
-		return DBoolFalse, pgerror.Wrap(
-			err, pgcode.InvalidRegularExpression, "LIKE regexp compilation failed")
+		return DBoolFalse, pgerror.Newf(
+			pgcode.InvalidRegularExpression, "LIKE regexp compilation failed: %v", err)
 	}
 
 	if like == nil {
@@ -3078,6 +3032,14 @@ type DatabaseRegionConfig interface {
 // EvalDatabase consists of functions that reference the session database
 // and is to be used from EvalContext.
 type EvalDatabase interface {
+	// CurrentDatabaseRegionConfig returns the RegionConfig of the current
+	// session database.
+	CurrentDatabaseRegionConfig(ctx context.Context) (DatabaseRegionConfig, error)
+
+	// ValidateAllMultiRegionZoneConfigsInCurrentDatabase validates whether the current
+	// database's multi-region zone configs are correctly setup. This includes
+	// all tables within the database.
+	ValidateAllMultiRegionZoneConfigsInCurrentDatabase(ctx context.Context) error
 
 	// ParseQualifiedTableName parses a SQL string of the form
 	// `[ database_name . ] [ schema_name . ] table_name`.
@@ -3091,9 +3053,9 @@ type EvalDatabase interface {
 	// It returns the ID of the resolved table, and an error if the table doesn't exist.
 	ResolveTableName(ctx context.Context, tn *TableName) (ID, error)
 
-	// SchemaExists looks up the schema with the given name and determines
-	// whether it exists.
-	SchemaExists(ctx context.Context, dbName, scName string) (found bool, err error)
+	// LookupSchema looks up the schema with the given name in the given
+	// database.
+	LookupSchema(ctx context.Context, dbName, scName string) (found bool, scMeta SchemaMeta, err error)
 
 	// IsTableVisible checks if the table with the given ID belongs to a schema
 	// on the given sessiondata.SearchPath.
@@ -3106,58 +3068,12 @@ type EvalDatabase interface {
 	IsTypeVisible(
 		ctx context.Context, curDB string, searchPath sessiondata.SearchPath, typeID oid.Oid,
 	) (isVisible bool, exists bool, err error)
-
-	// HasPrivilege returns whether the current user has privilege to access
-	// the given object.
-	HasPrivilege(
-		ctx context.Context,
-		specifier HasPrivilegeSpecifier,
-		user security.SQLUsername,
-		kind privilege.Kind,
-	) (bool, error)
-}
-
-// HasPrivilegeSpecifier specifies an object to lookup privilege for.
-type HasPrivilegeSpecifier struct {
-	// Only one of these is filled.
-	TableName *string
-	TableOID  *oid.Oid
-
-	// Only one of these is filled.
-	// Only used if TableName or TableOID is specified.
-	ColumnName   *Name
-	ColumnAttNum *uint32
-}
-
-// TypeResolver is an interface for resolving types and type OIDs.
-type TypeResolver interface {
-	TypeReferenceResolver
-
-	// ResolveOIDFromString looks up the populated value of the OID with the
-	// desired resultType which matches the provided name.
-	//
-	// The return value is a fresh DOid of the input oid.Oid with name and OID
-	// set to the result of the query. If there was not exactly one result to the
-	// query, an error will be returned.
-	ResolveOIDFromString(
-		ctx context.Context, resultType *types.T, toResolve *DString,
-	) (*DOid, error)
-
-	// ResolveOIDFromOID looks up the populated value of the oid with the
-	// desired resultType which matches the provided oid.
-	//
-	// The return value is a fresh DOid of the input oid.Oid with name and OID
-	// set to the result of the query. If there was not exactly one result to the
-	// query, an error will be returned.
-	ResolveOIDFromOID(
-		ctx context.Context, resultType *types.T, toResolve *DOid,
-	) (*DOid, error)
 }
 
 // EvalPlanner is a limited planner that can be used from EvalContext.
 type EvalPlanner interface {
 	EvalDatabase
-	TypeResolver
+	TypeReferenceResolver
 
 	// GetImmutableTableInterfaceByID returns an interface{} with
 	// catalog.TableDescriptor to avoid a circular dependency.
@@ -3205,12 +3121,13 @@ type EvalPlanner interface {
 		force bool,
 	) error
 
-	// UserHasAdminRole returns tuple of bool and error:
-	// (true, nil) means that the user has an admin role (i.e. root or node)
-	// (false, nil) means that the user has NO admin role
-	// (false, err) means that there was an error running the query on
-	// the `system.users` table
-	UserHasAdminRole(ctx context.Context, user security.SQLUsername) (bool, error)
+	// CompactEngineSpan is used to compact an engine key span at the given
+	// (nodeID, storeID). If we add more overloads to the compact_span builtin,
+	// this parameter list should be changed to a struct union to accommodate
+	// those overloads.
+	CompactEngineSpan(
+		ctx context.Context, nodeID int32, storeID int32, startKey []byte, endKey []byte,
+	) error
 
 	// MemberOfWithAdminOption is used to collect a list of roles (direct and
 	// indirect) that the member is part of. See the comment on the planner
@@ -3219,33 +3136,15 @@ type EvalPlanner interface {
 		ctx context.Context,
 		member security.SQLUsername,
 	) (map[security.SQLUsername]bool, error)
-
-	// ExternalReadFile reads the content from an external file URI.
-	ExternalReadFile(ctx context.Context, uri string) ([]byte, error)
-
-	// ExternalWriteFile writes the content to an external file URI.
-	ExternalWriteFile(ctx context.Context, uri string, content []byte) error
-
-	// DecodeGist exposes gist functionality to the builtin functions.
-	DecodeGist(gist string) ([]string, error)
 }
-
-// CompactEngineSpanFunc is used to compact an engine key span at the given
-// (nodeID, storeID). If we add more overloads to the compact_span builtin,
-// this parameter list should be changed to a struct union to accommodate
-// those overloads.
-type CompactEngineSpanFunc func(
-	ctx context.Context, nodeID, storeID int32, startKey, endKey []byte,
-) error
 
 // EvalSessionAccessor is a limited interface to access session variables.
 type EvalSessionAccessor interface {
-	// SetSessionVar sets a session variable to a new value. If isLocal is true,
-	// the setting change is scoped to the current transaction (as in SET LOCAL).
+	// SetConfig sets a session variable to a new value.
 	//
 	// This interface only supports strings as this is sufficient for
 	// pg_catalog.set_config().
-	SetSessionVar(ctx context.Context, settingName, newValue string, isLocal bool) error
+	SetSessionVar(ctx context.Context, settingName, newValue string) error
 
 	// GetSessionVar retrieves the current value of a session variable.
 	GetSessionVar(ctx context.Context, settingName string, missingOk bool) (bool, string, error)
@@ -3253,15 +3152,9 @@ type EvalSessionAccessor interface {
 	// HasAdminRole returns true iff the current session user has the admin role.
 	HasAdminRole(ctx context.Context) (bool, error)
 
-	// HasRoleOption returns nil iff the current session user has the specified
+	// HasAdminRole returns nil iff the current session user has the specified
 	// role option.
 	HasRoleOption(ctx context.Context, roleOption roleoption.Option) (bool, error)
-}
-
-// PreparedStatementState is a limited interface that exposes metadata about
-// prepared statements.
-type PreparedStatementState interface {
-	HasPrepared() bool
 }
 
 // ClientNoticeSender is a limited interface to send notices to the
@@ -3295,14 +3188,6 @@ type InternalExecutor interface {
 	) (Datums, error)
 }
 
-// ExecConfigAccessor is a limited interface to access ExecutorConfig's states.
-// It is defined independently to prevent a circular dependency on sql, tree and sqlbase.
-type ExecConfigAccessor interface {
-
-	// JobRegistry returns jobs.Registry from ExecutorConfig
-	JobRegistry() interface{}
-}
-
 // PrivilegedAccessor gives access to certain queries that would otherwise
 // require someone with RootUser access to query a given data source.
 // It is defined independently to prevent a circular dependency on sql, tree and sqlbase.
@@ -3315,44 +3200,37 @@ type PrivilegedAccessor interface {
 		ctx context.Context, parentID int64, name string,
 	) (DInt, bool, error)
 
-	// LookupZoneConfigByNamespaceID returns the zone config given a namespace id.
+	// LookupZoneConfig returns the zone config given a namespace id.
 	// It is meant as a replacement for looking up system.zones directly.
 	// Returns the config byte array, a bool representing whether the namespace exists,
 	// and an error if there is one.
 	LookupZoneConfigByNamespaceID(ctx context.Context, id int64) (DBytes, bool, error)
 }
 
-// RegionOperator gives access to the current region, validation for all
-// regions, and the ability to reset the zone configurations for tables
-// or databases.
-type RegionOperator interface {
-
-	// CurrentDatabaseRegionConfig returns the RegionConfig of the current
-	// session database.
-	CurrentDatabaseRegionConfig(ctx context.Context) (DatabaseRegionConfig, error)
-
-	// ValidateAllMultiRegionZoneConfigsInCurrentDatabase validates whether the current
-	// database's multi-region zone configs are correctly setup. This includes
-	// all tables within the database.
-	ValidateAllMultiRegionZoneConfigsInCurrentDatabase(ctx context.Context) error
-
-	// ResetMultiRegionZoneConfigsForTable resets the given table's zone
-	// configuration to its multi-region default.
-	ResetMultiRegionZoneConfigsForTable(ctx context.Context, id int64) error
-
-	// ResetMultiRegionZoneConfigsForDatabase resets the given database's zone
-	// configuration to its multi-region default.
-	ResetMultiRegionZoneConfigsForDatabase(ctx context.Context, id int64) error
-}
-
 // SequenceOperators is used for various sql related functions that can
 // be used from EvalContext.
 type SequenceOperators interface {
+	EvalDatabase
 
 	// GetSerialSequenceNameFromColumn returns the sequence name for a given table and column
 	// provided it is part of a SERIAL sequence.
 	// Returns an empty string if the sequence name does not exist.
 	GetSerialSequenceNameFromColumn(ctx context.Context, tableName *TableName, columnName Name) (*TableName, error)
+
+	// IncrementSequence increments the given sequence and returns the result.
+	// It returns an error if the given name is not a sequence.
+	// The caller must ensure that seqName is fully qualified already.
+	IncrementSequence(ctx context.Context, seqName *TableName) (int64, error)
+
+	// GetLatestValueInSessionForSequence returns the value most recently obtained by
+	// nextval() for the given sequence in this session.
+	GetLatestValueInSessionForSequence(ctx context.Context, seqName *TableName) (int64, error)
+
+	// SetSequenceValue sets the sequence's value.
+	// If isCalled is false, the sequence is set such that the next time nextval() is called,
+	// `newVal` is returned. Otherwise, the next call to nextval will return
+	// `newVal + seqOpts.Increment`.
+	SetSequenceValue(ctx context.Context, seqName *TableName, newVal int64, isCalled bool) error
 
 	// IncrementSequenceByID increments the given sequence and returns the result.
 	// It returns an error if the given ID is not a sequence.
@@ -3369,12 +3247,12 @@ type SequenceOperators interface {
 	// `newVal` is returned. Otherwise, the next call to nextval will return
 	// `newVal + seqOpts.Increment`.
 	// Takes in a sequence ID rather than a name, unlike SetSequenceValue.
-	SetSequenceValueByID(ctx context.Context, seqID uint32, newVal int64, isCalled bool) error
+	SetSequenceValueByID(ctx context.Context, seqID int64, newVal int64, isCalled bool) error
 }
 
 // TenantOperator is capable of interacting with tenant state, allowing SQL
-// builtin functions to create, configure, and destroy tenants. The methods will
-// return errors when run by any tenant other than the system tenant.
+// builtin functions to create and destroy tenants. The methods will return
+// errors when run by any tenant other than the system tenant.
 type TenantOperator interface {
 	// CreateTenant attempts to install a new tenant in the system. It returns
 	// an error if the tenant already exists. The new tenant is created at the
@@ -3389,28 +3267,6 @@ type TenantOperator interface {
 	// success it also removes the tenant record.
 	// It returns an error if the tenant does not exist.
 	GCTenant(ctx context.Context, tenantID uint64) error
-
-	// UpdateTenantResourceLimits reconfigures the tenant resource limits.
-	// See multitenant.TenantUsageServer for more details on the arguments.
-	UpdateTenantResourceLimits(
-		ctx context.Context,
-		tenantID uint64,
-		availableRU float64,
-		refillRate float64,
-		maxBurstRU float64,
-		asOf time.Time,
-		asOfConsumedRequestUnits float64,
-	) error
-}
-
-// JoinTokenCreator is capable of creating and persisting join tokens, allowing
-// SQL builtin functions to create join tokens. The methods will return errors
-// when run on multi-tenant clusters or with this functionality unavailable.
-type JoinTokenCreator interface {
-	// CreateJoinToken creates a new ephemeral join token and persists it
-	// across the cluster. This join token can then be used to have new nodes
-	// join the cluster and exchange certificates securely.
-	CreateJoinToken(ctx context.Context) (string, error)
 }
 
 // EvalContextTestingKnobs contains test knobs.
@@ -3446,19 +3302,11 @@ var _ base.ModuleTestingKnobs = &EvalContextTestingKnobs{}
 // ModuleTestingKnobs is part of the base.ModuleTestingKnobs interface.
 func (*EvalContextTestingKnobs) ModuleTestingKnobs() {}
 
-// SQLStatsController is an interface embedded in EvalCtx which can be used by
+// SQLStatsResetter is an interface embedded in EvalCtx which can be used by
 // the builtins to reset SQL stats in the cluster. This interface is introduced
 // to avoid circular dependency.
-type SQLStatsController interface {
+type SQLStatsResetter interface {
 	ResetClusterSQLStats(ctx context.Context) error
-	CreateSQLStatsCompactionSchedule(ctx context.Context) error
-}
-
-// IndexUsageStatsController is an interface embedded in EvalCtx which can be
-// used by the builtins to reset index usage stats in the cluster. This interface
-// is introduced to avoid circular dependency.
-type IndexUsageStatsController interface {
-	ResetIndexUsageStats(ctx context.Context) error
 }
 
 // EvalContext defines the context in which to evaluate an expression, allowing
@@ -3477,10 +3325,9 @@ type IndexUsageStatsController interface {
 // more fields from the sql package. Through that extendedEvalContext, this
 // struct now generally used by planNodes.
 type EvalContext struct {
-	// SessionDataStack stores the session variables accessible by the correct
-	// context. Each element on the stack represents the beginning of a new
-	// transaction or nested transaction (savepoints).
-	SessionDataStack *sessiondata.Stack
+	// Session variables. This is a read-only copy of the values owned by the
+	// Session.
+	SessionData *sessiondata.SessionData
 	// TxnState is a string representation of the current transactional state.
 	TxnState string
 	// TxnReadOnly specifies if the current transaction is read-only.
@@ -3501,8 +3348,6 @@ type EvalContext struct {
 	//
 	Locality roachpb.Locality
 
-	Tracer *tracing.Tracer
-
 	// The statement timestamp. May be different for every statement.
 	// Used for statement_timestamp().
 	StmtTimestamp time.Time
@@ -3510,15 +3355,6 @@ type EvalContext struct {
 	// of a transaction. Used for now(), current_timestamp(),
 	// transaction_timestamp() and the like.
 	TxnTimestamp time.Time
-
-	// AsOfSystemTime denotes the explicit AS OF SYSTEM TIME timestamp for the
-	// query, if any. If the query is not an AS OF SYSTEM TIME query,
-	// AsOfSystemTime is nil.
-	// TODO(knz): we may want to support table readers at arbitrary
-	// timestamps, so that each FROM clause can have its own
-	// timestamp. In that case, the timestamp would not be set
-	// globally for the entire txn and this field would not be needed.
-	AsOfSystemTime *AsOfSystemTime
 
 	// Placeholders relates placeholder names to their type and, later, value.
 	// This pointer should always be set to the location of the PlaceholderInfo
@@ -3549,8 +3385,6 @@ type EvalContext struct {
 	// variables from a parent session.
 	InternalExecutor InternalExecutor
 
-	ExecConfigAccessor ExecConfigAccessor
-
 	Planner EvalPlanner
 
 	PrivilegedAccessor PrivilegedAccessor
@@ -3562,13 +3396,6 @@ type EvalContext struct {
 	Sequence SequenceOperators
 
 	Tenant TenantOperator
-
-	// Regions stores information about regions.
-	Regions RegionOperator
-
-	JoinTokenCreator JoinTokenCreator
-
-	PreparedStatementState PreparedStatementState
 
 	// The transaction in which the statement is executing.
 	Txn *kv.Txn
@@ -3605,12 +3432,7 @@ type EvalContext struct {
 
 	SQLLivenessReader sqlliveness.Reader
 
-	SQLStatsController SQLStatsController
-
-	IndexUsageStatsController IndexUsageStatsController
-
-	// CompactEngineSpan is used to force compaction of a span in a store.
-	CompactEngineSpan CompactEngineSpanFunc
+	SQLStatsResetter SQLStatsResetter
 }
 
 // MakeTestingEvalContext returns an EvalContext that includes a MemoryMonitor.
@@ -3632,11 +3454,13 @@ func MakeTestingEvalContext(st *cluster.Settings) EvalContext {
 // EvalContext so do not start or close the memory monitor.
 func MakeTestingEvalContextWithMon(st *cluster.Settings, monitor *mon.BytesMonitor) EvalContext {
 	ctx := EvalContext{
-		Codec:            keys.SystemSQLCodec,
-		Txn:              &kv.Txn{},
-		SessionDataStack: sessiondata.NewStack(&sessiondata.SessionData{}),
-		Settings:         st,
-		NodeID:           base.TestingIDContainer,
+		Codec: keys.SystemSQLCodec,
+		Txn:   &kv.Txn{},
+		SessionData: &sessiondata.SessionData{SessionData: sessiondatapb.SessionData{
+			VectorizeMode: sessiondatapb.VectorizeOn,
+		}},
+		Settings: st,
+		NodeID:   base.TestingIDContainer,
 	}
 	monitor.Start(context.Background(), nil /* pool */, mon.MakeStandaloneBudget(math.MaxInt64))
 	ctx.Mon = monitor
@@ -3645,14 +3469,6 @@ func MakeTestingEvalContextWithMon(st *cluster.Settings, monitor *mon.BytesMonit
 	ctx.SetTxnTimestamp(now)
 	ctx.SetStmtTimestamp(now)
 	return ctx
-}
-
-// SessionData returns the SessionData the current EvalCtx should use to eval.
-func (ctx *EvalContext) SessionData() *sessiondata.SessionData {
-	if ctx.SessionDataStack == nil {
-		return nil
-	}
-	return ctx.SessionDataStack.Top()
 }
 
 // Copy returns a deep copy of ctx.
@@ -3688,20 +3504,6 @@ func NewTestingEvalContext(st *cluster.Settings) *EvalContext {
 // Stop closes out the EvalContext and must be called once it is no longer in use.
 func (ctx *EvalContext) Stop(c context.Context) {
 	ctx.Mon.Stop(c)
-}
-
-// FmtCtx creates a FmtCtx with the given options as well as the EvalContext's session data.
-func (ctx *EvalContext) FmtCtx(f FmtFlags, opts ...FmtCtxOption) *FmtCtx {
-	if ctx.SessionData() != nil {
-		opts = append(
-			[]FmtCtxOption{FmtDataConversionConfig(ctx.SessionData().DataConversionConfig)},
-			opts...,
-		)
-	}
-	return NewFmtCtx(
-		f,
-		opts...,
-	)
 }
 
 // GetStmtTimestamp retrieves the current statement timestamp as per
@@ -3755,41 +3557,19 @@ func TimestampToDecimal(ts hlc.Timestamp) apd.Decimal {
 	return res
 }
 
-// DecimalToInexactDTimestampTZ is the inverse of TimestampToDecimal. It converts
-// a decimal constructed from an hlc.Timestamp into an approximate DTimestampTZ
+// DecimalToInexactDTimestamp is the inverse of TimestampToDecimal. It converts
+// a decimal constructed from an hlc.Timestamp into an approximate DTimestamp
 // containing the walltime of the hlc.Timestamp.
-func DecimalToInexactDTimestampTZ(d *DDecimal) (*DTimestampTZ, error) {
-	ts, err := decimalToHLC(d)
-	if err != nil {
-		return nil, err
-	}
-	return MakeDTimestampTZ(timeutil.Unix(0, ts.WallTime), time.Microsecond)
-}
-
-func decimalToHLC(d *DDecimal) (hlc.Timestamp, error) {
+func DecimalToInexactDTimestamp(d *DDecimal) (*DTimestamp, error) {
 	var coef big.Int
 	coef.Set(&d.Decimal.Coeff)
 	// The physical portion of the HLC is stored shifted up by 10^10, so shift
 	// it down and clear out the logical component.
 	coef.Div(&coef, big10E10)
 	if !coef.IsInt64() {
-		return hlc.Timestamp{}, pgerror.Newf(
-			pgcode.DatetimeFieldOverflow,
-			"timestamp value out of range: %s", d.String(),
-		)
+		return nil, pgerror.Newf(pgcode.DatetimeFieldOverflow, "timestamp value out of range: %s", d.String())
 	}
-	return hlc.Timestamp{WallTime: coef.Int64()}, nil
-}
-
-// DecimalToInexactDTimestamp is the inverse of TimestampToDecimal. It converts
-// a decimal constructed from an hlc.Timestamp into an approximate DTimestamp
-// containing the walltime of the hlc.Timestamp.
-func DecimalToInexactDTimestamp(d *DDecimal) (*DTimestamp, error) {
-	ts, err := decimalToHLC(d)
-	if err != nil {
-		return nil, err
-	}
-	return TimestampToInexactDTimestamp(ts), nil
+	return TimestampToInexactDTimestamp(hlc.Timestamp{WallTime: coef.Int64()}), nil
 }
 
 // TimestampToDecimalDatum is the same as TimestampToDecimal, but
@@ -3876,23 +3656,7 @@ func (ctx *EvalContext) SetStmtTimestamp(ts time.Time) {
 
 // GetLocation returns the session timezone.
 func (ctx *EvalContext) GetLocation() *time.Location {
-	return ctx.SessionData().GetLocation()
-}
-
-// GetIntervalStyle returns the session interval style.
-func (ctx *EvalContext) GetIntervalStyle() duration.IntervalStyle {
-	if ctx.SessionData() == nil {
-		return duration.IntervalStyle_POSTGRES
-	}
-	return ctx.SessionData().GetIntervalStyle()
-}
-
-// GetDateStyle returns the session date style.
-func (ctx *EvalContext) GetDateStyle() pgdate.DateStyle {
-	if ctx.SessionData() == nil {
-		return pgdate.DefaultDateStyle()
-	}
-	return ctx.SessionData().GetDateStyle()
+	return ctx.SessionData.GetLocation()
 }
 
 // Ctx returns the session's context.
@@ -3977,7 +3741,7 @@ func (expr *CaseExpr) Eval(ctx *EvalContext) (Datum, error) {
 			if err != nil {
 				return nil, err
 			}
-			d, err := evalComparison(ctx, MakeComparisonOperator(EQ), val, arg)
+			d, err := evalComparison(ctx, EQ, val, arg)
 			if err != nil {
 				return nil, err
 			}
@@ -4012,6 +3776,75 @@ func (expr *CaseExpr) Eval(ctx *EvalContext) (Datum, error) {
 // name of the function into group 1.
 // e.g. function(a, b, c) or function( a )
 var pgSignatureRegexp = regexp.MustCompile(`^\s*([\w\."]+)\s*\((?:(?:\s*[\w"]+\s*,)*\s*[\w"]+)?\s*\)\s*$`)
+
+// regTypeInfo contains details on a pg_catalog table that has a reg* type.
+type regTypeInfo struct {
+	tableName string
+	// nameCol is the name of the column that contains the table's entity name.
+	nameCol string
+	// objName is a human-readable name describing the objects in the table.
+	objName string
+	// errType is the pg error code in case the object does not exist.
+	errType pgcode.Code
+}
+
+// regTypeInfos maps an oid.Oid to a regTypeInfo that describes the pg_catalog
+// table that contains the entities of the type of the key.
+var regTypeInfos = map[oid.Oid]regTypeInfo{
+	oid.T_regclass:     {"pg_class", "relname", "relation", pgcode.UndefinedTable},
+	oid.T_regtype:      {"pg_type", "typname", "type", pgcode.UndefinedObject},
+	oid.T_regproc:      {"pg_proc", "proname", "function", pgcode.UndefinedFunction},
+	oid.T_regprocedure: {"pg_proc", "proname", "function", pgcode.UndefinedFunction},
+	oid.T_regnamespace: {"pg_namespace", "nspname", "namespace", pgcode.UndefinedObject},
+}
+
+// queryOidWithJoin looks up the name or OID of an input OID or string in the
+// pg_catalog table that the input oid.Oid belongs to. If the input Datum
+// is a DOid, the relevant table will be queried by OID; if the input is a
+// DString, the table will be queried by its name column.
+//
+// The return value is a fresh DOid of the input oid.Oid with name and OID
+// set to the result of the query. If there was not exactly one result to the
+// query, an error will be returned.
+func queryOidWithJoin(
+	ctx *EvalContext, typ *types.T, d Datum, joinClause string, additionalWhere string,
+) (*DOid, error) {
+	ret := &DOid{semanticType: typ}
+	info := regTypeInfos[typ.Oid()]
+	var queryCol string
+	switch d.(type) {
+	case *DOid:
+		queryCol = "oid"
+	case *DString:
+		queryCol = info.nameCol
+	default:
+		return nil, errors.AssertionFailedf("invalid argument to OID cast: %s", d)
+	}
+	results, err := ctx.InternalExecutor.QueryRow(
+		ctx.Ctx(), "queryOidWithJoin",
+		ctx.Txn,
+		fmt.Sprintf(
+			"SELECT %s.oid, %s FROM pg_catalog.%s %s WHERE %s = $1 %s",
+			info.tableName, info.nameCol, info.tableName, joinClause, queryCol, additionalWhere),
+		d)
+	if err != nil {
+		if errors.HasType(err, (*MultipleResultsError)(nil)) {
+			return nil, pgerror.Newf(pgcode.AmbiguousAlias,
+				"more than one %s named %s", info.objName, d)
+		}
+		return nil, err
+	}
+	if results.Len() == 0 {
+		return nil, pgerror.Newf(info.errType, "%s %s does not exist", info.objName, d)
+	}
+	ret.DInt = results[0].(*DOid).DInt
+	ret.name = AsStringWithFlags(results[1], FmtBareStrings)
+	return ret, nil
+}
+
+func queryOid(ctx *EvalContext, typ *types.T, d Datum) (*DOid, error) {
+	return queryOidWithJoin(ctx, typ, d, "", "")
+}
 
 // Eval implements the TypedExpr interface.
 func (expr *CastExpr) Eval(ctx *EvalContext) (Datum, error) {
@@ -4125,7 +3958,7 @@ func (expr *ComparisonExpr) Eval(ctx *EvalContext) (Datum, error) {
 	}
 
 	op := expr.Operator
-	if op.Symbol.HasSubOperator() {
+	if op.HasSubOperator() {
 		return EvalComparisonExprWithSubOperator(ctx, expr, left, right)
 	}
 
@@ -4168,9 +4001,6 @@ func EvalComparisonExprWithSubOperator(
 func (expr *FuncExpr) EvalArgsAndGetGenerator(ctx *EvalContext) (ValueGenerator, error) {
 	if expr.fn == nil || expr.fnProps.Class != GeneratorClass {
 		return nil, errors.AssertionFailedf("cannot call EvalArgsAndGetGenerator() on non-aggregate function: %q", ErrString(expr))
-	}
-	if expr.fn.GeneratorWithExprs != nil {
-		return expr.fn.GeneratorWithExprs(ctx, expr.Exprs)
 	}
 	nullArg, args, err := expr.evalArgs(ctx)
 	if err != nil || nullArg {
@@ -4216,10 +4046,6 @@ func (expr *FuncExpr) MaybeWrapError(err error) error {
 
 // Eval implements the TypedExpr interface.
 func (expr *FuncExpr) Eval(ctx *EvalContext) (Datum, error) {
-	if expr.fn.FnWithExprs != nil {
-		return expr.fn.FnWithExprs(ctx, expr.Exprs)
-	}
-
 	nullResult, args, err := expr.evalArgs(ctx)
 	if err != nil {
 		return nil, err
@@ -4376,7 +4202,7 @@ func (expr *NullIfExpr) Eval(ctx *EvalContext) (Datum, error) {
 	if err != nil {
 		return nil, err
 	}
-	cond, err := evalComparison(ctx, MakeComparisonOperator(EQ), expr1, expr2)
+	cond, err := evalComparison(ctx, EQ, expr1, expr2)
 	if err != nil {
 		return nil, err
 	}
@@ -4705,8 +4531,7 @@ func (t *Placeholder) Eval(ctx *EvalContext) (Datum, error) {
 		// checking, since the placeholder's type hint didn't match the desired
 		// type for the placeholder. In this case, we cast the expression to
 		// the desired type.
-		// TODO(jordan,mgartner): Introduce a restriction on what casts are
-		// allowed here. Most likely, only implicit casts should be allowed.
+		// TODO(jordan): introduce a restriction on what casts are allowed here.
 		cast := NewTypedCastExpr(e, typ)
 		return cast.Eval(ctx)
 	}
@@ -4719,7 +4544,7 @@ func evalComparison(ctx *EvalContext, op ComparisonOperator, left, right Datum) 
 	}
 	ltype := left.ResolvedType()
 	rtype := right.ResolvedType()
-	if fn, ok := CmpOps[op.Symbol].LookupImpl(ltype, rtype); ok {
+	if fn, ok := CmpOps[op].LookupImpl(ltype, rtype); ok {
 		return fn.Fn(ctx, left, right)
 	}
 	return nil, pgerror.Newf(
@@ -4733,39 +4558,39 @@ func evalComparison(ctx *EvalContext, op ComparisonOperator, left, right Datum) 
 func FoldComparisonExpr(
 	op ComparisonOperator, left, right Expr,
 ) (newOp ComparisonOperator, newLeft Expr, newRight Expr, flipped bool, not bool) {
-	switch op.Symbol {
+	switch op {
 	case NE:
 		// NE(left, right) is implemented as !EQ(left, right).
-		return MakeComparisonOperator(EQ), left, right, false, true
+		return EQ, left, right, false, true
 	case GT:
 		// GT(left, right) is implemented as LT(right, left)
-		return MakeComparisonOperator(LT), right, left, true, false
+		return LT, right, left, true, false
 	case GE:
 		// GE(left, right) is implemented as LE(right, left)
-		return MakeComparisonOperator(LE), right, left, true, false
+		return LE, right, left, true, false
 	case NotIn:
 		// NotIn(left, right) is implemented as !IN(left, right)
-		return MakeComparisonOperator(In), left, right, false, true
+		return In, left, right, false, true
 	case NotLike:
 		// NotLike(left, right) is implemented as !Like(left, right)
-		return MakeComparisonOperator(Like), left, right, false, true
+		return Like, left, right, false, true
 	case NotILike:
 		// NotILike(left, right) is implemented as !ILike(left, right)
-		return MakeComparisonOperator(ILike), left, right, false, true
+		return ILike, left, right, false, true
 	case NotSimilarTo:
 		// NotSimilarTo(left, right) is implemented as !SimilarTo(left, right)
-		return MakeComparisonOperator(SimilarTo), left, right, false, true
+		return SimilarTo, left, right, false, true
 	case NotRegMatch:
 		// NotRegMatch(left, right) is implemented as !RegMatch(left, right)
-		return MakeComparisonOperator(RegMatch), left, right, false, true
+		return RegMatch, left, right, false, true
 	case NotRegIMatch:
 		// NotRegIMatch(left, right) is implemented as !RegIMatch(left, right)
-		return MakeComparisonOperator(RegIMatch), left, right, false, true
+		return RegIMatch, left, right, false, true
 	case IsDistinctFrom:
 		// IsDistinctFrom(left, right) is implemented as !IsNotDistinctFrom(left, right)
 		// Note: this seems backwards, but IS NOT DISTINCT FROM is an extended
 		// version of IS and IS DISTINCT FROM is an extended version of IS NOT.
-		return MakeComparisonOperator(IsNotDistinctFrom), left, right, false, true
+		return IsNotDistinctFrom, left, right, false, true
 	}
 	return op, left, right, false, false
 }
@@ -5405,37 +5230,16 @@ func (k similarToKey) Pattern() (string, error) {
 // SimilarToEscape checks if 'unescaped' is SIMILAR TO 'pattern' using custom escape token 'escape'
 // which must be either empty (which disables the escape mechanism) or a single unicode character.
 func SimilarToEscape(ctx *EvalContext, unescaped, pattern, escape string) (Datum, error) {
-	key, err := makeSimilarToKey(pattern, escape)
-	if err != nil {
-		return DBoolFalse, err
-	}
-	return matchRegexpWithKey(ctx, NewDString(unescaped), key)
-}
-
-// SimilarPattern converts a SQL regexp 'pattern' to a POSIX regexp 'pattern' using custom escape token 'escape'
-// which must be either empty (which disables the escape mechanism) or a single unicode character.
-func SimilarPattern(pattern, escape string) (Datum, error) {
-	key, err := makeSimilarToKey(pattern, escape)
-	if err != nil {
-		return nil, err
-	}
-	pattern, err = key.Pattern()
-	if err != nil {
-		return nil, err
-	}
-	return NewDString(pattern), nil
-}
-
-// makeSimilarToKey makes a similarToKey using the given 'pattern' and 'escape'.
-func makeSimilarToKey(pattern, escape string) (similarToKey, error) {
 	var escapeRune rune
-	var width int
-	escapeRune, width = utf8.DecodeRuneInString(escape)
-	if len(escape) > width {
-		return similarToKey{}, pgerror.Newf(pgcode.InvalidEscapeSequence, "invalid escape string")
+	if len(escape) > 0 {
+		var width int
+		escapeRune, width = utf8.DecodeRuneInString(escape)
+		if len(escape) > width {
+			return DBoolFalse, pgerror.Newf(pgcode.InvalidEscapeSequence, "invalid escape string")
+		}
 	}
 	key := similarToKey{s: pattern, escape: escapeRune}
-	return key, nil
+	return matchRegexpWithKey(ctx, NewDString(unescaped), key)
 }
 
 type regexpKey struct {
@@ -5580,9 +5384,9 @@ func PickFromTuple(ctx *EvalContext, greatest bool, args Datums) (Datum, error) 
 		var eval Datum
 		var err error
 		if greatest {
-			eval, err = evalComparison(ctx, MakeComparisonOperator(LT), g, d)
+			eval, err = evalComparison(ctx, LT, g, d)
 		} else {
-			eval, err = evalComparison(ctx, MakeComparisonOperator(LT), d, g)
+			eval, err = evalComparison(ctx, LT, d, g)
 		}
 		if err != nil {
 			return nil, err

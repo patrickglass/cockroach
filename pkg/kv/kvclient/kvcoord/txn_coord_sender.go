@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -487,7 +486,7 @@ func (tc *TxnCoordSender) Send(
 		log.Fatalf(ctx, "cannot send transactional request through unbound TxnCoordSender")
 	}
 	if sp.IsVerbose() {
-		sp.SetTag("txnID", attribute.StringValue(tc.mu.txn.ID.String()))
+		sp.SetBaggageItem("txnID", tc.mu.txn.ID.String())
 		ctx = logtags.AddTag(ctx, "txn", uuid.ShortStringer(tc.mu.txn.ID))
 		if log.V(2) {
 			ctx = logtags.AddTag(ctx, "ts", tc.mu.txn.WriteTimestamp)
@@ -586,25 +585,9 @@ func (tc *TxnCoordSender) Send(
 // transactions are guaranteed to start with higher timestamps, regardless
 // of the gateway they use. This ensures that all causally dependent
 // transactions commit with higher timestamps, even if their read and writes
-// sets do not conflict with the original transaction's. This prevents the
-// "causal reverse" anomaly which can be observed by a third, concurrent
-// transaction.
-//
-// Even when in linearizable mode and performing this extra wait on the commit
-// of read-write transactions, uncertainty intervals are still necessary. This
-// is to ensure that any two reads that touch overlapping keys but are executed
-// on different nodes obey real-time ordering and do not violate the "monotonic
-// reads" property. Without uncertainty intervals, it would be possible for a
-// read on a node with a fast clock (ts@15) to observe a committed value (ts@10)
-// and then a later read on a node with a slow clock (ts@5) to miss the
-// committed value. When contrasting this with Google Spanner, we notice that
-// Spanner performs a similar commit-wait but then does not include uncertainty
-// intervals. The reason this works in Spanner is that read-write transactions
-// in Spanner hold their locks across the commit-wait duration, which blocks
-// concurrent readers and enforces real-time ordering between any two readers as
-// well between the writer and any future reader. Read-write transactions in
-// CockroachDB do not hold locks across commit-wait (they release them before),
-// so the uncertainty interval is still needed.
+// sets do not conflict with the original transaction's. This obviates the
+// need for uncertainty intervals and prevents the "causal reverse" anamoly
+// which can be observed by a third, concurrent transaction.
 //
 // For more, see https://www.cockroachlabs.com/blog/consistency-model/ and
 // docs/RFCS/20200811_non_blocking_txns.md.
@@ -662,16 +645,11 @@ func (tc *TxnCoordSender) maybeCommitWait(ctx context.Context, deferred bool) er
 func (tc *TxnCoordSender) maybeRejectClientLocked(
 	ctx context.Context, ba *roachpb.BatchRequest,
 ) *roachpb.Error {
-	if ba != nil && ba.IsSingleAbortTxnRequest() && tc.mu.txn.Status != roachpb.COMMITTED {
+	if ba != nil && ba.IsSingleAbortTxnRequest() {
 		// As a special case, we allow rollbacks to be sent at any time. Any
 		// rollback attempt moves the TxnCoordSender state to txnFinalized, but higher
 		// layers are free to retry rollbacks if they want (and they do, for
 		// example, when the context was canceled while txn.Rollback() was running).
-		//
-		// However, we reject this if we know that the transaction has been
-		// committed, to avoid sending the rollback concurrently with the
-		// txnCommitter asynchronously making the commit explicit. See:
-		// https://github.com/cockroachdb/cockroach/issues/68643
 		return nil
 	}
 
@@ -686,11 +664,7 @@ func (tc *TxnCoordSender) maybeRejectClientLocked(
 			"Trying to execute: %s", ba.Summary())
 		stack := string(debug.Stack())
 		log.Errorf(ctx, "%s. stack:\n%s", msg, stack)
-		reason := roachpb.TransactionStatusError_REASON_UNKNOWN
-		if tc.mu.txn.Status == roachpb.COMMITTED {
-			reason = roachpb.TransactionStatusError_REASON_TXN_COMMITTED
-		}
-		return roachpb.NewErrorWithTxn(roachpb.NewTransactionStatusError(reason, msg), &tc.mu.txn)
+		return roachpb.NewErrorWithTxn(roachpb.NewTransactionStatusError(msg), &tc.mu.txn)
 	}
 
 	// Check the transaction proto state, along with any finalized transaction
@@ -779,8 +753,6 @@ func (tc *TxnCoordSender) handleRetryableErrLocked(
 			tc.metrics.RestartsSerializable.Inc()
 		case roachpb.RETRY_ASYNC_WRITE_FAILURE:
 			tc.metrics.RestartsAsyncWriteFailure.Inc()
-		case roachpb.RETRY_COMMIT_DEADLINE_EXCEEDED:
-			tc.metrics.RestartsCommitDeadlineExceeded.Inc()
 		default:
 			tc.metrics.RestartsUnknown.Inc()
 		}
@@ -1036,19 +1008,9 @@ func (tc *TxnCoordSender) CommitTimestampFixed() bool {
 }
 
 // SetFixedTimestamp is part of the client.TxnSender interface.
-func (tc *TxnCoordSender) SetFixedTimestamp(ctx context.Context, ts hlc.Timestamp) error {
+func (tc *TxnCoordSender) SetFixedTimestamp(ctx context.Context, ts hlc.Timestamp) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	// The transaction must not have already been used in this epoch.
-	if !tc.interceptorAlloc.txnSpanRefresher.refreshFootprint.empty() {
-		return errors.WithContextTags(errors.AssertionFailedf(
-			"cannot set fixed timestamp, txn %s already performed reads", tc.mu.txn), ctx)
-	}
-	if tc.mu.txn.Sequence != 0 {
-		return errors.WithContextTags(errors.AssertionFailedf(
-			"cannot set fixed timestamp, txn %s already performed writes", tc.mu.txn), ctx)
-	}
-
 	tc.mu.txn.ReadTimestamp = ts
 	tc.mu.txn.WriteTimestamp = ts
 	tc.mu.txn.GlobalUncertaintyLimit = ts
@@ -1057,7 +1019,6 @@ func (tc *TxnCoordSender) SetFixedTimestamp(ctx context.Context, ts hlc.Timestam
 	// Set the MinTimestamp to the minimum of the existing MinTimestamp and the fixed
 	// timestamp. This ensures that the MinTimestamp is always <= the other timestamps.
 	tc.mu.txn.MinTimestamp.Backward(ts)
-	return nil
 }
 
 // RequiredFrontier is part of the client.TxnSender interface.
@@ -1110,13 +1071,6 @@ func (tc *TxnCoordSender) Epoch() enginepb.TxnEpoch {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	return tc.mu.txn.Epoch
-}
-
-// IsLocking is part of the client.TxnSender interface.
-func (tc *TxnCoordSender) IsLocking() bool {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-	return tc.mu.txn.IsLocking()
 }
 
 // IsTracking returns true if the heartbeat loop is running.

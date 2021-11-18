@@ -16,15 +16,11 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlclient"
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlexec"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
-	isatty "github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
 
@@ -43,7 +39,7 @@ The user invoking the 'login' CLI command must be an admin on the cluster.
 The user for which the HTTP session is opened can be arbitrary.
 `,
 	Args: cobra.ExactArgs(1),
-	RunE: clierrorplus.MaybeDecorateError(runLogin),
+	RunE: MaybeDecorateGRPCError(runLogin),
 }
 
 func runLogin(cmd *cobra.Command, args []string) error {
@@ -70,11 +66,12 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		rows := [][]string{
 			{username, fmt.Sprintf("%d", id), hC},
 		}
-		if err := sqlExecCtx.PrintQueryOutput(os.Stdout, stderr, cols, clisqlexec.NewRowSliceIter(rows, "ll")); err != nil {
+		if err := printQueryOutput(os.Stdout, cols, newRowSliceIter(rows, "ll")); err != nil {
 			return err
 		}
 
-		if isatty.IsTerminal(os.Stdin.Fd()) {
+		checkInteractive(os.Stdin)
+		if cliCtx.isInteractive {
 			fmt.Fprintf(stderr, `#
 # Example uses:
 #
@@ -89,18 +86,16 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func createAuthSessionToken(
-	username string,
-) (sessionID int64, httpCookie *http.Cookie, resErr error) {
+func createAuthSessionToken(username string) (sessionID int64, httpCookie *http.Cookie, err error) {
 	sqlConn, err := makeSQLClient("cockroach auth-session login", useSystemDb)
 	if err != nil {
 		return -1, nil, err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, sqlConn.Close()) }()
+	defer sqlConn.Close()
 
 	// First things first. Does the user exist?
-	_, rows, err := sqlExecCtx.RunQuery(sqlConn,
-		clisqlclient.MakeQuery(`SELECT count(username) FROM system.users WHERE username = $1 AND NOT "isRole"`, username), false)
+	_, rows, err := runQuery(sqlConn,
+		makeQuery(`SELECT count(username) FROM system.users WHERE username = $1 AND NOT "isRole"`, username), false)
 	if err != nil {
 		return -1, nil, err
 	}
@@ -157,26 +152,26 @@ The user invoking the 'login' CLI command must be an admin on the cluster.
 The user for which the HTTP sessions are revoked can be arbitrary.
 `,
 	Args: cobra.ExactArgs(1),
-	RunE: clierrorplus.MaybeDecorateError(runLogout),
+	RunE: MaybeDecorateGRPCError(runLogout),
 }
 
-func runLogout(cmd *cobra.Command, args []string) (resErr error) {
+func runLogout(cmd *cobra.Command, args []string) error {
 	username := tree.Name(args[0]).Normalize()
 
 	sqlConn, err := makeSQLClient("cockroach auth-session logout", useSystemDb)
 	if err != nil {
 		return err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, sqlConn.Close()) }()
+	defer sqlConn.Close()
 
-	logoutQuery := clisqlclient.MakeQuery(
+	logoutQuery := makeQuery(
 		`UPDATE system.web_sessions SET "revokedAt" = if("revokedAt"::timestamptz<now(),"revokedAt",now())
       WHERE username = $1
   RETURNING username,
             id AS "session ID",
             "revokedAt" AS "revoked"`,
 		username)
-	return sqlExecCtx.RunQueryAndFormatResults(sqlConn, os.Stdout, stderr, logoutQuery)
+	return runQueryAndFormatResults(sqlConn, os.Stdout, logoutQuery)
 }
 
 var authListCmd = &cobra.Command{
@@ -188,17 +183,17 @@ Prints out the currently active HTTP sessions.
 The user invoking the 'list' CLI command must be an admin on the cluster.
 `,
 	Args: cobra.ExactArgs(0),
-	RunE: clierrorplus.MaybeDecorateError(runAuthList),
+	RunE: MaybeDecorateGRPCError(runAuthList),
 }
 
-func runAuthList(cmd *cobra.Command, args []string) (resErr error) {
+func runAuthList(cmd *cobra.Command, args []string) error {
 	sqlConn, err := makeSQLClient("cockroach auth-session list", useSystemDb)
 	if err != nil {
 		return err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, sqlConn.Close()) }()
+	defer sqlConn.Close()
 
-	logoutQuery := clisqlclient.MakeQuery(`
+	logoutQuery := makeQuery(`
 SELECT username,
        id AS "session ID",
        "createdAt" as "created",
@@ -206,7 +201,7 @@ SELECT username,
        "revokedAt" as "revoked",
        "lastUsedAt" as "last used"
   FROM system.web_sessions`)
-	return sqlExecCtx.RunQueryAndFormatResults(sqlConn, os.Stdout, stderr, logoutQuery)
+	return runQueryAndFormatResults(sqlConn, os.Stdout, logoutQuery)
 }
 
 var authCmds = []*cobra.Command{
@@ -218,7 +213,7 @@ var authCmds = []*cobra.Command{
 var authCmd = &cobra.Command{
 	Use:   "auth-session",
 	Short: "log in and out of HTTP sessions",
-	RunE:  UsageAndErr,
+	RunE:  usageAndErr,
 }
 
 func init() {

@@ -3,14 +3,11 @@
 
 package eventpb
 
-import (
-	fmt "fmt"
-	_ "github.com/gogo/protobuf/gogoproto"
-	proto "github.com/gogo/protobuf/proto"
-	io "io"
-	math "math"
-	math_bits "math/bits"
-)
+import proto "github.com/gogo/protobuf/proto"
+import fmt "fmt"
+import math "math"
+
+import io "io"
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
@@ -21,7 +18,7 @@ var _ = math.Inf
 // is compatible with the proto package it is being compiled against.
 // A compilation error at this line likely means your copy of the
 // proto package needs to be updated.
-const _ = proto.GoGoProtoPackageIsVersion3 // please upgrade the proto package
+const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
 
 // Import is recorded when an import job is created and successful completion.
 // If the job fails, events will be emitted on job creation, failure, and
@@ -35,21 +32,21 @@ func (m *Import) Reset()         { *m = Import{} }
 func (m *Import) String() string { return proto.CompactTextString(m) }
 func (*Import) ProtoMessage()    {}
 func (*Import) Descriptor() ([]byte, []int) {
-	return fileDescriptor_5417030acfd59c32, []int{0}
+	return fileDescriptor_job_events_8230347c4526922b, []int{0}
 }
 func (m *Import) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *Import) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *Import) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_Import.Merge(m, src)
+func (dst *Import) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Import.Merge(dst, src)
 }
 func (m *Import) XXX_Size() int {
 	return m.Size()
@@ -72,21 +69,21 @@ func (m *Restore) Reset()         { *m = Restore{} }
 func (m *Restore) String() string { return proto.CompactTextString(m) }
 func (*Restore) ProtoMessage()    {}
 func (*Restore) Descriptor() ([]byte, []int) {
-	return fileDescriptor_5417030acfd59c32, []int{1}
+	return fileDescriptor_job_events_8230347c4526922b, []int{1}
 }
 func (m *Restore) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *Restore) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *Restore) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_Restore.Merge(m, src)
+func (dst *Restore) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Restore.Merge(dst, src)
 }
 func (m *Restore) XXX_Size() int {
 	return m.Size()
@@ -101,33 +98,10 @@ func init() {
 	proto.RegisterType((*Import)(nil), "cockroach.util.log.eventpb.Import")
 	proto.RegisterType((*Restore)(nil), "cockroach.util.log.eventpb.Restore")
 }
-
-func init() { proto.RegisterFile("util/log/eventpb/job_events.proto", fileDescriptor_5417030acfd59c32) }
-
-var fileDescriptor_5417030acfd59c32 = []byte{
-	// 243 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xe2, 0x52, 0x2c, 0x2d, 0xc9, 0xcc,
-	0xd1, 0xcf, 0xc9, 0x4f, 0xd7, 0x4f, 0x2d, 0x4b, 0xcd, 0x2b, 0x29, 0x48, 0xd2, 0xcf, 0xca, 0x4f,
-	0x8a, 0x07, 0xb3, 0x8b, 0xf5, 0x0a, 0x8a, 0xf2, 0x4b, 0xf2, 0x85, 0xa4, 0x92, 0xf3, 0x93, 0xb3,
-	0x8b, 0xf2, 0x13, 0x93, 0x33, 0xf4, 0x40, 0x8a, 0xf5, 0x72, 0xf2, 0xd3, 0xf5, 0xa0, 0x8a, 0xa5,
-	0x44, 0xd2, 0xf3, 0xd3, 0xf3, 0xc1, 0xca, 0xf4, 0x41, 0x2c, 0x88, 0x0e, 0x29, 0x59, 0x0c, 0x43,
-	0x91, 0x0d, 0x54, 0xda, 0xc8, 0xc8, 0xc5, 0xe6, 0x99, 0x5b, 0x90, 0x5f, 0x54, 0x22, 0x14, 0xc2,
-	0xc5, 0x96, 0x9c, 0x9f, 0x9b, 0x9b, 0x9f, 0x27, 0xc1, 0xa8, 0xc0, 0xa8, 0xc1, 0x6d, 0xa4, 0xa7,
-	0x87, 0xdb, 0x32, 0x3d, 0x67, 0xb0, 0x4a, 0x57, 0x10, 0xcf, 0x25, 0xb5, 0x24, 0x31, 0x33, 0xa7,
-	0xd8, 0x89, 0xe7, 0xc4, 0x3d, 0x79, 0x86, 0x0b, 0xf7, 0xe4, 0x19, 0x5f, 0xdd, 0x93, 0x67, 0x08,
-	0x82, 0x9a, 0x25, 0x14, 0xc8, 0xc5, 0x9c, 0x95, 0x9f, 0x24, 0xc1, 0x04, 0x36, 0xd2, 0x90, 0xb0,
-	0x91, 0x5e, 0xf9, 0x49, 0x78, 0x4c, 0x05, 0x99, 0xa5, 0xb4, 0x89, 0x91, 0x8b, 0x3d, 0x28, 0xb5,
-	0xb8, 0x24, 0xbf, 0x28, 0x75, 0xc8, 0x38, 0xda, 0x49, 0xf3, 0xc4, 0x43, 0x39, 0x86, 0x13, 0x8f,
-	0xe4, 0x18, 0x2f, 0x3c, 0x92, 0x63, 0xbc, 0xf1, 0x48, 0x8e, 0xf1, 0xc1, 0x23, 0x39, 0xc6, 0x09,
-	0x8f, 0xe5, 0x18, 0x2e, 0x3c, 0x96, 0x63, 0xb8, 0xf1, 0x58, 0x8e, 0x21, 0x8a, 0x1d, 0x6a, 0x66,
-	0x12, 0x1b, 0x38, 0x6a, 0x8c, 0x01, 0x01, 0x00, 0x00, 0xff, 0xff, 0x09, 0x10, 0x78, 0xa6, 0x10,
-	0x02, 0x00, 0x00,
-}
-
 func (m *Import) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -135,42 +109,33 @@ func (m *Import) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *Import) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *Import) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	{
-		size, err := m.CommonJobEventDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintJobEvents(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x12
-	{
-		size, err := m.CommonEventDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintJobEvents(dAtA, i, uint64(size))
-	}
-	i--
 	dAtA[i] = 0xa
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintJobEvents(dAtA, i, uint64(m.CommonEventDetails.Size()))
+	n1, err := m.CommonEventDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n1
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintJobEvents(dAtA, i, uint64(m.CommonJobEventDetails.Size()))
+	n2, err := m.CommonJobEventDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n2
+	return i, nil
 }
 
 func (m *Restore) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -178,48 +143,37 @@ func (m *Restore) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *Restore) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *Restore) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	{
-		size, err := m.CommonJobEventDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintJobEvents(dAtA, i, uint64(size))
-	}
-	i--
-	dAtA[i] = 0x12
-	{
-		size, err := m.CommonEventDetails.MarshalToSizedBuffer(dAtA[:i])
-		if err != nil {
-			return 0, err
-		}
-		i -= size
-		i = encodeVarintJobEvents(dAtA, i, uint64(size))
-	}
-	i--
 	dAtA[i] = 0xa
-	return len(dAtA) - i, nil
+	i++
+	i = encodeVarintJobEvents(dAtA, i, uint64(m.CommonEventDetails.Size()))
+	n3, err := m.CommonEventDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n3
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintJobEvents(dAtA, i, uint64(m.CommonJobEventDetails.Size()))
+	n4, err := m.CommonJobEventDetails.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n4
+	return i, nil
 }
 
 func encodeVarintJobEvents(dAtA []byte, offset int, v uint64) int {
-	offset -= sovJobEvents(v)
-	base := offset
 	for v >= 1<<7 {
 		dAtA[offset] = uint8(v&0x7f | 0x80)
 		v >>= 7
 		offset++
 	}
 	dAtA[offset] = uint8(v)
-	return base
+	return offset + 1
 }
 func (m *Import) Size() (n int) {
 	if m == nil {
@@ -248,7 +202,14 @@ func (m *Restore) Size() (n int) {
 }
 
 func sovJobEvents(x uint64) (n int) {
-	return (math_bits.Len64(x|1) + 6) / 7
+	for {
+		n++
+		x >>= 7
+		if x == 0 {
+			break
+		}
+	}
+	return n
 }
 func sozJobEvents(x uint64) (n int) {
 	return sovJobEvents(uint64((x << 1) ^ uint64((int64(x) >> 63))))
@@ -268,7 +229,7 @@ func (m *Import) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -296,7 +257,7 @@ func (m *Import) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -305,9 +266,6 @@ func (m *Import) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthJobEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthJobEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -329,7 +287,7 @@ func (m *Import) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -338,9 +296,6 @@ func (m *Import) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthJobEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthJobEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -384,7 +339,7 @@ func (m *Restore) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -412,7 +367,7 @@ func (m *Restore) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -421,9 +376,6 @@ func (m *Restore) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthJobEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthJobEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -445,7 +397,7 @@ func (m *Restore) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -454,9 +406,6 @@ func (m *Restore) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthJobEvents
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthJobEvents
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -488,7 +437,6 @@ func (m *Restore) Unmarshal(dAtA []byte) error {
 func skipJobEvents(dAtA []byte) (n int, err error) {
 	l := len(dAtA)
 	iNdEx := 0
-	depth := 0
 	for iNdEx < l {
 		var wire uint64
 		for shift := uint(0); ; shift += 7 {
@@ -520,8 +468,10 @@ func skipJobEvents(dAtA []byte) (n int, err error) {
 					break
 				}
 			}
+			return iNdEx, nil
 		case 1:
 			iNdEx += 8
+			return iNdEx, nil
 		case 2:
 			var length int
 			for shift := uint(0); ; shift += 7 {
@@ -538,34 +488,77 @@ func skipJobEvents(dAtA []byte) (n int, err error) {
 					break
 				}
 			}
+			iNdEx += length
 			if length < 0 {
 				return 0, ErrInvalidLengthJobEvents
 			}
-			iNdEx += length
+			return iNdEx, nil
 		case 3:
-			depth++
-		case 4:
-			if depth == 0 {
-				return 0, ErrUnexpectedEndOfGroupJobEvents
+			for {
+				var innerWire uint64
+				var start int = iNdEx
+				for shift := uint(0); ; shift += 7 {
+					if shift >= 64 {
+						return 0, ErrIntOverflowJobEvents
+					}
+					if iNdEx >= l {
+						return 0, io.ErrUnexpectedEOF
+					}
+					b := dAtA[iNdEx]
+					iNdEx++
+					innerWire |= (uint64(b) & 0x7F) << shift
+					if b < 0x80 {
+						break
+					}
+				}
+				innerWireType := int(innerWire & 0x7)
+				if innerWireType == 4 {
+					break
+				}
+				next, err := skipJobEvents(dAtA[start:])
+				if err != nil {
+					return 0, err
+				}
+				iNdEx = start + next
 			}
-			depth--
+			return iNdEx, nil
+		case 4:
+			return iNdEx, nil
 		case 5:
 			iNdEx += 4
+			return iNdEx, nil
 		default:
 			return 0, fmt.Errorf("proto: illegal wireType %d", wireType)
 		}
-		if iNdEx < 0 {
-			return 0, ErrInvalidLengthJobEvents
-		}
-		if depth == 0 {
-			return iNdEx, nil
-		}
 	}
-	return 0, io.ErrUnexpectedEOF
+	panic("unreachable")
 }
 
 var (
-	ErrInvalidLengthJobEvents        = fmt.Errorf("proto: negative length found during unmarshaling")
-	ErrIntOverflowJobEvents          = fmt.Errorf("proto: integer overflow")
-	ErrUnexpectedEndOfGroupJobEvents = fmt.Errorf("proto: unexpected end of group")
+	ErrInvalidLengthJobEvents = fmt.Errorf("proto: negative length found during unmarshaling")
+	ErrIntOverflowJobEvents   = fmt.Errorf("proto: integer overflow")
 )
+
+func init() {
+	proto.RegisterFile("util/log/eventpb/job_events.proto", fileDescriptor_job_events_8230347c4526922b)
+}
+
+var fileDescriptor_job_events_8230347c4526922b = []byte{
+	// 243 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xe2, 0x52, 0x2c, 0x2d, 0xc9, 0xcc,
+	0xd1, 0xcf, 0xc9, 0x4f, 0xd7, 0x4f, 0x2d, 0x4b, 0xcd, 0x2b, 0x29, 0x48, 0xd2, 0xcf, 0xca, 0x4f,
+	0x8a, 0x07, 0xb3, 0x8b, 0xf5, 0x0a, 0x8a, 0xf2, 0x4b, 0xf2, 0x85, 0xa4, 0x92, 0xf3, 0x93, 0xb3,
+	0x8b, 0xf2, 0x13, 0x93, 0x33, 0xf4, 0x40, 0x8a, 0xf5, 0x72, 0xf2, 0xd3, 0xf5, 0xa0, 0x8a, 0xa5,
+	0x44, 0xd2, 0xf3, 0xd3, 0xf3, 0xc1, 0xca, 0xf4, 0x41, 0x2c, 0x88, 0x0e, 0x29, 0x59, 0x0c, 0x43,
+	0x91, 0x0d, 0x54, 0xda, 0xc8, 0xc8, 0xc5, 0xe6, 0x99, 0x5b, 0x90, 0x5f, 0x54, 0x22, 0x14, 0xc2,
+	0xc5, 0x96, 0x9c, 0x9f, 0x9b, 0x9b, 0x9f, 0x27, 0xc1, 0xa8, 0xc0, 0xa8, 0xc1, 0x6d, 0xa4, 0xa7,
+	0x87, 0xdb, 0x32, 0x3d, 0x67, 0xb0, 0x4a, 0x57, 0x10, 0xcf, 0x25, 0xb5, 0x24, 0x31, 0x33, 0xa7,
+	0xd8, 0x89, 0xe7, 0xc4, 0x3d, 0x79, 0x86, 0x0b, 0xf7, 0xe4, 0x19, 0x5f, 0xdd, 0x93, 0x67, 0x08,
+	0x82, 0x9a, 0x25, 0x14, 0xc8, 0xc5, 0x9c, 0x95, 0x9f, 0x24, 0xc1, 0x04, 0x36, 0xd2, 0x90, 0xb0,
+	0x91, 0x5e, 0xf9, 0x49, 0x78, 0x4c, 0x05, 0x99, 0xa5, 0xb4, 0x89, 0x91, 0x8b, 0x3d, 0x28, 0xb5,
+	0xb8, 0x24, 0xbf, 0x28, 0x75, 0xc8, 0x38, 0xda, 0x49, 0xf3, 0xc4, 0x43, 0x39, 0x86, 0x13, 0x8f,
+	0xe4, 0x18, 0x2f, 0x3c, 0x92, 0x63, 0xbc, 0xf1, 0x48, 0x8e, 0xf1, 0xc1, 0x23, 0x39, 0xc6, 0x09,
+	0x8f, 0xe5, 0x18, 0x2e, 0x3c, 0x96, 0x63, 0xb8, 0xf1, 0x58, 0x8e, 0x21, 0x8a, 0x1d, 0x6a, 0x66,
+	0x12, 0x1b, 0x38, 0x6a, 0x8c, 0x01, 0x01, 0x00, 0x00, 0xff, 0xff, 0x09, 0x10, 0x78, 0xa6, 0x10,
+	0x02, 0x00, 0x00,
+}

@@ -15,8 +15,6 @@ import (
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
@@ -25,13 +23,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowenc/rowencpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
-	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
 )
 
@@ -47,7 +43,7 @@ var maxRowSizeLog = settings.RegisterByteSizeSetting(
 	"maximum size of row (or column family if multiple column families are in use) that SQL can "+
 		"write to the database, above which an event is logged to SQL_PERF (or SQL_INTERNAL_PERF "+
 		"if the mutating statement was internal); use 0 to disable",
-	kvserver.MaxCommandSizeDefault,
+	0, /* Disabled by default in 21.1. */
 	func(size int64) error {
 		if size != 0 && size < maxRowSizeFloor {
 			return errors.Newf(
@@ -68,7 +64,7 @@ var maxRowSizeErr = settings.RegisterByteSizeSetting(
 	"sql.guardrails.max_row_size_err",
 	"maximum size of row (or column family if multiple column families are in use) that SQL can "+
 		"write to the database, above which an error is returned; use 0 to disable",
-	512<<20, /* 512 MiB */
+	0, /* Disabled by default in 21.1. */
 	func(size int64) error {
 		if size != 0 && size < maxRowSizeFloor {
 			return errors.Newf(
@@ -91,8 +87,8 @@ type rowHelper struct {
 
 	TableDesc catalog.TableDescriptor
 	// Secondary indexes.
-	Indexes      []catalog.Index
-	indexEntries map[catalog.Index][]rowenc.IndexEntry
+	Indexes      []descpb.IndexDescriptor
+	indexEntries []rowenc.IndexEntry
 
 	// Computed during initialization for pretty-printing.
 	primIndexValDirs []encoding.Direction
@@ -100,8 +96,7 @@ type rowHelper struct {
 
 	// Computed and cached.
 	primaryIndexKeyPrefix []byte
-	primaryIndexKeyCols   catalog.TableColSet
-	primaryIndexValueCols catalog.TableColSet
+	primaryIndexCols      catalog.TableColSet
 	sortedColumnFamilies  map[descpb.FamilyID][]descpb.ColumnID
 
 	// Used to check row size.
@@ -113,7 +108,7 @@ type rowHelper struct {
 func newRowHelper(
 	codec keys.SQLCodec,
 	desc catalog.TableDescriptor,
-	indexes []catalog.Index,
+	indexes []descpb.IndexDescriptor,
 	sv *settings.Values,
 	internal bool,
 	metrics *Metrics,
@@ -128,11 +123,11 @@ func newRowHelper(
 
 	// Pre-compute the encoding directions of the index key values for
 	// pretty-printing in traces.
-	rh.primIndexValDirs = catalogkeys.IndexKeyValDirs(rh.TableDesc.GetPrimaryIndex())
+	rh.primIndexValDirs = catalogkeys.IndexKeyValDirs(rh.TableDesc.GetPrimaryIndex().IndexDesc())
 
 	rh.secIndexValDirs = make([][]encoding.Direction, len(rh.Indexes))
 	for i := range rh.Indexes {
-		rh.secIndexValDirs[i] = catalogkeys.IndexKeyValDirs(rh.Indexes[i])
+		rh.secIndexValDirs[i] = catalogkeys.IndexKeyValDirs(&rh.Indexes[i])
 	}
 
 	rh.maxRowSizeLog = uint32(maxRowSizeLog.Get(sv))
@@ -150,11 +145,7 @@ func (rh *rowHelper) encodeIndexes(
 	values []tree.Datum,
 	ignoreIndexes util.FastIntSet,
 	includeEmpty bool,
-) (
-	primaryIndexKey []byte,
-	secondaryIndexEntries map[catalog.Index][]rowenc.IndexEntry,
-	err error,
-) {
+) (primaryIndexKey []byte, secondaryIndexEntries []rowenc.IndexEntry, err error) {
 	primaryIndexKey, err = rh.encodePrimaryIndex(colIDtoRowIndex, values)
 	if err != nil {
 		return nil, nil, err
@@ -175,7 +166,7 @@ func (rh *rowHelper) encodePrimaryIndex(
 			rh.TableDesc.GetPrimaryIndexID())
 	}
 	primaryIndexKey, _, err = rowenc.EncodeIndexKey(
-		rh.TableDesc, rh.TableDesc.GetPrimaryIndex(), colIDtoRowIndex, values, rh.primaryIndexKeyPrefix)
+		rh.TableDesc, rh.TableDesc.GetPrimaryIndex().IndexDesc(), colIDtoRowIndex, values, rh.primaryIndexKeyPrefix)
 	return primaryIndexKey, err
 }
 
@@ -195,43 +186,41 @@ func (rh *rowHelper) encodeSecondaryIndexes(
 	values []tree.Datum,
 	ignoreIndexes util.FastIntSet,
 	includeEmpty bool,
-) (secondaryIndexEntries map[catalog.Index][]rowenc.IndexEntry, err error) {
-
-	if rh.indexEntries == nil {
-		rh.indexEntries = make(map[catalog.Index][]rowenc.IndexEntry, len(rh.Indexes))
+) (secondaryIndexEntries []rowenc.IndexEntry, err error) {
+	if cap(rh.indexEntries) < len(rh.Indexes) {
+		rh.indexEntries = make([]rowenc.IndexEntry, 0, len(rh.Indexes))
 	}
 
-	for i := range rh.indexEntries {
-		rh.indexEntries[i] = rh.indexEntries[i][:0]
-	}
+	rh.indexEntries = rh.indexEntries[:0]
 
 	for i := range rh.Indexes {
-		index := rh.Indexes[i]
-		if !ignoreIndexes.Contains(int(index.GetID())) {
+		index := &rh.Indexes[i]
+		if !ignoreIndexes.Contains(int(index.ID)) {
 			entries, err := rowenc.EncodeSecondaryIndex(rh.Codec, rh.TableDesc, index, colIDtoRowIndex, values, includeEmpty)
 			if err != nil {
 				return nil, err
 			}
-			rh.indexEntries[index] = append(rh.indexEntries[index], entries...)
+			rh.indexEntries = append(rh.indexEntries, entries...)
 		}
 	}
 
 	return rh.indexEntries, nil
 }
 
-// skipColumnNotInPrimaryIndexValue returns true if the value at column colID
-// does not need to be encoded, either because it is already part of the primary
-// key, or because it is not part of the primary index altogether. Composite
+// skipColumnInPK returns true if the value at column colID does not need
+// to be encoded because it is already part of the primary key. Composite
 // datums are considered too, so a composite datum in a PK will return false.
-func (rh *rowHelper) skipColumnNotInPrimaryIndexValue(
-	colID descpb.ColumnID, value tree.Datum,
-) (bool, error) {
-	if rh.primaryIndexKeyCols.Empty() {
-		rh.primaryIndexKeyCols = rh.TableDesc.GetPrimaryIndex().CollectKeyColumnIDs()
-		rh.primaryIndexValueCols = rh.TableDesc.GetPrimaryIndex().CollectPrimaryStoredColumnIDs()
+// TODO(dan): This logic is common and being moved into TableDescriptor (see
+// #6233). Once it is, use the shared one.
+func (rh *rowHelper) skipColumnInPK(colID descpb.ColumnID, value tree.Datum) (bool, error) {
+	if rh.primaryIndexCols.Empty() {
+		for i := 0; i < rh.TableDesc.GetPrimaryIndex().NumColumns(); i++ {
+			pkColID := rh.TableDesc.GetPrimaryIndex().GetColumnID(i)
+			rh.primaryIndexCols.Add(pkColID)
+		}
 	}
-	if !rh.primaryIndexKeyCols.Contains(colID) {
-		return !rh.primaryIndexValueCols.Contains(colID), nil
+	if !rh.primaryIndexCols.Contains(colID) {
+		return false, nil
 	}
 	if cdatum, ok := value.(tree.CompositeDatum); ok {
 		// Composite columns are encoded in both the key and the value.
@@ -297,39 +286,6 @@ func (rh *rowHelper) checkRowSize(
 			rh.metrics.MaxRowSizeErrCount.Inc(1)
 		}
 		return pgerror.WithCandidateCode(&details, pgcode.ProgramLimitExceeded)
-	}
-	return nil
-}
-
-var deleteEncoding protoutil.Message = &rowencpb.IndexValueWrapper{
-	Value:   nil,
-	Deleted: true,
-}
-
-func (rh *rowHelper) deleteIndexEntry(
-	ctx context.Context,
-	batch *kv.Batch,
-	index catalog.Index,
-	valDirs []encoding.Direction,
-	entry *rowenc.IndexEntry,
-	traceKV bool,
-) error {
-	if index.UseDeletePreservingEncoding() {
-		if traceKV {
-			log.VEventf(ctx, 2, "Put (delete) %s", entry.Key)
-		}
-
-		batch.Put(entry.Key, deleteEncoding)
-	} else {
-		if traceKV {
-			if valDirs != nil {
-				log.VEventf(ctx, 2, "Del %s", keys.PrettyPrint(valDirs, entry.Key))
-			} else {
-				log.VEventf(ctx, 2, "Del %s", entry.Key)
-			}
-		}
-
-		batch.Del(entry.Key)
 	}
 	return nil
 }

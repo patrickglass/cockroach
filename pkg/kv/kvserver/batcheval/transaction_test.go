@@ -734,11 +734,9 @@ func TestUpdateAbortSpan(t *testing.T) {
 			defer db.Close()
 			batch := db.NewBatch()
 			defer batch.Close()
-			st := makeClusterSettingsUsingEngineIntentsSetting(db)
 			evalCtx := &MockEvalCtx{
-				ClusterSettings: st,
-				Desc:            &desc,
-				AbortSpan:       as,
+				Desc:      &desc,
+				AbortSpan: as,
 				CanCreateTxn: func() (bool, hlc.Timestamp, roachpb.TransactionAbortedReason) {
 					return true, hlc.Timestamp{}, 0
 				},

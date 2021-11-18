@@ -45,6 +45,5 @@ func genAnyNotNullAgg(inputFileContents string, wr io.Writer) error {
 }
 
 func init() {
-	registerAggGenerator(
-		genAnyNotNullAgg, "any_not_null_agg.eg.go", anyNotNullAggTmpl, false /* genWindowVariant */)
+	registerAggGenerator(genAnyNotNullAgg, "any_not_null_agg.eg.go", anyNotNullAggTmpl)
 }

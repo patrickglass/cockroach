@@ -144,29 +144,12 @@ func (c intervalCustomizer) getHashAssignFunc() assignFunc {
 	}
 }
 
-func (c jsonCustomizer) getHashAssignFunc() assignFunc {
-	return func(op *lastArgWidthOverload, targetElem, vElem, _, _, _, _ string) string {
-		// TODO(yuzefovich): consider refactoring this to avoid decoding-encoding of
-		// JSON altogether. This will require changing `assignFunc` to also have an
-		// access to the index of the current element and then some trickery to get
-		// to the bytes underlying the JSON.
-		return fmt.Sprintf(`
-        scratch := _overloadHelper.ByteScratch[:0]
-        _b, _err := json.EncodeJSON(scratch, %[2]s)
-        if _err != nil {
-          colexecerror.ExpectedError(_err)
-        }
-        _overloadHelper.ByteScratch = _b
-        %[1]s`, fmt.Sprintf(hashByteSliceString, targetElem, "_b"), vElem)
-	}
-}
-
 func (c datumCustomizer) getHashAssignFunc() assignFunc {
 	return func(op *lastArgWidthOverload, targetElem, vElem, _, _, _, _ string) string {
 		// Note that this overload assumes that there exists
 		//   var datumAlloc *rowenc.DatumAlloc.
 		// in the scope.
-		return fmt.Sprintf(`b := coldataext.Hash(%s.(tree.Datum), datumAlloc)`, vElem) +
+		return fmt.Sprintf(`b := %s.(*coldataext.Datum).Hash(datumAlloc)`, vElem) +
 			fmt.Sprintf(hashByteSliceString, targetElem, "b")
 	}
 }

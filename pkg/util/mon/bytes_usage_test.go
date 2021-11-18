@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
-	"github.com/stretchr/testify/require"
 )
 
 // randomSize generates a size greater or equal to zero, with a random
@@ -37,7 +36,7 @@ func TestMemoryAllocations(t *testing.T) {
 	poolAllocSizes := []int64{1, 2, 9, 10, 11, 100}
 	preBudgets := []int64{0, 1, 2, 9, 10, 11, 100}
 
-	rnd, seed := randutil.NewTestRand()
+	rnd, seed := randutil.NewPseudoRand()
 	t.Logf("random seed: %v", seed)
 
 	ctx := context.Background()
@@ -272,23 +271,6 @@ func TestBoundAccount(t *testing.T) {
 	}
 
 	m.Stop(ctx)
-}
-
-func TestNilBoundAccount(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	ctx := context.Background()
-	var ba *BoundAccount
-	_ = ba.Used()
-	_ = ba.Monitor()
-	_ = ba.allocated()
-	ba.Empty(ctx)
-	ba.Clear(ctx)
-	ba.Close(ctx)
-	require.Nil(t, ba.Resize(ctx, 0, 10))
-	require.Nil(t, ba.ResizeTo(ctx, 10))
-	require.Nil(t, ba.Grow(ctx, 10))
-	ba.Shrink(ctx, 10)
 }
 
 func TestBytesMonitor(t *testing.T) {

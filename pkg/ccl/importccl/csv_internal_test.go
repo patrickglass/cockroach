@@ -34,6 +34,10 @@ func TestMakeSimpleTableDescriptorErrors(t *testing.T) {
 			error: "unsupported IF NOT EXISTS",
 		},
 		{
+			stmt:  "create table a (i int) interleave in parent b (id)",
+			error: "interleaved not supported",
+		},
+		{
 			stmt:  "create table a as select 1",
 			error: "CREATE AS not supported",
 		},
@@ -48,10 +52,6 @@ func TestMakeSimpleTableDescriptorErrors(t *testing.T) {
 		{
 			stmt:  "create table a (i int, j int as (i + 10) virtual)",
 			error: `to import into a table with virtual computed columns, use IMPORT INTO`,
-		},
-		{
-			stmt:  "create table a (i int, index ((i + 1)))",
-			error: `to import into a table with expression indexes, use IMPORT INTO`,
 		},
 		{
 			stmt: `create table a (
@@ -79,7 +79,7 @@ func TestMakeSimpleTableDescriptorErrors(t *testing.T) {
 			if !ok {
 				t.Fatal("expected CREATE TABLE statement in table file")
 			}
-			_, err = MakeTestingSimpleTableDescriptor(ctx, &semaCtx, st, create, defaultCSVParentID, keys.PublicSchemaID, defaultCSVTableID, NoFKs, 0)
+			_, err = MakeSimpleTableDescriptor(ctx, &semaCtx, st, create, defaultCSVParentID, keys.PublicSchemaID, defaultCSVTableID, NoFKs, 0)
 			if !testutils.IsError(err, tc.error) {
 				t.Fatalf("expected %v, got %+v", tc.error, err)
 			}

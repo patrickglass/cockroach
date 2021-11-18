@@ -89,7 +89,7 @@ type BulkAdder interface {
 	// Close closes the underlying buffers/writers.
 	Close(ctx context.Context)
 	// SetOnFlush sets a callback function called after flushing the buffer.
-	SetOnFlush(func(summary roachpb.BulkOpSummary))
+	SetOnFlush(func())
 }
 
 // DuplicateKeyError represents a failed attempt to ingest the same key twice

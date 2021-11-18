@@ -11,12 +11,9 @@
 package tree
 
 import (
-	"strings"
-
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
-	"github.com/lib/pq/oid"
 )
 
 // ParseAndRequireString parses s as type t for simple types. Collated
@@ -37,25 +34,25 @@ func ParseAndRequireString(
 		}
 		d = formatBitArrayToType(r, t)
 	case types.BoolFamily:
-		d, err = ParseDBool(strings.TrimSpace(s))
+		d, err = ParseDBool(s)
 	case types.BytesFamily:
 		d, err = ParseDByte(s)
 	case types.DateFamily:
 		d, dependsOnContext, err = ParseDDate(ctx, s)
 	case types.DecimalFamily:
-		d, err = ParseDDecimal(strings.TrimSpace(s))
+		d, err = ParseDDecimal(s)
 	case types.FloatFamily:
-		d, err = ParseDFloat(strings.TrimSpace(s))
+		d, err = ParseDFloat(s)
 	case types.INetFamily:
 		d, err = ParseDIPAddrFromINetString(s)
 	case types.IntFamily:
-		d, err = ParseDInt(strings.TrimSpace(s))
+		d, err = ParseDInt(s)
 	case types.IntervalFamily:
 		itm, typErr := t.IntervalTypeMetadata()
 		if typErr != nil {
 			return nil, false, typErr
 		}
-		d, err = ParseDIntervalWithTypeMetadata(intervalStyle(ctx), s, itm)
+		d, err = ParseDIntervalWithTypeMetadata(s, itm)
 	case types.Box2DFamily:
 		d, err = ParseDBox2D(s)
 	case types.GeographyFamily:
@@ -65,15 +62,11 @@ func ParseAndRequireString(
 	case types.JsonFamily:
 		d, err = ParseDJSON(s)
 	case types.OidFamily:
-		if t.Oid() != oid.T_oid && s == ZeroOidValue {
-			d = wrapAsZeroOid(t)
-		} else {
-			i, err := ParseDInt(s)
-			if err != nil {
-				return nil, false, err
-			}
-			d = NewDOid(*i)
+		i, err := ParseDInt(s)
+		if err != nil {
+			return nil, false, err
 		}
+		d = NewDOid(*i)
 	case types.StringFamily:
 		// If the string type specifies a limit we truncate to that limit:
 		//   'hello'::CHAR(2) -> 'he'
@@ -94,8 +87,6 @@ func ParseAndRequireString(
 		d, err = ParseDUuidFromString(s)
 	case types.EnumFamily:
 		d, err = MakeDEnumFromLogicalRepresentation(t, s)
-	case types.TupleFamily:
-		d, dependsOnContext, err = ParseDTupleFromString(ctx, s, t)
 	default:
 		return nil, false, errors.AssertionFailedf("unknown type %s (%T)", t, t)
 	}

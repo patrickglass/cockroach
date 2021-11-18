@@ -10,6 +10,8 @@
 package colexecwindow
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
@@ -22,16 +24,17 @@ import (
 // NewRowNumberOperator creates a new Operator that computes window function
 // ROW_NUMBER. outputColIdx specifies in which coldata.Vec the operator should
 // put its output (if there is no such column, a new column is appended).
-func NewRowNumberOperator(args *WindowArgs) colexecop.Operator {
-	input := colexecutils.NewVectorTypeEnforcer(
-		args.MainAllocator, args.Input, types.Int, args.OutputColIdx)
+func NewRowNumberOperator(
+	allocator *colmem.Allocator, input colexecop.Operator, outputColIdx int, partitionColIdx int,
+) colexecop.Operator {
+	input = colexecutils.NewVectorTypeEnforcer(allocator, input, types.Int, outputColIdx)
 	base := rowNumberBase{
-		OneInputHelper:  colexecop.MakeOneInputHelper(input),
-		allocator:       args.MainAllocator,
-		outputColIdx:    args.OutputColIdx,
-		partitionColIdx: args.PartitionColIdx,
+		OneInputNode:    colexecop.NewOneInputNode(input),
+		allocator:       allocator,
+		outputColIdx:    outputColIdx,
+		partitionColIdx: partitionColIdx,
 	}
-	if args.PartitionColIdx == -1 {
+	if partitionColIdx == -1 {
 		return &rowNumberNoPartitionOp{base}
 	}
 	return &rowNumberWithPartitionOp{base}
@@ -41,12 +44,16 @@ func NewRowNumberOperator(args *WindowArgs) colexecop.Operator {
 // variations of row number operators. Note that it is not an operator itself
 // and should not be used directly.
 type rowNumberBase struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator       *colmem.Allocator
 	outputColIdx    int
 	partitionColIdx int
 
 	rowNumber int64
+}
+
+func (r *rowNumberBase) Init() {
+	r.Input.Init()
 }
 
 type rowNumberNoPartitionOp struct {
@@ -55,8 +62,8 @@ type rowNumberNoPartitionOp struct {
 
 var _ colexecop.Operator = &rowNumberNoPartitionOp{}
 
-func (r *rowNumberNoPartitionOp) Next() coldata.Batch {
-	batch := r.Input.Next()
+func (r *rowNumberNoPartitionOp) Next(ctx context.Context) coldata.Batch {
+	batch := r.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -92,8 +99,8 @@ type rowNumberWithPartitionOp struct {
 
 var _ colexecop.Operator = &rowNumberWithPartitionOp{}
 
-func (r *rowNumberWithPartitionOp) Next() coldata.Batch {
-	batch := r.Input.Next()
+func (r *rowNumberWithPartitionOp) Next(ctx context.Context) coldata.Batch {
+	batch := r.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch

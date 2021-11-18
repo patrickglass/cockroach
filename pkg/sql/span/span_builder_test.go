@@ -23,9 +23,9 @@ func TestSpanBuilderDoesNotSplitSystemTableFamilySpans(t *testing.T) {
 	st := cluster.MakeTestingClusterSettings()
 	evalCtx := tree.MakeTestingEvalContext(st)
 	builder := MakeBuilder(&evalCtx, keys.SystemSQLCodec, systemschema.DescriptorTable,
-		systemschema.DescriptorTable.GetPrimaryIndex())
+		systemschema.DescriptorTable.GetPrimaryIndex().IndexDesc())
 
-	if res := builder.CanSplitSpanIntoFamilySpans(
+	if res := builder.CanSplitSpanIntoSeparateFamilies(
 		1, 1, false); res {
 		t.Errorf("expected the system table to not be splittable")
 	}

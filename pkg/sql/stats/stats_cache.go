@@ -14,14 +14,16 @@ import (
 	"context"
 	"sync"
 
+	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -65,10 +67,9 @@ type TableStatisticsCache struct {
 	ClientDB    *kv.DB
 	SQLExecutor sqlutil.InternalExecutor
 	Codec       keys.SQLCodec
-	Settings    *cluster.Settings
 
-	// Used to resolve descriptors.
-	collectionFactory *descs.CollectionFactory
+	LeaseMgr *lease.Manager
+	Settings *cluster.Settings
 
 	// Used when decoding KV from the range feed.
 	datumAlloc rowenc.DatumAlloc
@@ -111,26 +112,41 @@ type cacheEntry struct {
 func NewTableStatisticsCache(
 	ctx context.Context,
 	cacheSize int,
+	gw gossip.OptionalGossip,
 	db *kv.DB,
 	sqlExecutor sqlutil.InternalExecutor,
 	codec keys.SQLCodec,
+	leaseManager *lease.Manager,
 	settings *cluster.Settings,
 	rangeFeedFactory *rangefeed.Factory,
-	cf *descs.CollectionFactory,
 ) *TableStatisticsCache {
 	tableStatsCache := &TableStatisticsCache{
-		ClientDB:          db,
-		SQLExecutor:       sqlExecutor,
-		Codec:             codec,
-		Settings:          settings,
-		collectionFactory: cf,
+		ClientDB:    db,
+		SQLExecutor: sqlExecutor,
+		Codec:       codec,
+		LeaseMgr:    leaseManager,
+		Settings:    settings,
 	}
 	tableStatsCache.mu.cache = cache.NewUnorderedCache(cache.Config{
 		Policy:      cache.CacheLRU,
 		ShouldEvict: func(s int, key, value interface{}) bool { return s > cacheSize },
 	})
 
-	// Set up a range feed to watch for updates to system.table_statistics.
+	// When not using multi-tenant, use the legacy Gossip-based invalidation
+	// mechanism. This avoids introducing regressions in 21.1.x.
+	// The stat cache requires redundant callbacks as it is using gossip to
+	// signal the presence of new stats, not to actually propagate them.
+	if g, ok := gw.Optional(47925); ok {
+		g.RegisterCallback(
+			gossip.MakePrefixPattern(gossip.KeyTableStatAddedPrefix),
+			tableStatsCache.tableStatAddedGossipUpdate,
+			gossip.Redundant,
+		)
+		return tableStatsCache
+	}
+
+	// In multi-tenant, gossip is not available. Use the 21.2 method: set up a
+	// range feed to watch for updates to system.table_statistics.
 
 	statsTablePrefix := codec.TablePrefix(keys.TableStatisticsTableID)
 	statsTableSpan := roachpb.Span{
@@ -149,7 +165,7 @@ func NewTableStatisticsCache(
 		}
 		ts := kv.Value.Timestamp
 		// A statistics collection inserts multiple rows in one transaction. We
-		// don't want to call refreshTableStats for each row since it has
+		// don't want to call RefreshTableStats for each row since it has
 		// non-trivial overhead.
 		if tableID == lastTableID && ts == lastTS {
 			return
@@ -175,16 +191,30 @@ func NewTableStatisticsCache(
 	return tableStatsCache
 }
 
+// tableStatAddedGossipUpdate is the gossip callback that fires when a new
+// statistic is available for a table.
+func (sc *TableStatisticsCache) tableStatAddedGossipUpdate(key string, value roachpb.Value) {
+	tableID, err := gossip.TableIDFromTableStatAddedKey(key)
+	if err != nil {
+		log.Errorf(context.Background(), "tableStatAddedGossipUpdate(%s) error: %v", key, err)
+		return
+	}
+	sc.RefreshTableStats(context.Background(), descpb.ID(tableID))
+}
+
 // decodeTableStatisticsKV decodes the table ID from a range feed event on
 // system.table_statistics.
 func decodeTableStatisticsKV(
 	codec keys.SQLCodec, kv *roachpb.RangeFeedValue, da *rowenc.DatumAlloc,
 ) (tableDesc descpb.ID, err error) {
+	tbl := systemschema.TableStatisticsTable
 	// The primary key of table_statistics is (tableID INT, statisticID INT).
 	types := []*types.T{types.Int, types.Int}
 	dirs := []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC}
 	keyVals := make([]rowenc.EncDatum, 2)
-	_, matches, _, err := rowenc.DecodeIndexKey(codec, types, keyVals, dirs, kv.Key)
+	_, matches, _, err := rowenc.DecodeIndexKey(
+		codec, tbl, tbl.GetPrimaryIndex().IndexDesc(), types, keyVals, dirs, kv.Key,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -203,7 +233,7 @@ func decodeTableStatisticsKV(
 	return descpb.ID(uint32(*tableID)), nil
 }
 
-// GetTableStats looks up statistics for the requested table in the cache,
+// GetTableStats looks up statistics for the requested table ID in the cache,
 // and if the stats are not present in the cache, it looks them up in
 // system.table_statistics.
 //
@@ -213,37 +243,18 @@ func decodeTableStatisticsKV(
 //
 // The statistics are ordered by their CreatedAt time (newest-to-oldest).
 func (sc *TableStatisticsCache) GetTableStats(
-	ctx context.Context, table catalog.TableDescriptor,
-) ([]*TableStatistic, error) {
-	if !hasStatistics(table) {
-		return nil, nil
-	}
-	return sc.getTableStatsFromCache(ctx, table.GetID())
-}
-
-// hasStatistics returns true if the table can have statistics collected for it.
-func hasStatistics(table catalog.TableDescriptor) bool {
-	if catalog.IsSystemDescriptor(table) {
-		// Don't try to get statistics for system tables (most importantly,
-		// for table_statistics itself).
-		return false
-	}
-	if table.IsVirtualTable() {
-		// Don't try to get statistics for virtual tables.
-		return false
-	}
-	if table.IsView() {
-		// Don't try to get statistics for views.
-		return false
-	}
-	return true
-}
-
-// getTableStatsFromCache is like GetTableStats but assumes that the table ID
-// is safe to fetch statistics for: non-system, non-virtual, non-view, etc.
-func (sc *TableStatisticsCache) getTableStatsFromCache(
 	ctx context.Context, tableID descpb.ID,
 ) ([]*TableStatistic, error) {
+	if descpb.IsReservedID(tableID) {
+		// Don't try to get statistics for system tables (most importantly,
+		// for table_statistics itself).
+		return nil, nil
+	}
+	if descpb.IsVirtualTable(tableID) {
+		// Don't try to get statistics for virtual tables.
+		return nil, nil
+	}
+
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
@@ -404,8 +415,12 @@ func (sc *TableStatisticsCache) refreshCacheEntry(
 	}
 }
 
-// refreshTableStats refreshes the cached statistics for the given table ID by
+// RefreshTableStats refreshes the cached statistics for the given table ID by
 // fetching the new stats from the database.
+func (sc *TableStatisticsCache) RefreshTableStats(ctx context.Context, tableID descpb.ID) {
+	sc.refreshTableStats(ctx, tableID, sc.ClientDB.Clock().Now())
+}
+
 func (sc *TableStatisticsCache) refreshTableStats(
 	ctx context.Context, tableID descpb.ID, ts hlc.Timestamp,
 ) {
@@ -435,7 +450,6 @@ const (
 	rowCountIndex
 	distinctCountIndex
 	nullCountIndex
-	avgSizeIndex
 	histogramIndex
 	statsLen
 )
@@ -469,7 +483,6 @@ func (sc *TableStatisticsCache) parseStats(
 		{"rowCount", rowCountIndex, types.Int, false},
 		{"distinctCount", distinctCountIndex, types.Int, false},
 		{"nullCount", nullCountIndex, types.Int, false},
-		{"avgSize", avgSizeIndex, types.Int, false},
 		{"histogram", histogramIndex, types.Bytes, true},
 	}
 	for _, v := range expectedTypes {
@@ -489,7 +502,6 @@ func (sc *TableStatisticsCache) parseStats(
 			RowCount:      (uint64)(*datums[rowCountIndex].(*tree.DInt)),
 			DistinctCount: (uint64)(*datums[distinctCountIndex].(*tree.DInt)),
 			NullCount:     (uint64)(*datums[nullCountIndex].(*tree.DInt)),
-			AvgSize:       (uint64)(*datums[avgSizeIndex].(*tree.DInt)),
 		},
 	}
 	columnIDs := datums[columnIDsIndex].(*tree.DArray)
@@ -521,16 +533,15 @@ func (sc *TableStatisticsCache) parseStats(
 			// If have types that are not backwards compatible in this way, then we
 			// will need to start writing a timestamp on the stats objects and request
 			// TypeDescriptor's with the timestamp that the stats were recorded with.
-			//
-			// TODO(ajwerner): We now do delete members from enum types. See #67050.
-			if err := sc.collectionFactory.Txn(ctx, sc.SQLExecutor, sc.ClientDB, func(
-				ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
-			) error {
-				resolver := descs.NewDistSQLTypeResolver(descriptors, txn)
+			err := sc.ClientDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+				collection := descs.NewCollection(sc.Settings, sc.LeaseMgr, nil /* hydratedTables */)
+				defer collection.ReleaseAll(ctx)
+				resolver := descs.NewDistSQLTypeResolver(collection, txn)
 				var err error
 				res.HistogramData.ColumnType, err = resolver.ResolveTypeByOID(ctx, typ.Oid())
 				return err
-			}); err != nil {
+			})
+			if err != nil {
 				return nil, err
 			}
 		}
@@ -592,7 +603,6 @@ SELECT
 	"rowCount",
 	"distinctCount",
 	"nullCount",
-	"avgSize",
 	histogram
 FROM system.table_statistics
 WHERE "tableID" = $1

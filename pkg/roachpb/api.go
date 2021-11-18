@@ -51,6 +51,22 @@ const (
 	MaxUserPriority UserPriority = 1000
 )
 
+// RequiresReadLease returns whether the ReadConsistencyType requires
+// that a read-only request be performed on an active valid leaseholder.
+// TODO(aayush): Rename the method since we no longer require a replica to be a
+// leaseholder to serve a consistent read.
+func (rc ReadConsistencyType) RequiresReadLease() bool {
+	switch rc {
+	case CONSISTENT:
+		return true
+	case READ_UNCOMMITTED:
+		return true
+	case INCONSISTENT:
+		return false
+	}
+	panic("unreachable")
+}
+
 // SupportsBatch determines whether the methods in the provided batch
 // are supported by the ReadConsistencyType, returning an error if not.
 func (rc ReadConsistencyType) SupportsBatch(ba BatchRequest) error {
@@ -61,7 +77,7 @@ func (rc ReadConsistencyType) SupportsBatch(ba BatchRequest) error {
 		for _, ru := range ba.Requests {
 			m := ru.GetInner().Method()
 			switch m {
-			case Get, Scan, ReverseScan, QueryResolvedTimestamp:
+			case Get, Scan, ReverseScan:
 			default:
 				return errors.Errorf("method %s not allowed with %s batch", m, rc)
 			}
@@ -83,7 +99,7 @@ const (
 	isAlone                         // requests which must be alone in a batch
 	isPrefix                        // requests which should be grouped with the next request in a batch
 	isUnsplittable                  // range command that must not be split during sending
-	skipLeaseCheck                  // commands which skip the check that the evaluating replica has a valid lease
+	skipLeaseCheck                  // commands which skip the check that the evaluting replica has a valid lease
 	updatesTSCache                  // commands which update the timestamp cache
 	updatesTSCacheOnErr             // commands which make read data available on errors
 	needsRefresh                    // commands which require refreshes to avoid serializable retries
@@ -324,6 +340,22 @@ func (sr *ScanResponse) combine(c combinable) error {
 
 var _ combinable = &ScanResponse{}
 
+func (avptr *AdminVerifyProtectedTimestampResponse) combine(c combinable) error {
+	other := c.(*AdminVerifyProtectedTimestampResponse)
+	if avptr != nil {
+		avptr.DeprecatedFailedRanges = append(avptr.DeprecatedFailedRanges,
+			other.DeprecatedFailedRanges...)
+		avptr.VerificationFailedRanges = append(avptr.VerificationFailedRanges,
+			other.VerificationFailedRanges...)
+		if err := avptr.ResponseHeader.combine(other.Header()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var _ combinable = &AdminVerifyProtectedTimestampResponse{}
+
 // combine implements the combinable interface.
 func (sr *ReverseScanResponse) combine(c combinable) error {
 	otherSR := c.(*ReverseScanResponse)
@@ -380,7 +412,7 @@ func (rr *ResolveIntentRangeResponse) combine(c combinable) error {
 
 var _ combinable = &ResolveIntentRangeResponse{}
 
-// combine implements the combinable interface.
+// Combine implements the combinable interface.
 func (cc *CheckConsistencyResponse) combine(c combinable) error {
 	if cc != nil {
 		otherCC := c.(*CheckConsistencyResponse)
@@ -394,7 +426,7 @@ func (cc *CheckConsistencyResponse) combine(c combinable) error {
 
 var _ combinable = &CheckConsistencyResponse{}
 
-// combine implements the combinable interface.
+// Combine implements the combinable interface.
 func (er *ExportResponse) combine(c combinable) error {
 	if er != nil {
 		otherER := c.(*ExportResponse)
@@ -408,7 +440,7 @@ func (er *ExportResponse) combine(c combinable) error {
 
 var _ combinable = &ExportResponse{}
 
-// combine implements the combinable interface.
+// Combine implements the combinable interface.
 func (r *AdminScatterResponse) combine(c combinable) error {
 	if r != nil {
 		otherR := c.(*AdminScatterResponse)
@@ -416,71 +448,40 @@ func (r *AdminScatterResponse) combine(c combinable) error {
 			return err
 		}
 
+		// Combined responses will always have only RangeInfo set, rather than
+		// DeprecatedRanges.
+		// TODO(pbardea): Remove in 21.1.
+		r.maybeUpgrade()
+		otherR.maybeUpgrade()
 		r.RangeInfos = append(r.RangeInfos, otherR.RangeInfos...)
 	}
 	return nil
 }
 
+// maybeUpgrade will upgrade responses from 20.1 clients to look like 20.2
+// responses.
+// It converts the DeprecatedRanges field of the response to the equivalent
+// RangeInfos and nils out DeprecatedRanges. Note that the converted RangeInfos
+// will have an empty lease and only have the start and end key of the range
+// descriptor populated.
+func (r *AdminScatterResponse) maybeUpgrade() {
+	if len(r.RangeInfos) == 0 {
+		r.RangeInfos = make([]RangeInfo, len(r.DeprecatedRanges))
+		for i, respRange := range r.DeprecatedRanges {
+			r.RangeInfos[i] = RangeInfo{
+				// respRange.Span's keys are not local keys. The keys were created with
+				// AsRawKey(), so converting back is safe.
+				Desc: RangeDescriptor{
+					StartKey: RKey(respRange.Span.Key),
+					EndKey:   RKey(respRange.Span.EndKey),
+				},
+			}
+		}
+	}
+	r.DeprecatedRanges = nil
+}
+
 var _ combinable = &AdminScatterResponse{}
-
-func (avptr *AdminVerifyProtectedTimestampResponse) combine(c combinable) error {
-	other := c.(*AdminVerifyProtectedTimestampResponse)
-	if avptr != nil {
-		avptr.DeprecatedFailedRanges = append(avptr.DeprecatedFailedRanges,
-			other.DeprecatedFailedRanges...)
-		avptr.VerificationFailedRanges = append(avptr.VerificationFailedRanges,
-			other.VerificationFailedRanges...)
-		if err := avptr.ResponseHeader.combine(other.Header()); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-var _ combinable = &AdminVerifyProtectedTimestampResponse{}
-
-// combine implements the combinable interface.
-func (r *QueryResolvedTimestampResponse) combine(c combinable) error {
-	if r != nil {
-		otherR := c.(*QueryResolvedTimestampResponse)
-		if err := r.ResponseHeader.combine(otherR.Header()); err != nil {
-			return err
-		}
-
-		r.ResolvedTS.Backward(otherR.ResolvedTS)
-	}
-	return nil
-}
-
-var _ combinable = &QueryResolvedTimestampResponse{}
-
-// combine implements the combinable interface.
-func (r *BarrierResponse) combine(c combinable) error {
-	otherR := c.(*BarrierResponse)
-	if r != nil {
-		if err := r.ResponseHeader.combine(otherR.Header()); err != nil {
-			return err
-		}
-		r.Timestamp.Forward(otherR.Timestamp)
-	}
-	return nil
-}
-
-var _ combinable = &BarrierResponse{}
-
-// combine implements the combinable interface.
-func (r *ScanInterleavedIntentsResponse) combine(c combinable) error {
-	otherR := c.(*ScanInterleavedIntentsResponse)
-	if r != nil {
-		if err := r.ResponseHeader.combine(otherR.Header()); err != nil {
-			return err
-		}
-		r.Intents = append(r.Intents, otherR.Intents...)
-	}
-	return nil
-}
-
-var _ combinable = &ScanInterleavedIntentsResponse{}
 
 // Header implements the Request interface.
 func (rh RequestHeader) Header() RequestHeader {
@@ -539,7 +540,7 @@ func (rh ResponseHeader) Header() ResponseHeader {
 	return rh
 }
 
-// Verify implements the Response interface for ResponseHeader with a
+// Verify implements the Response interface for ResopnseHeader with a
 // default noop. Individual response types should override this method
 // if they contain checksummed data which can be verified.
 func (rh *ResponseHeader) Verify(req Request) error {
@@ -674,7 +675,13 @@ func (*LeaseInfoRequest) Method() Method { return LeaseInfo }
 func (*ComputeChecksumRequest) Method() Method { return ComputeChecksum }
 
 // Method implements the Request interface.
+func (*WriteBatchRequest) Method() Method { return WriteBatch }
+
+// Method implements the Request interface.
 func (*ExportRequest) Method() Method { return Export }
+
+// Method implements the Request interface.
+func (*ImportRequest) Method() Method { return Import }
 
 // Method implements the Request interface.
 func (*AdminScatterRequest) Method() Method { return AdminScatter }
@@ -702,15 +709,6 @@ func (*RangeStatsRequest) Method() Method { return RangeStats }
 
 // Method implements the Request interface.
 func (*AdminVerifyProtectedTimestampRequest) Method() Method { return AdminVerifyProtectedTimestamp }
-
-// Method implements the Request interface.
-func (*QueryResolvedTimestampRequest) Method() Method { return QueryResolvedTimestamp }
-
-// Method implements the Request interface.
-func (*ScanInterleavedIntentsRequest) Method() Method { return ScanInterleavedIntents }
-
-// Method implements the Request interface.
-func (*BarrierRequest) Method() Method { return Barrier }
 
 // ShallowCopy implements the Request interface.
 func (gr *GetRequest) ShallowCopy() Request {
@@ -911,8 +909,20 @@ func (ccr *ComputeChecksumRequest) ShallowCopy() Request {
 }
 
 // ShallowCopy implements the Request interface.
+func (r *WriteBatchRequest) ShallowCopy() Request {
+	shallowCopy := *r
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Request interface.
 func (ekr *ExportRequest) ShallowCopy() Request {
 	shallowCopy := *ekr
+	return &shallowCopy
+}
+
+// ShallowCopy implements the Request interface.
+func (r *ImportRequest) ShallowCopy() Request {
+	shallowCopy := *r
 	return &shallowCopy
 }
 
@@ -966,24 +976,6 @@ func (r *RangeStatsRequest) ShallowCopy() Request {
 
 // ShallowCopy implements the Request interface.
 func (r *AdminVerifyProtectedTimestampRequest) ShallowCopy() Request {
-	shallowCopy := *r
-	return &shallowCopy
-}
-
-// ShallowCopy implements the Request interface.
-func (r *QueryResolvedTimestampRequest) ShallowCopy() Request {
-	shallowCopy := *r
-	return &shallowCopy
-}
-
-// ShallowCopy implements the Request interface.
-func (r *ScanInterleavedIntentsRequest) ShallowCopy() Request {
-	shallowCopy := *r
-	return &shallowCopy
-}
-
-// ShallowCopy implements the Request interface.
-func (r *BarrierRequest) ShallowCopy() Request {
 	shallowCopy := *r
 	return &shallowCopy
 }
@@ -1068,6 +1060,9 @@ func NewConditionalPut(key Key, value Value, expValue []byte, allowNotExist bool
 // The callee takes ownership of value's underlying bytes and it will mutate
 // them. The caller retains ownership of expVal; NewConditionalPut will copy it
 // into the request.
+//
+// Callers should check the version gate clusterversion.CPutInline to make
+// sure this is supported.
 func NewConditionalPutInline(key Key, value Value, expValue []byte, allowNotExist bool) Request {
 	value.InitChecksum(key)
 	// Compatibility with 20.1 servers.
@@ -1262,11 +1257,8 @@ func (*AdminMergeRequest) flags() int          { return isAdmin | isAlone }
 func (*AdminTransferLeaseRequest) flags() int  { return isAdmin | isAlone }
 func (*AdminChangeReplicasRequest) flags() int { return isAdmin | isAlone }
 func (*AdminRelocateRangeRequest) flags() int  { return isAdmin | isAlone }
+func (*HeartbeatTxnRequest) flags() int        { return isWrite | isTxn }
 func (*GCRequest) flags() int                  { return isWrite | isRange }
-
-// HeartbeatTxn updates the timestamp cache with transaction records,
-// to avoid checking for them on disk when considering 1PC evaluation.
-func (*HeartbeatTxnRequest) flags() int { return isWrite | isTxn | updatesTSCache }
 
 // PushTxnRequest updates different marker keys in the timestamp cache when
 // pushing a transaction's timestamp and when aborting a transaction.
@@ -1309,7 +1301,9 @@ func (*TransferLeaseRequest) flags() int {
 func (*RecomputeStatsRequest) flags() int                { return isWrite | isAlone }
 func (*ComputeChecksumRequest) flags() int               { return isWrite }
 func (*CheckConsistencyRequest) flags() int              { return isAdmin | isRange }
+func (*WriteBatchRequest) flags() int                    { return isWrite | isRange }
 func (*ExportRequest) flags() int                        { return isRead | isRange | updatesTSCache }
+func (*ImportRequest) flags() int                        { return isAdmin | isAlone }
 func (*AdminScatterRequest) flags() int                  { return isAdmin | isRange | isAlone }
 func (*AdminVerifyProtectedTimestampRequest) flags() int { return isAdmin | isRange | isAlone }
 func (*AddSSTableRequest) flags() int {
@@ -1326,63 +1320,14 @@ func (r *RefreshRangeRequest) flags() int {
 	return isRead | isTxn | isRange | updatesTSCache
 }
 
-func (*SubsumeRequest) flags() int                { return isRead | isAlone | updatesTSCache }
-func (*RangeStatsRequest) flags() int             { return isRead }
-func (*QueryResolvedTimestampRequest) flags() int { return isRead | isRange }
-func (*ScanInterleavedIntentsRequest) flags() int { return isRead | isRange }
-func (*BarrierRequest) flags() int                { return isWrite | isRange }
+func (*SubsumeRequest) flags() int    { return isRead | isAlone | updatesTSCache }
+func (*RangeStatsRequest) flags() int { return isRead }
 
 // IsParallelCommit returns whether the EndTxn request is attempting to perform
 // a parallel commit. See txn_interceptor_committer.go for a discussion about
 // parallel commits.
 func (etr *EndTxnRequest) IsParallelCommit() bool {
 	return etr.Commit && len(etr.InFlightWrites) > 0
-}
-
-const (
-	// ExternalStorageAuthImplicit is used by ExternalStorage instances to
-	// indicate access via a node's "implicit" authorization (e.g. machine acct).
-	ExternalStorageAuthImplicit = "implicit"
-
-	// ExternalStorageAuthSpecified is used by ExternalStorage instances to
-	// indicate access is via explicitly provided credentials.
-	ExternalStorageAuthSpecified = "specified"
-)
-
-// AccessIsWithExplicitAuth returns true if the external storage config carries
-// its own explicit credentials to use for access (or does not require them), as
-// opposed to using something about the node to gain implicit access, such as a
-// VM's machine account, network access, file system, etc.
-func (m *ExternalStorage) AccessIsWithExplicitAuth() bool {
-	switch m.Provider {
-	case ExternalStorageProvider_s3:
-		// custom endpoints could be a network resource only accessible via this
-		// node's network context and thus have an element of implicit auth.
-		if m.S3Config.Endpoint != "" {
-			return false
-		}
-		return m.S3Config.Auth != ExternalStorageAuthImplicit
-	case ExternalStorageProvider_gs:
-		return m.GoogleCloudConfig.Auth == ExternalStorageAuthSpecified
-	case ExternalStorageProvider_azure:
-		// Azure storage only uses explicitly supplied credentials.
-		return true
-	case ExternalStorageProvider_userfile:
-		// userfile always checks the user performing the action has grants on the
-		// table used.
-		return true
-	case ExternalStorageProvider_null:
-		return true
-	case ExternalStorageProvider_http:
-		// Arbitrary network endpoints may be accessible only via the node and thus
-		// make use of its implicit access to them.
-		return false
-	case ExternalStorageProvider_nodelocal:
-		// The node's local filesystem is obviously accessed implicitly as the node.
-		return false
-	default:
-		return false
-	}
 }
 
 // BulkOpSummaryID returns the key within a BulkOpSummary's EntryCounts map for
@@ -1569,87 +1514,10 @@ func (r *JoinNodeResponse) CreateStoreIdent() (StoreIdent, error) {
 
 // SafeFormat implements redact.SafeFormatter.
 func (c *ContentionEvent) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.Printf("conflicted with %s on %s for %.3fs", c.TxnMeta.ID, c.Key, c.Duration.Seconds())
+	w.Printf("conflicted with %s on %s for %.2fs", c.TxnMeta.ID, c.Key, c.Duration.Seconds())
 }
 
 // String implements fmt.Stringer.
 func (c *ContentionEvent) String() string {
 	return redact.StringWithoutMarkers(c)
-}
-
-// Equal returns whether the two structs are identical. Needed for compatibility
-// with proto2.
-func (c *TenantConsumption) Equal(other *TenantConsumption) bool {
-	return *c == *other
-}
-
-// Equal is used by generated code when TenantConsumption is embedded in a
-// proto2.
-var _ = (*TenantConsumption).Equal
-
-// Add consumption from the given structure.
-func (c *TenantConsumption) Add(other *TenantConsumption) {
-	c.RU += other.RU
-	c.ReadRequests += other.ReadRequests
-	c.ReadBytes += other.ReadBytes
-	c.WriteRequests += other.WriteRequests
-	c.WriteBytes += other.WriteBytes
-	c.SQLPodsCPUSeconds += other.SQLPodsCPUSeconds
-	c.PGWireEgressBytes += other.PGWireEgressBytes
-}
-
-// Sub subtracts consumption, making sure no fields become negative.
-func (c *TenantConsumption) Sub(other *TenantConsumption) {
-	if c.RU < other.RU {
-		c.RU = 0
-	} else {
-		c.RU -= other.RU
-	}
-
-	if c.ReadRequests < other.ReadRequests {
-		c.ReadRequests = 0
-	} else {
-		c.ReadRequests -= other.ReadRequests
-	}
-
-	if c.ReadBytes < other.ReadBytes {
-		c.ReadBytes = 0
-	} else {
-		c.ReadBytes -= other.ReadBytes
-	}
-
-	if c.WriteRequests < other.WriteRequests {
-		c.WriteRequests = 0
-	} else {
-		c.WriteRequests -= other.WriteRequests
-	}
-
-	if c.WriteBytes < other.WriteBytes {
-		c.WriteBytes = 0
-	} else {
-		c.WriteBytes -= other.WriteBytes
-	}
-
-	if c.SQLPodsCPUSeconds < other.SQLPodsCPUSeconds {
-		c.SQLPodsCPUSeconds = 0
-	} else {
-		c.SQLPodsCPUSeconds -= other.SQLPodsCPUSeconds
-	}
-
-	if c.PGWireEgressBytes < other.PGWireEgressBytes {
-		c.PGWireEgressBytes = 0
-	} else {
-		c.PGWireEgressBytes -= other.PGWireEgressBytes
-	}
-}
-
-// SafeFormat implements redact.SafeFormatter.
-func (s *ScanStats) SafeFormat(w redact.SafePrinter, _ rune) {
-	w.Printf("scan stats: stepped %d times (%d internal); seeked %d times (%d internal)",
-		s.NumInterfaceSteps, s.NumInternalSteps, s.NumInterfaceSeeks, s.NumInternalSeeks)
-}
-
-// String implements fmt.Stringer.
-func (s *ScanStats) String() string {
-	return redact.StringWithoutMarkers(s)
 }

@@ -17,7 +17,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
@@ -46,7 +45,7 @@ Capable of detecting the following errors:
 * MVCC stats that are inconsistent with the data within the range
 `,
 	Args: cobra.ExactArgs(1),
-	RunE: clierrorplus.MaybeDecorateError(runDebugCheckStoreCmd),
+	RunE: MaybeDecorateGRPCError(runDebugCheckStoreCmd),
 }
 
 var errCheckFoundProblem = errors.New("check-store found problems")
@@ -252,7 +251,7 @@ func checkStoreRaftState(
 					return err
 				}
 				getReplicaInfo(rangeID).committedIndex = hs.Commit
-			case bytes.Equal(suffix, keys.LocalRaftTruncatedStateSuffix):
+			case bytes.Equal(suffix, keys.LocalRaftTruncatedStateLegacySuffix):
 				var trunc roachpb.RaftTruncatedState
 				if err := kv.Value.GetProto(&trunc); err != nil {
 					return err
@@ -264,6 +263,12 @@ func checkStoreRaftState(
 					return err
 				}
 				getReplicaInfo(rangeID).appliedIndex = state.RaftAppliedIndex
+			case bytes.Equal(suffix, keys.LocalRaftAppliedIndexLegacySuffix):
+				idx, err := kv.Value.GetInt()
+				if err != nil {
+					return err
+				}
+				getReplicaInfo(rangeID).appliedIndex = uint64(idx)
 			case bytes.Equal(suffix, keys.LocalRaftLogSuffix):
 				_, index, err := encoding.DecodeUint64Ascending(detail)
 				if err != nil {

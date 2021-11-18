@@ -18,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/seqexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -29,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
+	"github.com/cockroachdb/cockroach/pkg/util/sequence"
 	"github.com/cockroachdb/errors"
 )
 
@@ -58,7 +58,7 @@ func (p *planner) RenameDatabase(ctx context.Context, n *tree.RenameDatabase) (p
 		return nil, pgerror.DangerousStatementf("RENAME DATABASE on current database")
 	}
 
-	dbDesc, err := p.Descriptors().GetMutableDatabaseByName(ctx, p.txn, string(n.Name),
+	_, dbDesc, err := p.Descriptors().GetMutableDatabaseByName(ctx, p.txn, string(n.Name),
 		tree.DatabaseLookupFlags{Required: true})
 	if err != nil {
 		return nil, err
@@ -131,7 +131,7 @@ func (n *renameDatabaseNode) startExec(params runParams) error {
 		return err
 	}
 	for _, schema := range schemas {
-		tbNames, _, err := p.Descriptors().GetObjectNamesAndIDs(
+		tbNames, err := p.Descriptors().GetObjectNames(
 			ctx,
 			p.txn,
 			dbDesc,
@@ -145,8 +145,6 @@ func (n *renameDatabaseNode) startExec(params runParams) error {
 			return err
 		}
 		lookupFlags.Required = false
-		// TODO(ajwerner): Make this do something better than one-at-a-time lookups
-		// followed by catalogkv reads on each dependency.
 		for i := range tbNames {
 			found, tbDesc, err := p.Descriptors().GetImmutableTableByName(
 				ctx, p.txn, &tbNames[i], tree.ObjectLookupFlags{CommonLookupFlags: lookupFlags},
@@ -298,7 +296,7 @@ func isAllowedDependentDescInRenameDatabase(
 		if err != nil {
 			return false, "", err
 		}
-		seqIdentifiers, err := seqexpr.GetUsedSequences(typedExpr)
+		seqIdentifiers, err := sequence.GetUsedSequences(typedExpr)
 		if err != nil {
 			return false, "", err
 		}

@@ -39,12 +39,12 @@ limit
  ├── internal-ordering: +1
  ├── cardinality: [0 - 10]
  ├── stats: [rows=10]
- ├── cost: 1324.21194
+ ├── cost: 1324.06569
  ├── interesting orderings: (+1,+2)
  ├── sort
  │    ├── columns: t.public.abc.a:1(int) t.public.abc.b:2(int)
  │    ├── stats: [rows=1000]
- │    ├── cost: 1324.10194
+ │    ├── cost: 1323.95569
  │    ├── ordering: +1
  │    ├── limit hint: 10.00
  │    ├── interesting orderings: (+1,+2)

@@ -1777,21 +1777,6 @@ SELECT array_length(ARRAY['a'], 2)
 NULL
 
 query I
-SELECT cardinality(ARRAY['a', 'b'])
-----
-2
-
-query I
-SELECT cardinality(ARRAY[]:::int[])
-----
-0
-
-query I
-SELECT cardinality(NULL:::int[])
-----
-NULL
-
-query I
 SELECT array_lower(ARRAY['a', 'b'], 1)
 ----
 1
@@ -1943,37 +1928,6 @@ SELECT length(gen_random_uuid()::BYTES), gen_random_uuid() = gen_random_uuid()
 ----
 16 false
 
-query IB
-SELECT length(gen_random_ulid()::BYTES), gen_random_ulid() = gen_random_ulid()
-----
-16 false
-
-query TTTT
-SELECT uuid_to_ulid('0178951c-b665-30a7-19a2-a18999834858'),
-       ulid_to_uuid('01F2AHSDK562KHK8N1H6CR6J2R'),
-       ulid_to_uuid(uuid_to_ulid('0178951c-b665-30a7-19a2-a18999834858')),
-       uuid_to_ulid(ulid_to_uuid('01F2AHSDK562KHK8N1H6CR6J2R'))
-----
-01F2AHSDK562KHK8N1H6CR6J2R  0178951c-b665-30a7-19a2-a18999834858  0178951c-b665-30a7-19a2-a18999834858  01F2AHSDK562KHK8N1H6CR6J2R
-
-let $ulid1
-SELECT gen_random_ulid()
-
-# Proper sorting of ULIDs inside the same millisecond is not guaranteed, we need this to enforce correct behavior.
-statement ok
-SELECT pg_sleep(0.001)
-
-let $ulid2
-SELECT gen_random_ulid()
-
-query BBBB
-SELECT '$ulid1' < '$ulid2',
-       '$ulid1' > '$ulid2',
-       uuid_to_ulid('$ulid1') < uuid_to_ulid('$ulid2'),
-       uuid_to_ulid('$ulid1') > uuid_to_ulid('$ulid2')
-----
-true  false  true  false
-
 query TTTTTT
 SELECT to_uuid('63616665-6630-3064-6465-616462656566'),
        to_uuid('{63616665-6630-3064-6465-616462656566}'),
@@ -1992,7 +1946,7 @@ cafef00ddeadbeef
 query error uuid: incorrect UUID length
 SELECT to_uuid('63616665-6630-3064-6465')
 
-query error uuid: incorrect UUID format
+query error uuid: incorrect UUID length
 SELECT to_uuid('63616665-6630-3064-6465-616462656566-123')
 
 query error uuid: incorrect UUID format
@@ -2054,7 +2008,6 @@ VALUES (format_type('anyelement'::regtype, -1)),
        (format_type('regnamespace'::regtype, -1)),
        (format_type('regproc'::regtype, -1)),
        (format_type('regprocedure'::regtype, -1)),
-       (format_type('regrole'::regtype, -1)),
        (format_type('regtype'::regtype, -1)),
        (format_type('string'::regtype, -1)),
        (format_type('time'::regtype, -1)),
@@ -2098,7 +2051,6 @@ regclass
 regnamespace
 regproc
 regprocedure
-regrole
 regtype
 text
 time without time zone
@@ -2668,8 +2620,7 @@ subtest crdb_internal_privileged_only
 user root
 
 statement ok
-CREATE DATABASE root_test;
-REVOKE CONNECT ON DATABASE root_test FROM public
+CREATE DATABASE root_test
 
 statement ok
 CREATE TABLE root_test.t(a int)
@@ -2804,38 +2755,6 @@ SELECT getdatabaseencoding()
 ----
 UTF8
 
-subtest get_byte
-
-query I
-SELECT get_byte('Th\000omas'::BYTEA, 4)
-----
-109
-
-query error byte index 10 out of valid range
-SELECT get_byte('abc'::BYTEA, 10)
-
-query error byte index -10 out of valid range
-SELECT get_byte('abc'::BYTEA, -10)
-
-subtest set_byte
-
-query T
-SELECT set_byte('Th\000omas'::BYTEA, 2, 64)
-----
-Th@omas
-
-# A substitute value that's larger than 8 bit will be truncated.
-query T
-SELECT set_byte('Th\000omas'::BYTEA, 2, 16448)
-----
-Th@omas
-
-query error byte index 10 out of valid range
-SELECT set_byte('abc'::BYTEA, 10, 123)
-
-query error byte index -10 out of valid range
-SELECT set_byte('abc'::BYTEA, -10, 123)
-
 subtest get_bit
 
 query I rowsort
@@ -2911,7 +2830,7 @@ SELECT set_bit('000000'::varbit, 5, 1) UNION SELECT set_bit('111111'::varbit, 5,
 query error set_bit\(\): SetBitAtIndex: bit index 10 out of valid range \(0..6\)
 SELECT set_bit(B'1101010', 10, 1)
 
-query error set_bit\(\): new bit must be 0 or 1
+query error set_bit\(\): new bit must be 0 or 1.
 SELECT set_bit(B'1001010', 0, 2)
 
 query error set_bit\(\): SetBitAtIndex: bit index 0 out of valid range \(0..-1\)
@@ -2955,7 +2874,7 @@ SELECT set_bit(b'ac', 16, 0)
 query error set_bit\(\): bit index 0 out of valid range \(0..-1\)
 SELECT set_bit(b'', 0, 1)
 
-query error set_bit\(\): new bit must be 0 or 1
+query error set_bit\(\): new bit must be 0 or 1.
 SELECT set_bit(b'\145\x6C\l', 0, 2)
 
 subtest num_nulls_test
@@ -2981,10 +2900,6 @@ select crdb_internal.pb_to_json('cockroach.sql.sqlbase.Descriptor', descriptor)-
 ----
 system
 
-query T
-select crdb_internal.pb_to_json('cockroach.sql.sqlbase.Descriptor', descriptor, true, true)->'database'->>'name' from system.descriptor where id=1
-----
-system
 
 query error pq: crdb_internal.pb_to_json\(\): unknown proto message type cockroach.sql.sqlbase.descriptor
 select crdb_internal.pb_to_json('cockroach.sql.sqlbase.descriptor', descriptor)->'database'->>'name' from system.descriptor where id=1
@@ -2998,9 +2913,6 @@ query B
 select crdb_internal.json_to_pb('cockroach.sql.sqlbase.Descriptor', crdb_internal.pb_to_json('cockroach.sql.sqlbase.Descriptor', descriptor)) = descriptor from system.descriptor where id = 1
 ----
 true
-
-query error pq: crdb_internal.json_to_pb\(\): unmarshaling json to cockroach.sql.sqlbase.Descriptor: unknown field "__redacted__" in descpb.Descriptor
-select crdb_internal.json_to_pb('cockroach.sql.sqlbase.Descriptor', crdb_internal.pb_to_json('cockroach.sql.sqlbase.Descriptor', descriptor, true, true)) = descriptor from system.descriptor where id = 1
 
 subtest regexp_split
 
@@ -3087,121 +2999,3 @@ query B
 SELECT * FROM crdb_internal.set_trace_verbose(0, false)
 WHERE false
 ----
-
-# set timezone to something other then UTC
-statement ok
-SET timezone = 'Europe/Berlin'
-
-query T
-select generate_series('2021-07-05'::timestamptz, '2021-07-06'::timestamptz, '1day'::interval)
-----
-2021-07-05 00:00:00 +0200 CEST
-2021-07-06 00:00:00 +0200 CEST
-
-statement ok
-SET TIME ZONE +0
-
-statement ok
-set timezone = 'Europe/Bucharest';
-
-# the following two queries should provide the same output
-query T
-select '2020-10-25 00:00'::TIMESTAMPTZ + (i::text || ' hour')::interval from generate_series(0, 24) AS g(i);
-----
-2020-10-25 00:00:00 +0300 EEST
-2020-10-25 01:00:00 +0300 EEST
-2020-10-25 02:00:00 +0300 EEST
-2020-10-25 03:00:00 +0300 EEST
-2020-10-25 03:00:00 +0200 EET
-2020-10-25 04:00:00 +0200 EET
-2020-10-25 05:00:00 +0200 EET
-2020-10-25 06:00:00 +0200 EET
-2020-10-25 07:00:00 +0200 EET
-2020-10-25 08:00:00 +0200 EET
-2020-10-25 09:00:00 +0200 EET
-2020-10-25 10:00:00 +0200 EET
-2020-10-25 11:00:00 +0200 EET
-2020-10-25 12:00:00 +0200 EET
-2020-10-25 13:00:00 +0200 EET
-2020-10-25 14:00:00 +0200 EET
-2020-10-25 15:00:00 +0200 EET
-2020-10-25 16:00:00 +0200 EET
-2020-10-25 17:00:00 +0200 EET
-2020-10-25 18:00:00 +0200 EET
-2020-10-25 19:00:00 +0200 EET
-2020-10-25 20:00:00 +0200 EET
-2020-10-25 21:00:00 +0200 EET
-2020-10-25 22:00:00 +0200 EET
-2020-10-25 23:00:00 +0200 EET
-
-query T
-select generate_series('2020-10-25 00:00'::TIMESTAMPTZ, '2020-10-25 23:00'::TIMESTAMPTZ, '1 hour');
-----
-2020-10-25 00:00:00 +0300 EEST
-2020-10-25 01:00:00 +0300 EEST
-2020-10-25 02:00:00 +0300 EEST
-2020-10-25 03:00:00 +0300 EEST
-2020-10-25 03:00:00 +0200 EET
-2020-10-25 04:00:00 +0200 EET
-2020-10-25 05:00:00 +0200 EET
-2020-10-25 06:00:00 +0200 EET
-2020-10-25 07:00:00 +0200 EET
-2020-10-25 08:00:00 +0200 EET
-2020-10-25 09:00:00 +0200 EET
-2020-10-25 10:00:00 +0200 EET
-2020-10-25 11:00:00 +0200 EET
-2020-10-25 12:00:00 +0200 EET
-2020-10-25 13:00:00 +0200 EET
-2020-10-25 14:00:00 +0200 EET
-2020-10-25 15:00:00 +0200 EET
-2020-10-25 16:00:00 +0200 EET
-2020-10-25 17:00:00 +0200 EET
-2020-10-25 18:00:00 +0200 EET
-2020-10-25 19:00:00 +0200 EET
-2020-10-25 20:00:00 +0200 EET
-2020-10-25 21:00:00 +0200 EET
-2020-10-25 22:00:00 +0200 EET
-2020-10-25 23:00:00 +0200 EET
-
-statement ok
-SET TIME ZONE +0
-
-query B
-SELECT 'AAA'::text ~ similar_escape('(ACTIVE|CLOSED|PENDING)'::text, NULL::text)
-----
-false
-
-query B
-SELECT 'ACTIVE'::text ~ similar_escape('(ACTIVE|CLOSED|PENDING)'::text, NULL::text)
-----
-true
-
-query B
-SELECT 'ACTIVE'::text ~ similar_escape(NULL::text, NULL::text)
-----
-NULL
-
-query B
-SELECT 'AAA'::text ~ similar_to_escape('(ACTIVE|CLOSED|PENDING)'::text, NULL::text)
-----
-NULL
-
-query B
-SELECT 'ACTIVE'::text ~ similar_to_escape('(ACTIVE|CLOSED|PENDING)'::text, NULL::text)
-----
-NULL
-
-query B
-SELECT 'ACTIVE'::text ~ similar_to_escape('(ACTIVE|CLOSED|PENDING)'::text)
-----
-true
-
-query B
-SELECT 'AAA'::text ~ similar_to_escape('(ACTIVE|CLOSED|PENDING)'::text)
-----
-false
-
-query B
-SELECT 'ACTIVE'::text ~ similar_to_escape(NULL::text)
-----
-NULL

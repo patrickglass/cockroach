@@ -18,12 +18,14 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
+	"github.com/cockroachdb/cockroach/pkg/config"
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
@@ -47,10 +49,10 @@ const (
 	newReplicaGracePeriod = 5 * time.Minute
 )
 
-// MinLeaseTransferInterval controls how frequently leases can be transferred
+// minLeaseTransferInterval controls how frequently leases can be transferred
 // for rebalancing. It does not prevent transferring leases in order to allow
 // a replica to be removed from a range.
-var MinLeaseTransferInterval = settings.RegisterDurationSetting(
+var minLeaseTransferInterval = settings.RegisterDurationSetting(
 	"kv.allocator.min_lease_transfer_interval",
 	"controls how frequently leases can be transferred for rebalancing. "+
 		"It does not prevent transferring leases in order to allow a "+
@@ -167,7 +169,7 @@ type replicateQueue struct {
 }
 
 // newReplicateQueue returns a new instance of replicateQueue.
-func newReplicateQueue(store *Store, allocator Allocator) *replicateQueue {
+func newReplicateQueue(store *Store, g *gossip.Gossip, allocator Allocator) *replicateQueue {
 	rq := &replicateQueue{
 		metrics:    makeReplicateQueueMetrics(),
 		allocator:  allocator,
@@ -175,7 +177,7 @@ func newReplicateQueue(store *Store, allocator Allocator) *replicateQueue {
 	}
 	store.metrics.registry.AddMetricStruct(&rq.metrics)
 	rq.baseQueue = newBaseQueue(
-		"replicate", rq, store,
+		"replicate", rq, store, g,
 		queueConfig{
 			maxSize:              defaultQueueMaxSize,
 			needsLease:           true,
@@ -203,7 +205,7 @@ func newReplicateQueue(store *Store, allocator Allocator) *replicateQueue {
 
 	// Register gossip and node liveness callbacks to signal that
 	// replicas in purgatory might be retried.
-	if g := store.cfg.Gossip; g != nil { // gossip is nil for some unittests
+	if g != nil { // gossip is nil for some unittests
 		g.RegisterCallback(gossip.MakePrefixPattern(gossip.KeyStorePrefix), func(key string, _ roachpb.Value) {
 			if !rq.store.IsStarted() {
 				return
@@ -227,10 +229,19 @@ func newReplicateQueue(store *Store, allocator Allocator) *replicateQueue {
 }
 
 func (rq *replicateQueue) shouldQueue(
-	ctx context.Context, now hlc.ClockTimestamp, repl *Replica, _ spanconfig.StoreReader,
-) (shouldQueue bool, priority float64) {
-	desc, conf := repl.DescAndSpanConfig()
-	action, priority := rq.allocator.ComputeAction(ctx, conf, desc)
+	ctx context.Context, now hlc.ClockTimestamp, repl *Replica, sysCfg *config.SystemConfig,
+) (shouldQ bool, priority float64) {
+	desc, zone := repl.DescAndZone()
+	action, priority := rq.allocator.ComputeAction(ctx, zone, desc)
+
+	// For simplicity, the first thing the allocator does is remove learners, so
+	// it can do all of its reasoning about only voters. We do the same here so
+	// the executions of the allocator's decisions can be in terms of voters.
+	if action == AllocatorRemoveLearner {
+		return true, priority
+	}
+	voterReplicas := desc.Replicas().VoterDescriptors()
+	nonVoterReplicas := desc.Replicas().NonVoterDescriptors()
 
 	if action == AllocatorNoop {
 		log.VEventf(ctx, 2, "no action to take")
@@ -240,19 +251,16 @@ func (rq *replicateQueue) shouldQueue(
 		return true, priority
 	}
 
-	voterReplicas := desc.Replicas().VoterDescriptors()
-	nonVoterReplicas := desc.Replicas().NonVoterDescriptors()
 	if !rq.store.TestingKnobs().DisableReplicaRebalancing {
 		rangeUsageInfo := rangeUsageInfoForRepl(repl)
 		_, _, _, ok := rq.allocator.RebalanceVoter(
 			ctx,
-			conf,
+			zone,
 			repl.RaftStatus(),
 			voterReplicas,
 			nonVoterReplicas,
 			rangeUsageInfo,
 			storeFilterThrottled,
-			rq.allocator.scorerOptions(),
 		)
 		if ok {
 			log.VEventf(ctx, 2, "rebalance target found for voter, enqueuing")
@@ -260,13 +268,12 @@ func (rq *replicateQueue) shouldQueue(
 		}
 		_, _, _, ok = rq.allocator.RebalanceNonVoter(
 			ctx,
-			conf,
+			zone,
 			repl.RaftStatus(),
 			voterReplicas,
 			nonVoterReplicas,
 			rangeUsageInfo,
 			storeFilterThrottled,
-			rq.allocator.scorerOptions(),
 		)
 		if ok {
 			log.VEventf(ctx, 2, "rebalance target found for non-voter, enqueuing")
@@ -278,8 +285,8 @@ func (rq *replicateQueue) shouldQueue(
 	// If the lease is valid, check to see if we should transfer it.
 	status := repl.LeaseStatusAt(ctx, now)
 	if status.IsValid() &&
-		rq.canTransferLeaseFrom(ctx, repl) &&
-		rq.allocator.ShouldTransferLease(ctx, conf, voterReplicas, status.Lease.Replica.StoreID, repl.leaseholderStats) {
+		rq.canTransferLease() &&
+		rq.allocator.ShouldTransferLease(ctx, zone, voterReplicas, status.Lease.Replica.StoreID, repl.leaseholderStats) {
 
 		log.VEventf(ctx, 2, "lease transfer needed, enqueuing")
 		return true, 0
@@ -289,7 +296,7 @@ func (rq *replicateQueue) shouldQueue(
 }
 
 func (rq *replicateQueue) process(
-	ctx context.Context, repl *Replica, confReader spanconfig.StoreReader,
+	ctx context.Context, repl *Replica, sysCfg *config.SystemConfig,
 ) (processed bool, err error) {
 	retryOpts := retry.Options{
 		InitialBackoff: 50 * time.Millisecond,
@@ -303,7 +310,7 @@ func (rq *replicateQueue) process(
 	// selected target.
 	for r := retry.StartWithCtx(ctx, retryOpts); r.Next(); {
 		for {
-			requeue, err := rq.processOneChange(ctx, repl, rq.canTransferLeaseFrom, false /* dryRun */)
+			requeue, err := rq.processOneChange(ctx, repl, rq.canTransferLease, false /* dryRun */)
 			if isSnapshotError(err) {
 				// If ChangeReplicas failed because the snapshot failed, we log the
 				// error but then return success indicating we should retry the
@@ -320,7 +327,7 @@ func (rq *replicateQueue) process(
 			}
 
 			if testingAggressiveConsistencyChecks {
-				if _, err := rq.store.consistencyQueue.process(ctx, repl, confReader); err != nil {
+				if _, err := rq.store.consistencyQueue.process(ctx, repl, sysCfg); err != nil {
 					log.Warningf(ctx, "%v", err)
 				}
 			}
@@ -337,10 +344,7 @@ func (rq *replicateQueue) process(
 }
 
 func (rq *replicateQueue) processOneChange(
-	ctx context.Context,
-	repl *Replica,
-	canTransferLeaseFrom func(ctx context.Context, repl *Replica) bool,
-	dryRun bool,
+	ctx context.Context, repl *Replica, canTransferLease func() bool, dryRun bool,
 ) (requeue bool, _ error) {
 	// Check lease and destroy status here. The queue does this higher up already, but
 	// adminScatter (and potential other future callers) also call this method and don't
@@ -359,7 +363,7 @@ func (rq *replicateQueue) processOneChange(
 	// upon that decision is a bit unfortunate. It means that we could
 	// successfully execute a decision that was based on the state of a stale
 	// range descriptor.
-	desc, conf := repl.DescAndSpanConfig()
+	desc, zone := repl.DescAndZone()
 
 	// Avoid taking action if the range has too many dead replicas to make quorum.
 	// Consider stores marked suspect as live in order to make this determination.
@@ -376,7 +380,7 @@ func (rq *replicateQueue) processOneChange(
 	// unavailability; see:
 	_ = execChangeReplicasTxn
 
-	action, _ := rq.allocator.ComputeAction(ctx, conf, desc)
+	action, _ := rq.allocator.ComputeAction(ctx, zone, desc)
 	log.VEventf(ctx, 1, "next replica action: %s", action)
 
 	// For simplicity, the first thing the allocator does is remove learners, so
@@ -481,7 +485,7 @@ func (rq *replicateQueue) processOneChange(
 	case AllocatorRemoveLearner:
 		return rq.removeLearner(ctx, repl, dryRun)
 	case AllocatorConsiderRebalance:
-		return rq.considerRebalance(ctx, repl, voterReplicas, nonVoterReplicas, canTransferLeaseFrom, dryRun)
+		return rq.considerRebalance(ctx, repl, voterReplicas, nonVoterReplicas, canTransferLease, dryRun)
 	case AllocatorFinalizeAtomicReplicationChange:
 		_, err := maybeLeaveAtomicChangeReplicasAndRemoveLearners(ctx, repl.store, repl.Desc())
 		// Requeue because either we failed to transition out of a joint state
@@ -519,7 +523,7 @@ func (rq *replicateQueue) addOrReplaceVoters(
 	removeIdx int,
 	dryRun bool,
 ) (requeue bool, _ error) {
-	desc, conf := repl.DescAndSpanConfig()
+	desc, zone := repl.DescAndZone()
 	existingVoters := desc.Replicas().VoterDescriptors()
 	if len(existingVoters) == 1 {
 		// If only one replica remains, that replica is the leaseholder and
@@ -541,7 +545,7 @@ func (rq *replicateQueue) addOrReplaceVoters(
 		// See about transferring the lease away if we're about to remove the
 		// leaseholder.
 		done, err := rq.maybeTransferLeaseAway(
-			ctx, repl, existingVoters[removeIdx].StoreID, dryRun, nil /* canTransferLeaseFrom */)
+			ctx, repl, existingVoters[removeIdx].StoreID, dryRun, nil /* canTransferLease */)
 		if err != nil {
 			return false, err
 		}
@@ -555,7 +559,7 @@ func (rq *replicateQueue) addOrReplaceVoters(
 	// we're removing it (i.e. dead or decommissioning). If we left the replica in
 	// the slice, the allocator would not be guaranteed to pick a replica that
 	// fills the gap removeRepl leaves once it's gone.
-	newStore, details, err := rq.allocator.AllocateVoter(ctx, conf, remainingLiveVoters, remainingLiveNonVoters)
+	newStore, details, err := rq.allocator.AllocateVoter(ctx, zone, remainingLiveVoters, remainingLiveNonVoters)
 	if err != nil {
 		return false, err
 	}
@@ -568,7 +572,7 @@ func (rq *replicateQueue) addOrReplaceVoters(
 	}
 
 	clusterNodes := rq.allocator.storePool.ClusterNodeCount()
-	neededVoters := GetNeededVoters(conf.GetNumVoters(), clusterNodes)
+	neededVoters := GetNeededVoters(zone.GetNumVoters(), clusterNodes)
 
 	// Only up-replicate if there are suitable allocation targets such that,
 	// either the replication goal is met, or it is possible to get to the next
@@ -591,7 +595,7 @@ func (rq *replicateQueue) addOrReplaceVoters(
 			NodeID:  newStore.Node.NodeID,
 			StoreID: newStore.StoreID,
 		})
-		_, _, err := rq.allocator.AllocateVoter(ctx, conf, oldPlusNewReplicas, remainingLiveNonVoters)
+		_, _, err := rq.allocator.AllocateVoter(ctx, zone, oldPlusNewReplicas, remainingLiveNonVoters)
 		if err != nil {
 			// It does not seem possible to go to the next odd replica state. Note
 			// that AllocateVoter returns an allocatorError (a purgatoryError)
@@ -662,10 +666,15 @@ func (rq *replicateQueue) addOrReplaceNonVoters(
 	removeIdx int,
 	dryRun bool,
 ) (requeue bool, _ error) {
-	desc, conf := repl.DescAndSpanConfig()
+	// Non-voter creation is disabled before 21.1.
+	if v, st := clusterversion.NonVotingReplicas, repl.ClusterSettings(); !st.Version.IsActive(ctx, v) {
+		return false, errors.AssertionFailedf("non-voting replicas cannot be created pre-21.1")
+	}
+
+	desc, zone := repl.DescAndZone()
 	existingNonVoters := desc.Replicas().NonVoterDescriptors()
 
-	newStore, details, err := rq.allocator.AllocateNonVoter(ctx, conf, liveVoterReplicas, liveNonVoterReplicas)
+	newStore, details, err := rq.allocator.AllocateNonVoter(ctx, zone, liveVoterReplicas, liveNonVoterReplicas)
 	if err != nil {
 		return false, err
 	}
@@ -718,13 +727,13 @@ func (rq *replicateQueue) addOrReplaceNonVoters(
 func (rq *replicateQueue) findRemoveVoter(
 	ctx context.Context,
 	repl interface {
-		DescAndSpanConfig() (*roachpb.RangeDescriptor, roachpb.SpanConfig)
+		DescAndZone() (*roachpb.RangeDescriptor, *zonepb.ZoneConfig)
 		LastReplicaAdded() (roachpb.ReplicaID, time.Time)
 		RaftStatus() *raft.Status
 	},
 	existingVoters, existingNonVoters []roachpb.ReplicaDescriptor,
 ) (roachpb.ReplicaDescriptor, string, error) {
-	_, zone := repl.DescAndSpanConfig()
+	_, zone := repl.DescAndZone()
 	// This retry loop involves quick operations on local state, so a
 	// small MaxBackoff is good (but those local variables change on
 	// network time scales as raft receives responses).
@@ -783,14 +792,7 @@ func (rq *replicateQueue) findRemoveVoter(
 			rangeRaftProgress(repl.RaftStatus(), existingVoters))}
 	}
 
-	return rq.allocator.RemoveVoter(
-		ctx,
-		zone,
-		candidates,
-		existingVoters,
-		existingNonVoters,
-		rq.allocator.scorerOptions(),
-	)
+	return rq.allocator.RemoveVoter(ctx, zone, candidates, existingVoters, existingNonVoters)
 }
 
 // maybeTransferLeaseAway is called whenever a replica on a given store is
@@ -800,22 +802,22 @@ func (rq *replicateQueue) findRemoveVoter(
 // true to indicate to the caller that it should not pursue the current
 // replication change further because it is no longer the leaseholder. When the
 // returned bool is false, it should continue. On error, the caller should also
-// stop. If canTransferLeaseFrom is non-nil, it is consulted and an error is
+// stop. If canTransferLease is non-nil, it is consulted and an error is
 // returned if it returns false.
 func (rq *replicateQueue) maybeTransferLeaseAway(
 	ctx context.Context,
 	repl *Replica,
 	removeStoreID roachpb.StoreID,
 	dryRun bool,
-	canTransferLeaseFrom func(ctx context.Context, repl *Replica) bool,
+	canTransferLease func() bool,
 ) (done bool, _ error) {
 	if removeStoreID != repl.store.StoreID() {
 		return false, nil
 	}
-	if canTransferLeaseFrom != nil && !canTransferLeaseFrom(ctx, repl) {
+	if canTransferLease != nil && !canTransferLease() {
 		return false, errors.Errorf("cannot transfer lease")
 	}
-	desc, conf := repl.DescAndSpanConfig()
+	desc, zone := repl.DescAndZone()
 	// The local replica was selected as the removal target, but that replica
 	// is the leaseholder, so transfer the lease instead. We don't check that
 	// the current store has too many leases in this case under the
@@ -830,7 +832,7 @@ func (rq *replicateQueue) maybeTransferLeaseAway(
 		ctx,
 		repl,
 		desc,
-		conf,
+		zone,
 		transferLeaseOptions{
 			dryRun: dryRun,
 		},
@@ -849,7 +851,7 @@ func (rq *replicateQueue) removeVoter(
 		return false, err
 	}
 	done, err := rq.maybeTransferLeaseAway(
-		ctx, repl, removeVoter.StoreID, dryRun, nil /* canTransferLeaseFrom */)
+		ctx, repl, removeVoter.StoreID, dryRun, nil /* canTransferLease */)
 	if err != nil {
 		return false, err
 	}
@@ -866,7 +868,7 @@ func (rq *replicateQueue) removeVoter(
 		NodeID:  removeVoter.NodeID,
 		StoreID: removeVoter.StoreID,
 	}
-	desc := repl.Desc()
+	desc, _ := repl.DescAndZone()
 	// TODO(aayush): Directly removing the voter here is a bit of a missed
 	// opportunity since we could potentially be 1 non-voter short and the
 	// `target` could be a valid store for a non-voter. In such a scenario, we
@@ -895,14 +897,12 @@ func (rq *replicateQueue) removeNonVoter(
 ) (requeue bool, _ error) {
 	rq.metrics.RemoveReplicaCount.Inc(1)
 
-	desc, conf := repl.DescAndSpanConfig()
+	desc, zone := repl.DescAndZone()
 	removeNonVoter, details, err := rq.allocator.RemoveNonVoter(
 		ctx,
-		conf,
+		zone,
 		existingNonVoters,
-		existingVoters,
-		existingNonVoters,
-		rq.allocator.scorerOptions(),
+		existingVoters, existingNonVoters,
 	)
 	if err != nil {
 		return false, err
@@ -933,7 +933,7 @@ func (rq *replicateQueue) removeNonVoter(
 func (rq *replicateQueue) removeDecommissioning(
 	ctx context.Context, repl *Replica, targetType targetReplicaType, dryRun bool,
 ) (requeue bool, _ error) {
-	desc := repl.Desc()
+	desc, _ := repl.DescAndZone()
 	var decommissioningReplicas []roachpb.ReplicaDescriptor
 	switch targetType {
 	case voterTarget:
@@ -1070,22 +1070,21 @@ func (rq *replicateQueue) considerRebalance(
 	ctx context.Context,
 	repl *Replica,
 	existingVoters, existingNonVoters []roachpb.ReplicaDescriptor,
-	canTransferLeaseFrom func(ctx context.Context, repl *Replica) bool,
+	canTransferLease func() bool,
 	dryRun bool,
 ) (requeue bool, _ error) {
-	desc, conf := repl.DescAndSpanConfig()
+	desc, zone := repl.DescAndZone()
 	rebalanceTargetType := voterTarget
 	if !rq.store.TestingKnobs().DisableReplicaRebalancing {
 		rangeUsageInfo := rangeUsageInfoForRepl(repl)
 		addTarget, removeTarget, details, ok := rq.allocator.RebalanceVoter(
 			ctx,
-			conf,
+			zone,
 			repl.RaftStatus(),
 			existingVoters,
 			existingNonVoters,
 			rangeUsageInfo,
 			storeFilterThrottled,
-			rq.allocator.scorerOptions(),
 		)
 		if !ok {
 			// If there was nothing to do for the set of voting replicas on this
@@ -1093,13 +1092,12 @@ func (rq *replicateQueue) considerRebalance(
 			log.VEventf(ctx, 1, "no suitable rebalance target for voters")
 			addTarget, removeTarget, details, ok = rq.allocator.RebalanceNonVoter(
 				ctx,
-				conf,
+				zone,
 				repl.RaftStatus(),
 				existingVoters,
 				existingNonVoters,
 				rangeUsageInfo,
 				storeFilterThrottled,
-				rq.allocator.scorerOptions(),
 			)
 			rebalanceTargetType = nonVoterTarget
 		}
@@ -1107,7 +1105,7 @@ func (rq *replicateQueue) considerRebalance(
 		if !ok {
 			log.VEventf(ctx, 1, "no suitable rebalance target for non-voters")
 		} else if done, err := rq.maybeTransferLeaseAway(
-			ctx, repl, removeTarget.StoreID, dryRun, canTransferLeaseFrom,
+			ctx, repl, removeTarget.StoreID, dryRun, canTransferLease,
 		); err != nil {
 			log.VEventf(ctx, 1, "want to remove self, but failed to transfer lease away: %s", err)
 		} else if done {
@@ -1150,7 +1148,7 @@ func (rq *replicateQueue) considerRebalance(
 		}
 	}
 
-	if !canTransferLeaseFrom(ctx, repl) {
+	if !canTransferLease() {
 		// No action was necessary and no rebalance target was found. Return
 		// without re-queuing this replica.
 		return false, nil
@@ -1162,9 +1160,8 @@ func (rq *replicateQueue) considerRebalance(
 		ctx,
 		repl,
 		desc,
-		conf,
+		zone,
 		transferLeaseOptions{
-			goal:                     followTheWorkload,
 			checkTransferLeaseSource: true,
 			checkCandidateFullness:   true,
 			dryRun:                   dryRun,
@@ -1272,27 +1269,10 @@ func replicationChangesForRebalance(
 	return chgs, performingSwap, nil
 }
 
-// transferLeaseGoal dictates whether a call to TransferLeaseTarget should
-// improve locality of access, convergence of lease counts or convergence of
-// QPS.
-type transferLeaseGoal int
-
-const (
-	followTheWorkload transferLeaseGoal = iota
-	leaseCountConvergence
-	qpsConvergence
-)
-
 type transferLeaseOptions struct {
-	goal transferLeaseGoal
-	// checkTransferLeaseSource, when false, tells `TransferLeaseTarget` to
-	// exclude the current leaseholder from consideration as a potential target
-	// (i.e. when the caller explicitly wants to shed its lease away).
 	checkTransferLeaseSource bool
-	// checkCandidateFullness, when false, tells `TransferLeaseTarget`
-	// to disregard the existing lease counts on candidates.
-	checkCandidateFullness bool
-	dryRun                 bool
+	checkCandidateFullness   bool
+	dryRun                   bool
 }
 
 // leaseTransferOutcome represents the result of shedLease().
@@ -1327,19 +1307,20 @@ func (rq *replicateQueue) shedLease(
 	ctx context.Context,
 	repl *Replica,
 	desc *roachpb.RangeDescriptor,
-	conf roachpb.SpanConfig,
+	zone *zonepb.ZoneConfig,
 	opts transferLeaseOptions,
 ) (leaseTransferOutcome, error) {
 	// Learner replicas aren't allowed to become the leaseholder or raft leader,
 	// so only consider the `VoterDescriptors` replicas.
 	target := rq.allocator.TransferLeaseTarget(
 		ctx,
-		conf,
+		zone,
 		desc.Replicas().VoterDescriptors(),
 		repl,
 		repl.leaseholderStats,
-		false, /* forceDecisionWithoutStats */
-		opts,
+		opts.checkTransferLeaseSource,
+		opts.checkCandidateFullness,
+		false, /* alwaysAllowDecisionWithoutStats */
 	)
 	if target == (roachpb.ReplicaDescriptor{}) {
 		return noSuitableTarget, nil
@@ -1401,19 +1382,9 @@ func (rq *replicateQueue) changeReplicas(
 	return nil
 }
 
-// canTransferLeaseFrom checks is a lease can be transferred from the specified
-// replica. It considers two factors if the replica is in -conformance with
-// lease preferences and the last time a transfer occurred to avoid thrashing.
-func (rq *replicateQueue) canTransferLeaseFrom(ctx context.Context, repl *Replica) bool {
-	// Do a best effort check to see if this replica conforms to the configured
-	// lease preferences (if any), if it does not we want to encourage more
-	// aggressive lease movement and not delay it.
-	respectsLeasePreferences, err := repl.checkLeaseRespectsPreferences(ctx)
-	if err == nil && !respectsLeasePreferences {
-		return true
-	}
+func (rq *replicateQueue) canTransferLease() bool {
 	if lastLeaseTransfer := rq.lastLeaseTransfer.Load(); lastLeaseTransfer != nil {
-		minInterval := MinLeaseTransferInterval.Get(&rq.store.cfg.Settings.SV)
+		minInterval := minLeaseTransferInterval.Get(&rq.store.cfg.Settings.SV)
 		return timeutil.Since(lastLeaseTransfer.(time.Time)) > minInterval
 	}
 	return true

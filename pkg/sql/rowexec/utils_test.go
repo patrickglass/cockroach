@@ -12,7 +12,6 @@ package rowexec
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -152,19 +151,15 @@ func (r *rowGeneratingSource) ConsumerClosed() {}
 type rowDisposer struct {
 	bufferedMeta    []execinfrapb.ProducerMetadata
 	numRowsDisposed int
-	logRows         bool
 }
 
 var _ execinfra.RowReceiver = &rowDisposer{}
 
-// Push is part of the execinfra.RowReceiver interface.
+// Push is part of the distsql.RowReceiver interface.
 func (r *rowDisposer) Push(
 	row rowenc.EncDatumRow, meta *execinfrapb.ProducerMetadata,
 ) execinfra.ConsumerStatus {
 	if row != nil {
-		if r.logRows {
-			fmt.Printf("row #%d : %v\n", r.numRowsDisposed, row)
-		}
 		r.numRowsDisposed++
 	} else if meta != nil {
 		r.bufferedMeta = append(r.bufferedMeta, *meta)
@@ -172,8 +167,13 @@ func (r *rowDisposer) Push(
 	return execinfra.NeedMoreRows
 }
 
-// ProducerDone is part of the execinfra.RowReceiver interface.
+// ProducerDone is part of the RowReceiver interface.
 func (r *rowDisposer) ProducerDone() {}
+
+// Types is part of the RowReceiver interface.
+func (r *rowDisposer) Types() []*types.T {
+	return nil
+}
 
 func (r *rowDisposer) ResetNumRowsDisposed() {
 	r.numRowsDisposed = 0
@@ -181,4 +181,10 @@ func (r *rowDisposer) ResetNumRowsDisposed() {
 
 func (r *rowDisposer) NumRowsDisposed() int {
 	return r.numRowsDisposed
+}
+
+func (r *rowDisposer) DrainMeta(context.Context) []execinfrapb.ProducerMetadata {
+	meta := r.bufferedMeta
+	r.bufferedMeta = r.bufferedMeta[:0]
+	return meta
 }

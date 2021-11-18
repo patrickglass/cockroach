@@ -93,7 +93,7 @@ CREATE TABLE public.t (
   c INT8 NULL,
   d INT8 NULL,
   j JSONB NULL,
-  CONSTRAINT t_pkey PRIMARY KEY (pk ASC),
+  CONSTRAINT "primary" PRIMARY KEY (pk ASC),
   INDEX t_b_idx (b ASC) PARTITION BY LIST (a) (
     PARTITION b_implicit VALUES IN ((2))
   ),
@@ -127,7 +127,7 @@ CREATE TABLE public.t (
   c INT8 NULL,
   d INT8 NULL,
   j JSONB NULL,
-  CONSTRAINT t_pkey PRIMARY KEY (pk ASC),
+  CONSTRAINT "primary" PRIMARY KEY (pk ASC),
   INDEX t_b_idx (b ASC) PARTITION BY LIST (a) (
     PARTITION b_implicit VALUES IN ((2))
   ),
@@ -161,9 +161,9 @@ TABLE t
  ├── j jsonb
  ├── crdb_internal_mvcc_timestamp decimal [hidden] [system]
  ├── tableoid oid [hidden] [system]
- ├── j_inverted_key bytes not null [inverted]
+ ├── j_inverted_key bytes not null [virtual-inverted]
  ├── FAMILY fam_0_pk_a_b_c_d_j (pk, a, b, c, d, j)
- ├── PRIMARY INDEX t_pkey
+ ├── PRIMARY INDEX primary
  │    ├── a int not null (implicit)
  │    ├── pk int not null
  │    └── partitions
@@ -198,7 +198,7 @@ TABLE t
  │                   └── (4)
  ├── INVERTED INDEX t_j_idx
  │    ├── a int not null (implicit)
- │    ├── j_inverted_key bytes not null [inverted]
+ │    ├── j_inverted_key bytes not null [virtual-inverted]
  │    ├── pk int not null
  │    └── partitions
  │         └── j_implicit
@@ -226,28 +226,6 @@ CREATE TABLE fk_using_implicit_columns_against_t (
   ref_t_pk INT NOT NULL REFERENCES t,
   ref_t_c INT NOT NULL REFERENCES t(c)
 )
-
-statement ok
-CREATE TABLE fk_using_implicit_columns_against_t_one_family (
-  pk INT NOT NULL PRIMARY KEY,
-  ref_t_pk INT NOT NULL REFERENCES t,
-  ref_t_c INT NOT NULL REFERENCES t(c),
-  FAMILY (pk, ref_t_pk, ref_t_c)
-)
-
-query T
-SELECT create_statement FROM [SHOW CREATE TABLE fk_using_implicit_columns_against_t_one_family]
-----
-CREATE TABLE public.fk_using_implicit_columns_against_t_one_family (
-   pk INT8 NOT NULL,
-   ref_t_pk INT8 NOT NULL,
-   ref_t_c INT8 NOT NULL,
-   CONSTRAINT fk_using_implicit_columns_against_t_one_family_pkey PRIMARY KEY (pk ASC),
-   CONSTRAINT fk_using_implicit_columns_against_t_one_family_ref_t_pk_fkey FOREIGN KEY (ref_t_pk) REFERENCES public.t(pk),
-   CONSTRAINT fk_using_implicit_columns_against_t_one_family_ref_t_c_fkey FOREIGN KEY (ref_t_c) REFERENCES public.t(c),
-   FAMILY fam_0_pk_ref_t_pk_ref_t_c (pk, ref_t_pk, ref_t_c)
-)
-
 
 query T
 EXPLAIN INSERT INTO fk_using_implicit_columns_against_t VALUES (1, 1, 4)
@@ -368,6 +346,8 @@ ORDER BY 1, 2
 index_name   column_name  implicit
 new_idx      a            true
 new_idx      d            false
+primary      a            true
+primary      pk           false
 t_a_b_c_idx  a            false
 t_a_b_c_idx  b            false
 t_a_b_c_idx  c            false
@@ -378,8 +358,6 @@ t_c_key      a            true
 t_c_key      c            false
 t_j_idx      a            true
 t_j_idx      j            false
-t_pkey       a            true
-t_pkey       pk           false
 
 query TTT colnames
 SELECT
@@ -390,11 +368,11 @@ ORDER BY 1, 2, 3
 ----
 tablename  indexname    indexdef
 t          new_idx      CREATE INDEX new_idx ON test.public.t USING btree (d ASC)
+t          primary      CREATE UNIQUE INDEX "primary" ON test.public.t USING btree (pk ASC)
 t          t_a_b_c_idx  CREATE INDEX t_a_b_c_idx ON test.public.t USING btree (a ASC, b ASC, c ASC)
 t          t_b_idx      CREATE INDEX t_b_idx ON test.public.t USING btree (b ASC)
 t          t_c_key      CREATE UNIQUE INDEX t_c_key ON test.public.t USING btree (c ASC)
 t          t_j_idx      CREATE INDEX t_j_idx ON test.public.t USING gin (j ASC)
-t          t_pkey       CREATE UNIQUE INDEX t_pkey ON test.public.t USING btree (pk ASC)
 
 statement error cannot ALTER INDEX PARTITION BY on an index which already has implicit column partitioning
 ALTER INDEX new_idx PARTITION BY LIST (a) (
@@ -496,7 +474,7 @@ CREATE TABLE public.t (
   j JSONB NULL,
   u STRING NULL,
   e INT8 NOT NULL,
-  CONSTRAINT t_pkey PRIMARY KEY (pk ASC),
+  CONSTRAINT "primary" PRIMARY KEY (pk ASC),
   UNIQUE INDEX t_u_key (u ASC),
   INDEX t_a_idx (a ASC),
   UNIQUE INDEX t_b_key (b ASC),
@@ -519,6 +497,8 @@ ORDER BY index_name, seq_in_index
 created_idx           partition_by  true
 created_idx           c             false
 created_idx           pk            true
+primary               partition_by  true
+primary               pk            false
 t_a_idx               partition_by  true
 t_a_idx               a             false
 t_a_idx               pk            true
@@ -534,16 +514,6 @@ t_j_idx               pk            true
 t_partition_by_c_idx  partition_by  false
 t_partition_by_c_idx  c             false
 t_partition_by_c_idx  pk            true
-t_pkey                partition_by  true
-t_pkey                pk            false
-t_pkey                pk2           false
-t_pkey                a             false
-t_pkey                b             false
-t_pkey                c             false
-t_pkey                d             false
-t_pkey                j             false
-t_pkey                u             false
-t_pkey                e             false
 t_u_key               partition_by  true
 t_u_key               u             false
 t_u_key               pk            true
@@ -560,6 +530,8 @@ ORDER BY 1, 2
 index_name            column_name   implicit
 created_idx           c             false
 created_idx           partition_by  true
+primary               partition_by  true
+primary               pk            false
 t_a_idx               a             false
 t_a_idx               partition_by  true
 t_b_key               b             false
@@ -570,8 +542,6 @@ t_j_idx               j             false
 t_j_idx               partition_by  true
 t_partition_by_c_idx  c             false
 t_partition_by_c_idx  partition_by  false
-t_pkey                partition_by  true
-t_pkey                pk            false
 t_u_key               partition_by  true
 t_u_key               u             false
 unique_c_d            c             false
@@ -595,7 +565,7 @@ CREATE TABLE public.t (
   j JSONB NULL,
   u STRING NULL,
   e INT8 NOT NULL,
-  CONSTRAINT t_pkey PRIMARY KEY (pk2 ASC),
+  CONSTRAINT "primary" PRIMARY KEY (pk2 ASC),
   UNIQUE INDEX t_pk_key (pk ASC),
   UNIQUE INDEX t_u_key (u ASC),
   INDEX t_a_idx (a ASC),
@@ -620,6 +590,8 @@ ORDER BY 1, 2
 index_name            column_name   implicit
 created_idx           c             false
 created_idx           partition_by  true
+primary               partition_by  true
+primary               pk2           false
 t_a_idx               a             false
 t_a_idx               partition_by  true
 t_b_key               b             false
@@ -632,8 +604,6 @@ t_partition_by_c_idx  c             false
 t_partition_by_c_idx  partition_by  false
 t_pk_key              partition_by  true
 t_pk_key              pk            false
-t_pkey                partition_by  true
-t_pkey                pk2           false
 t_u_key               partition_by  true
 t_u_key               u             false
 unique_c_d            c             false
@@ -679,6 +649,8 @@ ORDER BY 1, 2
 index_name            column_name   implicit
 created_idx           c             false
 created_idx           partition_by  true
+primary               partition_by  true
+primary               pk            false
 t_a_idx               a             false
 t_a_idx               partition_by  true
 t_b_key               b             false
@@ -687,8 +659,6 @@ t_c_key               c             false
 t_c_key               partition_by  true
 t_partition_by_c_idx  c             false
 t_partition_by_c_idx  partition_by  false
-t_pkey                partition_by  true
-t_pkey                pk            false
 
 query T
 SELECT create_statement FROM [SHOW CREATE TABLE t]
@@ -701,7 +671,7 @@ CREATE TABLE public.t (
   b INT8 NULL,
   c INT8 NULL,
   d INT8 NULL,
-  CONSTRAINT t_pkey PRIMARY KEY (pk ASC),
+  CONSTRAINT "primary" PRIMARY KEY (pk ASC),
   INDEX t_a_idx (a ASC),
   UNIQUE INDEX t_b_key (b ASC),
   UNIQUE INDEX t_c_key (c ASC) WHERE d > 100:::INT8,
@@ -779,7 +749,7 @@ vectorized: true
             │ count: 1
             │
             └── • lookup join
-                │ table: t@t_pkey
+                │ table: t@primary
                 │ equality: (partition_by, pk) = (partition_by,pk)
                 │ equality cols are key
                 │
@@ -820,7 +790,7 @@ vectorized: true
 │
 ├── • upsert
 │   │ into: t(pk, pk2, partition_by, a, b, c, d)
-│   │ arbiter constraints: t_pkey
+│   │ arbiter constraints: primary
 │   │
 │   └── • buffer
 │       │ label: buffer 1
@@ -837,7 +807,7 @@ vectorized: true
 │                   │
 │                   └── • scan
 │                         missing stats
-│                         table: t@t_pkey
+│                         table: t@primary
 │                         spans: FULL SCAN
 │
 ├── • constraint-check
@@ -865,7 +835,7 @@ vectorized: true
             │ count: 1
             │
             └── • lookup join
-                │ table: t@t_pkey
+                │ table: t@primary
                 │ equality: (partition_by, pk) = (partition_by,pk)
                 │ equality cols are key
                 │

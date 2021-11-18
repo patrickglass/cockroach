@@ -36,7 +36,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/kr/pretty"
@@ -102,10 +101,9 @@ func createTestStorePool(
 	mc := hlc.NewManualClock(123)
 	clock := hlc.NewClock(mc.UnixNano, time.Nanosecond)
 	st := cluster.MakeTestingClusterSettings()
-	tr := tracing.NewTracer()
 	rpcContext := rpc.NewContext(rpc.ContextOptions{
 		TenantID:   roachpb.SystemTenantID,
-		AmbientCtx: log.AmbientContext{Tracer: tr},
+		AmbientCtx: log.AmbientContext{Tracer: st.Tracer},
 		Config:     &base.Config{Insecure: true},
 		Clock:      clock,
 		Stopper:    stopper,
@@ -115,9 +113,9 @@ func createTestStorePool(
 	g := gossip.NewTest(1, rpcContext, server, stopper, metric.NewRegistry(), zonepb.DefaultZoneConfigRef())
 	mnl := newMockNodeLiveness(defaultNodeStatus)
 
-	TimeUntilStoreDead.Override(context.Background(), &st.SV, timeUntilStoreDeadValue)
+	TimeUntilStoreDead.Override(&st.SV, timeUntilStoreDeadValue)
 	storePool := NewStorePool(
-		log.AmbientContext{Tracer: tr},
+		log.AmbientContext{Tracer: st.Tracer},
 		st,
 		g,
 		clock,
@@ -158,7 +156,7 @@ func TestStorePoolGossipUpdate(t *testing.T) {
 // verifyStoreList ensures that the returned list of stores is correct.
 func verifyStoreList(
 	sp *StorePool,
-	constraints []roachpb.ConstraintsConjunction,
+	constraints []zonepb.ConstraintsConjunction,
 	storeIDs roachpb.StoreIDSlice, // optional
 	filter storeFilter,
 	expected []int,
@@ -174,7 +172,7 @@ func verifyStoreList(
 		sl, aliveStoreCount, throttled = sp.getStoreListFromIDs(storeIDs, filter)
 	}
 	throttledStoreCount := len(throttled)
-	sl = sl.excludeInvalid(constraints)
+	sl = sl.filter(constraints)
 	if aliveStoreCount != expectedAliveStoreCount {
 		return errors.Errorf("expected AliveStoreCount %d does not match actual %d",
 			expectedAliveStoreCount, aliveStoreCount)
@@ -207,18 +205,18 @@ func TestStorePoolGetStoreList(t *testing.T) {
 		livenesspb.NodeLivenessStatus_DEAD)
 	defer stopper.Stop(context.Background())
 	sg := gossiputil.NewStoreGossiper(g)
-	constraints := []roachpb.ConstraintsConjunction{
+	constraints := []zonepb.ConstraintsConjunction{
 		{
-			Constraints: []roachpb.Constraint{
-				{Type: roachpb.Constraint_REQUIRED, Value: "ssd"},
-				{Type: roachpb.Constraint_REQUIRED, Value: "dc"},
+			Constraints: []zonepb.Constraint{
+				{Type: zonepb.Constraint_REQUIRED, Value: "ssd"},
+				{Type: zonepb.Constraint_REQUIRED, Value: "dc"},
 			},
 		},
 	}
 	required := []string{"ssd", "dc"}
 	// Nothing yet.
 	sl, _, _ := sp.getStoreList(storeFilterNone)
-	sl = sl.excludeInvalid(constraints)
+	sl = sl.filter(constraints)
 	if len(sl.stores) != 0 {
 		t.Errorf("expected no stores, instead %+v", sl.stores)
 	}
@@ -405,12 +403,13 @@ func TestStoreListFilter(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	constraints := []roachpb.ConstraintsConjunction{
+	constraints := []zonepb.ConstraintsConjunction{
 		{
-			Constraints: []roachpb.Constraint{
-				{Type: roachpb.Constraint_REQUIRED, Key: "region", Value: "us-west"},
-				{Type: roachpb.Constraint_REQUIRED, Value: "MustMatch"},
-				{Type: roachpb.Constraint_PROHIBITED, Value: "MustNotMatch"},
+			Constraints: []zonepb.Constraint{
+				{Type: zonepb.Constraint_REQUIRED, Key: "region", Value: "us-west"},
+				{Type: zonepb.Constraint_REQUIRED, Value: "MustMatch"},
+				{Type: zonepb.Constraint_DEPRECATED_POSITIVE, Value: "MatchingOptional"},
+				{Type: zonepb.Constraint_PROHIBITED, Value: "MustNotMatch"},
 			},
 		},
 	}
@@ -487,7 +486,7 @@ func TestStoreListFilter(t *testing.T) {
 		}
 	}
 
-	filtered := sl.excludeInvalid(constraints)
+	filtered := sl.filter(constraints)
 	if !reflect.DeepEqual(expected, filtered.stores) {
 		t.Errorf("did not get expected stores %s", pretty.Diff(expected, filtered.stores))
 	}
@@ -632,7 +631,7 @@ func TestStorePoolUpdateLocalStoreBeforeGossip(t *testing.T) {
 	eng := storage.NewDefaultInMemForTesting()
 	stopper.AddCloser(eng)
 	cfg := TestStoreConfig(clock)
-	cfg.Transport = NewDummyRaftTransport(cfg.Settings, cfg.AmbientCtx.Tracer)
+	cfg.Transport = NewDummyRaftTransport(cfg.Settings)
 	store := NewStore(ctx, cfg, eng, &node)
 	// Fake an ident because this test doesn't want to start the store
 	// but without an Ident there will be NPEs.
@@ -835,15 +834,30 @@ func TestStorePoolThrottle(t *testing.T) {
 	sg := gossiputil.NewStoreGossiper(g)
 	sg.GossipStores(uniqueStore, t)
 
-	expected := sp.clock.Now().GoTime().Add(FailedReservationsTimeout.Get(&sp.st.SV))
-	sp.throttle(throttleFailed, "", 1)
+	{
+		expected := sp.clock.Now().GoTime().Add(DeclinedReservationsTimeout.Get(&sp.st.SV))
+		sp.throttle(throttleDeclined, "", 1)
 
-	sp.detailsMu.Lock()
-	detail := sp.getStoreDetailLocked(1)
-	sp.detailsMu.Unlock()
-	if !detail.throttledUntil.Equal(expected) {
-		t.Errorf("expected store to have been throttled to %v, found %v",
-			expected, detail.throttledUntil)
+		sp.detailsMu.Lock()
+		detail := sp.getStoreDetailLocked(1)
+		sp.detailsMu.Unlock()
+		if !detail.throttledUntil.Equal(expected) {
+			t.Errorf("expected store to have been throttled to %v, found %v",
+				expected, detail.throttledUntil)
+		}
+	}
+
+	{
+		expected := sp.clock.Now().GoTime().Add(FailedReservationsTimeout.Get(&sp.st.SV))
+		sp.throttle(throttleFailed, "", 1)
+
+		sp.detailsMu.Lock()
+		detail := sp.getStoreDetailLocked(1)
+		sp.detailsMu.Unlock()
+		if !detail.throttledUntil.Equal(expected) {
+			t.Errorf("expected store to have been throttled to %v, found %v",
+				expected, detail.throttledUntil)
+		}
 	}
 }
 
@@ -1223,7 +1237,7 @@ func TestNodeLivenessLivenessStatus(t *testing.T) {
 			},
 			expected: livenesspb.NodeLivenessStatus_DECOMMISSIONED,
 		},
-		// Draining
+		// Draining (reports as unavailable).
 		{
 			liveness: livenesspb.Liveness{
 				NodeID: 1,
@@ -1234,31 +1248,6 @@ func TestNodeLivenessLivenessStatus(t *testing.T) {
 				Draining: true,
 			},
 			expected: livenesspb.NodeLivenessStatus_DRAINING,
-		},
-		// Decommissioning that is unavailable.
-		{
-			liveness: livenesspb.Liveness{
-				NodeID: 1,
-				Epoch:  1,
-				Expiration: hlc.LegacyTimestamp{
-					WallTime: now.UnixNano(),
-				},
-				Draining:   false,
-				Membership: livenesspb.MembershipStatus_DECOMMISSIONING,
-			},
-			expected: livenesspb.NodeLivenessStatus_UNAVAILABLE,
-		},
-		// Draining that is unavailable.
-		{
-			liveness: livenesspb.Liveness{
-				NodeID: 1,
-				Epoch:  1,
-				Expiration: hlc.LegacyTimestamp{
-					WallTime: now.UnixNano(),
-				},
-				Draining: true,
-			},
-			expected: livenesspb.NodeLivenessStatus_UNAVAILABLE,
 		},
 	} {
 		t.Run("", func(t *testing.T) {

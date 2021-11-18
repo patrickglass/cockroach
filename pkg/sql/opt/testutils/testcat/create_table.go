@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
@@ -24,10 +23,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 )
@@ -76,6 +73,12 @@ func (tc *Catalog) CreateTable(stmt *tree.CreateTable) *Table {
 
 	tab := &Table{TabID: tc.nextStableID(), TabName: stmt.Table, Catalog: tc}
 
+	// TODO(andyk): For now, just remember that the table was interleaved. In the
+	// future, it may be necessary to extract additional metadata.
+	if stmt.Interleave != nil {
+		tab.interleaved = true
+	}
+
 	// Find the PK columns; we have to force these to be non-nullable.
 	pkCols := make(map[tree.Name]struct{})
 	for _, def := range stmt.Defs {
@@ -112,7 +115,7 @@ func (tc *Catalog) CreateTable(stmt *tree.CreateTable) *Table {
 	if !hasPrimaryIndex {
 		var rowid cat.Column
 		ordinal := len(tab.Columns)
-		rowid.Init(
+		rowid.InitNonVirtual(
 			ordinal,
 			cat.StableID(1+ordinal),
 			"rowid",
@@ -122,9 +125,6 @@ func (tc *Catalog) CreateTable(stmt *tree.CreateTable) *Table {
 			cat.Hidden,
 			&uniqueRowIDString, /* defaultExpr */
 			nil,                /* computedExpr */
-			nil,                /* onUpdateExpr */
-			cat.NotGeneratedAsIdentity,
-			nil, /* generatedAsIdentitySequenceOption */
 		)
 		tab.Columns = append(tab.Columns, rowid)
 	}
@@ -142,7 +142,7 @@ func (tc *Catalog) CreateTable(stmt *tree.CreateTable) *Table {
 	// Add the MVCC timestamp system column.
 	var mvcc cat.Column
 	ordinal := len(tab.Columns)
-	mvcc.Init(
+	mvcc.InitNonVirtual(
 		ordinal,
 		cat.StableID(1+ordinal),
 		colinfo.MVCCTimestampColumnName,
@@ -152,30 +152,8 @@ func (tc *Catalog) CreateTable(stmt *tree.CreateTable) *Table {
 		cat.Hidden,
 		nil, /* defaultExpr */
 		nil, /* computedExpr */
-		nil, /* onUpdateExpr */
-		cat.NotGeneratedAsIdentity,
-		nil, /* generatedAsIdentitySequenceOption */
 	)
 	tab.Columns = append(tab.Columns, mvcc)
-
-	// Add the tableoid system column.
-	var tableoid cat.Column
-	ordinal = len(tab.Columns)
-	tableoid.Init(
-		ordinal,
-		cat.StableID(1+ordinal),
-		colinfo.TableOIDColumnName,
-		cat.System,
-		types.Oid,
-		true, /* nullable */
-		cat.Hidden,
-		nil, /* defaultExpr */
-		nil, /* computedExpr */
-		nil, /* onUpdateExpr */
-		cat.NotGeneratedAsIdentity,
-		nil, /* generatedAsIdentitySequenceOption */
-	)
-	tab.Columns = append(tab.Columns, tableoid)
 
 	// Cache the partitioning statement for the primary index.
 	if stmt.PartitionByTable != nil {
@@ -296,7 +274,7 @@ func (tc *Catalog) createVirtualTable(stmt *tree.CreateTable) *Table {
 
 	// Add the dummy PK column.
 	var pk cat.Column
-	pk.Init(
+	pk.InitNonVirtual(
 		0, /* ordinal */
 		0, /* stableID */
 		"crdb_internal_vtable_pk",
@@ -306,9 +284,6 @@ func (tc *Catalog) createVirtualTable(stmt *tree.CreateTable) *Table {
 		cat.Hidden,
 		nil, /* defaultExpr */
 		nil, /* computedExpr */
-		nil, /* onUpdateExpr */
-		cat.NotGeneratedAsIdentity,
-		nil, /* generatedAsIdentitySequenceOption */
 	)
 
 	tab.Columns = []cat.Column{pk}
@@ -355,7 +330,7 @@ func (tc *Catalog) CreateTableAs(name tree.TableName, columns []cat.Column) *Tab
 
 	var rowid cat.Column
 	ordinal := len(columns)
-	rowid.Init(
+	rowid.InitNonVirtual(
 		ordinal,
 		cat.StableID(1+ordinal),
 		"rowid",
@@ -365,9 +340,6 @@ func (tc *Catalog) CreateTableAs(name tree.TableName, columns []cat.Column) *Tab
 		cat.Hidden,
 		&uniqueRowIDString, /* defaultExpr */
 		nil,                /* computedExpr */
-		nil,                /* onUpdateExpr */
-		cat.NotGeneratedAsIdentity,
-		nil, /* generatedAsIdentitySequenceOption */
 	)
 
 	tab.Columns = append(tab.Columns, rowid)
@@ -393,34 +365,15 @@ func (tc *Catalog) resolveFK(tab *Table, d *tree.ForeignKeyConstraintTableDef) {
 		targetTable = tc.Table(&d.Table)
 	}
 
-	referencedColNames := d.ToCols
-	if len(referencedColNames) == 0 {
-		// If no columns are specified, attempt to default to PK, ignoring implicit
-		// columns.
-		idx := targetTable.Index(cat.PrimaryIndex)
-		numImplicitCols := idx.ImplicitPartitioningColumnCount()
-		referencedColNames = make(
-			tree.NameList,
-			0,
-			idx.KeyColumnCount()-numImplicitCols,
-		)
-		for i := numImplicitCols; i < idx.KeyColumnCount(); i++ {
-			referencedColNames = append(
-				referencedColNames,
-				idx.Column(i).ColName(),
-			)
-		}
-	}
-	toCols := make([]int, len(referencedColNames))
-	for i, c := range referencedColNames {
+	toCols := make([]int, len(d.ToCols))
+	for i, c := range d.ToCols {
 		toCols[i] = targetTable.FindOrdinal(string(c))
 	}
 
 	constraintName := string(d.Name)
 	if constraintName == "" {
-		constraintName = tabledesc.ForeignKeyConstraintName(
-			tab.TabName.Table(),
-			d.FromCols.ToStrings(),
+		constraintName = fmt.Sprintf(
+			"fk_%s_ref_%s", string(d.FromCols[0]), targetTable.TabName.Table(),
 		)
 	}
 
@@ -584,12 +537,6 @@ func (tt *Table) addColumn(def *tree.ColumnTableDef) {
 	kind := cat.Ordinary
 	visibility := cat.Visible
 
-	if def.IsSerial {
-		// Here we only take care of the case where
-		// serial_normalization == SerialUsesRowID.
-		def.DefaultExpr.Expr = generateDefExprForSerialCol(tt.TabName, name, sessiondatapb.SerialUsesRowID)
-	}
-
 	// Look for name suffixes indicating this is a special column.
 	if n, ok := extractInaccessibleColumn(def); ok {
 		name = n
@@ -604,7 +551,7 @@ func (tt *Table) addColumn(def *tree.ColumnTableDef) {
 		visibility = cat.Inaccessible
 	}
 
-	var defaultExpr, computedExpr, onUpdateExpr, generatedAsIdentitySequenceOption *string
+	var defaultExpr, computedExpr *string
 	if def.DefaultExpr.Expr != nil {
 		s := serializeTableDefExpr(def.DefaultExpr.Expr)
 		defaultExpr = &s
@@ -613,45 +560,6 @@ func (tt *Table) addColumn(def *tree.ColumnTableDef) {
 	if def.Computed.Expr != nil {
 		s := serializeTableDefExpr(def.Computed.Expr)
 		computedExpr = &s
-	}
-
-	if def.OnUpdateExpr.Expr != nil {
-		s := serializeTableDefExpr(def.OnUpdateExpr.Expr)
-		onUpdateExpr = &s
-	}
-
-	generatedAsIdentityType := cat.NotGeneratedAsIdentity
-	if def.GeneratedIdentity.IsGeneratedAsIdentity {
-		switch def.GeneratedIdentity.GeneratedAsIdentityType {
-		case tree.GeneratedAlways, tree.GeneratedByDefault:
-			def.DefaultExpr.Expr = generateDefExprForGeneratedAsIdentityCol(tt.TabName, name)
-			switch def.GeneratedIdentity.GeneratedAsIdentityType {
-			case tree.GeneratedAlways:
-				generatedAsIdentityType = cat.GeneratedAlwaysAsIdentity
-			case tree.GeneratedByDefault:
-				generatedAsIdentityType = cat.GeneratedByDefaultAsIdentity
-			}
-		default:
-			panic(fmt.Errorf(
-				"column %s is of invalid generated as identity type (neither ALWAYS nor BY DEFAULT)",
-				def.Name,
-			))
-		}
-	}
-
-	if def.DefaultExpr.Expr != nil {
-		s := serializeTableDefExpr(def.DefaultExpr.Expr)
-		defaultExpr = &s
-	}
-
-	if def.Computed.Expr != nil {
-		s := serializeTableDefExpr(def.Computed.Expr)
-		computedExpr = &s
-	}
-
-	if def.GeneratedIdentity.SeqOptions != nil {
-		s := serializeGeneratedAsIdentitySequenceOption(&def.GeneratedIdentity.SeqOptions)
-		generatedAsIdentitySequenceOption = &s
 	}
 
 	var col cat.Column
@@ -666,7 +574,7 @@ func (tt *Table) addColumn(def *tree.ColumnTableDef) {
 			*computedExpr,
 		)
 	} else {
-		col.Init(
+		col.InitNonVirtual(
 			ordinal,
 			cat.StableID(1+ordinal),
 			name,
@@ -676,9 +584,6 @@ func (tt *Table) addColumn(def *tree.ColumnTableDef) {
 			visibility,
 			defaultExpr,
 			computedExpr,
-			onUpdateExpr,
-			generatedAsIdentityType,
-			generatedAsIdentitySequenceOption,
 		)
 	}
 	tt.Columns = append(tt.Columns, col)
@@ -697,7 +602,7 @@ func (tt *Table) addIndexWithVersion(
 	}
 
 	idx := &Index{
-		IdxName:  tt.makeIndexName(def.Name, def.Columns, typ),
+		IdxName:  tt.makeIndexName(def.Name, typ),
 		Unique:   typ != nonUniqueIndex,
 		Inverted: def.Inverted,
 		IdxZone:  &zonepb.ZoneConfig{},
@@ -806,7 +711,7 @@ func (tt *Table) addIndexWithVersion(
 		}
 		// Add the rest of the columns in the table.
 		for i, col := range tt.Columns {
-			if !pkOrdinals.Contains(i) && col.Kind() != cat.Inverted && !col.IsVirtualComputed() {
+			if !pkOrdinals.Contains(i) && col.Kind() != cat.VirtualInverted && !col.IsVirtualComputed() {
 				idx.addColumnByOrdinal(tt, i, tree.Ascending, nonKeyCol)
 			}
 		}
@@ -907,56 +812,15 @@ func (tt *Table) addIndexWithVersion(
 	return idx
 }
 
-func (tt *Table) makeIndexName(defName tree.Name, cols tree.IndexElemList, typ indexType) string {
+func (tt *Table) makeIndexName(defName tree.Name, typ indexType) string {
 	name := string(defName)
-	if name != "" {
-		return name
-	}
-
-	if typ == primaryIndex {
-		return fmt.Sprintf("%s_pkey", tt.TabName.Table())
-	}
-
-	var sb strings.Builder
-	sb.WriteString(tt.TabName.Table())
-	exprCount := 0
-	for _, col := range cols {
-		sb.WriteRune('_')
-		if col.Expr != nil {
-			sb.WriteString("expr")
-			if exprCount > 0 {
-				sb.WriteString(strconv.Itoa(exprCount))
-			}
-			exprCount++
+	if name == "" {
+		if typ == primaryIndex {
+			name = "primary"
 		} else {
-			sb.WriteString(col.Column.String())
+			name = "secondary"
 		}
 	}
-
-	if typ == uniqueIndex {
-		sb.WriteString("_key")
-	} else {
-		sb.WriteString("_idx")
-	}
-
-	idxNameExists := func(idxName string) bool {
-		for _, idx := range tt.Indexes {
-			if idx.IdxName == idxName {
-				return true
-			}
-		}
-		return false
-	}
-
-	baseName := sb.String()
-	name = baseName
-	for i := 1; ; i++ {
-		if !idxNameExists(name) {
-			break
-		}
-		name = fmt.Sprintf("%s%d", baseName, i)
-	}
-
 	return name
 }
 
@@ -998,7 +862,7 @@ func (tt *Table) addFamily(def *tree.FamilyTableDef) {
 }
 
 // addColumn adds a column to the index. If necessary, creates a virtual column
-// (for inverted and expression indexes).
+// (for inverted and expression-based indexes).
 //
 // isLastIndexCol indicates if this is the last explicit column in the index as
 // specified in the schema; it is used to indicate the inverted column if the
@@ -1006,17 +870,15 @@ func (tt *Table) addFamily(def *tree.FamilyTableDef) {
 func (ti *Index) addColumn(
 	tt *Table, elem tree.IndexElem, colType colType, isLastIndexCol bool,
 ) *cat.Column {
-	var ordinal int
-	var colName tree.Name
 	if elem.Expr != nil {
+		if ti.Inverted && isLastIndexCol {
+			panic("expression-based inverted column not supported")
+		}
 		col := columnForIndexElemExpr(tt, elem.Expr)
-		ordinal = col.Ordinal()
-		colName = col.ColName()
-	} else {
-		ordinal = tt.FindOrdinal(string(elem.Column))
-		colName = elem.Column
+		return ti.addColumnByOrdinal(tt, col.Ordinal(), elem.Direction, colType)
 	}
 
+	ordinal := tt.FindOrdinal(string(elem.Column))
 	if ti.Inverted && isLastIndexCol {
 		// The last column of an inverted index is special: the index key does not
 		// contain values from the column itself, but contains inverted index
@@ -1026,9 +888,9 @@ func (ti *Index) addColumn(
 		// TODO(radu,mjibson): update this when the corresponding type in the real
 		// catalog is fixed (see sql.newOptTable).
 		typ := tt.Columns[ordinal].DatumType()
-		col.InitInverted(
+		col.InitVirtualInverted(
 			len(tt.Columns),
-			colName+"_inverted_key",
+			elem.Column+"_inverted_key",
 			typ,
 			false,   /* nullable */
 			ordinal, /* invertedSourceColumnOrdinal */
@@ -1046,20 +908,23 @@ func (ti *Index) addColumn(
 // reused. Otherwise, a new column is added to the table.
 func columnForIndexElemExpr(tt *Table, expr tree.Expr) cat.Column {
 	exprStr := serializeTableDefExpr(expr)
-
+	// Find an existing virtual computed column with the same expression.
+	for _, col := range tt.Columns {
+		if col.IsVirtualComputed() && col.ComputedExprStr() == exprStr {
+			return col
+		}
+	}
 	// Add a new virtual computed column with a unique name.
-	prefix := "crdb_internal_idx_expr"
-	nameExistsFn := func(n tree.Name) bool {
+	var name tree.Name
+	for n, done := 1, false; !done; n++ {
+		done = true
+		name = tree.Name(fmt.Sprintf("idx_expr_%d", n))
 		for _, col := range tt.Columns {
-			if col.ColName() == n {
-				return true
+			if col.ColName() == name {
+				done = false
+				break
 			}
 		}
-		return false
-	}
-	name := tree.Name(prefix)
-	for i := 1; nameExistsFn(name); i++ {
-		name = tree.Name(fmt.Sprintf("%s_%d", prefix, i))
 	}
 
 	typ := typeCheckTableExpr(expr, tt.Columns)
@@ -1083,7 +948,7 @@ func (ti *Index) addColumnByOrdinal(
 	col := tt.Column(ord)
 	if colType == keyCol || colType == strictKeyCol {
 		typ := col.DatumType()
-		if col.Kind() == cat.Inverted {
+		if col.Kind() == cat.VirtualInverted {
 			if !colinfo.ColumnTypeIsInvertedIndexable(typ) {
 				panic(fmt.Errorf(
 					"column %s of type %s is not allowed as the last column of an inverted index",
@@ -1235,54 +1100,4 @@ func serializeTableDefExpr(expr tree.Expr) string {
 		panic(err)
 	}
 	return tree.Serialize(expr)
-}
-
-func serializeGeneratedAsIdentitySequenceOption(seqOpts *tree.SequenceOptions) string {
-	return tree.Serialize(seqOpts)
-}
-
-// generateDefExprForSequenceBasedCol provides a default expression
-// for a column created with an underlying sequence.
-func generateDefExprForSequenceBasedCol(
-	tableName tree.TableName, colName tree.Name,
-) *tree.FuncExpr {
-	seqName := tree.NewTableNameWithSchema(
-		tableName.CatalogName,
-		tableName.SchemaName,
-		tree.Name(tableName.Table()+"_"+string(colName)+"_seq"))
-	defaultExpr := &tree.FuncExpr{
-		Func:  tree.WrapFunction("nextval"),
-		Exprs: tree.Exprs{tree.NewStrVal(seqName.String())},
-	}
-	return defaultExpr
-}
-
-// generateDefExprForGeneratedAsIdentityCol provides a default expression
-// for an IDENTITY column created with `GENERATED {ALWAYS | BY DEFAULT}
-// AS IDENTITY` syntax. The default expression is to show that there is
-// an underlying sequence attached to this IDENTITY column.
-func generateDefExprForGeneratedAsIdentityCol(
-	tableName tree.TableName, colName tree.Name,
-) *tree.FuncExpr {
-	return generateDefExprForSequenceBasedCol(tableName, colName)
-}
-
-// generateDefExprForGeneratedAsIdentityCol provides a default expression
-// for an SERIAL column.
-func generateDefExprForSerialCol(
-	tableName tree.TableName,
-	colName tree.Name,
-	serialNormalizationMode sessiondatapb.SerialNormalizationMode,
-) *tree.FuncExpr {
-	switch serialNormalizationMode {
-	case sessiondatapb.SerialUsesRowID:
-		return &tree.FuncExpr{Func: tree.WrapFunction("unique_rowid")}
-	case sessiondatapb.SerialUsesVirtualSequences,
-		sessiondatapb.SerialUsesSQLSequences,
-		sessiondatapb.SerialUsesCachedSQLSequences:
-		return generateDefExprForSequenceBasedCol(tableName, colName)
-	default:
-		panic(fmt.Errorf("invalid serial normalization mode for col %s in table"+
-			" %s", colName, tableName.String()))
-	}
 }

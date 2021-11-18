@@ -129,17 +129,39 @@ func formatSafeIndex(
 	if idx.Predicate != "" {
 		w.Printf(", Partial: true")
 	}
-	w.Printf(", KeyColumns: [")
-	for i := range idx.KeyColumnIDs {
+	if !idx.Interleave.Equal(&descpb.InterleaveDescriptor{}) {
+		w.Printf(", InterleaveParents: [")
+		for i := range idx.Interleave.Ancestors {
+			a := &idx.Interleave.Ancestors[i]
+			if i > 0 {
+				w.Printf(", ")
+			}
+			w.Printf("{TableID: %d, IndexID: %d}", a.TableID, a.IndexID)
+		}
+		w.Printf("]")
+	}
+	if len(idx.InterleavedBy) > 0 {
+		w.Printf(", InterleaveChildren: [")
+		for i := range idx.InterleavedBy {
+			a := &idx.InterleavedBy[i]
+			if i > 0 {
+				w.Printf(", ")
+			}
+			w.Printf("{TableID: %d, IndexID: %d}", a.Table, a.Index)
+		}
+		w.Printf("]")
+	}
+	w.Printf(", Columns: [")
+	for i := range idx.ColumnIDs {
 		if i > 0 {
 			w.Printf(", ")
 		}
-		w.Printf("{ID: %d, Dir: %s}", idx.KeyColumnIDs[i], idx.KeyColumnDirections[i])
+		w.Printf("{ID: %d, Dir: %s}", idx.ColumnIDs[i], idx.ColumnDirections[i])
 	}
 	w.Printf("]")
-	if len(idx.KeySuffixColumnIDs) > 0 {
-		w.Printf(", KeySuffixColumns: ")
-		formatSafeColumnIDs(w, idx.KeySuffixColumnIDs)
+	if len(idx.ExtraColumnIDs) > 0 {
+		w.Printf(", ExtraColumns: ")
+		formatSafeColumnIDs(w, idx.ExtraColumnIDs)
 	}
 	if len(idx.StoreColumnIDs) > 0 {
 		w.Printf(", StoreColumns: ")
@@ -307,7 +329,7 @@ func formatSafeMutation(w *redact.StringBuilder, m *descpb.DescriptorMutation) {
 		w.Printf("OldPrimaryIndexID: %d", md.PrimaryKeySwap.OldPrimaryIndexId)
 		w.Printf(", OldIndexes: ")
 		formatSafeIndexIDs(w, md.PrimaryKeySwap.NewIndexes)
-		w.Printf(", NewPrimaryIndexID: %d", md.PrimaryKeySwap.NewPrimaryIndexId)
+		w.Printf("NewPrimaryIndexID: %d", md.PrimaryKeySwap.NewPrimaryIndexId)
 		w.Printf(", NewIndexes: ")
 		formatSafeIndexIDs(w, md.PrimaryKeySwap.NewIndexes)
 		w.Printf("}")

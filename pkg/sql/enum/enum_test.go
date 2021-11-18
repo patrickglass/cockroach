@@ -99,7 +99,7 @@ func TestRandomGenByteStringBetween(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	const iterations = 100
 	const n = 500
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	// The randomized tests work by generating a random permutation of the
 	// sequence 1..N. This sequence represents the enum values we will

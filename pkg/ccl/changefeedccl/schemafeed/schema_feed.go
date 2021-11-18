@@ -23,13 +23,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -54,49 +49,33 @@ func (e TableEvent) Timestamp() hlc.Timestamp {
 	return e.After.GetModificationTime()
 }
 
-// SchemaFeed is a stream of events corresponding the relevant set of
-// descriptors.
-type SchemaFeed interface {
-	// Run synchronously runs the SchemaFeed. It should be invoked before any
-	// calls to Peek or Pop.
-	Run(ctx context.Context) error
+// Config configures a SchemaFeed.
+type Config struct {
+	DB       *kv.DB
+	Clock    *hlc.Clock
+	Settings *cluster.Settings
+	Targets  jobspb.ChangefeedTargets
 
-	// Peek returns events occurring up to atOrBefore.
-	Peek(ctx context.Context, atOrBefore hlc.Timestamp) (events []TableEvent, err error)
-	// Pop returns events occurring up to atOrBefore and removes them from the feed.
-	Pop(ctx context.Context, atOrBefore hlc.Timestamp) (events []TableEvent, err error)
-}
+	// SchemaChangeEvents controls the class of events which are emitted by this
+	// SchemaFeed.
+	SchemaChangeEvents changefeedbase.SchemaChangeEventClass
 
-// New creates SchemaFeed tracking 'targets' and emitting specified 'events'.
-//
-// initialHighwater is the timestamp after which events should occur.
-// NB: When clients want to create a changefeed which has a resolved timestamp
-// of ts1, they care about write which occur at ts1.Next() and later but they
-// should scan the tables as of ts1. This is important so that writes which
-// change the table at ts1.Next() are emitted as an event.
-func New(
-	ctx context.Context,
-	cfg *execinfra.ServerConfig,
-	events changefeedbase.SchemaChangeEventClass,
-	targets jobspb.ChangefeedTargets,
-	initialHighwater hlc.Timestamp,
-	metrics *Metrics,
-) SchemaFeed {
-	m := &schemaFeed{
-		filter:            schemaChangeEventFilters[events],
-		db:                cfg.DB,
-		clock:             cfg.DB.Clock(),
-		settings:          cfg.Settings,
-		targets:           targets,
-		leaseMgr:          cfg.LeaseManager.(*lease.Manager),
-		ie:                cfg.SessionBoundInternalExecutorFactory(ctx, &sessiondata.SessionData{}),
-		collectionFactory: cfg.CollectionFactory,
-		metrics:           metrics,
-	}
-	m.mu.previousTableVersion = make(map[descpb.ID]catalog.TableDescriptor)
-	m.mu.highWater = initialHighwater
-	m.mu.typeDeps = typeDependencyTracker{deps: make(map[descpb.ID][]descpb.ID)}
-	return m
+	// InitialHighWater is the timestamp after which events should occur.
+	//
+	// NB: When clients want to create a changefeed which has a resolved timestamp
+	// of ts1, they care about write which occur at ts1.Next() and later but they
+	// should scan the tables as of ts1. This is important so that writes which
+	// change the table at ts1.Next() are emitted as an event.
+	InitialHighWater hlc.Timestamp
+
+	// LeaseManager is used to ensure that when an event is emitted that at a higher
+	// level it is ensured that the right table descriptor will be used for the
+	// event if this lease manager is used.
+	//
+	// TODO(ajwerner): Should this live underneath the FilterFunc?
+	// Should there be another function to decide whether to update the
+	// lease manager?
+	LeaseManager *lease.Manager
 }
 
 // SchemaFeed tracks changes to a set of tables and exports them as a queue of
@@ -109,22 +88,14 @@ func New(
 // timestamp such that every version of a TableDescriptor has met a provided
 // invariant (via `validateFn`). An error timestamp is also kept, which is the
 // lowest timestamp where at least one table doesn't meet the invariant.
-type schemaFeed struct {
+type SchemaFeed struct {
 	filter   tableEventFilter
 	db       *kv.DB
 	clock    *hlc.Clock
 	settings *cluster.Settings
 	targets  jobspb.ChangefeedTargets
-	ie       sqlutil.InternalExecutor
-	metrics  *Metrics
-
-	// TODO(ajwerner): Should this live underneath the FilterFunc?
-	// Should there be another function to decide whether to update the
-	// lease manager?
-	leaseMgr          *lease.Manager
-	collectionFactory *descs.CollectionFactory
-
-	mu struct {
+	leaseMgr *lease.Manager
+	mu       struct {
 		syncutil.Mutex
 
 		started bool
@@ -147,7 +118,7 @@ type schemaFeed struct {
 
 		// previousTableVersion is a map from tableID to the most recent version
 		// of the table descriptor seen by the poller. This is needed to determine
-		// when a backfilling mutation has successfully completed - this can only
+		// when a backilling mutation has successfully completed - this can only
 		// be determining by comparing a version to the previous version.
 		previousTableVersion map[descpb.ID]catalog.TableDescriptor
 
@@ -194,27 +165,16 @@ func (t *typeDependencyTracker) removeDependency(typeID, tableID descpb.ID) {
 	}
 }
 
-func (t *typeDependencyTracker) purgeTable(tbl catalog.TableDescriptor) error {
+func (t *typeDependencyTracker) purgeTable(tbl catalog.TableDescriptor) {
 	for _, col := range tbl.UserDefinedTypeColumns() {
-		id, err := typedesc.UserDefinedTypeOIDToID(col.GetType().Oid())
-		if err != nil {
-			return err
-		}
-		t.removeDependency(id, tbl.GetID())
+		t.removeDependency(typedesc.UserDefinedTypeOIDToID(col.GetType().Oid()), tbl.GetID())
 	}
-
-	return nil
 }
 
-func (t *typeDependencyTracker) ingestTable(tbl catalog.TableDescriptor) error {
+func (t *typeDependencyTracker) ingestTable(tbl catalog.TableDescriptor) {
 	for _, col := range tbl.UserDefinedTypeColumns() {
-		id, err := typedesc.UserDefinedTypeOIDToID(col.GetType().Oid())
-		if err != nil {
-			return err
-		}
-		t.addDependency(id, tbl.GetID())
+		t.addDependency(typedesc.UserDefinedTypeOIDToID(col.GetType().Oid()), tbl.GetID())
 	}
-	return nil
 }
 
 func (t *typeDependencyTracker) containsType(id descpb.ID) bool {
@@ -227,7 +187,24 @@ type tableHistoryWaiter struct {
 	errCh chan error
 }
 
-func (tf *schemaFeed) markStarted() error {
+// New creates SchemaFeed with the given Config.
+func New(cfg Config) *SchemaFeed {
+	// TODO(ajwerner): validate config.
+	m := &SchemaFeed{
+		filter:   schemaChangeEventFilters[cfg.SchemaChangeEvents],
+		db:       cfg.DB,
+		clock:    cfg.Clock,
+		settings: cfg.Settings,
+		targets:  cfg.Targets,
+		leaseMgr: cfg.LeaseManager,
+	}
+	m.mu.previousTableVersion = make(map[descpb.ID]catalog.TableDescriptor)
+	m.mu.highWater = cfg.InitialHighWater
+	m.mu.typeDeps = typeDependencyTracker{deps: make(map[descpb.ID][]descpb.ID)}
+	return m
+}
+
+func (tf *SchemaFeed) markStarted() error {
 	tf.mu.Lock()
 	defer tf.mu.Unlock()
 	if tf.mu.started {
@@ -238,7 +215,7 @@ func (tf *schemaFeed) markStarted() error {
 }
 
 // Run will run the SchemaFeed. It is an error to run a feed more than once.
-func (tf *schemaFeed) Run(ctx context.Context) error {
+func (tf *SchemaFeed) Run(ctx context.Context) error {
 	if err := tf.markStarted(); err != nil {
 		return err
 	}
@@ -265,23 +242,17 @@ func (tf *schemaFeed) Run(ctx context.Context) error {
 	return tf.pollTableHistory(ctx)
 }
 
-func (tf *schemaFeed) primeInitialTableDescs(ctx context.Context) error {
+func (tf *SchemaFeed) primeInitialTableDescs(ctx context.Context) error {
 	tf.mu.Lock()
 	initialTableDescTs := tf.mu.highWater
 	tf.mu.Unlock()
 	var initialDescs []catalog.Descriptor
-	initialTableDescsFn := func(
-		ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
-	) error {
+	initialTableDescsFn := func(ctx context.Context, txn *kv.Txn) error {
 		initialDescs = initialDescs[:0]
-		if err := txn.SetFixedTimestamp(ctx, initialTableDescTs); err != nil {
-			return err
-		}
+		txn.SetFixedTimestamp(ctx, initialTableDescTs)
 		// Note that all targets are currently guaranteed to be tables.
 		for tableID := range tf.targets {
-			flags := tree.ObjectLookupFlagsWithRequired()
-			flags.AvoidCached = true
-			tableDesc, err := descriptors.GetImmutableTableByID(ctx, txn, tableID, flags)
+			tableDesc, err := catalogkv.MustGetTableDescByID(ctx, txn, tf.leaseMgr.Codec(), tableID)
 			if err != nil {
 				return err
 			}
@@ -289,10 +260,7 @@ func (tf *schemaFeed) primeInitialTableDescs(ctx context.Context) error {
 		}
 		return nil
 	}
-
-	if err := tf.collectionFactory.Txn(
-		ctx, tf.ie, tf.db, initialTableDescsFn,
-	); err != nil {
+	if err := tf.db.Txn(ctx, initialTableDescsFn); err != nil {
 		return err
 	}
 
@@ -300,17 +268,14 @@ func (tf *schemaFeed) primeInitialTableDescs(ctx context.Context) error {
 	// Register all types used by the initial set of tables.
 	for _, desc := range initialDescs {
 		tbl := desc.(catalog.TableDescriptor)
-		if err := tf.mu.typeDeps.ingestTable(tbl); err != nil {
-			tf.mu.Unlock()
-			return err
-		}
+		tf.mu.typeDeps.ingestTable(tbl)
 	}
 	tf.mu.Unlock()
 
 	return tf.ingestDescriptors(ctx, hlc.Timestamp{}, initialTableDescTs, initialDescs, tf.validateDescriptor)
 }
 
-func (tf *schemaFeed) pollTableHistory(ctx context.Context) error {
+func (tf *SchemaFeed) pollTableHistory(ctx context.Context) error {
 	for {
 		if err := tf.updateTableHistory(ctx, tf.clock.Now()); err != nil {
 			return err
@@ -324,7 +289,7 @@ func (tf *schemaFeed) pollTableHistory(ctx context.Context) error {
 	}
 }
 
-func (tf *schemaFeed) updateTableHistory(ctx context.Context, endTS hlc.Timestamp) error {
+func (tf *SchemaFeed) updateTableHistory(ctx context.Context, endTS hlc.Timestamp) error {
 	startTS := tf.highWater()
 	if endTS.LessEq(startTS) {
 		return nil
@@ -338,7 +303,7 @@ func (tf *schemaFeed) updateTableHistory(ctx context.Context, endTS hlc.Timestam
 
 // Peek returns all events which have not been popped which happen at or
 // before the passed timestamp.
-func (tf *schemaFeed) Peek(
+func (tf *SchemaFeed) Peek(
 	ctx context.Context, atOrBefore hlc.Timestamp,
 ) (events []TableEvent, err error) {
 
@@ -346,13 +311,13 @@ func (tf *schemaFeed) Peek(
 }
 
 // Pop pops events from the EventQueue.
-func (tf *schemaFeed) Pop(
+func (tf *SchemaFeed) Pop(
 	ctx context.Context, atOrBefore hlc.Timestamp,
 ) (events []TableEvent, err error) {
 	return tf.peekOrPop(ctx, atOrBefore, true /* pop */)
 }
 
-func (tf *schemaFeed) peekOrPop(
+func (tf *SchemaFeed) peekOrPop(
 	ctx context.Context, atOrBefore hlc.Timestamp, pop bool,
 ) (events []TableEvent, err error) {
 	if err = tf.waitForTS(ctx, atOrBefore); err != nil {
@@ -374,7 +339,7 @@ func (tf *schemaFeed) peekOrPop(
 }
 
 // highWater returns the current high-water timestamp.
-func (tf *schemaFeed) highWater() hlc.Timestamp {
+func (tf *SchemaFeed) highWater() hlc.Timestamp {
 	tf.mu.Lock()
 	highWater := tf.mu.highWater
 	tf.mu.Unlock()
@@ -389,7 +354,7 @@ func (tf *schemaFeed) highWater() hlc.Timestamp {
 // timestamp will never switch from nil to an error or vice-versa (assuming that
 // `validateFn` is deterministic and the ingested descriptors are read
 // transactionally).
-func (tf *schemaFeed) waitForTS(ctx context.Context, ts hlc.Timestamp) error {
+func (tf *SchemaFeed) waitForTS(ctx context.Context, ts hlc.Timestamp) error {
 	var errCh chan error
 
 	tf.mu.Lock()
@@ -422,9 +387,6 @@ func (tf *schemaFeed) waitForTS(ctx context.Context, ts hlc.Timestamp) error {
 		if log.V(1) {
 			log.Infof(ctx, "waited %s for %s highwater: %v", timeutil.Since(start), ts, err)
 		}
-		if tf.metrics != nil {
-			tf.metrics.TableMetadataNanos.Inc(timeutil.Since(start).Nanoseconds())
-		}
 		return err
 	}
 }
@@ -443,7 +405,7 @@ func descLess(a, b catalog.Descriptor) bool {
 // two given timestamps.
 //
 // validateFn is exposed for testing, in production it is tf.validateDescriptor.
-func (tf *schemaFeed) ingestDescriptors(
+func (tf *SchemaFeed) ingestDescriptors(
 	ctx context.Context,
 	startTS, endTS hlc.Timestamp,
 	descs []catalog.Descriptor,
@@ -460,7 +422,7 @@ func (tf *schemaFeed) ingestDescriptors(
 }
 
 // adjustTimestamps adjusts the high-water or error timestamp appropriately.
-func (tf *schemaFeed) adjustTimestamps(startTS, endTS hlc.Timestamp, validateErr error) error {
+func (tf *SchemaFeed) adjustTimestamps(startTS, endTS hlc.Timestamp, validateErr error) error {
 	tf.mu.Lock()
 	defer tf.mu.Unlock()
 
@@ -511,19 +473,19 @@ func formatEvent(e TableEvent) string {
 	return fmt.Sprintf("%v->%v", formatDesc(e.Before), formatDesc(e.After))
 }
 
-func (tf *schemaFeed) validateDescriptor(
+func (tf *SchemaFeed) validateDescriptor(
 	ctx context.Context, earliestTsBeingIngested hlc.Timestamp, desc catalog.Descriptor,
 ) error {
 	tf.mu.Lock()
 	defer tf.mu.Unlock()
 	switch desc := desc.(type) {
-	case catalog.TypeDescriptor:
+	case *typedesc.Immutable:
 		if !tf.mu.typeDeps.containsType(desc.GetID()) {
 			return nil
 		}
 		// If a interesting type changed, then we just want to force the lease
 		// manager to acquire the freshest version of the type.
-		return tf.leaseMgr.AcquireFreshestFromStore(ctx, desc.GetID())
+		return tf.leaseMgr.AcquireFreshestFromStore(ctx, desc.ID)
 	case catalog.TableDescriptor:
 		if err := changefeedbase.ValidateTable(tf.targets, desc); err != nil {
 			return err
@@ -547,9 +509,7 @@ func (tf *schemaFeed) validateDescriptor(
 			}
 
 			// Purge the old version of the table from the type mapping.
-			if err := tf.mu.typeDeps.purgeTable(lastVersion); err != nil {
-				return err
-			}
+			tf.mu.typeDeps.purgeTable(lastVersion)
 
 			e := TableEvent{
 				Before: lastVersion,
@@ -575,9 +535,7 @@ func (tf *schemaFeed) validateDescriptor(
 			}
 		}
 		// Add the types used by the table into the dependency tracker.
-		if err := tf.mu.typeDeps.ingestTable(desc); err != nil {
-			return err
-		}
+		tf.mu.typeDeps.ingestTable(desc)
 		tf.mu.previousTableVersion[desc.GetID()] = desc
 		return nil
 	default:
@@ -585,7 +543,7 @@ func (tf *schemaFeed) validateDescriptor(
 	}
 }
 
-func (tf *schemaFeed) fetchDescriptorVersions(
+func (tf *SchemaFeed) fetchDescriptorVersions(
 	ctx context.Context, codec keys.SQLCodec, db *kv.DB, startTS, endTS hlc.Timestamp,
 ) ([]catalog.Descriptor, error) {
 	if log.V(2) {
@@ -600,6 +558,7 @@ func (tf *schemaFeed) fetchDescriptorVersions(
 		StartTime:     startTS,
 		MVCCFilter:    roachpb.MVCCFilter_All,
 		ReturnSST:     true,
+		OmitChecksum:  true,
 	}
 	res, pErr := kv.SendWrappedWith(ctx, db.NonTransactionalSender(), header, req)
 	if log.V(2) {
@@ -672,28 +631,3 @@ func (tf *schemaFeed) fetchDescriptorVersions(
 	}
 	return descs, nil
 }
-
-type doNothingSchemaFeed struct{}
-
-// Run does nothing until the context is canceled.
-func (f doNothingSchemaFeed) Run(ctx context.Context) error {
-	<-ctx.Done()
-	return ctx.Err()
-}
-
-// Peek implements SchemaFeed
-func (f doNothingSchemaFeed) Peek(
-	ctx context.Context, atOrBefore hlc.Timestamp,
-) (events []TableEvent, err error) {
-	return nil, nil
-}
-
-// Pop implements SchemaFeed
-func (f doNothingSchemaFeed) Pop(
-	ctx context.Context, atOrBefore hlc.Timestamp,
-) (events []TableEvent, err error) {
-	return nil, nil
-}
-
-// DoNothingSchemaFeed is the SchemaFeed implementation that does nothing.
-var DoNothingSchemaFeed SchemaFeed = &doNothingSchemaFeed{}

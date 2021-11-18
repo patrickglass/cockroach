@@ -311,7 +311,7 @@ func TestAsOfRetry(t *testing.T) {
 			defer magicVals.Unlock()
 
 			switch req := args.Req.(type) {
-			case *roachpb.GetRequest:
+			case *roachpb.ScanRequest:
 				if kv.TestingIsRangeLookupRequest(req) {
 					return nil
 				}

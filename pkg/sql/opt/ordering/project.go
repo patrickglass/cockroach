@@ -13,10 +13,10 @@ package ordering
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 )
 
-func projectCanProvideOrdering(expr memo.RelExpr, required *props.OrderingChoice) bool {
+func projectCanProvideOrdering(expr memo.RelExpr, required *physical.OrderingChoice) bool {
 	// Project can pass through its ordering if the ordering depends only on
 	// columns present in the input.
 	proj := expr.(*memo.ProjectExpr)
@@ -34,10 +34,10 @@ func projectCanProvideOrdering(expr memo.RelExpr, required *props.OrderingChoice
 }
 
 func projectBuildChildReqOrdering(
-	parent memo.RelExpr, required *props.OrderingChoice, childIdx int,
-) props.OrderingChoice {
+	parent memo.RelExpr, required *physical.OrderingChoice, childIdx int,
+) physical.OrderingChoice {
 	if childIdx != 0 {
-		return props.OrderingChoice{}
+		return physical.OrderingChoice{}
 	}
 
 	// Project can prune input columns, which can cause its FD set to be
@@ -62,8 +62,8 @@ func projectBuildChildReqOrdering(
 // columns. If projection is not necessary, returns a shallow copy of the
 // ordering.
 func projectOrderingToInput(
-	input memo.RelExpr, ordering *props.OrderingChoice,
-) props.OrderingChoice {
+	input memo.RelExpr, ordering *physical.OrderingChoice,
+) physical.OrderingChoice {
 	childOutCols := input.Relational().OutputCols
 	if ordering.SubsetOfCols(childOutCols) {
 		return *ordering
@@ -73,7 +73,7 @@ func projectOrderingToInput(
 	return result
 }
 
-func projectBuildProvided(expr memo.RelExpr, required *props.OrderingChoice) opt.Ordering {
+func projectBuildProvided(expr memo.RelExpr, required *physical.OrderingChoice) opt.Ordering {
 	p := expr.(*memo.ProjectExpr)
 	// Project can only satisfy required orderings that refer to projected
 	// columns; it should always be possible to remap the columns in the input's

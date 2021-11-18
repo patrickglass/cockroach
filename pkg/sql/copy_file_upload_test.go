@@ -23,7 +23,6 @@ import (
 	"strings"
 	"testing"
 
-	_ "github.com/cockroachdb/cockroach/pkg/cloud/impl" // register cloud storage providers
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -303,7 +302,6 @@ func TestNodelocalNotAdmin(t *testing.T) {
 // interact with the FileTable ExternalStorage.
 func TestUserfileNotAdmin(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	params, _ := tests.CreateTestServerParams()
 	localExternalDir, cleanup := testutils.TempDir(t)

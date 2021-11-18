@@ -72,9 +72,6 @@ const (
 	//
 	ExplainDDL
 
-	// ExplainGist generates a plan "gist".
-	ExplainGist
-
 	numExplainModes = iota
 )
 
@@ -85,7 +82,6 @@ var explainModeStrings = [...]string{
 	ExplainVec:     "VEC",
 	ExplainDebug:   "DEBUG",
 	ExplainDDL:     "DDL",
-	ExplainGist:    "GIST",
 }
 
 var explainModeStringMap = func() map[string]ExplainMode {
@@ -116,7 +112,6 @@ const (
 	ExplainFlagStages
 	ExplainFlagDeps
 	ExplainFlagMemo
-	ExplainFlagShape
 	numExplainFlags = iota
 )
 
@@ -129,7 +124,6 @@ var explainFlagStrings = [...]string{
 	ExplainFlagStages:  "STAGES",
 	ExplainFlagDeps:    "DEPS",
 	ExplainFlagMemo:    "MEMO",
-	ExplainFlagShape:   "SHAPE",
 }
 
 var explainFlagStringMap = func() map[string]ExplainFlag {

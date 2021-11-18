@@ -22,14 +22,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
+	"github.com/cockroachdb/cockroach/pkg/sql/colfetcher"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -56,8 +57,6 @@ func TestColBatchScanMeta(t *testing.T) {
 	st := s.ClusterSettings()
 	evalCtx := tree.MakeTestingEvalContext(st)
 	defer evalCtx.Stop(ctx)
-	var monitorRegistry colexecargs.MonitorRegistry
-	defer monitorRegistry.Close(ctx)
 
 	rootTxn := kv.NewTxn(ctx, s.DB(), s.NodeID())
 	leafInputState := rootTxn.GetLeafTxnInputState(ctx)
@@ -74,28 +73,29 @@ func TestColBatchScanMeta(t *testing.T) {
 	spec := execinfrapb.ProcessorSpec{
 		Core: execinfrapb.ProcessorCoreUnion{
 			TableReader: &execinfrapb.TableReaderSpec{
-				Spans: []roachpb.Span{
-					td.PrimaryIndexSpan(keys.SystemSQLCodec),
+				Spans: []execinfrapb.TableReaderSpan{
+					{Span: td.PrimaryIndexSpan(keys.SystemSQLCodec)},
 				},
-				NeededColumns: []uint32{0},
-				Table:         *td.TableDesc(),
+				Table: *td.TableDesc(),
 			}},
-		ResultTypes: types.OneIntCol,
+		Post: execinfrapb.PostProcessSpec{
+			Projection:    true,
+			OutputColumns: []uint32{0},
+		},
+		ResultTypes: rowenc.OneIntCol,
 	}
 
 	args := &colexecargs.NewColOperatorArgs{
 		Spec:                &spec,
 		StreamingMemAccount: testMemAcc,
-		MonitorRegistry:     &monitorRegistry,
 	}
 	res, err := colbuilder.NewColOperator(ctx, &flowCtx, args)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.TestCleanupNoError(t)
-	tr := res.Root
-	tr.Init(ctx)
-	meta := res.MetadataSources[0].DrainMeta()
+	tr := res.Op
+	tr.Init()
+	meta := tr.(*colexecutils.CancelChecker).Input.(*colfetcher.ColBatchScan).DrainMeta(ctx)
 	var txnFinalStateSeen bool
 	for _, m := range meta {
 		if m.LeafTxnFinalState != nil {
@@ -128,21 +128,23 @@ func BenchmarkColBatchScan(b *testing.B) {
 		)
 		tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", tableName)
 		b.Run(fmt.Sprintf("rows=%d", numRows), func(b *testing.B) {
-			span := tableDesc.PrimaryIndexSpan(keys.SystemSQLCodec)
 			spec := execinfrapb.ProcessorSpec{
 				Core: execinfrapb.ProcessorCoreUnion{
 					TableReader: &execinfrapb.TableReaderSpec{
 						Table: *tableDesc.TableDesc(),
-						// Spans will be set below.
-						NeededColumns: []uint32{0, 1},
+						Spans: []execinfrapb.TableReaderSpan{
+							{Span: tableDesc.PrimaryIndexSpan(keys.SystemSQLCodec)},
+						},
 					}},
-				ResultTypes: types.TwoIntCols,
+				Post: execinfrapb.PostProcessSpec{
+					Projection:    true,
+					OutputColumns: []uint32{0, 1},
+				},
+				ResultTypes: rowenc.TwoIntCols,
 			}
 
 			evalCtx := tree.MakeTestingEvalContext(s.ClusterSettings())
 			defer evalCtx.Stop(ctx)
-			var monitorRegistry colexecargs.MonitorRegistry
-			defer monitorRegistry.Close(ctx)
 
 			flowCtx := execinfra.FlowCtx{
 				EvalCtx: &evalCtx,
@@ -154,30 +156,24 @@ func BenchmarkColBatchScan(b *testing.B) {
 			b.SetBytes(int64(numRows * numCols * 8))
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				// We have to set the spans on each iteration since the
-				// txnKVFetcher reuses the passed-in slice and destructively
-				// modifies it.
-				spec.Core.TableReader.Spans = []roachpb.Span{span}
+				b.StopTimer()
 				args := &colexecargs.NewColOperatorArgs{
 					Spec:                &spec,
 					StreamingMemAccount: testMemAcc,
-					MonitorRegistry:     &monitorRegistry,
 				}
 				res, err := colbuilder.NewColOperator(ctx, &flowCtx, args)
 				if err != nil {
 					b.Fatal(err)
 				}
-				tr := res.Root
+				tr := res.Op
+				tr.Init()
 				b.StartTimer()
-				tr.Init(ctx)
 				for {
-					bat := tr.Next()
+					bat := tr.Next(ctx)
 					if bat.Length() == 0 {
 						break
 					}
 				}
-				b.StopTimer()
-				res.TestCleanupNoError(b)
 			}
 		})
 	}

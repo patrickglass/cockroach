@@ -195,8 +195,6 @@ func TestAuthenticationHook(t *testing.T) {
 		{false, "foo", security.NodeUserName(), "", true, false, false},
 		// Secure mode, node user.
 		{false, security.NodeUser, security.NodeUserName(), "", true, true, true},
-		// Secure mode, node cert and unrelated user.
-		{false, security.NodeUser, fooUser, "", true, false, false},
 		// Secure mode, root user.
 		{false, security.RootUser, security.NodeUserName(), "", true, false, false},
 		// Secure mode, tenant cert, foo user.

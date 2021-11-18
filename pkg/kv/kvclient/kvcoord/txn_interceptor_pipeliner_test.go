@@ -59,6 +59,11 @@ func (m *mockLockedSender) MockSend(
 	m.mockFn = fn
 }
 
+// Reset resets the mockLockedSender mocking function to a no-op.
+func (m *mockLockedSender) Reset() {
+	m.mockFn = nil
+}
+
 // ChainMockSend sets a series of mocking functions on the mockLockedSender.
 // The provided mocking functions are set in the order that they are provided
 // and a given mocking function is set after the previous one has been called.
@@ -82,7 +87,7 @@ func (m *mockLockedSender) ChainMockSend(
 //
 // iter is the iterator to use for condensing the lock spans. It can be nil, in
 // which case the pipeliner will panic if it ever needs to condense lock spans.
-func makeMockTxnPipeliner(iter condensableSpanSetRangeIterator) (txnPipeliner, *mockLockedSender) {
+func makeMockTxnPipeliner() (txnPipeliner, *mockLockedSender) {
 	mockSender := &mockLockedSender{}
 	metrics := MakeTxnMetrics(time.Hour)
 	everyN := log.Every(time.Hour)
@@ -91,13 +96,7 @@ func makeMockTxnPipeliner(iter condensableSpanSetRangeIterator) (txnPipeliner, *
 		wrapped:                mockSender,
 		txnMetrics:             &metrics,
 		condensedIntentsEveryN: &everyN,
-		riGen: rangeIteratorFactory{
-			factory: func() condensableSpanSetRangeIterator {
-				return iter
-			},
-		},
 	}, mockSender
-
 }
 
 func makeTxnProto() roachpb.Transaction {
@@ -113,7 +112,7 @@ func TestTxnPipeliner1PCTransaction(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	tp, mockSender := makeMockTxnPipeliner(nil /* iter */)
+	tp, mockSender := makeMockTxnPipeliner()
 
 	txn := makeTxnProto()
 	keyA, keyB := roachpb.Key("a"), roachpb.Key("b")
@@ -175,7 +174,7 @@ func TestTxnPipelinerTrackInFlightWrites(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	tp, mockSender := makeMockTxnPipeliner(nil /* iter */)
+	tp, mockSender := makeMockTxnPipeliner()
 
 	txn := makeTxnProto()
 	keyA := roachpb.Key("a")
@@ -328,7 +327,7 @@ func TestTxnPipelinerReads(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	tp, mockSender := makeMockTxnPipeliner(nil /* iter */)
+	tp, mockSender := makeMockTxnPipeliner()
 
 	txn := makeTxnProto()
 	keyA, keyC := roachpb.Key("a"), roachpb.Key("c")
@@ -432,7 +431,7 @@ func TestTxnPipelinerRangedWrites(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	tp, mockSender := makeMockTxnPipeliner(nil /* iter */)
+	tp, mockSender := makeMockTxnPipeliner()
 
 	txn := makeTxnProto()
 	keyA, keyD := roachpb.Key("a"), roachpb.Key("d")
@@ -516,7 +515,7 @@ func TestTxnPipelinerNonTransactionalRequests(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	tp, mockSender := makeMockTxnPipeliner(nil /* iter */)
+	tp, mockSender := makeMockTxnPipeliner()
 
 	txn := makeTxnProto()
 	keyA, keyC := roachpb.Key("a"), roachpb.Key("c")
@@ -581,11 +580,13 @@ func TestTxnPipelinerManyWrites(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	tp, mockSender := makeMockTxnPipeliner(nil /* iter */)
+	tp, mockSender := makeMockTxnPipeliner()
 
-	// Disable write_pipelining_max_outstanding_size and max_intents_bytes limits.
-	pipelinedWritesMaxBatchSize.Override(ctx, &tp.st.SV, 0)
-	trackedWritesMaxSize.Override(ctx, &tp.st.SV, math.MaxInt64)
+	// Disable write_pipelining_max_outstanding_size,
+	// write_pipelining_max_batch_size, and max_intents_bytes limits.
+	pipelinedWritesMaxInFlightSize.Override(&tp.st.SV, math.MaxInt64)
+	pipelinedWritesMaxBatchSize.Override(&tp.st.SV, 0)
+	trackedWritesMaxSize.Override(&tp.st.SV, math.MaxInt64)
 
 	const writes = 2048
 	keyBuf := roachpb.Key(strings.Repeat("a", writes+1))
@@ -677,7 +678,7 @@ func TestTxnPipelinerTransactionAbort(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	tp, mockSender := makeMockTxnPipeliner(nil /* iter */)
+	tp, mockSender := makeMockTxnPipeliner()
 
 	txn := makeTxnProto()
 	keyA := roachpb.Key("a")
@@ -769,7 +770,7 @@ func TestTxnPipelinerTransactionAbort(t *testing.T) {
 func TestTxnPipelinerEpochIncrement(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	tp, _ := makeMockTxnPipeliner(nil /* iter */)
+	tp, _ := makeMockTxnPipeliner()
 
 	tp.ifWrites.insert(roachpb.Key("b"), 10)
 	tp.ifWrites.insert(roachpb.Key("d"), 11)
@@ -788,7 +789,7 @@ func TestTxnPipelinerIntentMissingError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	tp, mockSender := makeMockTxnPipeliner(nil /* iter */)
+	tp, mockSender := makeMockTxnPipeliner()
 
 	txn := makeTxnProto()
 	keyA, keyB := roachpb.Key("a"), roachpb.Key("b")
@@ -848,10 +849,10 @@ func TestTxnPipelinerEnableDisableMixTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	tp, mockSender := makeMockTxnPipeliner(nil /* iter */)
+	tp, mockSender := makeMockTxnPipeliner()
 
 	// Start with pipelining disabled. Should NOT use async consensus.
-	pipelinedWritesEnabled.Override(ctx, &tp.st.SV, false)
+	pipelinedWritesEnabled.Override(&tp.st.SV, false)
 
 	txn := makeTxnProto()
 	keyA, keyC := roachpb.Key("a"), roachpb.Key("c")
@@ -878,7 +879,7 @@ func TestTxnPipelinerEnableDisableMixTxn(t *testing.T) {
 	require.Equal(t, 0, tp.ifWrites.len())
 
 	// Enable pipelining. Should use async consensus.
-	pipelinedWritesEnabled.Override(ctx, &tp.st.SV, true)
+	pipelinedWritesEnabled.Override(&tp.st.SV, true)
 
 	ba.Requests = nil
 	putArgs2 := roachpb.PutRequest{RequestHeader: roachpb.RequestHeader{Key: keyA}}
@@ -906,7 +907,7 @@ func TestTxnPipelinerEnableDisableMixTxn(t *testing.T) {
 
 	// Disable pipelining again. Should NOT use async consensus but should still
 	// make sure to chain on to any overlapping in-flight writes.
-	pipelinedWritesEnabled.Override(ctx, &tp.st.SV, false)
+	pipelinedWritesEnabled.Override(&tp.st.SV, false)
 
 	ba.Requests = nil
 	putArgs4 := roachpb.PutRequest{RequestHeader: roachpb.RequestHeader{Key: keyA}}
@@ -968,25 +969,18 @@ func TestTxnPipelinerEnableDisableMixTxn(t *testing.T) {
 	require.Equal(t, 0, tp.ifWrites.len())
 }
 
-// TestTxnPipelinerMaxInFlightSize tests that batches are not pipelined if doing
-// so would push the memory used to track locks and in-flight writes over the
-// limit allowed by the kv.transaction.max_intents_bytes setting.
+// TestTxnPipelinerMaxInFlightSize tests that batches are not pipelined if
+// doing so would push the memory used to track in-flight writes over the
+// limit allowed by the kv.transaction.write_pipelining_max_outstanding_size
+// setting.
 func TestTxnPipelinerMaxInFlightSize(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
+	tp, mockSender := makeMockTxnPipeliner()
 
-	rangeIter := newDescriptorDBRangeIterator(mockRangeDescriptorDBForDescs(
-		roachpb.RangeDescriptor{
-			RangeID:  1,
-			StartKey: roachpb.RKey("a"),
-			EndKey:   roachpb.RKey("z"),
-		},
-	))
-	tp, mockSender := makeMockTxnPipeliner(rangeIter)
-
-	// Set budget limit to 3 bytes.
-	trackedWritesMaxSize.Override(ctx, &tp.st.SV, 3)
+	// Set maxInFlightSize limit to 3 bytes.
+	pipelinedWritesMaxInFlightSize.Override(&tp.st.SV, 3)
 
 	txn := makeTxnProto()
 	keyA, keyB := roachpb.Key("a"), roachpb.Key("b")
@@ -1013,10 +1007,8 @@ func TestTxnPipelinerMaxInFlightSize(t *testing.T) {
 	require.Nil(t, pErr)
 	require.NotNil(t, br)
 	require.Equal(t, int64(0), tp.ifWrites.byteSize())
-	require.Equal(t, tp.lockFootprint.asSlice(), []roachpb.Span{{Key: keyA, EndKey: keyD.Next()}})
 
 	// Send a batch that is equal to the limit.
-	tp.lockFootprint.clear() // Hackily forget about the past.
 	ba.Requests = nil
 	ba.Add(&roachpb.PutRequest{RequestHeader: roachpb.RequestHeader{Key: keyA}})
 	ba.Add(&roachpb.PutRequest{RequestHeader: roachpb.RequestHeader{Key: keyB}})
@@ -1055,7 +1047,6 @@ func TestTxnPipelinerMaxInFlightSize(t *testing.T) {
 	require.Equal(t, int64(3), tp.ifWrites.byteSize())
 
 	// Send a batch that proves two of the in-flight writes.
-	tp.lockFootprint.clear() // hackily disregard the locks
 	ba.Requests = nil
 	ba.Add(&roachpb.GetRequest{RequestHeader: roachpb.RequestHeader{Key: keyA}})
 	ba.Add(&roachpb.GetRequest{RequestHeader: roachpb.RequestHeader{Key: keyB}})
@@ -1082,7 +1073,6 @@ func TestTxnPipelinerMaxInFlightSize(t *testing.T) {
 
 	// Now that we're not up against the limit, send a batch that proves one
 	// write and immediately writes it again, along with a second write.
-	tp.lockFootprint.clear() // hackily disregard the locks
 	ba.Requests = nil
 	ba.Add(&roachpb.PutRequest{RequestHeader: roachpb.RequestHeader{Key: keyB}})
 	ba.Add(&roachpb.PutRequest{RequestHeader: roachpb.RequestHeader{Key: keyC}})
@@ -1128,9 +1118,8 @@ func TestTxnPipelinerMaxInFlightSize(t *testing.T) {
 	require.NotNil(t, br)
 	require.Equal(t, int64(0), tp.ifWrites.byteSize())
 
-	// Increase the budget limit to 5 bytes.
-	trackedWritesMaxSize.Override(ctx, &tp.st.SV, 5)
-	tp.lockFootprint.clear() // hackily disregard the locks
+	// Increase maxInFlightSize limit to 5 bytes.
+	pipelinedWritesMaxInFlightSize.Override(&tp.st.SV, 5)
 
 	// The original batch with 4 writes should succeed.
 	ba.Requests = nil
@@ -1165,10 +1154,10 @@ func TestTxnPipelinerMaxBatchSize(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	tp, mockSender := makeMockTxnPipeliner(nil /* iter */)
+	tp, mockSender := makeMockTxnPipeliner()
 
 	// Set maxBatchSize limit to 1.
-	pipelinedWritesMaxBatchSize.Override(ctx, &tp.st.SV, 1)
+	pipelinedWritesMaxBatchSize.Override(&tp.st.SV, 1)
 
 	txn := makeTxnProto()
 	keyA, keyC := roachpb.Key("a"), roachpb.Key("c")
@@ -1217,7 +1206,7 @@ func TestTxnPipelinerMaxBatchSize(t *testing.T) {
 	require.Equal(t, 0, tp.ifWrites.len())
 
 	// Increase maxBatchSize limit to 2.
-	pipelinedWritesMaxBatchSize.Override(ctx, &tp.st.SV, 2)
+	pipelinedWritesMaxBatchSize.Override(&tp.st.SV, 2)
 
 	// Same batch now below limit.
 	mockSender.MockSend(func(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
@@ -1244,7 +1233,7 @@ func TestTxnPipelinerRecordsLocksOnFailure(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	tp, mockSender := makeMockTxnPipeliner(nil /* iter */)
+	tp, mockSender := makeMockTxnPipeliner()
 
 	txn := makeTxnProto()
 	keyA, keyB, keyC := roachpb.Key("a"), roachpb.Key("b"), roachpb.Key("c")
@@ -1332,87 +1321,12 @@ func TestTxnPipelinerRecordsLocksOnFailure(t *testing.T) {
 	require.NotNil(t, br)
 }
 
-// TestTxnPipelinerIgnoresLocksOnUnambiguousFailure tests that when a request
-// returns with an unambiguous error, the locks that it attempted to acquire
-// from the specific request that hit the error (but not any other in the batch)
-// are NOT added to the lock footprint.
-func TestTxnPipelinerIgnoresLocksOnUnambiguousFailure(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-	tp, mockSender := makeMockTxnPipeliner(nil /* iter */)
-
-	txn := makeTxnProto()
-	keyA, keyB, keyC := roachpb.Key("a"), roachpb.Key("b"), roachpb.Key("c")
-	keyD, keyE, keyF := roachpb.Key("d"), roachpb.Key("e"), roachpb.Key("f")
-
-	// Return a ConditionalFailed error for a CPut. The lock spans correspond to
-	// the CPut are not added to the lock footprint, but the lock spans for all
-	// other requests in the batch are.
-	var ba roachpb.BatchRequest
-	ba.Header = roachpb.Header{Txn: &txn}
-	ba.Add(&roachpb.ConditionalPutRequest{RequestHeader: roachpb.RequestHeader{Key: keyA}})
-	ba.Add(&roachpb.DeleteRangeRequest{RequestHeader: roachpb.RequestHeader{Key: keyB, EndKey: keyB.Next()}})
-	ba.Add(&roachpb.ScanRequest{RequestHeader: roachpb.RequestHeader{Key: keyC, EndKey: keyC.Next()}, KeyLocking: lock.Exclusive})
-
-	condFailedErr := roachpb.NewError(&roachpb.ConditionFailedError{})
-	condFailedErr.SetErrorIndex(0)
-	mockSender.MockSend(func(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
-		require.Len(t, ba.Requests, 3)
-		require.False(t, ba.AsyncConsensus)
-		require.IsType(t, &roachpb.ConditionalPutRequest{}, ba.Requests[0].GetInner())
-		require.IsType(t, &roachpb.DeleteRangeRequest{}, ba.Requests[1].GetInner())
-		require.IsType(t, &roachpb.ScanRequest{}, ba.Requests[2].GetInner())
-
-		return nil, condFailedErr
-	})
-
-	br, pErr := tp.SendLocked(ctx, ba)
-	require.Nil(t, br)
-	require.Equal(t, condFailedErr, pErr)
-	require.Equal(t, 0, tp.ifWrites.len())
-
-	var expLocks []roachpb.Span
-	expLocks = append(expLocks, roachpb.Span{Key: keyB, EndKey: keyB.Next()})
-	expLocks = append(expLocks, roachpb.Span{Key: keyC, EndKey: keyC.Next()})
-	require.Equal(t, expLocks, tp.lockFootprint.asSlice())
-
-	// Return a WriteIntentError for a Scan. The lock spans correspond to the Scan
-	// are not added to the lock footprint, but the lock spans for all other
-	// requests in the batch are.
-	ba.Requests = nil
-	ba.Add(&roachpb.ConditionalPutRequest{RequestHeader: roachpb.RequestHeader{Key: keyD}})
-	ba.Add(&roachpb.DeleteRangeRequest{RequestHeader: roachpb.RequestHeader{Key: keyE, EndKey: keyE.Next()}})
-	ba.Add(&roachpb.ScanRequest{RequestHeader: roachpb.RequestHeader{Key: keyF, EndKey: keyF.Next()}, KeyLocking: lock.Exclusive})
-
-	writeIntentErr := roachpb.NewError(&roachpb.WriteIntentError{})
-	writeIntentErr.SetErrorIndex(2)
-	mockSender.MockSend(func(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
-		require.Len(t, ba.Requests, 3)
-		require.False(t, ba.AsyncConsensus)
-		require.IsType(t, &roachpb.ConditionalPutRequest{}, ba.Requests[0].GetInner())
-		require.IsType(t, &roachpb.DeleteRangeRequest{}, ba.Requests[1].GetInner())
-		require.IsType(t, &roachpb.ScanRequest{}, ba.Requests[2].GetInner())
-
-		return nil, writeIntentErr
-	})
-
-	br, pErr = tp.SendLocked(ctx, ba)
-	require.Nil(t, br)
-	require.Equal(t, writeIntentErr, pErr)
-	require.Equal(t, 0, tp.ifWrites.len())
-
-	expLocks = append(expLocks, roachpb.Span{Key: keyD})
-	expLocks = append(expLocks, roachpb.Span{Key: keyE, EndKey: keyE.Next()})
-	require.Equal(t, expLocks, tp.lockFootprint.asSlice())
-}
-
 // Test that the pipeliners knows how to save and restore its state.
 func TestTxnPipelinerSavepoints(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	tp, mockSender := makeMockTxnPipeliner(nil /* iter */)
+	tp, mockSender := makeMockTxnPipeliner()
 
 	initialSavepoint := savepoint{}
 	tp.createSavepointLocked(ctx, &initialSavepoint)
@@ -1498,12 +1412,11 @@ func TestTxnPipelinerSavepoints(t *testing.T) {
 // TestTxnCoordSenderCondenseLockSpans verifies that lock spans are condensed
 // along range boundaries when they exceed the maximum intent bytes threshold.
 //
-// TODO(andrei): Merge this test into TestTxnPipelinerCondenseLockSpans2, which
-// uses a txnPipeliner instead of a full TxnCoordSender.
+// TODO(andrei): This test should use a txnPipeliner instead of a full
+// TxnCoordSender.
 func TestTxnPipelinerCondenseLockSpans(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	ctx := context.Background()
 	a := roachpb.Span{Key: roachpb.Key("a"), EndKey: roachpb.Key(nil)}
 	b := roachpb.Span{Key: roachpb.Key("b"), EndKey: roachpb.Key(nil)}
 	c := roachpb.Span{Key: roachpb.Key("c"), EndKey: roachpb.Key(nil)}
@@ -1549,7 +1462,7 @@ func TestTxnPipelinerCondenseLockSpans(t *testing.T) {
 	descDB := mockRangeDescriptorDBForDescs(descs...)
 	s := createTestDB(t)
 	st := s.Store.ClusterSettings()
-	trackedWritesMaxSize.Override(ctx, &st.SV, 10) /* 10 bytes and it will condense */
+	trackedWritesMaxSize.Override(&st.SV, 10) /* 10 bytes and it will condense */
 	defer s.Stop()
 
 	// Check end transaction locks, which should be condensed and split
@@ -1592,6 +1505,7 @@ func TestTxnPipelinerCondenseLockSpans(t *testing.T) {
 		ds,
 	)
 	db := kv.NewDB(ambient, tsf, s.Clock, s.Stopper())
+	ctx := context.Background()
 
 	txn := kv.NewTxn(ctx, db, 0 /* gatewayNodeID */)
 	// Disable txn pipelining so that all write spans are immediately
@@ -1601,7 +1515,7 @@ func TestTxnPipelinerCondenseLockSpans(t *testing.T) {
 	}
 	for i, tc := range testCases {
 		if tc.span.EndKey != nil {
-			if _, err := txn.DelRange(ctx, tc.span.Key, tc.span.EndKey, false /* returnKeys */); err != nil {
+			if err := txn.DelRange(ctx, tc.span.Key, tc.span.EndKey); err != nil {
 				t.Fatal(err)
 			}
 		} else {
@@ -1631,128 +1545,6 @@ func TestTxnPipelinerCondenseLockSpans(t *testing.T) {
 		t.Fatal(err)
 	}
 	require.Zero(t, metrics.TxnsWithCondensedIntentsGauge.Value())
-}
-
-// TestTxnCoordSenderCondenseLockSpans2 verifies that lock spans are condensed
-// along range boundaries when they exceed the maximum intent bytes threshold.
-func TestTxnPipelinerCondenseLockSpans2(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-
-	type span struct {
-		start, end string
-	}
-
-	c30 := "cccccccccccccccccccccccccccccc"
-
-	testCases := []struct {
-		name string
-		// Pre-existing lock spans and in-flight writes.
-		lockSpans []span
-		ifWrites  []string
-		// The budget.
-		maxBytes int64
-		// The request that the test sends.
-		req roachpb.BatchRequest
-		// The expected state after the request returns.
-		expLockSpans []span
-		expIfWrites  []string
-	}{
-		{
-			// In this scenario, a request is sent when the pipeliner already had a
-			// considerable size of inflight-writes. These cause the pipeliner to
-			// exceed its budget and collapse the spans.
-			//
-			// The in-flight writes are by themselves larger than maxBytes, so the
-			// lock span condensing is essentially told that it needs to compact the
-			// locks completely.
-			name:      "pre-existing large inflight-writes",
-			lockSpans: []span{{"a1", "a2"}, {"a3", "a4"}, {"b1", "b2"}, {"b3", "b4"}},
-			ifWrites:  []string{c30},
-			maxBytes:  20,
-			req:       putBatchNoAsyncConsensus(roachpb.Key("b"), nil),
-			// We expect the locks to be condensed as aggressively as possible, which
-			// means that they're completely condensed at the level of each range.
-			// Note that the "b" key from the request is included.
-			expLockSpans: []span{{"a1", "a4"}, {"b", "b4"}},
-			expIfWrites:  []string{c30}, // The pre-existing key.
-		},
-		{
-			// Like the above, except the large in-flight writes come from the test's
-			// request. The request will not be allowed to perform async consensus.
-			// Because it runs without async consensus, the request's key will be
-			// added to the lock spans on response.
-			name:         "new large inflight-writes",
-			lockSpans:    []span{{"a1", "a2"}, {"a3", "a4"}, {"b1", "b2"}, {"b3", "b4"}},
-			maxBytes:     20,
-			req:          putBatch(roachpb.Key(c30), nil),
-			expLockSpans: []span{{"a1", "a4"}, {"b1", "b4"}, {c30, ""}},
-			expIfWrites:  nil, // The request was not allowed to perform async consensus.
-		},
-	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			rangeIter := newDescriptorDBRangeIterator(mockRangeDescriptorDBForDescs(
-				roachpb.RangeDescriptor{
-					RangeID:  1,
-					StartKey: roachpb.RKey("a"),
-					EndKey:   roachpb.RKey("b"),
-				},
-				roachpb.RangeDescriptor{
-					RangeID:  2,
-					StartKey: roachpb.RKey("b"),
-					EndKey:   roachpb.RKey("c"),
-				},
-				roachpb.RangeDescriptor{
-					RangeID:  3,
-					StartKey: roachpb.RKey("c"),
-					EndKey:   roachpb.RKey("d"),
-				}))
-			tp, mockSender := makeMockTxnPipeliner(rangeIter)
-			trackedWritesMaxSize.Override(ctx, &tp.st.SV, tc.maxBytes)
-
-			for _, sp := range tc.lockSpans {
-				tp.lockFootprint.insert(roachpb.Span{Key: roachpb.Key(sp.start), EndKey: roachpb.Key(sp.end)})
-			}
-
-			for _, k := range tc.ifWrites {
-				tp.ifWrites.insert(roachpb.Key(k), 1)
-			}
-
-			txn := makeTxnProto()
-			mockSender.MockSend(func(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
-				br := ba.CreateReply()
-				br.Txn = ba.Txn
-				return br, nil
-			})
-
-			tc.req.Header = roachpb.Header{Txn: &txn}
-			_, pErr := tp.SendLocked(ctx, tc.req)
-			require.Nil(t, pErr)
-
-			expLockSpans := make([]roachpb.Span, len(tc.expLockSpans))
-			for i, sp := range tc.expLockSpans {
-				var endKey roachpb.Key
-				if sp.end != "" {
-					endKey = roachpb.Key(sp.end)
-				}
-				expLockSpans[i] = roachpb.Span{Key: roachpb.Key(sp.start), EndKey: endKey}
-			}
-			require.Equal(t, expLockSpans, tp.lockFootprint.asSortedSlice())
-
-			expIfWrites := make([]roachpb.Key, len(tc.expIfWrites))
-			for i, k := range tc.expIfWrites {
-				expIfWrites[i] = roachpb.Key(k)
-			}
-			ifWrites := tp.ifWrites.asSlice()
-			ifWriteKeys := make([]roachpb.Key, len(ifWrites))
-			for i, k := range ifWrites {
-				ifWriteKeys[i] = k.Key
-			}
-			require.Equal(t, expIfWrites, ifWriteKeys)
-		})
-	}
 }
 
 func putBatch(key roachpb.Key, value []byte) roachpb.BatchRequest {
@@ -1785,10 +1577,6 @@ type descriptorDBRangeIterator struct {
 }
 
 var _ condensableSpanSetRangeIterator = &descriptorDBRangeIterator{}
-
-func newDescriptorDBRangeIterator(db MockRangeDescriptorDB) *descriptorDBRangeIterator {
-	return &descriptorDBRangeIterator{db: db}
-}
 
 func (s descriptorDBRangeIterator) Valid() bool {
 	return true
@@ -1900,9 +1688,9 @@ func TestTxnPipelinerRejectAboveBudget(t *testing.T) {
 				t.Fatalf("invalid test")
 			}
 
-			tp, mockSender := makeMockTxnPipeliner(nil /* iter */)
-			trackedWritesMaxSize.Override(ctx, &tp.st.SV, 10) /* reject when exceeding 10 bytes */
-			rejectTxnOverTrackedWritesBudget.Override(ctx, &tp.st.SV, true)
+			tp, mockSender := makeMockTxnPipeliner()
+			trackedWritesMaxSize.Override(&tp.st.SV, 10) /* reject when exceeding 10 bytes */
+			rejectTxnOverTrackedWritesBudget.Override(&tp.st.SV, true)
 
 			txn := makeTxnProto()
 

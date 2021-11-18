@@ -1,3 +1,4 @@
+# Test the crdb_internal.force_delete_table_data function
 subtest lost-table-data
 
 statement ok
@@ -22,10 +23,10 @@ let $corrupt_id
 SELECT id FROM system.namespace WHERE name = 'corruptdesc';
 
 let $parentID
-SELECT pid FROM system.namespace AS n(pid,psid,name,id) WHERE id = $t_id;
+select pid from system.namespace2 as n(pid,psid,name,id) where id=$t_id;
 
 let $parentSchemaID
-SELECT psid FROM system.namespace AS n(pid,psid,name,id) WHERE id = $t_id;
+select psid from system.namespace2 as n(pid,psid,name,id)  where id=$t_id;
 
 query I
 SELECT * FROM crdb_internal.lost_descriptors_with_data;
@@ -116,7 +117,6 @@ SELECT * FROM crdb_internal.unsafe_upsert_descriptor($corrupt_id, crdb_internal.
 statement ok
 SELECT * FROM corruptdesc;
 
-# Test the crdb_internal.force_delete_table_data function
 subtest force-delete-data
 
 statement ok
@@ -153,10 +153,10 @@ SELECT * FROM forcedeletemydata ORDER BY v ASC
 7
 
 let $parentID
-SELECT pid FROM system.namespace AS n(pid,psid,name,id) WHERE id = $t_id;
+select pid from system.namespace2 as n(pid,psid,name,id) where id=$t_id;
 
 let $parentSchemaID
-SELECT psid FROM system.namespace AS n(pid,psid,name,id) WHERE id = $t_id;
+select psid from system.namespace2 as n(pid,psid,name,id)  where id=$t_id;
 
 let $json
 WITH descs AS (

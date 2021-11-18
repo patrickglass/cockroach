@@ -114,9 +114,6 @@ func RunNemesis(f TestFeedFactory, db *gosql.DB, isSinkless bool) (Validator, er
 			eventRemoveColumn{
 				CanRemoveColumnAfter: fsm.False,
 			}: 5,
-
-			// eventCreateEnum creates a new enum type.
-			eventCreateEnum{}: 5,
 		},
 	}
 
@@ -135,11 +132,7 @@ func RunNemesis(f TestFeedFactory, db *gosql.DB, isSinkless bool) (Validator, er
 	// then randomly either committing or rolling back transactions. This will
 	// leave some committed rows.
 	for i := 0; i < ns.rowCount*5; i++ {
-		payload, err := newOpenTxnPayload(ns)
-		if err != nil {
-			return nil, err
-		}
-		if err := openTxn(fsm.Args{Ctx: ctx, Extended: ns, Payload: payload}); err != nil {
+		if err := openTxn(fsm.Args{Ctx: ctx, Extended: ns}); err != nil {
 			return nil, err
 		}
 		// Randomly commit or rollback, but commit at least one row to the table.
@@ -195,11 +188,7 @@ func RunNemesis(f TestFeedFactory, db *gosql.DB, isSinkless bool) (Validator, er
 	// Maybe open an intent.
 	if rand.Intn(2) < 1 {
 		txnOpenBeforeInitialScan = true
-		payload, err := newOpenTxnPayload(ns)
-		if err != nil {
-			return nil, err
-		}
-		if err := openTxn(fsm.Args{Ctx: ctx, Extended: ns, Payload: payload}); err != nil {
+		if err := openTxn(fsm.Args{Ctx: ctx, Extended: ns}); err != nil {
 			return nil, err
 		}
 	}
@@ -219,11 +208,11 @@ func RunNemesis(f TestFeedFactory, db *gosql.DB, isSinkless bool) (Validator, er
 		if _, ok := state.(stateDone); ok {
 			return ns.v, nil
 		}
-		event, eventPayload, err := ns.nextEvent(rng, state, &m)
+		event, err := ns.nextEvent(rng, state, foo, &m)
 		if err != nil {
 			return nil, err
 		}
-		if err := m.ApplyWithPayload(ctx, event, eventPayload); err != nil {
+		if err := m.Apply(ctx, event); err != nil {
 			return nil, err
 		}
 	}
@@ -235,27 +224,6 @@ const (
 	openTxnTypeUpsert openTxnType = `UPSERT`
 	openTxnTypeDelete openTxnType = `DELETE`
 )
-
-type openTxnPayload struct {
-	openTxnType openTxnType
-
-	// rowID is the column ID to operate on.
-	rowID int
-}
-
-type addColumnType string
-
-const (
-	addColumnTypeString addColumnType = "string"
-	addColumnTypeEnum   addColumnType = "enum"
-)
-
-type addColumnPayload struct {
-	columnType addColumnType
-
-	// if columnType is enumColumn, which enum to add
-	enum int
-}
 
 type nemeses struct {
 	rowCount           int
@@ -272,27 +240,24 @@ type nemeses struct {
 	openTxnType            openTxnType
 	openTxnID              int
 	openTxnTs              string
-
-	enumCount int
 }
 
 // nextEvent selects the next state transition.
 func (ns *nemeses) nextEvent(
-	rng *rand.Rand, state fsm.State, m *fsm.Machine,
-) (se fsm.Event, payload fsm.EventPayload, err error) {
-	var noPayload interface{}
+	rng *rand.Rand, state fsm.State, f TestFeed, m *fsm.Machine,
+) (se fsm.Event, err error) {
 	if ns.v.NumResolvedWithRows >= 6 && ns.v.NumResolvedRows >= 10 {
-		return eventFinished{}, noPayload, nil
+		return eventFinished{}, nil
 	}
 	possibleEvents, ok := compiledStateTransitions.GetExpanded()[state]
 	if !ok {
-		return nil, noPayload, errors.Errorf(`unknown state: %T %s`, state, state)
+		return nil, errors.Errorf(`unknown state: %T %s`, state, state)
 	}
 	mixTotal := 0
 	for event := range possibleEvents {
 		weight, ok := ns.eventMix[event]
 		if !ok {
-			return nil, noPayload, errors.Errorf(`unknown event: %T`, event)
+			return nil, errors.Errorf(`unknown event: %T`, event)
 		}
 		mixTotal += weight
 	}
@@ -308,70 +273,24 @@ func (ns *nemeses) nextEvent(
 			if ns.availableRows < 1 {
 				s := state.(stateRunning)
 				if s.TxnOpen.Get() {
-					return eventCommit{}, noPayload, nil
+					return eventCommit{}, nil
 				}
-				payload, err := newOpenTxnPayload(ns)
-				if err != nil {
-					return eventOpenTxn{}, noPayload, err
-				}
-				return eventOpenTxn{}, payload, nil
+				return eventOpenTxn{}, nil
 			}
-			return eventFeedMessage{}, noPayload, nil
-		}
-		if _, ok := event.(eventOpenTxn); ok {
-			payload, err := newOpenTxnPayload(ns)
-			if err != nil {
-				return eventOpenTxn{}, noPayload, err
-			}
-			return eventOpenTxn{}, payload, nil
+			return eventFeedMessage{}, nil
 		}
 		if e, ok := event.(eventAddColumn); ok {
 			e.CanAddColumnAfter = fsm.FromBool(ns.currentTestColumnCount < ns.maxTestColumnCount-1)
-			payload := addColumnPayload{}
-			if ns.enumCount > 0 && rng.Intn(4) < 1 {
-				payload.columnType = addColumnTypeEnum
-				payload.enum = rng.Intn(ns.enumCount)
-			} else {
-				payload.columnType = addColumnTypeString
-			}
-			return e, payload, nil
+			return e, nil
 		}
 		if e, ok := event.(eventRemoveColumn); ok {
 			e.CanRemoveColumnAfter = fsm.FromBool(ns.currentTestColumnCount > 1)
-			return e, noPayload, nil
+			return e, nil
 		}
-		return event, noPayload, nil
+		return event, nil
 	}
 
 	panic(`unreachable`)
-}
-
-func newOpenTxnPayload(ns *nemeses) (openTxnPayload, error) {
-	payload := openTxnPayload{}
-	if rand.Intn(10) == 0 {
-		rows, err := ns.db.Query(`SELECT id FROM foo ORDER BY random() LIMIT 1`)
-		if err != nil {
-			return payload, err
-		}
-		defer func() { _ = rows.Close() }()
-		if rows.Next() {
-			var deleteID int
-			if err := rows.Scan(&deleteID); err != nil {
-				return payload, err
-			}
-			payload.rowID = deleteID
-			payload.openTxnType = openTxnTypeDelete
-			return payload, nil
-		}
-		if err := rows.Err(); err != nil {
-			return payload, err
-		}
-		// No rows to delete, do an upsert
-	}
-
-	payload.rowID = rand.Intn(ns.rowCount)
-	payload.openTxnType = openTxnTypeUpsert
-	return payload, nil
 }
 
 type stateRunning struct {
@@ -400,7 +319,6 @@ type eventAddColumn struct {
 type eventRemoveColumn struct {
 	CanRemoveColumnAfter fsm.Bool
 }
-type eventCreateEnum struct{}
 type eventFinished struct{}
 
 func (eventOpenTxn) Event()      {}
@@ -414,7 +332,6 @@ func (eventRollback) Event()     {}
 func (eventSplit) Event()        {}
 func (eventAddColumn) Event()    {}
 func (eventRemoveColumn) Event() {}
-func (eventCreateEnum) Event()   {}
 func (eventFinished) Event()     {}
 
 var stateTransitions = fsm.Pattern{
@@ -500,15 +417,6 @@ var stateTransitions = fsm.Pattern{
 				CanRemoveColumn: fsm.Var("CanRemoveColumn")},
 			Action: logEvent(openTxn),
 		},
-		eventCreateEnum{}: {
-			Next: stateRunning{
-				FeedPaused:      fsm.Var("FeedPaused"),
-				TxnOpen:         fsm.False,
-				CanAddColumn:    fsm.Var("CanAddColumn"),
-				CanRemoveColumn: fsm.Var("CanRemoveColumn"),
-			},
-			Action: logEvent(createEnum),
-		},
 	},
 	stateRunning{
 		FeedPaused:      fsm.Var("FeedPaused"),
@@ -585,7 +493,9 @@ var compiledStateTransitions = fsm.Compile(stateTransitions)
 
 func logEvent(fn func(fsm.Args) error) func(fsm.Args) error {
 	return func(a fsm.Args) error {
-		log.Infof(a.Ctx, "Event: %#v, Payload: %#v\n", a.Event, a.Payload)
+		if log.V(1) {
+			log.Infof(a.Ctx, "%#v\n", a.Event)
+		}
 		return fn(a)
 	}
 }
@@ -599,31 +509,44 @@ func cleanup(a fsm.Args) error {
 
 func openTxn(a fsm.Args) error {
 	ns := a.Extended.(*nemeses)
-	payload := a.Payload.(openTxnPayload)
+
+	const noDeleteSentinel = int(-1)
+	// 10% of the time attempt a DELETE.
+	deleteID := noDeleteSentinel
+	if rand.Intn(10) == 0 {
+		rows, err := ns.db.Query(`SELECT id FROM foo ORDER BY random() LIMIT 1`)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		if rows.Next() {
+			if err := rows.Scan(&deleteID); err != nil {
+				return err
+			}
+		}
+		// If there aren't any rows, skip the DELETE this time.
+	}
 
 	txn, err := ns.db.Begin()
 	if err != nil {
 		return err
 	}
-	switch payload.openTxnType {
-	case openTxnTypeUpsert:
+	if deleteID == noDeleteSentinel {
 		if err := txn.QueryRow(
-			`UPSERT INTO foo VALUES ($1, cluster_logical_timestamp()::string) RETURNING id, ts`,
-			payload.rowID,
+			`UPSERT INTO foo VALUES ((random() * $1)::int, cluster_logical_timestamp()::string) RETURNING id, ts`,
+			ns.rowCount,
 		).Scan(&ns.openTxnID, &ns.openTxnTs); err != nil {
 			return err
 		}
-	case openTxnTypeDelete:
+		ns.openTxnType = openTxnTypeUpsert
+	} else {
 		if err := txn.QueryRow(
-			`DELETE FROM foo WHERE id = $1 RETURNING id, ts`,
-			payload.rowID,
+			`DELETE FROM foo WHERE id = $1 RETURNING id, ts`, deleteID,
 		).Scan(&ns.openTxnID, &ns.openTxnTs); err != nil {
 			return err
 		}
-	default:
-		panic("unreachable")
+		ns.openTxnType = openTxnTypeDelete
 	}
-	ns.openTxnType = payload.openTxnType
 	ns.txn = txn
 	return nil
 }
@@ -648,40 +571,18 @@ func rollback(a fsm.Args) error {
 	return ns.txn.Rollback()
 }
 
-func createEnum(a fsm.Args) error {
-	ns := a.Extended.(*nemeses)
-
-	if _, err := ns.db.Exec(fmt.Sprintf(`CREATE TYPE enum%d AS ENUM ('hello')`, ns.enumCount)); err != nil {
-		return err
-	}
-	ns.enumCount++
-	return nil
-}
-
 func addColumn(a fsm.Args) error {
 	ns := a.Extended.(*nemeses)
-	payload := a.Payload.(addColumnPayload)
 
 	if ns.currentTestColumnCount >= ns.maxTestColumnCount {
 		return errors.AssertionFailedf(`addColumn should be called when`+
 			`there are less than %d columns.`, ns.maxTestColumnCount)
 	}
 
-	switch payload.columnType {
-	case addColumnTypeEnum:
-		// Pick a random enum to add.
-		enum := payload.enum
-		if _, err := ns.db.Exec(fmt.Sprintf(`ALTER TABLE foo ADD COLUMN test%d enum%d DEFAULT 'hello'`,
-			ns.currentTestColumnCount, enum)); err != nil {
-			return err
-		}
-	case addColumnTypeString:
-		if _, err := ns.db.Exec(fmt.Sprintf(`ALTER TABLE foo ADD COLUMN test%d STRING DEFAULT 'x'`,
-			ns.currentTestColumnCount)); err != nil {
-			return err
-		}
+	if _, err := ns.db.Exec(fmt.Sprintf(`ALTER TABLE foo ADD COLUMN test%d STRING DEFAULT 'x'`,
+		ns.currentTestColumnCount)); err != nil {
+		return err
 	}
-
 	ns.currentTestColumnCount++
 	var rows int
 	// Adding a column should trigger a full table scan.
@@ -724,43 +625,37 @@ func noteFeedMessage(a fsm.Args) error {
 		return errors.AssertionFailedf(`noteFeedMessage should be called with at` +
 			`least one available row.`)
 	}
-	for {
-		m, err := ns.f.Next()
+	m, err := ns.f.Next()
+	if err != nil {
+		return err
+	} else if m == nil {
+		return errors.Errorf(`expected another message`)
+	}
+
+	if len(m.Resolved) > 0 {
+		_, ts, err := ParseJSONValueTimestamps(m.Resolved)
 		if err != nil {
 			return err
-		} else if m == nil {
-			return errors.Errorf(`expected another message`)
 		}
-
-		if len(m.Resolved) > 0 {
-			_, ts, err := ParseJSONValueTimestamps(m.Resolved)
-			if err != nil {
-				return err
-			}
-			log.Infof(a.Ctx, "%v", string(m.Resolved))
-			err = ns.v.NoteResolved(m.Partition, ts)
-			if err != nil {
-				return err
-			}
-			// Keep consuming until we hit a row
-		} else {
-			ts, _, err := ParseJSONValueTimestamps(m.Value)
-			if err != nil {
-				return err
-			}
-			ns.availableRows--
-			log.Infof(a.Ctx, "%s->%s", m.Key, m.Value)
-			return ns.v.NoteRow(m.Partition, string(m.Key), string(m.Value), ts)
-		}
+		log.Infof(a.Ctx, "%v", string(m.Resolved))
+		return ns.v.NoteResolved(m.Partition, ts)
 	}
+	ts, _, err := ParseJSONValueTimestamps(m.Value)
+	if err != nil {
+		return err
+	}
+
+	ns.availableRows--
+	log.Infof(a.Ctx, "%s->%s", m.Key, m.Value)
+	return ns.v.NoteRow(m.Partition, string(m.Key), string(m.Value), ts)
 }
 
 func pause(a fsm.Args) error {
-	return a.Extended.(*nemeses).f.(EnterpriseTestFeed).Pause()
+	return a.Extended.(*nemeses).f.Pause()
 }
 
 func resume(a fsm.Args) error {
-	return a.Extended.(*nemeses).f.(EnterpriseTestFeed).Resume()
+	return a.Extended.(*nemeses).f.Resume()
 }
 
 func abort(a fsm.Args) error {

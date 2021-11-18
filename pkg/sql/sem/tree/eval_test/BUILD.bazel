@@ -7,10 +7,9 @@ go_test(
         "eval_test.go",
         "main_test.go",
     ],
-    data = ["//pkg/sql/sem/tree:testdata"],
+    tags = ["broken_in_bazel"],
     deps = [
         "//pkg/base",
-        "//pkg/build/bazel",
         "//pkg/col/coldata",
         "//pkg/security",
         "//pkg/security/securitytest",

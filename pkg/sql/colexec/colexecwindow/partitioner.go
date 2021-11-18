@@ -11,6 +11,8 @@
 package colexecwindow
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
@@ -32,29 +34,35 @@ func NewWindowSortingPartitioner(
 	partitionIdxs []uint32,
 	ordCols []execinfrapb.Ordering_Column,
 	partitionColIdx int,
-	createDiskBackedSorter func(input colexecop.Operator, inputTypes []*types.T, orderingCols []execinfrapb.Ordering_Column) colexecop.Operator,
-) colexecop.Operator {
+	createDiskBackedSorter func(input colexecop.Operator, inputTypes []*types.T, orderingCols []execinfrapb.Ordering_Column) (colexecop.Operator, error),
+) (op colexecop.Operator, err error) {
 	partitionAndOrderingCols := make([]execinfrapb.Ordering_Column, len(partitionIdxs)+len(ordCols))
 	for i, idx := range partitionIdxs {
 		partitionAndOrderingCols[i] = execinfrapb.Ordering_Column{ColIdx: idx}
 	}
 	copy(partitionAndOrderingCols[len(partitionIdxs):], ordCols)
-	input = createDiskBackedSorter(input, inputTyps, partitionAndOrderingCols)
+	input, err = createDiskBackedSorter(input, inputTyps, partitionAndOrderingCols)
+	if err != nil {
+		return nil, err
+	}
 
 	var distinctCol []bool
-	input, distinctCol = colexecbase.OrderedDistinctColsToOperators(input, partitionIdxs, inputTyps, false /* nullsAreDistinct */)
+	input, distinctCol, err = colexecbase.OrderedDistinctColsToOperators(input, partitionIdxs, inputTyps)
+	if err != nil {
+		return nil, err
+	}
 
 	input = colexecutils.NewVectorTypeEnforcer(allocator, input, types.Bool, partitionColIdx)
 	return &windowSortingPartitioner{
-		OneInputHelper:  colexecop.MakeOneInputHelper(input),
+		OneInputNode:    colexecop.NewOneInputNode(input),
 		allocator:       allocator,
 		distinctCol:     distinctCol,
 		partitionColIdx: partitionColIdx,
-	}
+	}, nil
 }
 
 type windowSortingPartitioner struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator *colmem.Allocator
 	// distinctCol is the output column of the chain of ordered distinct
@@ -64,8 +72,12 @@ type windowSortingPartitioner struct {
 	partitionColIdx int
 }
 
-func (p *windowSortingPartitioner) Next() coldata.Batch {
-	b := p.Input.Next()
+func (p *windowSortingPartitioner) Init() {
+	p.Input.Init()
+}
+
+func (p *windowSortingPartitioner) Next(ctx context.Context) coldata.Batch {
+	b := p.Input.Next(ctx)
 	if b.Length() == 0 {
 		return coldata.ZeroBatch
 	}

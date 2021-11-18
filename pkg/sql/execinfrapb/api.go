@@ -11,8 +11,6 @@
 package execinfrapb
 
 import (
-	"strconv"
-
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -26,10 +24,6 @@ type ProcessorID int
 // machine boundaries. The identifier can only be used in the context of a
 // specific flow.
 type StreamID int
-
-func (sid StreamID) String() string {
-	return strconv.Itoa(int(sid))
-}
 
 // FlowID identifies a flow. It is most importantly used when setting up streams
 // between nodes.
@@ -53,8 +47,8 @@ type DistSQLVersion uint32
 // MakeEvalContext serializes some of the fields of a tree.EvalContext into a
 // execinfrapb.EvalContext proto.
 func MakeEvalContext(evalCtx *tree.EvalContext) EvalContext {
-	sessionDataProto := evalCtx.SessionData().SessionData
-	sessiondata.MarshalNonLocal(evalCtx.SessionData(), &sessionDataProto)
+	sessionDataProto := evalCtx.SessionData.SessionData
+	sessiondata.MarshalNonLocal(evalCtx.SessionData, &sessionDataProto)
 	return EvalContext{
 		SessionData:        sessionDataProto,
 		StmtTimestampNanos: evalCtx.StmtTimestamp.UnixNano(),
@@ -69,11 +63,6 @@ func (m *BackupDataSpec) User() security.SQLUsername {
 
 // User accesses the user field.
 func (m *CSVWriterSpec) User() security.SQLUsername {
-	return m.UserProto.Decode()
-}
-
-// User accesses the user field.
-func (m *ParquetWriterSpec) User() security.SQLUsername {
 	return m.UserProto.Decode()
 }
 

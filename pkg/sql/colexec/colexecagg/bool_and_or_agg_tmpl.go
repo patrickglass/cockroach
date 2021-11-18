@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for bool_and_or_agg.eg.go. It's formatted in a
 // special way, so it's both valid Go and a valid text/template input. This
@@ -60,7 +58,7 @@ type bool_OP_TYPE_AGGKINDAgg struct {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	orderedAggregateFuncBase
 	// {{else}}
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// {{end}}
 	col    []bool
 	curAgg bool
@@ -75,18 +73,17 @@ func (a *bool_OP_TYPE_AGGKINDAgg) SetOutput(vec coldata.Vec) {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	a.orderedAggregateFuncBase.SetOutput(vec)
 	// {{else}}
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	// {{end}}
 	a.col = vec.Bool()
 }
 
 func (a *bool_OP_TYPE_AGGKINDAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	execgen.SETVARIABLESIZE(oldCurAggSize, a.curAgg)
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec.Bool(), vec.Nulls()
-	// {{if not (eq "_AGGKIND" "Window")}}
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		// {{if eq "_AGGKIND" "Ordered"}}
 		// Capture groups and col to force bounds check to work. See
@@ -99,21 +96,21 @@ func (a *bool_OP_TYPE_AGGKINDAgg) Compute(
 		// sel to specify the tuples to be aggregated.
 		// */}}
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 					_ACCUMULATE_BOOLEAN(a, nulls, i, true, false)
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 					_ACCUMULATE_BOOLEAN(a, nulls, i, false, false)
 				}
 			}
 		} else
 		// {{end}}
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 					_ACCUMULATE_BOOLEAN(a, nulls, i, true, true)
@@ -126,21 +123,6 @@ func (a *bool_OP_TYPE_AGGKINDAgg) Compute(
 		}
 	},
 	)
-	// {{else}}
-	// Unnecessary memory accounting can have significant overhead for window
-	// aggregate functions because Compute is called at least once for every row.
-	// For this reason, we do not use PerformOperation here.
-	_, _ = col.Get(endIdx-1), col.Get(startIdx)
-	if nulls.MaybeHasNulls() {
-		for i := startIdx; i < endIdx; i++ {
-			_ACCUMULATE_BOOLEAN(a, nulls, i, true, false)
-		}
-	} else {
-		for i := startIdx; i < endIdx; i++ {
-			_ACCUMULATE_BOOLEAN(a, nulls, i, false, false)
-		}
-	}
-	// {{end}}
 	execgen.SETVARIABLESIZE(newCurAggSize, a.curAgg)
 	if newCurAggSize != oldCurAggSize {
 		a.allocator.AdjustMemoryUsage(int64(newCurAggSize - oldCurAggSize))

@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//go:build crdb_test
 // +build crdb_test
 
 package memo
@@ -17,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -40,7 +40,7 @@ func (m *Memo) CheckExpr(e opt.Expr) {
 		// If the expression was added to an existing group, cross-check its
 		// properties against the properties of the group. Skip this check if the
 		// operator is known to not have code for building logical props.
-		if t != t.FirstExpr() && t.Op() != opt.MergeJoinOp && t.Op() != opt.PlaceholderScanOp {
+		if t != t.FirstExpr() && t.Op() != opt.MergeJoinOp {
 			var relProps props.Relational
 			// Don't build stats when verifying logical props - unintentionally
 			// building stats for non-normalized expressions could add extra colStats
@@ -75,13 +75,6 @@ func (m *Memo) CheckExpr(e opt.Expr) {
 	case *ScanExpr:
 		if t.Flags.NoIndexJoin && t.Flags.ForceIndex {
 			panic(errors.AssertionFailedf("NoIndexJoin and ForceIndex set"))
-		}
-		if evalCtx := m.logPropsBuilder.evalCtx; evalCtx != nil && t.Constraint != nil {
-			if expected := t.Constraint.ExactPrefix(evalCtx); expected != t.ExactPrefix {
-				panic(errors.AssertionFailedf(
-					"expected exact prefix %d but found %d", expected, t.ExactPrefix,
-				))
-			}
 		}
 
 	case *ProjectExpr:
@@ -138,13 +131,6 @@ func (m *Memo) CheckExpr(e opt.Expr) {
 			))
 		}
 
-		switch t.Op() {
-		case opt.LocalityOptimizedSearchOp:
-			if !setPrivate.Ordering.Any() {
-				panic(errors.AssertionFailedf("locality optimized search op has a non-empty ordering"))
-			}
-		}
-
 	case *AggregationsExpr:
 		var checkAggs func(scalar opt.ScalarExpr)
 		checkAggs = func(scalar opt.ScalarExpr) {
@@ -177,7 +163,6 @@ func (m *Memo) CheckExpr(e opt.Expr) {
 
 	case *DistinctOnExpr, *EnsureDistinctOnExpr, *UpsertDistinctOnExpr, *EnsureUpsertDistinctOnExpr:
 		checkErrorOnDup(e.(RelExpr))
-		checkNullsAreDistinct(e.(RelExpr))
 
 		// Check that aggregates can be only FirstAgg or ConstAgg.
 		for _, item := range *t.Child(1).(*AggregationsExpr) {
@@ -191,7 +176,6 @@ func (m *Memo) CheckExpr(e opt.Expr) {
 
 	case *GroupByExpr, *ScalarGroupByExpr:
 		checkErrorOnDup(e.(RelExpr))
-		checkNullsAreDistinct(e.(RelExpr))
 
 		// Check that aggregates cannot be FirstAgg.
 		for _, item := range *t.Child(1).(*AggregationsExpr) {
@@ -261,8 +245,8 @@ func (m *Memo) CheckExpr(e opt.Expr) {
 				switch kind {
 				case cat.System:
 					panic(errors.AssertionFailedf("system column found in insertion columns"))
-				case cat.Inverted:
-					panic(errors.AssertionFailedf("inverted column found in insertion columns"))
+				case cat.VirtualInverted:
+					panic(errors.AssertionFailedf("virtual inverted column found in insertion columns"))
 				}
 			}
 		}
@@ -301,27 +285,6 @@ func (m *Memo) CheckExpr(e opt.Expr) {
 	case *ConstExpr:
 		if t.Value == tree.DNull {
 			panic(errors.AssertionFailedf("NULL values should always use NullExpr, not ConstExpr"))
-		}
-		if t.Value == tree.DBoolTrue {
-			panic(errors.AssertionFailedf("true values should always use TrueSingleton, not ConstExpr"))
-		}
-		if t.Value == tree.DBoolFalse {
-			panic(errors.AssertionFailedf("false values should always use FalseSingleton, not ConstExpr"))
-		}
-
-	case *WithExpr:
-		if !t.BindingOrdering.Any() && (!t.Mtr.Set || !t.Mtr.Materialize) {
-			panic(errors.AssertionFailedf("with ordering can only be specified with forced materialization"))
-		}
-
-	case *WithScanExpr:
-		// Verify the input columns exist in the binding.
-		binding := m.Metadata().WithBinding(t.With)
-		if binding == nil {
-			panic(errors.AssertionFailedf("WithScan binding missing"))
-		}
-		if !t.InCols.ToSet().SubsetOf(binding.(RelExpr).Relational().OutputCols) {
-			panic(errors.AssertionFailedf("invalid WithScan input columns %v", t.InCols))
 		}
 
 	default:
@@ -377,29 +340,16 @@ func (m *Memo) checkMutationExpr(rel RelExpr, private *MutationPrivate) {
 
 // checkExprOrdering runs checks on orderings stored inside operators.
 func checkExprOrdering(e opt.Expr) {
-	// Verify that orderings stored in operators only refer to output columns.
-	var ordering props.OrderingChoice
+	// Verify that orderings stored in operators only refer to columns produced by
+	// their input.
+	var ordering physical.OrderingChoice
 	switch t := e.Private().(type) {
-	case *props.OrderingChoice:
+	case *physical.OrderingChoice:
 		ordering = *t
 	case *OrdinalityPrivate:
 		ordering = t.Ordering
 	case GroupingPrivate:
 		ordering = t.Ordering
-	case *SetPrivate:
-		ordering = t.Ordering
-		switch e.Op() {
-		case opt.ExceptOp, opt.ExceptAllOp, opt.IntersectOp, opt.IntersectAllOp, opt.UnionOp:
-			// For these operators, the ordering must include all output columns.
-			if !ordering.Any() {
-				if outCols := e.(RelExpr).Relational().OutputCols; !outCols.SubsetOf(ordering.ColSet()) {
-					panic(errors.AssertionFailedf(
-						"ordering for streaming set ops must include all output columns %v (op: %s, outcols: %v)",
-						log.Safe(ordering), log.Safe(e.Op()), log.Safe(outCols),
-					))
-				}
-			}
-		}
 	default:
 		return
 	}
@@ -438,23 +388,6 @@ func checkErrorOnDup(e RelExpr) {
 		e.Private().(*GroupingPrivate).ErrorOnDup == "" {
 		panic(errors.AssertionFailedf(
 			"%s should never leave ErrorOnDup as an empty string", log.Safe(e.Op())))
-	}
-}
-
-func checkNullsAreDistinct(e RelExpr) {
-	// Only UpsertDistinctOn and EnsureUpsertDistinctOn should set the
-	// NullsAreDistinct field to true.
-	if e.Op() != opt.UpsertDistinctOnOp &&
-		e.Op() != opt.EnsureUpsertDistinctOnOp &&
-		e.Private().(*GroupingPrivate).NullsAreDistinct {
-		panic(errors.AssertionFailedf(
-			"%s should never set NullsAreDistinct to true", log.Safe(e.Op())))
-	}
-	if (e.Op() == opt.UpsertDistinctOnOp ||
-		e.Op() == opt.EnsureUpsertDistinctOnOp) &&
-		!e.Private().(*GroupingPrivate).NullsAreDistinct {
-		panic(errors.AssertionFailedf(
-			"%s should never set NullsAreDistinct to false", log.Safe(e.Op())))
 	}
 }
 

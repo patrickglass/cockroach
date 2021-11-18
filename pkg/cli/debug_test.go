@@ -39,14 +39,22 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/pebble"
 )
 
 func createStore(t *testing.T, path string) {
 	t.Helper()
-	db, err := storage.Open(
-		context.Background(),
-		storage.Filesystem(path),
-		storage.CacheSize(server.DefaultCacheSize))
+	cache := pebble.NewCache(server.DefaultCacheSize)
+	defer cache.Unref()
+	cfg := storage.PebbleConfig{
+		StorageConfig: base.StorageConfig{
+			Dir:       path,
+			MustExist: false,
+		},
+	}
+	cfg.Opts = storage.DefaultPebbleOptions()
+	cfg.Opts.Cache = cache
+	db, err := storage.NewPebble(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +242,7 @@ func TestRemoveDeadReplicas(t *testing.T) {
 						t.Fatal(err)
 					}
 
-					// At this point the intent has been written to Pebble but this
+					// At this point the intent has been written to rocksdb but this
 					// write was not synced (only the raft log append was synced). We
 					// need to force another sync, but we're far from the storage
 					// layer here so the easiest thing to do is simply perform a

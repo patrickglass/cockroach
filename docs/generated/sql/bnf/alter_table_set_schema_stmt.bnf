@@ -1,3 +1,0 @@
-alter_table_set_schema_stmt ::=
-	'ALTER' 'TABLE' relation_expr 'SET' 'SCHEMA' schema_name
-	| 'ALTER' 'TABLE' 'IF' 'EXISTS' relation_expr 'SET' 'SCHEMA' schema_name

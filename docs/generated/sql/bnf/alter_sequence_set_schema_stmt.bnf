@@ -1,3 +1,0 @@
-alter_sequence_set_schema_stmt ::=
-	'ALTER' 'SEQUENCE' relation_expr 'SET' 'SCHEMA' schema_name
-	| 'ALTER' 'SEQUENCE' 'IF' 'EXISTS' relation_expr 'SET' 'SCHEMA' schema_name

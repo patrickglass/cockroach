@@ -13,7 +13,6 @@ package rangefeed
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -25,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/span"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 )
 
@@ -97,9 +95,9 @@ func newFactory(stopper *stop.Stopper, client kvDB, knobs *TestingKnobs) *Factor
 	}
 }
 
-// RangeFeed constructs a new rangefeed and runs it in an async task.
+// RangeFeed constructs a new RangeFeed.
 //
-// The rangefeed can be stopped via Close(); otherwise, it will stop when the
+// The range feed can be stopped via Close(); otherwise, it will stop when the
 // server shuts down.
 //
 // The only error which can be returned will indicate that the server is being
@@ -107,45 +105,35 @@ func newFactory(stopper *stop.Stopper, client kvDB, knobs *TestingKnobs) *Factor
 func (f *Factory) RangeFeed(
 	ctx context.Context,
 	name string,
-	sp roachpb.Span,
+	span roachpb.Span,
 	initialTimestamp hlc.Timestamp,
-	onValue OnValue,
+	onValue func(ctx context.Context, value *roachpb.RangeFeedValue),
 	options ...Option,
 ) (_ *RangeFeed, err error) {
-	r := f.New(name, sp, initialTimestamp, onValue, options...)
-	if err := r.Start(ctx); err != nil {
-		return nil, err
-	}
-	return r, nil
-}
-
-// New constructs a new RangeFeed (without running it).
-func (f *Factory) New(
-	name string, sp roachpb.Span, initialTimestamp hlc.Timestamp, onValue OnValue, options ...Option,
-) *RangeFeed {
 	r := RangeFeed{
 		client:  f.client,
 		stopper: f.stopper,
 		knobs:   f.knobs,
 
 		initialTimestamp: initialTimestamp,
-		name:             name,
-		span:             sp,
+		span:             span,
 		onValue:          onValue,
 
 		stopped: make(chan struct{}),
 	}
 	initConfig(&r.config, options)
-	return &r
+	ctx = logtags.AddTag(ctx, "rangefeed", name)
+	ctx, r.cancel = f.stopper.WithCancelOnQuiesce(ctx)
+	if err := f.stopper.RunAsyncTask(ctx, "rangefeed", r.run); err != nil {
+		r.cancel()
+		return nil, err
+	}
+	return &r, nil
 }
-
-// OnValue is called for each rangefeed value.
-type OnValue func(ctx context.Context, value *roachpb.RangeFeedValue)
 
 // RangeFeed represents a running RangeFeed.
 type RangeFeed struct {
 	config
-	name    string
 	client  kvDB
 	stopper *stop.Stopper
 	knobs   *TestingKnobs
@@ -153,49 +141,15 @@ type RangeFeed struct {
 	initialTimestamp hlc.Timestamp
 
 	span    roachpb.Span
-	onValue OnValue
+	onValue func(ctx context.Context, value *roachpb.RangeFeedValue)
 
 	closeOnce sync.Once
 	cancel    context.CancelFunc
 	stopped   chan struct{}
-
-	started int32 // accessed atomically
 }
 
-// Start kicks off the rangefeed in an async task, it can only be invoked once.
-// All the installed callbacks (OnValue, OnCheckpoint, OnFrontierAdvance,
-// OnInitialScanDone) are called in said async task in a single thread.
-func (f *RangeFeed) Start(ctx context.Context) error {
-	if !atomic.CompareAndSwapInt32(&f.started, 0, 1) {
-		return errors.AssertionFailedf("rangefeed already started")
-	}
-
-	// Maintain a frontier in order to resume at a reasonable timestamp.
-	// TODO(ajwerner): Consider exposing the frontier through a RangeFeed method.
-	// Doing so would require some synchronization.
-	frontier, err := span.MakeFrontier(f.span)
-	if err != nil {
-		return err
-	}
-	if _, err := frontier.Forward(f.span, f.initialTimestamp); err != nil {
-		return err
-	}
-	runWithFrontier := func(ctx context.Context) {
-		f.run(ctx, frontier)
-	}
-
-	ctx = logtags.AddTag(ctx, "rangefeed", f.name)
-	ctx, f.cancel = f.stopper.WithCancelOnQuiesce(ctx)
-	if err := f.stopper.RunAsyncTask(ctx, "rangefeed", runWithFrontier); err != nil {
-		f.cancel()
-		return err
-	}
-	return nil
-}
-
-// Close closes the RangeFeed and waits for it to shut down; it does so
-// idempotently. It waits for the currently running handler, if any, to complete
-// and guarantees that no future handlers will be invoked after this point.
+// Close closes the RangeFeed and waits for it to shut down.
+// Close is idempotent.
 func (f *RangeFeed) Close() {
 	f.closeOnce.Do(func() {
 		f.cancel()
@@ -213,7 +167,7 @@ const resetThreshold = 30 * time.Second
 
 // run will run the RangeFeed until the context is canceled or if the client
 // indicates that an initial scan error is non-recoverable.
-func (f *RangeFeed) run(ctx context.Context, frontier *span.Frontier) {
+func (f *RangeFeed) run(ctx context.Context) {
 	defer close(f.stopped)
 	r := retry.StartWithCtx(ctx, f.retryOptions)
 	restartLogEvery := log.Every(10 * time.Second)
@@ -231,6 +185,11 @@ func (f *RangeFeed) run(ctx context.Context, frontier *span.Frontier) {
 	eventCh := make(chan *roachpb.RangeFeedEvent)
 	errCh := make(chan error)
 
+	// Maintain a frontier in order to resume at a reasonable timestamp.
+	// TODO(ajwerner): Consider exposing the frontier through a RangeFeed method.
+	// Doing so would require some synchronization.
+	frontier := span.MakeFrontier(f.span)
+	frontier.Forward(f.span, f.initialTimestamp)
 	for i := 0; r.Next(); i++ {
 
 		// TODO(ajwerner): Figure out what to do if the rangefeed falls behind to
@@ -306,7 +265,6 @@ func (f *RangeFeed) maybeRunInitialScan(
 		// indicating that the value was previously deleted.
 		if f.withDiff {
 			v.PrevValue = v.Value
-			v.PrevValue.Timestamp = hlc.Timestamp{}
 		}
 
 		// It's something of a bummer that we must allocate a new value for each
@@ -350,16 +308,7 @@ func (f *RangeFeed) processEvents(
 			case ev.Val != nil:
 				f.onValue(ctx, ev.Val)
 			case ev.Checkpoint != nil:
-				advanced, err := frontier.Forward(ev.Checkpoint.Span, ev.Checkpoint.ResolvedTS)
-				if err != nil {
-					return err
-				}
-				if f.onCheckpoint != nil {
-					f.onCheckpoint(ctx, ev.Checkpoint)
-				}
-				if advanced && f.onFrontierAdvance != nil {
-					f.onFrontierAdvance(ctx, frontier.Frontier())
-				}
+				frontier.Forward(ev.Checkpoint.Span, ev.Checkpoint.ResolvedTS)
 			case ev.Error != nil:
 				// Intentionally do nothing, we'll get an error returned from the
 				// call to RangeFeed.

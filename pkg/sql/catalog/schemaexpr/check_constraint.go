@@ -89,7 +89,7 @@ func (b *CheckConstraintBuilder) Build(
 
 	// Verify that the expression results in a boolean and does not use
 	// invalid functions.
-	expr, _, colIDs, err := DequalifyAndValidateExpr(
+	expr, colIDs, err := DequalifyAndValidateExpr(
 		b.ctx,
 		b.desc,
 		c.Expr,
@@ -161,9 +161,9 @@ func (b *CheckConstraintBuilder) DefaultName(expr tree.Expr) (string, error) {
 	var nameBuf bytes.Buffer
 	nameBuf.WriteString("check")
 
-	err := iterColDescriptors(b.desc, expr, func(c catalog.Column) error {
+	err := iterColDescriptors(b.desc, expr, func(c *descpb.ColumnDescriptor) error {
 		nameBuf.WriteByte('_')
-		nameBuf.WriteString(c.GetName())
+		nameBuf.WriteString(c.Name)
 		return nil
 	})
 	if err != nil {

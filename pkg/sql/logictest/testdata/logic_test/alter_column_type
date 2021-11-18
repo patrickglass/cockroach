@@ -22,12 +22,12 @@ ALTER TABLE t ALTER s TYPE STRING, ALTER sl TYPE STRING(6), ALTER ts TYPE TIMEST
 query TTBTTTB colnames
 SHOW COLUMNS FROM t
 ----
-column_name  data_type    is_nullable  column_default  generation_expression  indices   is_hidden
-s            STRING       true         NULL            ·                      {t_pkey}  false
-sl           STRING(6)    true         NULL            ·                      {t_pkey}  false
-t            TIME         true         NULL            ·                      {t_pkey}  false
-ts           TIMESTAMPTZ  true         NULL            ·                      {t_pkey}  false
-rowid        INT8         false        unique_rowid()  ·                      {t_pkey}  true
+column_name  data_type    is_nullable  column_default  generation_expression  indices    is_hidden
+s            STRING       true         NULL            ·                      {}         false
+sl           STRING(6)    true         NULL            ·                      {}         false
+t            TIME         true         NULL            ·                      {}         false
+ts           TIMESTAMPTZ  true         NULL            ·                      {}         false
+rowid        INT8         false        unique_rowid()  ·                      {primary}  true
 
 query TTTT
 SELECT * FROM t
@@ -74,7 +74,7 @@ table_name  create_statement
 t           CREATE TABLE public.t (
             a INT8 NOT NULL,
             i INT8 NULL,
-            CONSTRAINT t_pkey PRIMARY KEY (a ASC),
+            CONSTRAINT "primary" PRIMARY KEY (a ASC),
             INDEX idx2 (i ASC),
             FAMILY "primary" (a, i)
 )
@@ -106,9 +106,9 @@ CREATE TABLE t (a INT)
 query TTBTTTB colnames
 SHOW COLUMNS FROM t
 ----
-column_name  data_type  is_nullable  column_default  generation_expression  indices   is_hidden
-a            INT8       true         NULL            ·                      {t_pkey}  false
-rowid        INT8       false        unique_rowid()  ·                      {t_pkey}  true
+column_name  data_type  is_nullable  column_default  generation_expression  indices    is_hidden
+a            INT8       true         NULL            ·                      {}         false
+rowid        INT8       false        unique_rowid()  ·                      {primary}  true
 
 statement ok
 ALTER TABLE t ALTER a TYPE INTEGER
@@ -116,9 +116,9 @@ ALTER TABLE t ALTER a TYPE INTEGER
 query TTBTTTB colnames
 SHOW COLUMNS FROM t
 ----
-column_name  data_type  is_nullable  column_default  generation_expression  indices   is_hidden
-a            INT8       true         NULL            ·                      {t_pkey}  false
-rowid        INT8       false        unique_rowid()  ·                      {t_pkey}  true
+column_name  data_type  is_nullable  column_default  generation_expression  indices    is_hidden
+a            INT8       true         NULL            ·                      {}         false
+rowid        INT8       false        unique_rowid()  ·                      {primary}  true
 
 statement ok
 DROP TABLE t
@@ -194,11 +194,14 @@ ALTER TABLE t2 ALTER COLUMN id TYPE STRING
 query TTBTTTB
 SHOW COLUMNS FROM t2
 ----
-id     STRING  true   NULL            ·  {t2_pkey}  false
-rowid  INT8    false  unique_rowid()  ·  {t2_pkey}  true
+id     STRING  true   NULL            ·  {}         false
+rowid  INT8    false  unique_rowid()  ·  {primary}  true
 
 statement ok
 INSERT INTO t2 VALUES ('5')
+
+statement error pq: value type int doesn't match type string of column "id"
+INSERT INTO t2 VALUES (6)
 
 # Verify ALTER COLUMN TYPE from INT to STRING works correctly.
 # Column order should stay the same.
@@ -214,10 +217,10 @@ ALTER TABLE t3 ALTER COLUMN id2 TYPE string
 query TTBTTTB
 SHOW COLUMNS FROM t3
 ----
-id     INT8    true   NULL            ·  {t3_pkey}  false
-id2    STRING  true   NULL            ·  {t3_pkey}  false
-id3    INT8    true   NULL            ·  {t3_pkey}  false
-rowid  INT8    false  unique_rowid()  ·  {t3_pkey}  true
+id     INT8    true   NULL            ·  {}         false
+id2    STRING  true   NULL            ·  {}         false
+id3    INT8    true   NULL            ·  {}         false
+rowid  INT8    false  unique_rowid()  ·  {primary}  true
 
 statement ok
 INSERT INTO t3 VALUES (4,'4',4)
@@ -258,17 +261,25 @@ t6  CREATE TABLE public.t6 (
     id INT8 NULL,
     id2 STRING NULL,
     rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-    CONSTRAINT t6_pkey PRIMARY KEY (rowid ASC),
+    CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
     FAMILY f1 (id, rowid),
     FAMILY f2 (id2)
 )
 
-# Ensure the type of the default column is checked
-statement error default for column "x" cannot be cast automatically to type DATE
+# Ensure default expressions are casted correctly.
+statement ok
 CREATE TABLE t7 (x INT DEFAULT 1, y INT);
 INSERT INTO t7 (y) VALUES (1), (2), (3);
 ALTER TABLE t7 ALTER COLUMN x TYPE DATE;
 INSERT INTO t7 (y) VALUES (4);
+
+query TI
+SELECT * FROM t7 ORDER BY y
+----
+1970-01-02 00:00:00 +0000 +0000  1
+1970-01-02 00:00:00 +0000 +0000  2
+1970-01-02 00:00:00 +0000 +0000  3
+1970-01-02 00:00:00 +0000 +0000  4
 
 # Ensure a runtime error correctly rolls back and the table is unchanged.
 statement ok
@@ -286,7 +297,7 @@ SHOW CREATE TABLE t8
 t8  CREATE TABLE public.t8 (
     x STRING NULL,
     rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-    CONSTRAINT t8_pkey PRIMARY KEY (rowid ASC),
+    CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
     FAMILY "primary" (x, rowid)
 )
 
@@ -322,14 +333,49 @@ CREATE TABLE uniq (x INT, y INT, UNIQUE WITHOUT INDEX (x, y))
 statement error pq: unimplemented: ALTER COLUMN TYPE for a column that has a constraint is currently not supported
 ALTER TABLE uniq ALTER COLUMN x TYPE STRING
 
-# Ensure we cannot change the column type of a column stored in a secondary index.
+# Ensure ALTER COLUMN TYPE works correctly for interleaved tables.
+statement ok
+CREATE TABLE t13 (x INT PRIMARY KEY, y INT);
+INSERT INTO t13 VALUES (1, 1), (2, 2);
+CREATE TABLE t14 (x INT, y INT, z STRING, PRIMARY KEY(y, x)) INTERLEAVE IN PARENT t13 (y);
+INSERT INTO t14 VALUES (1, 1, '1'), (2, 2, '2')
+
+# Ensure we can change the column type of an interleaved child if the
+# column is not part of the primary key.
+statement ok
+ALTER TABLE t14 ALTER COLUMN z TYPE INT
+
+query III
+SELECT x, y, z FROM t14 ORDER BY x
+----
+1  1  1
+2  2  2
+
+# Ensure we can change the column type of an interleaved parent if the
+# column is not part of the primary key.
+statement ok
+ALTER TABLE t13 ALTER COLUMN y TYPE STRING
+
+query IT
+SELECT x, y FROM t13 ORDER BY x
+----
+1  1
+2  2
+
+# Ensure we can change the column type of a column stored in a secondary index.
 statement ok
 CREATE TABLE t15 (x INT, y INT);
 CREATE INDEX ON t15 (x) STORING (y);
 INSERT INTO t15 VALUES (1, 1), (2, 2)
 
-statement error pq: unimplemented: ALTER COLUMN TYPE requiring rewrite of on-disk data is currently not supported for columns that are part of an index
+statement ok
 ALTER TABLE t15 ALTER COLUMN y TYPE STRING;
+
+query IT
+SELECT x, y FROM t15 ORDER BY x
+----
+1  1
+2  2
 
 # Ensure ALTER COLUMN TYPE works for collated strings.
 statement ok
@@ -355,13 +401,10 @@ Baz
 
 # Ensure ALTER COLUMN TYPE fails if the DEFAULT EXPR cannot be casted to the new type.
 statement ok
-CREATE TABLE t17 (x STRING DEFAULT 'HELLO', y STRING ON UPDATE 'HELLO', FAMILY f1 (x,y));
+CREATE TABLE t17 (x STRING DEFAULT 'HELLO');
 
-statement error default for column "x" cannot be cast automatically to type INT8
+statement error pq: could not parse "HELLO" as type int: strconv.ParseInt: parsing "HELLO": invalid syntax
 ALTER TABLE t17 ALTER COLUMN x TYPE INT
-
-statement error on update for column "y" cannot be cast automatically to type INT8
-ALTER TABLE t17 ALTER COLUMN y TYPE INT
 
 query TT colnames
 show create table t17
@@ -369,12 +412,10 @@ show create table t17
 table_name  create_statement
 t17         CREATE TABLE public.t17 (
             x STRING NULL DEFAULT 'HELLO':::STRING,
-            y STRING NULL ON UPDATE 'HELLO':::STRING,
             rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-            CONSTRAINT t17_pkey PRIMARY KEY (rowid ASC),
-            FAMILY f1 (x, y, rowid)
+            CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
+            FAMILY "primary" (x, rowid)
 )
-
 
 # Ensure ALTER COLUMN TYPE fails if the column is part of an FK relationship.
 statement ok
@@ -445,7 +486,7 @@ table_name  create_statement
 t24         CREATE TABLE public.t24 (
             x STRING NULL,
             rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-            CONSTRAINT t24_pkey PRIMARY KEY (rowid ASC),
+            CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
             FAMILY "primary" (x, rowid)
 )
 

@@ -24,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -58,7 +57,7 @@ func verifyRows(
 			return err
 		}
 		if cmp, err := compareRows(
-			types.OneIntCol, row, expectedRows[0], evalCtx, &rowenc.DatumAlloc{}, ordering,
+			rowenc.OneIntCol, row, expectedRows[0], evalCtx, &rowenc.DatumAlloc{}, ordering,
 		); err != nil {
 			return err
 		} else if cmp != 0 {
@@ -78,7 +77,7 @@ func TestRowContainerReplaceMax(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	ctx := context.Background()
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	st := cluster.MakeTestingClusterSettings()
 	evalCtx := tree.NewTestingEvalContext(st)
@@ -139,13 +138,13 @@ func TestRowContainerIterators(t *testing.T) {
 
 	const numRows = 10
 	const numCols = 1
-	rows := randgen.MakeIntRows(numRows, numCols)
+	rows := rowenc.MakeIntRows(numRows, numCols)
 	ordering := colinfo.ColumnOrdering{{ColIdx: 0, Direction: encoding.Ascending}}
 
 	var mc MemRowContainer
 	mc.Init(
 		ordering,
-		types.OneIntCol,
+		rowenc.OneIntCol,
 		evalCtx,
 	)
 	defer mc.Close(ctx)
@@ -219,13 +218,13 @@ func TestDiskBackedRowContainer(t *testing.T) {
 
 	const numRows = 10
 	const numCols = 1
-	rows := randgen.MakeIntRows(numRows, numCols)
+	rows := rowenc.MakeIntRows(numRows, numCols)
 	ordering := colinfo.ColumnOrdering{{ColIdx: 0, Direction: encoding.Ascending}}
 
 	rc := DiskBackedRowContainer{}
 	rc.Init(
 		ordering,
-		types.OneIntCol,
+		rowenc.OneIntCol,
 		&evalCtx,
 		tempEngine,
 		memoryMonitor,
@@ -382,9 +381,9 @@ func TestDiskBackedRowContainerDeDuping(t *testing.T) {
 			Direction: encoding.Descending,
 		},
 	}
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	// Use random types and random rows.
-	types := randgen.RandSortingTypes(rng, numCols)
+	types := rowenc.RandSortingTypes(rng, numCols)
 	numRows, rows := makeUniqueRows(t, &evalCtx, rng, numRows, types, ordering)
 	rc := DiskBackedRowContainer{}
 	rc.Init(
@@ -510,9 +509,9 @@ func TestDiskBackedIndexedRowContainer(t *testing.T) {
 	t.Run("SpillingHalfway", func(t *testing.T) {
 		for i := 0; i < numTestRuns; i++ {
 			rows := make([]rowenc.EncDatumRow, numRows)
-			types := randgen.RandSortingTypes(rng, numCols)
+			types := rowenc.RandSortingTypes(rng, numCols)
 			for i := 0; i < numRows; i++ {
-				rows[i] = randgen.RandEncDatumRowOfTypes(rng, types)
+				rows[i] = rowenc.RandEncDatumRowOfTypes(rng, types)
 			}
 
 			func() {
@@ -567,9 +566,9 @@ func TestDiskBackedIndexedRowContainer(t *testing.T) {
 		for i := 0; i < numTestRuns; i++ {
 			rows := make([]rowenc.EncDatumRow, numRows)
 			sortedRows := indexedRows{rows: make([]IndexedRow, numRows)}
-			types := randgen.RandSortingTypes(rng, numCols)
+			types := rowenc.RandSortingTypes(rng, numCols)
 			for i := 0; i < numRows; i++ {
-				rows[i] = randgen.RandEncDatumRowOfTypes(rng, types)
+				rows[i] = rowenc.RandEncDatumRowOfTypes(rng, types)
 				sortedRows.rows[i] = IndexedRow{Idx: i, Row: rows[i]}
 			}
 
@@ -655,9 +654,9 @@ func TestDiskBackedIndexedRowContainer(t *testing.T) {
 			memoryUsage := int64(0)
 			rows := make([]rowenc.EncDatumRow, 0, numRows)
 			sortedRows := indexedRows{rows: make([]IndexedRow, 0, numRows)}
-			types := randgen.RandSortingTypes(rng, numCols)
+			types := rowenc.RandSortingTypes(rng, numCols)
 			for memoryUsage < 2*budget {
-				row := randgen.RandEncDatumRowOfTypes(rng, types)
+				row := rowenc.RandEncDatumRowOfTypes(rng, types)
 				memoryUsage += int64(row.Size())
 				rows = append(rows, row)
 				sortedRows.rows = append(sortedRows.rows, IndexedRow{Idx: len(sortedRows.rows), Row: row})
@@ -731,14 +730,14 @@ func TestDiskBackedIndexedRowContainer(t *testing.T) {
 	t.Run("ReorderingInMemory", func(t *testing.T) {
 		for i := 0; i < numTestRuns; i++ {
 			rows := make([]rowenc.EncDatumRow, numRows)
-			typs := randgen.RandSortingTypes(rng, numCols)
+			typs := rowenc.RandSortingTypes(rng, numCols)
 			for i := 0; i < numRows; i++ {
-				rows[i] = randgen.RandEncDatumRowOfTypes(rng, typs)
+				rows[i] = rowenc.RandEncDatumRowOfTypes(rng, typs)
 			}
 			storedTypes := make([]*types.T, len(typs)+1)
 			copy(storedTypes, typs)
 			// The container will add an extra int column for indices.
-			storedTypes[len(typs)] = types.OneIntCol[0]
+			storedTypes[len(typs)] = rowenc.OneIntCol[0]
 
 			func() {
 				rc := NewDiskBackedIndexedRowContainer(ordering, typs, &evalCtx, tempEngine, memoryMonitor, diskMonitor)
@@ -772,14 +771,14 @@ func TestDiskBackedIndexedRowContainer(t *testing.T) {
 	t.Run("ReorderingOnDisk", func(t *testing.T) {
 		for i := 0; i < numTestRuns; i++ {
 			rows := make([]rowenc.EncDatumRow, numRows)
-			typs := randgen.RandSortingTypes(rng, numCols)
+			typs := rowenc.RandSortingTypes(rng, numCols)
 			for i := 0; i < numRows; i++ {
-				rows[i] = randgen.RandEncDatumRowOfTypes(rng, typs)
+				rows[i] = rowenc.RandEncDatumRowOfTypes(rng, typs)
 			}
 			storedTypes := make([]*types.T, len(typs)+1)
 			copy(storedTypes, typs)
 			// The container will add an extra int column for indices.
-			storedTypes[len(typs)] = types.OneIntCol[0]
+			storedTypes[len(typs)] = rowenc.OneIntCol[0]
 
 			func() {
 				d := NewDiskBackedIndexedRowContainer(ordering, typs, &evalCtx, tempEngine, memoryMonitor, diskMonitor)
@@ -933,7 +932,7 @@ func BenchmarkDiskBackedIndexedRowContainer(b *testing.B) {
 		math.MaxInt64, /* noteworthy */
 		st,
 	)
-	rows := randgen.MakeIntRows(numRows, numCols)
+	rows := rowenc.MakeIntRows(numRows, numCols)
 	memoryMonitor.Start(ctx, nil, mon.MakeStandaloneBudget(math.MaxInt64))
 	defer memoryMonitor.Stop(ctx)
 	diskMonitor.Start(ctx, nil, mon.MakeStandaloneBudget(math.MaxInt64))
@@ -942,7 +941,7 @@ func BenchmarkDiskBackedIndexedRowContainer(b *testing.B) {
 	accessPattern := generateAccessPattern(numRows)
 
 	b.Run("InMemory", func(b *testing.B) {
-		rc := NewDiskBackedIndexedRowContainer(nil, types.OneIntCol, &evalCtx, tempEngine, memoryMonitor, diskMonitor)
+		rc := NewDiskBackedIndexedRowContainer(nil, rowenc.OneIntCol, &evalCtx, tempEngine, memoryMonitor, diskMonitor)
 		defer rc.Close(ctx)
 		for i := 0; i < len(rows); i++ {
 			if err := rc.AddRow(ctx, rows[i]); err != nil {
@@ -964,7 +963,7 @@ func BenchmarkDiskBackedIndexedRowContainer(b *testing.B) {
 	})
 
 	b.Run("OnDiskWithCache", func(b *testing.B) {
-		rc := NewDiskBackedIndexedRowContainer(nil, types.OneIntCol, &evalCtx, tempEngine, memoryMonitor, diskMonitor)
+		rc := NewDiskBackedIndexedRowContainer(nil, rowenc.OneIntCol, &evalCtx, tempEngine, memoryMonitor, diskMonitor)
 		defer rc.Close(ctx)
 		if err := rc.SpillToDisk(ctx); err != nil {
 			b.Fatal(err)
@@ -989,7 +988,7 @@ func BenchmarkDiskBackedIndexedRowContainer(b *testing.B) {
 	})
 
 	b.Run("OnDiskWithoutCache", func(b *testing.B) {
-		rc := NewDiskBackedIndexedRowContainer(nil, types.OneIntCol, &evalCtx, tempEngine, memoryMonitor, diskMonitor)
+		rc := NewDiskBackedIndexedRowContainer(nil, rowenc.OneIntCol, &evalCtx, tempEngine, memoryMonitor, diskMonitor)
 		defer rc.Close(ctx)
 		if err := rc.SpillToDisk(ctx); err != nil {
 			b.Fatal(err)

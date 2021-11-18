@@ -10,18 +10,14 @@ package backupccl
 
 import (
 	"context"
-	"fmt"
 	"go/constant"
 	"net/url"
 	"path"
 	"sort"
 	"strconv"
-	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/ccl/multiregionccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/featureflag"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
@@ -37,8 +33,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/multiregion"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
@@ -48,12 +42,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
@@ -70,17 +65,11 @@ const (
 	restoreOptSkipMissingSequences      = "skip_missing_sequences"
 	restoreOptSkipMissingSequenceOwners = "skip_missing_sequence_owners"
 	restoreOptSkipMissingViews          = "skip_missing_views"
-	restoreOptSkipLocalitiesCheck       = "skip_localities_check"
-	restoreOptDebugPauseOn              = "debug_pause_on"
 
 	// The temporary database system tables will be restored into for full
 	// cluster backups.
 	restoreTempSystemDB = "crdb_temp_system"
 )
-
-var allowedDebugPauseOnValues = map[string]struct{}{
-	"error": {},
-}
 
 // featureRestoreEnabled is used to enable and disable the RESTORE feature.
 var featureRestoreEnabled = settings.RegisterBoolSetting(
@@ -100,18 +89,16 @@ func rewriteViewQueryDBNames(table *tabledesc.Mutable, newDB string) error {
 			"failed to parse underlying query from view %q", table.Name)
 	}
 	// Re-format to change all DB names to `newDB`.
-	f := tree.NewFmtCtx(
-		tree.FmtParsable,
-		tree.FmtReformatTableNames(func(ctx *tree.FmtCtx, tn *tree.TableName) {
-			// empty catalog e.g. ``"".information_schema.tables` should stay empty.
-			if tn.CatalogName != "" {
-				tn.CatalogName = tree.Name(newDB)
-			}
-			ctx.WithReformatTableNames(nil, func() {
-				ctx.FormatNode(tn)
-			})
-		}),
-	)
+	f := tree.NewFmtCtx(tree.FmtParsable)
+	f.SetReformatTableNames(func(ctx *tree.FmtCtx, tn *tree.TableName) {
+		// empty catalog e.g. ``"".information_schema.tables` should stay empty.
+		if tn.CatalogName != "" {
+			tn.CatalogName = tree.Name(newDB)
+		}
+		ctx.WithReformatTableNames(nil, func() {
+			ctx.FormatNode(tn)
+		})
+	})
 	f.FormatNode(stmt.AST)
 	table.ViewQuery = f.CloseAndGetString()
 	return nil
@@ -124,25 +111,14 @@ func rewriteTypesInExpr(expr string, rewrites DescRewriteMap) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
-	ctx := tree.NewFmtCtx(
-		tree.FmtSerializable,
-		tree.FmtIndexedTypeFormat(func(ctx *tree.FmtCtx, ref *tree.OIDTypeReference) {
-			newRef := ref
-			var id descpb.ID
-			id, err = typedesc.UserDefinedTypeOIDToID(ref.OID)
-			if err != nil {
-				return
-			}
-			if rw, ok := rewrites[id]; ok {
-				newRef = &tree.OIDTypeReference{OID: typedesc.TypeIDToOID(rw.ID)}
-			}
-			ctx.WriteString(newRef.SQLString())
-		}),
-	)
-	if err != nil {
-		return "", err
-	}
+	ctx := tree.NewFmtCtx(tree.FmtSerializable)
+	ctx.SetIndexedTypeFormat(func(ctx *tree.FmtCtx, ref *tree.OIDTypeReference) {
+		newRef := ref
+		if rw, ok := rewrites[typedesc.UserDefinedTypeOIDToID(ref.OID)]; ok {
+			newRef = &tree.OIDTypeReference{OID: typedesc.TypeIDToOID(rw.ID)}
+		}
+		ctx.WriteString(newRef.SQLString())
+	})
 	ctx.FormatNode(parsed)
 	return ctx.CloseAndGetString(), nil
 }
@@ -155,11 +131,7 @@ func rewriteSequencesInExpr(expr string, rewrites DescRewriteMap) (string, error
 		return "", err
 	}
 	rewriteFunc := func(expr tree.Expr) (recurse bool, newExpr tree.Expr, err error) {
-		id, ok := schemaexpr.GetSeqIDFromExpr(expr)
-		if !ok {
-			return true, expr, nil
-		}
-		annotateTypeExpr, ok := expr.(*tree.AnnotateTypeExpr)
+		annotateTypeExpr, id, ok := schemaexpr.GetTypeExprAndSeqID(expr)
 		if !ok {
 			return true, expr, nil
 		}
@@ -183,50 +155,13 @@ func rewriteSequencesInExpr(expr string, rewrites DescRewriteMap) (string, error
 	return newExpr.String(), nil
 }
 
-// rewriteSequencesInView walks the given viewQuery and
-// rewrites all sequence IDs in it according to rewrites.
-func rewriteSequencesInView(viewQuery string, rewrites DescRewriteMap) (string, error) {
-	rewriteFunc := func(expr tree.Expr) (recurse bool, newExpr tree.Expr, err error) {
-		id, ok := schemaexpr.GetSeqIDFromExpr(expr)
-		if !ok {
-			return true, expr, nil
-		}
-		annotateTypeExpr, ok := expr.(*tree.AnnotateTypeExpr)
-		if !ok {
-			return true, expr, nil
-		}
-		rewrite, ok := rewrites[descpb.ID(id)]
-		if !ok {
-			return true, expr, nil
-		}
-		annotateTypeExpr.Expr = tree.NewNumVal(
-			constant.MakeInt64(int64(rewrite.ID)),
-			strconv.Itoa(int(rewrite.ID)),
-			false, /* negative */
-		)
-		return false, annotateTypeExpr, nil
-	}
-
-	stmt, err := parser.ParseOne(viewQuery)
-	if err != nil {
-		return "", err
-	}
-	newStmt, err := tree.SimpleStmtVisit(stmt.AST, rewriteFunc)
-	if err != nil {
-		return "", err
-	}
-	return newStmt.String(), nil
-}
-
 // maybeFilterMissingViews filters the set of tables to restore to exclude views
 // whose dependencies are either missing or are themselves unrestorable due to
 // missing dependencies, and returns the resulting set of tables. If the
 // skipMissingViews option is not set, an error is returned if any
 // unrestorable views are found.
 func maybeFilterMissingViews(
-	tablesByID map[descpb.ID]*tabledesc.Mutable,
-	typesByID map[descpb.ID]*typedesc.Mutable,
-	skipMissingViews bool,
+	tablesByID map[descpb.ID]*tabledesc.Mutable, skipMissingViews bool,
 ) (map[descpb.ID]*tabledesc.Mutable, error) {
 	// Function that recursively determines whether a given table, if it is a
 	// view, has valid dependencies. Dependencies are looked up in tablesByID.
@@ -236,12 +171,7 @@ func maybeFilterMissingViews(
 			return true
 		}
 		for _, id := range desc.DependsOn {
-			if depDesc, ok := tablesByID[id]; !ok || !hasValidViewDependencies(depDesc) {
-				return false
-			}
-		}
-		for _, id := range desc.DependsOnTypes {
-			if _, ok := typesByID[id]; !ok {
+			if desc, ok := tablesByID[id]; !ok || !hasValidViewDependencies(desc) {
 				return false
 			}
 		}
@@ -265,28 +195,43 @@ func maybeFilterMissingViews(
 }
 
 func synthesizePGTempSchema(
-	ctx context.Context, p sql.PlanHookState, schemaName string, dbID descpb.ID,
-) (descpb.ID, error) {
+	ctx context.Context, p sql.PlanHookState, schemaName string,
+) (descpb.ID, descpb.ID, error) {
 	var synthesizedSchemaID descpb.ID
+	var defaultDBID descpb.ID
 	err := p.ExecCfg().DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		var err error
-		sKey := catalogkeys.NewNameKeyComponents(dbID, keys.RootNamespaceID, schemaName)
+		defaultDBID, err = lookupDatabaseID(ctx, txn, p.ExecCfg().Codec,
+			catalogkeys.DefaultDatabaseName)
+		if err != nil {
+			return err
+		}
+
+		sKey := catalogkeys.NewSchemaKey(defaultDBID, schemaName)
 		schemaID, err := catalogkv.GetDescriptorID(ctx, txn, p.ExecCfg().Codec, sKey)
 		if err != nil {
 			return err
 		}
 		if schemaID != descpb.InvalidID {
 			return errors.Newf("attempted to synthesize temp schema during RESTORE but found"+
-				" another schema already using the same schema key %s", sKey.GetName())
+				" another schema already using the same schema key %s", sKey.Name())
 		}
 		synthesizedSchemaID, err = catalogkv.GenerateUniqueDescID(ctx, p.ExecCfg().DB, p.ExecCfg().Codec)
 		if err != nil {
 			return err
 		}
-		return p.CreateSchemaNamespaceEntry(ctx, catalogkeys.EncodeNameKey(p.ExecCfg().Codec, sKey), synthesizedSchemaID)
+		return p.CreateSchemaNamespaceEntry(ctx, sKey.Key(p.ExecCfg().Codec), synthesizedSchemaID)
 	})
 
-	return synthesizedSchemaID, err
+	return synthesizedSchemaID, defaultDBID, err
+}
+
+// dbSchemaKey is used when generating fake pg_temp schemas for the purpose of
+// restoring temporary objects. Detailed comments can be found where it is being
+// used.
+type dbSchemaKey struct {
+	parentID descpb.ID
+	schemaID descpb.ID
 }
 
 // allocateDescriptorRewrites determines the new ID and parentID (a "DescriptorRewrite")
@@ -305,16 +250,21 @@ func allocateDescriptorRewrites(
 	descriptorCoverage tree.DescriptorCoverage,
 	opts tree.RestoreOptions,
 	intoDB string,
-	newDBName string,
 ) (DescRewriteMap, error) {
 	descriptorRewrites := make(DescRewriteMap)
+	var overrideDB string
+	var renaming bool
+	if opts.IntoDB != nil {
+		overrideDB = intoDB
+		renaming = true
+	}
 
 	restoreDBNames := make(map[string]catalog.DatabaseDescriptor, len(restoreDBs))
 	for _, db := range restoreDBs {
 		restoreDBNames[db.GetName()] = db
 	}
 
-	if len(restoreDBNames) > 0 && intoDB != "" {
+	if len(restoreDBNames) > 0 && renaming {
 		return nil, errors.Errorf("cannot use %q option when restoring database(s)", restoreOptIntoDB)
 	}
 
@@ -347,15 +297,11 @@ func allocateDescriptorRewrites(
 			// Ensure that all referenced types are present.
 			if col.Type.UserDefined() {
 				// TODO (rohany): This can be turned into an option later.
-				id, err := typedesc.GetUserDefinedTypeDescID(col.Type)
-				if err != nil {
-					return nil, err
-				}
-				if _, ok := typesByID[id]; !ok {
+				if _, ok := typesByID[typedesc.GetTypeDescID(col.Type)]; !ok {
 					return nil, errors.Errorf(
 						"cannot restore table %q without referenced type %d",
 						table.Name,
-						id,
+						typedesc.GetTypeDescID(col.Type),
 					)
 				}
 			}
@@ -467,17 +413,26 @@ func allocateDescriptorRewrites(
 		// represented as a descriptor and thus is not picked up during a full
 		// cluster BACKUP.
 		// To overcome this orphaned schema pointer problem, when restoring a
-		// temporary object we create a "fake" pg_temp schema in temp table's db and
-		// add it to the namespace table.
-		// We then remap the temporary object descriptors to point to this schema.
-		// This allows us to piggy back on the temporary
+		// temporary object we create a "fake" pg_temp schema in defaultdb and add
+		// it to the namespace table. We then remap the temporary object descriptors
+		// to point to this schema. This allows us to piggy back on the temporary
 		// reconciliation job which looks for "pg_temp" schemas linked to temporary
 		// sessions and properly cleans up the temporary objects in it.
-		haveSynthesizedTempSchema := make(map[descpb.ID]bool)
+		haveSynthesizedTempSchema := make(map[dbSchemaKey]bool)
+		var defaultDBID descpb.ID
 		var synthesizedTempSchemaCount int
 		for _, table := range tablesByID {
 			if table.IsTemporary() {
-				if _, ok := haveSynthesizedTempSchema[table.GetParentSchemaID()]; !ok {
+				// We generate a "fake" temporary schema for every unique
+				// <dbID,schemaID> tuple of the backed-up temporary table descriptors.
+				// This is important because post rewrite all the "fake" schemas and
+				// consequently temp table objects are going to be in defaultdb. Placing
+				// them under different "fake" schemas prevents name collisions if the
+				// backed up tables had the same names but were in different temp
+				// schemas/databases in the cluster which was backed up.
+				dbSchemaIDKey := dbSchemaKey{parentID: table.GetParentID(),
+					schemaID: table.GetParentSchemaID()}
+				if _, ok := haveSynthesizedTempSchema[dbSchemaIDKey]; !ok {
 					var synthesizedSchemaID descpb.ID
 					var err error
 					// NB: TemporarySchemaNameForRestorePrefix is a special value that has
@@ -491,7 +446,7 @@ func allocateDescriptorRewrites(
 					// which the cluster was started.
 					schemaName := sql.TemporarySchemaNameForRestorePrefix +
 						strconv.Itoa(synthesizedTempSchemaCount)
-					synthesizedSchemaID, err = synthesizePGTempSchema(ctx, p, schemaName, table.GetParentID())
+					synthesizedSchemaID, defaultDBID, err = synthesizePGTempSchema(ctx, p, schemaName)
 					if err != nil {
 						return nil, err
 					}
@@ -500,9 +455,13 @@ func allocateDescriptorRewrites(
 					// specific pg_temp schema to point to this synthesized schema when we
 					// are performing the table rewrites.
 					descriptorRewrites[table.GetParentSchemaID()] = &jobspb.RestoreDetails_DescriptorRewrite{ID: synthesizedSchemaID}
-					haveSynthesizedTempSchema[table.GetParentSchemaID()] = true
+					haveSynthesizedTempSchema[dbSchemaIDKey] = true
 					synthesizedTempSchemaCount++
 				}
+
+				// Remap the temp table descriptors to belong to the defaultdb where we
+				// have synthesized the temp schema.
+				descriptorRewrites[table.GetID()] = &jobspb.RestoreDetails_DescriptorRewrite{ParentID: defaultDBID}
 			}
 		}
 	}
@@ -528,7 +487,8 @@ func allocateDescriptorRewrites(
 				continue
 			}
 
-			targetDB, err := resolveTargetDB(ctx, txn, p, databasesByID, intoDB, descriptorCoverage, sc)
+			targetDB, err := resolveTargetDB(ctx, txn, p, databasesByID, renaming, overrideDB,
+				descriptorCoverage, sc)
 			if err != nil {
 				return err
 			}
@@ -571,8 +531,8 @@ func allocateDescriptorRewrites(
 						return err
 					}
 					descriptorRewrites[sc.ID] = &jobspb.RestoreDetails_DescriptorRewrite{
-						ParentID:   desc.GetParentID(),
-						ID:         desc.GetID(),
+						ParentID:   desc.ParentID,
+						ID:         desc.ID,
 						ToExisting: true,
 					}
 				}
@@ -585,8 +545,8 @@ func allocateDescriptorRewrites(
 				continue
 			}
 
-			targetDB, err := resolveTargetDB(ctx, txn, p, databasesByID, intoDB, descriptorCoverage,
-				table)
+			targetDB, err := resolveTargetDB(ctx, txn, p, databasesByID, renaming, overrideDB,
+				descriptorCoverage, table)
 			if err != nil {
 				return err
 			}
@@ -630,11 +590,19 @@ func allocateDescriptorRewrites(
 					return err
 				}
 
-				// We're restoring a table and not its parent database. We may block
-				// restoring multi-region tables to multi-region databases since
-				// regions may mismatch.
-				if err := checkMultiRegionCompatible(ctx, txn, p.ExecCfg().Codec, table, parentDB); err != nil {
-					return pgerror.WithCandidateCode(err, pgcode.FeatureNotSupported)
+				// We're restoring a table and not its parent database.  If the
+				// new database we're placing the table in is a multi-region database,
+				// block the restore. We do this because we currently have no way to
+				// modify this table and make it multi-region friendly. Long-term we'd
+				// want to modify the table so that it can exist in the multi-region
+				// database.
+				// https://github.com/cockroachdb/cockroach/issues/59804
+				if parentDB.IsMultiRegion() {
+					return pgerror.Newf(pgcode.FeatureNotSupported,
+						"cannot restore individual table %d into multi-region database %d",
+						table.GetID(),
+						parentDB.GetID(),
+					)
 				}
 
 				// Create the table rewrite with the new parent ID. We've done all the
@@ -650,7 +618,8 @@ func allocateDescriptorRewrites(
 				continue
 			}
 
-			targetDB, err := resolveTargetDB(ctx, txn, p, databasesByID, intoDB, descriptorCoverage, typ)
+			targetDB, err := resolveTargetDB(ctx, txn, p, databasesByID, renaming, overrideDB,
+				descriptorCoverage, typ)
 			if err != nil {
 				return err
 			}
@@ -681,20 +650,12 @@ func allocateDescriptorRewrites(
 				}
 
 				// See if there is an existing type with the same name.
-				getParentSchemaID := func(typ *typedesc.Mutable) (parentSchemaID descpb.ID) {
-					parentSchemaID = typ.GetParentSchemaID()
-					// If we find UDS with same name defined in the restoring DB, use its ID instead.
-					if rewrite, ok := descriptorRewrites[parentSchemaID]; ok && rewrite.ID != 0 {
-						parentSchemaID = rewrite.ID
-					}
-					return
-				}
 				desc, err := catalogkv.GetDescriptorCollidingWithObject(
 					ctx,
 					txn,
 					p.ExecCfg().Codec,
 					parentID,
-					getParentSchemaID(typ),
+					typ.GetParentSchemaID(),
 					typ.Name,
 				)
 				if err != nil {
@@ -714,8 +675,8 @@ func allocateDescriptorRewrites(
 
 					// Ensure that there isn't a collision with the array type name.
 					arrTyp := typesByID[typ.ArrayTypeID]
-					typeName := tree.NewUnqualifiedTypeName(arrTyp.GetName())
-					err = catalogkv.CheckObjectCollision(ctx, txn, p.ExecCfg().Codec, parentID, getParentSchemaID(typ), typeName)
+					typeName := tree.NewUnqualifiedTypeName(tree.Name(arrTyp.GetName()))
+					err := catalogkv.CheckObjectCollision(ctx, txn, p.ExecCfg().Codec, parentID, typ.GetParentSchemaID(), typeName)
 					if err != nil {
 						return errors.Wrapf(err, "name collision for %q's array type", typ.Name)
 					}
@@ -726,7 +687,7 @@ func allocateDescriptorRewrites(
 					// this type to the type existing in the cluster.
 
 					// If the collided object isn't a type, then error out.
-					existingType, isType := desc.(catalog.TypeDescriptor)
+					existingType, isType := desc.(*typedesc.Immutable)
 					if !isType {
 						return sqlerrors.MakeObjectAlreadyExistsError(desc.DescriptorProto(), typ.Name)
 					}
@@ -736,21 +697,21 @@ func allocateDescriptorRewrites(
 						return errors.Wrapf(
 							err,
 							"%q is not compatible with type %q existing in cluster",
-							existingType.GetName(),
-							existingType.GetName(),
+							existingType.Name,
+							existingType.Name,
 						)
 					}
 
 					// Remap both the type and its array type since they are compatible
 					// with the type existing in the cluster.
 					descriptorRewrites[typ.ID] = &jobspb.RestoreDetails_DescriptorRewrite{
-						ParentID:   existingType.GetParentID(),
-						ID:         existingType.GetID(),
+						ParentID:   existingType.ParentID,
+						ID:         existingType.ID,
 						ToExisting: true,
 					}
 					descriptorRewrites[typ.ArrayTypeID] = &jobspb.RestoreDetails_DescriptorRewrite{
-						ParentID:   existingType.GetParentID(),
-						ID:         existingType.GetArrayTypeID(),
+						ParentID:   existingType.ParentID,
+						ID:         existingType.ArrayTypeID,
 						ToExisting: true,
 					}
 				}
@@ -788,13 +749,6 @@ func allocateDescriptorRewrites(
 		}
 
 		descriptorRewrites[db.GetID()] = &jobspb.RestoreDetails_DescriptorRewrite{ID: newID}
-
-		// If a database restore has specified a new name for the restored database,
-		// then populate the rewrite with the newDBName, else the restored database name is preserved.
-		if newDBName != "" {
-			descriptorRewrites[db.GetID()].NewDBName = newDBName
-		}
-
 		for _, tableID := range needsNewParentIDs[db.GetName()] {
 			descriptorRewrites[tableID] = &jobspb.RestoreDetails_DescriptorRewrite{ParentID: newID}
 		}
@@ -861,44 +815,41 @@ func allocateDescriptorRewrites(
 	return descriptorRewrites, nil
 }
 
-// If we're doing a full cluster restore - to treat defaultdb and postgres
-// as regular databases, we drop them before restoring them again in the
-// restore.
-func dropDefaultUserDBs(ctx context.Context, execCfg *sql.ExecutorConfig) error {
-	return sql.DescsTxn(ctx, execCfg, func(ctx context.Context, txn *kv.Txn, col *descs.Collection) error {
-		ie := execCfg.InternalExecutor
-		_, err := ie.Exec(ctx, "drop-defaultdb", nil, "DROP DATABASE IF EXISTS defaultdb")
-		if err != nil {
-			return err
-		}
-
-		_, err = ie.Exec(ctx, "drop-postgres", nil, "DROP DATABASE IF EXISTS postgres")
-		if err != nil {
-			return err
-		}
-		return nil
-	})
-}
-
 func resolveTargetDB(
 	ctx context.Context,
 	txn *kv.Txn,
 	p sql.PlanHookState,
 	databasesByID map[descpb.ID]*dbdesc.Mutable,
-	intoDB string,
+	renaming bool,
+	overrideDB string,
 	descriptorCoverage tree.DescriptorCoverage,
 	descriptor catalog.Descriptor,
 ) (string, error) {
-	if intoDB != "" {
-		return intoDB, nil
+	if renaming {
+		return overrideDB, nil
 	}
 
-	if descriptorCoverage == tree.AllDescriptors && descriptor.GetParentID() < keys.MaxReservedDescID {
+	if descriptorCoverage == tree.AllDescriptors && descriptor.GetParentID() < catalogkeys.MaxDefaultDescriptorID {
+		// This is a table that is in a database that already existed at
+		// cluster creation time.
+		defaultDBID, err := lookupDatabaseID(ctx, txn, p.ExecCfg().Codec, catalogkeys.DefaultDatabaseName)
+		if err != nil {
+			return "", err
+		}
+		postgresDBID, err := lookupDatabaseID(ctx, txn, p.ExecCfg().Codec, catalogkeys.PgDatabaseName)
+		if err != nil {
+			return "", err
+		}
+
 		var targetDB string
 		if descriptor.GetParentID() == systemschema.SystemDB.GetID() {
 			// For full cluster backups, put the system tables in the temporary
 			// system table.
 			targetDB = restoreTempSystemDB
+		} else if descriptor.GetParentID() == defaultDBID {
+			targetDB = catalogkeys.DefaultDatabaseName
+		} else if descriptor.GetParentID() == postgresDBID {
+			targetDB = catalogkeys.PgDatabaseName
 		}
 		return targetDB, nil
 	}
@@ -935,7 +886,7 @@ func maybeUpgradeDescriptors(
 		if tableDesc, isTable := desc.(catalog.TableDescriptor); isTable {
 			b = tabledesc.NewBuilderForFKUpgrade(tableDesc.TableDesc(), skipFKsWithNoMatchingTable)
 		} else {
-			b = desc.NewBuilder()
+			b = catalogkv.NewBuilder(desc.DescriptorProto())
 		}
 		err := b.RunPostDeserializationChanges(ctx, descGetter)
 		if err != nil {
@@ -993,25 +944,20 @@ func rewriteDatabaseDescs(databases []*dbdesc.Mutable, descriptorRewrites DescRe
 		}
 		db.ID = rewrite.ID
 
-		if rewrite.NewDBName != "" {
-			db.Name = rewrite.NewDBName
-		}
-
 		db.Version = 1
 		db.ModificationTime = hlc.Timestamp{}
 
 		// Rewrite the name-to-ID mapping for the database's child schemas.
 		newSchemas := make(map[string]descpb.DatabaseDescriptor_SchemaInfo)
-		err := db.ForEachNonDroppedSchema(func(id descpb.ID, name string) error {
-			rewrite, ok := descriptorRewrites[id]
+		for schemaName, schemaInfo := range db.Schemas {
+			if schemaInfo.Dropped {
+				continue
+			}
+			rewrite, ok := descriptorRewrites[schemaInfo.ID]
 			if !ok {
 				return errors.Errorf("missing rewrite for schema %d", db.ID)
 			}
-			newSchemas[name] = descpb.DatabaseDescriptor_SchemaInfo{ID: rewrite.ID}
-			return nil
-		})
-		if err != nil {
-			return err
+			newSchemas[schemaName] = descpb.DatabaseDescriptor_SchemaInfo{ID: rewrite.ID}
 		}
 		db.Schemas = newSchemas
 	}
@@ -1020,37 +966,25 @@ func rewriteDatabaseDescs(databases []*dbdesc.Mutable, descriptorRewrites DescRe
 
 // rewriteIDsInTypesT rewrites all ID's in the input types.T using the input
 // ID rewrite mapping.
-func rewriteIDsInTypesT(typ *types.T, descriptorRewrites DescRewriteMap) error {
+func rewriteIDsInTypesT(typ *types.T, descriptorRewrites DescRewriteMap) {
 	if !typ.UserDefined() {
-		return nil
-	}
-	tid, err := typedesc.GetUserDefinedTypeDescID(typ)
-	if err != nil {
-		return err
+		return
 	}
 	// Collect potential new OID values.
 	var newOID, newArrayOID oid.Oid
-	if rw, ok := descriptorRewrites[tid]; ok {
+	if rw, ok := descriptorRewrites[typedesc.GetTypeDescID(typ)]; ok {
 		newOID = typedesc.TypeIDToOID(rw.ID)
 	}
 	if typ.Family() != types.ArrayFamily {
-		tid, err = typedesc.GetUserDefinedArrayTypeDescID(typ)
-		if err != nil {
-			return err
-		}
-		if rw, ok := descriptorRewrites[tid]; ok {
+		if rw, ok := descriptorRewrites[typedesc.GetArrayTypeDescID(typ)]; ok {
 			newArrayOID = typedesc.TypeIDToOID(rw.ID)
 		}
 	}
 	types.RemapUserDefinedTypeOIDs(typ, newOID, newArrayOID)
 	// If the type is an array, then we need to rewrite the element type as well.
 	if typ.Family() == types.ArrayFamily {
-		if err := rewriteIDsInTypesT(typ.ArrayContents(), descriptorRewrites); err != nil {
-			return err
-		}
+		rewriteIDsInTypesT(typ.ArrayContents(), descriptorRewrites)
 	}
-
-	return nil
 }
 
 // rewriteTypeDescs rewrites all ID's in the input slice of TypeDescriptors
@@ -1082,9 +1016,7 @@ func rewriteTypeDescs(types []*typedesc.Mutable, descriptorRewrites DescRewriteM
 			}
 		case descpb.TypeDescriptor_ALIAS:
 			// We need to rewrite any ID's present in the aliased types.T.
-			if err := rewriteIDsInTypesT(typ.Alias, descriptorRewrites); err != nil {
-				return err
-			}
+			rewriteIDsInTypesT(typ.Alias, descriptorRewrites)
 		default:
 			return errors.AssertionFailedf("unknown type kind %s", t.String())
 		}
@@ -1176,13 +1108,34 @@ func RewriteTableDescs(
 			return err
 		}
 
-		// Walk view query and remap sequence IDs.
-		if table.IsView() {
-			viewQuery, err := rewriteSequencesInView(table.ViewQuery, descriptorRewrites)
-			if err != nil {
-				return err
+		if err := catalog.ForEachNonDropIndex(table, func(indexI catalog.Index) error {
+			index := indexI.IndexDesc()
+			// Verify that for any interleaved index being restored, the interleave
+			// parent is also being restored. Otherwise, the interleave entries in the
+			// restored IndexDescriptors won't have anything to point to.
+			// TODO(dan): It seems like this restriction could be lifted by restoring
+			// stub TableDescriptors for the missing interleave parents.
+			for j, a := range index.Interleave.Ancestors {
+				ancestorRewrite, ok := descriptorRewrites[a.TableID]
+				if !ok {
+					return errors.Errorf(
+						"cannot restore table %q without interleave parent %d", table.Name, a.TableID,
+					)
+				}
+				index.Interleave.Ancestors[j].TableID = ancestorRewrite.ID
 			}
-			table.ViewQuery = viewQuery
+			for j, c := range index.InterleavedBy {
+				childRewrite, ok := descriptorRewrites[c.Table]
+				if !ok {
+					return errors.Errorf(
+						"cannot restore table %q without interleave child table %d", table.Name, c.Table,
+					)
+				}
+				index.InterleavedBy[j].Table = childRewrite.ID
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 
 		// TODO(lucy): deal with outbound foreign key mutations here as well.
@@ -1229,17 +1182,6 @@ func RewriteTableDescs(
 					table.Name, dest)
 			}
 		}
-		for i, dest := range table.DependsOnTypes {
-			if depRewrite, ok := descriptorRewrites[dest]; ok {
-				table.DependsOnTypes[i] = depRewrite.ID
-			} else {
-				// Views with missing dependencies should have been filtered out
-				// or have caused an error in maybeFilterMissingViews().
-				return errors.AssertionFailedf(
-					"cannot restore %q because referenced type %d was not found",
-					table.Name, dest)
-			}
-		}
 		origRefs := table.DependedOnBy
 		table.DependedOnBy = nil
 		for _, ref := range origRefs {
@@ -1264,9 +1206,7 @@ func RewriteTableDescs(
 		// rewriteCol is a closure that performs the ID rewrite logic on a column.
 		rewriteCol := func(col *descpb.ColumnDescriptor) error {
 			// Rewrite the types.T's IDs present in the column.
-			if err := rewriteIDsInTypesT(col.Type, descriptorRewrites); err != nil {
-				return err
-			}
+			rewriteIDsInTypesT(col.Type, descriptorRewrites)
 			var newUsedSeqRefs []descpb.ID
 			for _, seqID := range col.UsesSequenceIds {
 				if rewrite, ok := descriptorRewrites[seqID]; ok {
@@ -1330,7 +1270,7 @@ func errOnMissingRange(span covering.Range, start, end hlc.Timestamp) error {
 func getUserDescriptorNames(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec,
 ) ([]string, error) {
-	allDescs, err := catalogkv.GetAllDescriptors(ctx, txn, codec, true /* shouldRunPostDeserializationChanges */)
+	allDescs, err := catalogkv.GetAllDescriptors(ctx, txn, codec)
 	if err != nil {
 		return nil, err
 	}
@@ -1345,12 +1285,8 @@ func getUserDescriptorNames(
 	return allNames, nil
 }
 
-// resolveOptionsForRestoreJobDescription creates a copy of
-// the options specified during a restore, after processing
-// them to be suitable for displaying in the jobs' description.
-// This includes redacting secrets from external storage URIs.
 func resolveOptionsForRestoreJobDescription(
-	opts tree.RestoreOptions, intoDB string, newDBName string, kmsURIs []string,
+	opts tree.RestoreOptions, intoDB string, kmsURIs []string,
 ) (tree.RestoreOptions, error) {
 	if opts.IsDefault() {
 		return opts, nil
@@ -1372,12 +1308,8 @@ func resolveOptionsForRestoreJobDescription(
 		newOpts.IntoDB = tree.NewDString(intoDB)
 	}
 
-	if opts.NewDBName != nil {
-		newOpts.NewDBName = tree.NewDString(newDBName)
-	}
-
 	for _, uri := range kmsURIs {
-		redactedURI, err := cloud.RedactKMSURI(uri)
+		redactedURI, err := cloudimpl.RedactKMSURI(uri)
 		if err != nil {
 			return tree.RestoreOptions{}, err
 		}
@@ -1393,7 +1325,6 @@ func restoreJobDescription(
 	from [][]string,
 	opts tree.RestoreOptions,
 	intoDB string,
-	newDBName string,
 	kmsURIs []string,
 ) (string, error) {
 	r := &tree.Restore{
@@ -1405,8 +1336,7 @@ func restoreJobDescription(
 
 	var options tree.RestoreOptions
 	var err error
-	if options, err = resolveOptionsForRestoreJobDescription(opts, intoDB, newDBName,
-		kmsURIs); err != nil {
+	if options, err = resolveOptionsForRestoreJobDescription(opts, intoDB, kmsURIs); err != nil {
 		return "", err
 	}
 	r.Options = options
@@ -1414,7 +1344,7 @@ func restoreJobDescription(
 	for i, backup := range from {
 		r.From[i] = make(tree.StringOrPlaceholderOptList, len(backup))
 		for j, uri := range backup {
-			sf, err := cloud.SanitizeExternalStorageURI(uri, nil /* extraParams */)
+			sf, err := cloudimpl.SanitizeExternalStorageURI(uri, nil /* extraParams */)
 			if err != nil {
 				return "", err
 			}
@@ -1490,19 +1420,6 @@ func restorePlanHook(
 		}
 	}
 
-	var newDBNameFn func() (string, error)
-	if restoreStmt.Options.NewDBName != nil {
-		if restoreStmt.DescriptorCoverage == tree.AllDescriptors || len(restoreStmt.Targets.Databases) != 1 {
-			err = errors.New("new_db_name can only be used for RESTORE DATABASE with a single target" +
-				" database")
-			return nil, nil, nil, false, err
-		}
-		newDBNameFn, err = p.TypeAsString(ctx, restoreStmt.Options.NewDBName, "RESTORE")
-		if err != nil {
-			return nil, nil, nil, false, err
-		}
-	}
-
 	fn := func(ctx context.Context, _ []sql.PlanNode, resultsCh chan<- tree.Datums) error {
 		// TODO(dan): Move this span into sql.
 		ctx, span := tracing.ChildSpan(ctx, stmt.StatementTag())
@@ -1524,6 +1441,19 @@ func restorePlanHook(
 				return err
 			}
 		}
+		if subdir != "" {
+			if len(from) != 1 {
+				return errors.Errorf("RESTORE FROM ... IN can only by used against a single collection path (per-locality)")
+			}
+			for i := range from[0] {
+				parsed, err := url.Parse(from[0][i])
+				if err != nil {
+					return err
+				}
+				parsed.Path = path.Join(parsed.Path, subdir)
+				from[0][i] = parsed.String()
+			}
+		}
 
 		if err := checkPrivilegesForRestore(ctx, restoreStmt, p, from); err != nil {
 			return err
@@ -1531,11 +1461,11 @@ func restorePlanHook(
 
 		var endTime hlc.Timestamp
 		if restoreStmt.AsOf.Expr != nil {
-			asOf, err := p.EvalAsOfTimestamp(ctx, restoreStmt.AsOf)
+			var err error
+			endTime, err = p.EvalAsOfTimestamp(ctx, restoreStmt.AsOf)
 			if err != nil {
 				return err
 			}
-			endTime = asOf.Timestamp
 		}
 
 		var passphrase string
@@ -1562,38 +1492,7 @@ func restorePlanHook(
 			}
 		}
 
-		var newDBName string
-		if newDBNameFn != nil {
-			newDBName, err = newDBNameFn()
-			if err != nil {
-				return err
-			}
-		}
-
-		if subdir != "" {
-			if strings.EqualFold(subdir, "LATEST") {
-				// set subdir to content of latest file
-				latest, err := readLatestFile(ctx, from[0][0], p.ExecCfg().DistSQLSrv.ExternalStorageFromURI, p.User())
-				if err != nil {
-					return err
-				}
-				subdir = latest
-			}
-			if len(from) != 1 {
-				return errors.Errorf("RESTORE FROM ... IN can only by used against a single collection path (per-locality)")
-			}
-			for i := range from[0] {
-				parsed, err := url.Parse(from[0][i])
-				if err != nil {
-					return err
-				}
-				parsed.Path = path.Join(parsed.Path, subdir)
-				from[0][i] = parsed.String()
-			}
-		}
-
-		return doRestorePlan(ctx, restoreStmt, p, from, passphrase, kms, intoDB, newDBName, endTime,
-			resultsCh)
+		return doRestorePlan(ctx, restoreStmt, p, from, passphrase, kms, intoDB, endTime, resultsCh)
 	}
 
 	if restoreStmt.Options.Detached {
@@ -1642,68 +1541,19 @@ func checkPrivilegesForRestore(
 	// Check that none of the sources rely on implicit access.
 	for i := range from {
 		for j := range from[i] {
-			conf, err := cloud.ExternalStorageConfFromURI(from[i][j], p.User())
+			uri := from[i][j]
+			hasExplicitAuth, uriScheme, err := cloud.AccessIsWithExplicitAuth(uri)
 			if err != nil {
 				return err
 			}
-			if !conf.AccessIsWithExplicitAuth() {
+			if !hasExplicitAuth {
 				return pgerror.Newf(
 					pgcode.InsufficientPrivilege,
 					"only users with the admin role are allowed to RESTORE from the specified %s URI",
-					conf.Provider.String())
+					uriScheme)
 			}
 		}
 	}
-	return nil
-}
-
-func checkClusterRegions(
-	ctx context.Context, p sql.PlanHookState, typesByID map[descpb.ID]*typedesc.Mutable,
-) error {
-	regionSet := make(map[descpb.RegionName]struct{})
-	for _, typ := range typesByID {
-		typeDesc := typedesc.NewBuilder(typ.TypeDesc()).BuildImmutableType()
-		if typeDesc.GetKind() == descpb.TypeDescriptor_MULTIREGION_ENUM {
-			regionNames, err := typeDesc.RegionNames()
-			if err != nil {
-				return err
-			}
-			for _, region := range regionNames {
-				if _, ok := regionSet[region]; !ok {
-					regionSet[region] = struct{}{}
-				}
-			}
-		}
-	}
-
-	if len(regionSet) == 0 {
-		return nil
-	}
-
-	l, err := sql.GetLiveClusterRegions(ctx, p)
-	if err != nil {
-		return err
-	}
-
-	missingRegions := make([]string, 0)
-	for region := range regionSet {
-		if !l.IsActive(region) {
-			missingRegions = append(missingRegions, string(region))
-		}
-	}
-
-	if len(missingRegions) > 0 {
-		// Missing regions are sorted for predictable outputs in tests.
-		sort.Strings(missingRegions)
-		mismatchErr := errors.Newf("detected a mismatch in regions between the restore cluster and the backup cluster, "+
-			"missing regions detected: %s.", strings.Join(missingRegions, ", "))
-		hintsMsg := fmt.Sprintf("there are two ways you can resolve this issue: "+
-			"1) update the cluster to which you're restoring to ensure that the regions present on the nodes' "+
-			"--locality flags match those present in the backup image, or "+
-			"2) restore with the %q option", restoreOptSkipLocalitiesCheck)
-		return errors.WithHint(mismatchErr, hintsMsg)
-	}
-
 	return nil
 }
 
@@ -1715,7 +1565,6 @@ func doRestorePlan(
 	passphrase string,
 	kms []string,
 	intoDB string,
-	newDBName string,
 	endTime hlc.Timestamp,
 	resultsCh chan<- tree.Datums,
 ) error {
@@ -1821,10 +1670,6 @@ func doRestorePlan(
 			if table == nil {
 				continue
 			}
-			index := table.GetPrimaryIndex()
-			if len(index.Interleave.Ancestors) > 0 || len(index.InterleavedBy) > 0 {
-				return errors.Errorf("restoring interleaved tables is no longer allowed. table %s was found to be interleaved", table.Name)
-			}
 			if err := catalog.ForEachNonDropIndex(
 				tabledesc.NewBuilder(table).BuildImmutable().(catalog.TableDescriptor),
 				func(index catalog.Index) error {
@@ -1841,9 +1686,7 @@ func doRestorePlan(
 		}
 	}
 
-	sqlDescs, restoreDBs, tenants, err := selectTargets(
-		ctx, p, mainBackupManifests, restoreStmt.Targets, restoreStmt.DescriptorCoverage, endTime,
-	)
+	sqlDescs, restoreDBs, tenants, err := selectTargets(ctx, p, mainBackupManifests, restoreStmt.Targets, restoreStmt.DescriptorCoverage, endTime)
 	if err != nil {
 		return errors.Wrap(err,
 			"failed to resolve targets in the BACKUP location specified by the RESTORE stmt, "+
@@ -1865,21 +1708,8 @@ func doRestorePlan(
 		}
 	}
 
-	databaseModifiers, newTypeDescs, err := planDatabaseModifiersForRestore(ctx, p, sqlDescs, restoreDBs)
-	if err != nil {
-		return err
-	}
-
-	sqlDescs = append(sqlDescs, newTypeDescs...)
-
 	if err := maybeUpgradeDescriptors(ctx, sqlDescs, restoreStmt.Options.SkipMissingFKs); err != nil {
 		return err
-	}
-
-	if restoreStmt.Options.NewDBName != nil {
-		if err := renameTargetDatabaseDescriptor(sqlDescs, restoreDBs, newDBName); err != nil {
-			return err
-		}
 	}
 
 	if len(tenants) > 0 {
@@ -1917,48 +1747,11 @@ func doRestorePlan(
 			typesByID[desc.ID] = desc
 		}
 	}
-
-	if !restoreStmt.Options.SkipLocalitiesCheck {
-		if err := checkClusterRegions(ctx, p, typesByID); err != nil {
-			return err
-		}
-	}
-
-	var debugPauseOn string
-	if restoreStmt.Options.DebugPauseOn != nil {
-		pauseOnFn, err := p.TypeAsString(ctx, restoreStmt.Options.DebugPauseOn, "RESTORE")
-		if err != nil {
-			return err
-		}
-
-		debugPauseOn, err = pauseOnFn()
-		if err != nil {
-			return err
-		}
-
-		if _, ok := allowedDebugPauseOnValues[debugPauseOn]; len(debugPauseOn) > 0 && !ok {
-			return errors.Newf("%s cannot be set with the value %s", restoreOptDebugPauseOn, debugPauseOn)
-		}
-	}
-
-	filteredTablesByID, err := maybeFilterMissingViews(
-		tablesByID,
-		typesByID,
+	filteredTablesByID, err := maybeFilterMissingViews(tablesByID,
 		restoreStmt.Options.SkipMissingViews)
 	if err != nil {
 		return err
 	}
-
-	// When running a full cluster restore, we drop the defaultdb and postgres
-	// databases that are present in a new cluster.
-	// This is done so that they can be restored the same way any other user
-	// defined database would be restored from the backup.
-	if restoreStmt.DescriptorCoverage == tree.AllDescriptors {
-		if err := dropDefaultUserDBs(ctx, p.ExecCfg()); err != nil {
-			return err
-		}
-	}
-
 	descriptorRewrites, err := allocateDescriptorRewrites(
 		ctx,
 		p,
@@ -1970,12 +1763,11 @@ func doRestorePlan(
 		restoreStmt.DescriptorCoverage,
 		restoreStmt.Options,
 		intoDB,
-		newDBName)
+	)
 	if err != nil {
 		return err
 	}
-	description, err := restoreJobDescription(p, restoreStmt, from, restoreStmt.Options, intoDB,
-		newDBName, kms)
+	description, err := restoreJobDescription(p, restoreStmt, from, restoreStmt.Options, intoDB, kms)
 	if err != nil {
 		return err
 	}
@@ -2049,8 +1841,6 @@ func doRestorePlan(
 			DescriptorCoverage: restoreStmt.DescriptorCoverage,
 			Encryption:         encryption,
 			RevalidateIndexes:  revalidateIndexes,
-			DatabaseModifiers:  databaseModifiers,
-			DebugPauseOn:       debugPauseOn,
 		},
 		Progress: jobspb.RestoreProgress{},
 	}
@@ -2069,35 +1859,19 @@ func doRestorePlan(
 		return nil
 	}
 
-	// We create the job record in the planner's transaction to ensure that
-	// the job record creation happens transactionally.
-	plannerTxn := p.ExtendedEvalContext().Txn
-
-	// Construct the job and commit the transaction. Perform this work in a
-	// closure to ensure that the job is cleaned up if an error occurs.
 	var sj *jobs.StartableJob
-	if err := func() (err error) {
-		defer func() {
-			if err == nil || sj == nil {
-				return
-			}
+	jobID := p.ExecCfg().JobRegistry.MakeJobID()
+	if err := p.ExecCfg().DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
+		return p.ExecCfg().JobRegistry.CreateStartableJobWithTxn(ctx, &sj, jobID, txn, jr)
+	}); err != nil {
+		if sj != nil {
 			if cleanupErr := sj.CleanupOnRollback(ctx); cleanupErr != nil {
-				log.Errorf(ctx, "failed to cleanup job: %v", cleanupErr)
+				log.Warningf(ctx, "failed to cleanup StartableJob: %v", cleanupErr)
 			}
-		}()
-		jobID := p.ExecCfg().JobRegistry.MakeJobID()
-		if err := p.ExecCfg().JobRegistry.CreateStartableJobWithTxn(ctx, &sj, jobID, plannerTxn, jr); err != nil {
-			return err
 		}
-
-		// We commit the transaction here so that the job can be started. This is
-		// safe because we're in an implicit transaction. If we were in an explicit
-		// transaction the job would have to be created with the detached option and
-		// would have been handled above.
-		return plannerTxn.Commit(ctx)
-	}(); err != nil {
 		return err
 	}
+
 	collectTelemetry()
 	if err := sj.Start(ctx); err != nil {
 		return err
@@ -2106,204 +1880,6 @@ func doRestorePlan(
 		return err
 	}
 	return sj.ReportExecutionResults(ctx, resultsCh)
-}
-
-// renameTargetDatabaseDescriptor updates the name in the target database
-// descriptor to the user specified new_db_name. We update the database
-// descriptor in both sqlDescs that contains all the descriptors being restored,
-// and restoreDBs that contains just the target database descriptor. Renaming
-// the target descriptor ensures accurate name resolution during restore.
-func renameTargetDatabaseDescriptor(
-	sqlDescs []catalog.Descriptor, restoreDBs []catalog.DatabaseDescriptor, newDBName string,
-) error {
-	if len(restoreDBs) != 1 {
-		return errors.NewAssertionErrorWithWrappedErrf(errors.Newf(
-			"expected restoreDBs to have a single entry but found %d entries when renaming the target"+
-				" database", len(restoreDBs)), "assertion failed")
-	}
-
-	for _, desc := range sqlDescs {
-		// Only process database descriptors.
-		db, isDB := desc.(*dbdesc.Mutable)
-		if !isDB {
-			continue
-		}
-		db.SetName(newDBName)
-	}
-	db, ok := restoreDBs[0].(*dbdesc.Mutable)
-	if !ok {
-		return errors.NewAssertionErrorWithWrappedErrf(errors.Newf(
-			"expected db desc but found %T", db), "assertion failed")
-	}
-	db.SetName(newDBName)
-	return nil
-}
-
-func planDatabaseModifiersForRestore(
-	ctx context.Context,
-	p sql.PlanHookState,
-	sqlDescs []catalog.Descriptor,
-	restoreDBs []catalog.DatabaseDescriptor,
-) (map[descpb.ID]*jobspb.RestoreDetails_DatabaseModifier, []catalog.Descriptor, error) {
-	databaseModifiers := make(map[descpb.ID]*jobspb.RestoreDetails_DatabaseModifier)
-	defaultPrimaryRegion := descpb.RegionName(
-		sql.DefaultPrimaryRegion.Get(&p.ExecCfg().Settings.SV),
-	)
-	if defaultPrimaryRegion == "" {
-		return nil, nil, nil
-	}
-	if err := multiregionccl.CheckClusterSupportsMultiRegion(p.ExecCfg()); err != nil {
-		return nil, nil, errors.WithHintf(
-			err,
-			"try disabling the default PRIMARY REGION by using RESET CLUSTER SETTING %s",
-			sql.DefaultPrimaryRegionClusterSettingName,
-		)
-	}
-
-	l, err := sql.GetLiveClusterRegions(ctx, p)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := sql.CheckClusterRegionIsLive(
-		l,
-		defaultPrimaryRegion,
-	); err != nil {
-		return nil, nil, errors.WithHintf(
-			err,
-			"set the default PRIMARY REGION to a region that exists (see SHOW REGIONS FROM CLUSTER) then using SET CLUSTER SETTING %s = 'region'",
-			sql.DefaultPrimaryRegionClusterSettingName,
-		)
-	}
-
-	var maxSeenID descpb.ID
-	for _, desc := range sqlDescs {
-		if desc.GetID() > maxSeenID {
-			maxSeenID = desc.GetID()
-		}
-	}
-
-	shouldRestoreDatabaseIDs := make(map[descpb.ID]struct{})
-	for _, db := range restoreDBs {
-		shouldRestoreDatabaseIDs[db.GetID()] = struct{}{}
-	}
-
-	var extraDescs []catalog.Descriptor
-	for _, desc := range sqlDescs {
-		// Only process database descriptors.
-		db, isDB := desc.(*dbdesc.Mutable)
-		if !isDB {
-			continue
-		}
-		// Check this database is actually being restored.
-		if _, ok := shouldRestoreDatabaseIDs[db.GetID()]; !ok {
-			continue
-		}
-		// We only need to change databases with no region defined.
-		if db.IsMultiRegion() {
-			continue
-		}
-		p.BufferClientNotice(
-			ctx,
-			errors.WithHintf(
-				pgnotice.Newf(
-					"setting the PRIMARY REGION as %s on database %s",
-					defaultPrimaryRegion,
-					db.GetName(),
-				),
-				"to change the default primary region, use SET CLUSTER SETTING %[1]s = 'region' "+
-					"or use RESET CLUSTER SETTING %[1]s to disable this behavior",
-				sql.DefaultPrimaryRegionClusterSettingName,
-			),
-		)
-
-		// Allocate the region enum ID.
-		regionEnumID := maxSeenID + 1
-		regionEnumArrayID := maxSeenID + 2
-		maxSeenID += 2
-
-		// Assign the multi-region configuration to the database descriptor.
-		sg, err := sql.TranslateSurvivalGoal(tree.SurvivalGoalDefault)
-		if err != nil {
-			return nil, nil, err
-		}
-		regionConfig := multiregion.MakeRegionConfig(
-			[]descpb.RegionName{defaultPrimaryRegion},
-			defaultPrimaryRegion,
-			sg,
-			regionEnumID,
-			descpb.DataPlacement_DEFAULT,
-		)
-		if err := multiregion.ValidateRegionConfig(regionConfig); err != nil {
-			return nil, nil, err
-		}
-		if err := db.SetInitialMultiRegionConfig(&regionConfig); err != nil {
-			return nil, nil, err
-		}
-
-		// Create the multi-region enums.
-		regionEnum, regionArrayEnum, err := restoreCreateDefaultPrimaryRegionEnums(
-			ctx,
-			p,
-			db,
-			regionConfig,
-			regionEnumID,
-			regionEnumArrayID,
-		)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		// Append the enums to sqlDescs.
-		extraDescs = append(extraDescs, regionEnum, regionArrayEnum)
-		databaseModifiers[db.GetID()] = &jobspb.RestoreDetails_DatabaseModifier{
-			ExtraTypeDescs: []*descpb.TypeDescriptor{
-				&regionEnum.TypeDescriptor,
-				&regionArrayEnum.TypeDescriptor,
-			},
-			RegionConfig: db.GetRegionConfig(),
-		}
-	}
-	return databaseModifiers, extraDescs, nil
-}
-
-func restoreCreateDefaultPrimaryRegionEnums(
-	ctx context.Context,
-	p sql.PlanHookState,
-	db *dbdesc.Mutable,
-	regionConfig multiregion.RegionConfig,
-	regionEnumID descpb.ID,
-	regionEnumArrayID descpb.ID,
-) (*typedesc.Mutable, *typedesc.Mutable, error) {
-	regionLabels := make(tree.EnumValueList, 0, len(regionConfig.Regions()))
-	for _, regionName := range regionConfig.Regions() {
-		regionLabels = append(regionLabels, tree.EnumValue(regionName))
-	}
-	sc := schemadesc.GetPublicSchema()
-	regionEnum, err := sql.CreateEnumTypeDesc(
-		p.RunParams(ctx),
-		regionConfig.RegionEnumID(),
-		regionLabels,
-		db,
-		sc,
-		tree.NewQualifiedTypeName(db.GetName(), tree.PublicSchema, tree.RegionEnum),
-		sql.EnumTypeMultiRegion,
-	)
-	if err != nil {
-		return nil, nil, err
-	}
-	regionEnum.ArrayTypeID = regionEnumArrayID
-	regionArrayEnum, err := sql.CreateEnumArrayTypeDesc(
-		p.RunParams(ctx),
-		regionEnum,
-		db,
-		sc.GetID(),
-		regionEnumArrayID,
-		"_"+tree.RegionEnum,
-	)
-	if err != nil {
-		return nil, nil, err
-	}
-	return regionEnum, regionArrayEnum, nil
 }
 
 func init() {

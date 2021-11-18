@@ -1,3 +1,0 @@
-show_constraints_stmt ::=
-	'SHOW' 'CONSTRAINT' 'FROM' table_name with_comment
-	| 'SHOW' 'CONSTRAINTS' 'FROM' table_name with_comment

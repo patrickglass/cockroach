@@ -14,9 +14,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/config"
+	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -71,7 +72,7 @@ type consistencyShouldQueueData struct {
 }
 
 // newConsistencyQueue returns a new instance of consistencyQueue.
-func newConsistencyQueue(store *Store) *consistencyQueue {
+func newConsistencyQueue(store *Store, gossip *gossip.Gossip) *consistencyQueue {
 	q := &consistencyQueue{
 		interval: func() time.Duration {
 			return consistencyCheckInterval.Get(&store.ClusterSettings().SV)
@@ -79,7 +80,7 @@ func newConsistencyQueue(store *Store) *consistencyQueue {
 		replicaCountFn: store.ReplicaCount,
 	}
 	q.baseQueue = newBaseQueue(
-		"consistencyChecker", q, store,
+		"consistencyChecker", q, store, gossip,
 		queueConfig{
 			maxSize:              defaultQueueMaxSize,
 			needsLease:           true,
@@ -96,7 +97,7 @@ func newConsistencyQueue(store *Store) *consistencyQueue {
 }
 
 func (q *consistencyQueue) shouldQueue(
-	ctx context.Context, now hlc.ClockTimestamp, repl *Replica, _ spanconfig.StoreReader,
+	ctx context.Context, now hlc.ClockTimestamp, repl *Replica, _ *config.SystemConfig,
 ) (bool, float64) {
 	return consistencyQueueShouldQueueImpl(ctx, now,
 		consistencyShouldQueueData{
@@ -146,7 +147,7 @@ func consistencyQueueShouldQueueImpl(
 
 // process() is called on every range for which this node is a lease holder.
 func (q *consistencyQueue) process(
-	ctx context.Context, repl *Replica, _ spanconfig.StoreReader,
+	ctx context.Context, repl *Replica, _ *config.SystemConfig,
 ) (bool, error) {
 	if q.interval() <= 0 {
 		return false, nil

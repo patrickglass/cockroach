@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -52,10 +53,15 @@ func loadTestData(
 		exists = false
 	}
 
-	eng, err := storage.Open(
+	eng, err := storage.NewPebble(
 		ctx,
-		storage.Filesystem(dir),
-		storage.Settings(cluster.MakeTestingClusterSettings()))
+		storage.PebbleConfig{
+			StorageConfig: base.StorageConfig{
+				Settings: cluster.MakeTestingClusterSettings(),
+				Dir:      dir,
+			},
+		},
+	)
 	if err != nil {
 		return nil, err
 	}

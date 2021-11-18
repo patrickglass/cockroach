@@ -1,3 +1,0 @@
-drop_schedule_stmt ::=
-	'DROP' 'SCHEDULE' a_expr
-	| 'DROP' 'SCHEDULES' select_stmt

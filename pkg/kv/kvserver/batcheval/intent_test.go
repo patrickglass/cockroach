@@ -57,7 +57,7 @@ func TestCollectIntentsUsesSameIterator(t *testing.T) {
 		Timestamp:       ts,
 		ReadConsistency: roachpb.READ_UNCOMMITTED,
 	}
-	evalCtx := (&MockEvalCtx{ClusterSettings: cluster.MakeTestingClusterSettings()}).EvalContext()
+	evalCtx := (&MockEvalCtx{ClusterSettings: cluster.MakeClusterSettings()}).EvalContext()
 
 	testCases := []struct {
 		name              string

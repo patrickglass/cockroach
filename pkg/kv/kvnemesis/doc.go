@@ -23,8 +23,8 @@
 // guarantees.
 //
 // TODO
-// - CPut/InitPut/Increment
-// - ClearRange/RevertRange
+// - CPut/InitPut/Increment/Delete
+// - DeleteRange/ClearRange/RevertRange/ReverseScan
 // - AdminRelocateRange
 // - AdminUnsplit
 // - AdminScatter
@@ -34,8 +34,4 @@
 // - Root and leaf transactions
 // - GCRequest
 // - Protected timestamps
-// - Transactions being abandoned by their coordinator
-// - Continuing txns after CPut and WriteIntent errors (generally continuing
-//   after errors is not allowed, but it is allowed after ConditionFailedError and
-//   WriteIntentError as a special case)
 package kvnemesis

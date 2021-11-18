@@ -20,13 +20,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/errors"
 )
 
-// IndexForDisplay formats an index descriptor as a SQL string. It converts user
-// defined types in partial index predicate expressions to a human-readable
-// form.
+// IndexForDisplay formats a column descriptor as a SQL string. It
+// converts user defined types in partial index predicate expressions to a
+// human-readable form.
 //
 // If tableName is anonymous then no table name is included in the formatted
 // string. For example:
@@ -41,23 +40,10 @@ func IndexForDisplay(
 	ctx context.Context,
 	table catalog.TableDescriptor,
 	tableName *tree.TableName,
-	index catalog.Index,
-	partition string,
-	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
-) (string, error) {
-	return indexForDisplay(ctx, table, tableName, index.IndexDesc(), index.Primary(), partition, semaCtx, sessionData)
-}
-
-func indexForDisplay(
-	ctx context.Context,
-	table catalog.TableDescriptor,
-	tableName *tree.TableName,
 	index *descpb.IndexDescriptor,
-	isPrimary bool,
 	partition string,
+	interleave string,
 	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
 ) (string, error) {
 	f := tree.NewFmtCtx(tree.FmtSimple)
 	if index.Unique {
@@ -73,9 +59,7 @@ func indexForDisplay(
 		f.FormatNode(tableName)
 	}
 	f.WriteString(" (")
-	if err := FormatIndexElements(ctx, table, index, f, semaCtx, sessionData); err != nil {
-		return "", err
-	}
+	index.ColNamesFormat(f)
 	f.WriteByte(')')
 
 	if index.IsSharded() {
@@ -83,7 +67,7 @@ func indexForDisplay(
 			index.Sharded.ShardBuckets)
 	}
 
-	if !isPrimary && len(index.StoreColumnNames) > 0 {
+	if len(index.StoreColumnNames) > 0 {
 		f.WriteString(" STORING (")
 		for i := range index.StoreColumnNames {
 			if i > 0 {
@@ -94,70 +78,9 @@ func indexForDisplay(
 		f.WriteByte(')')
 	}
 
+	f.WriteString(interleave)
 	f.WriteString(partition)
 
-	if err := formatStorageConfigs(table, index, f); err != nil {
-		return "", err
-	}
-
-	if index.IsPartial() {
-		f.WriteString(" WHERE ")
-		pred, err := schemaexpr.FormatExprForDisplay(ctx, table, index.Predicate, semaCtx, sessionData, tree.FmtParsable)
-		if err != nil {
-			return "", err
-		}
-		f.WriteString(pred)
-	}
-
-	return f.CloseAndGetString(), nil
-}
-
-// FormatIndexElements formats the key columns an index. If the column is an
-// inaccessible computed column, the computed column expression is formatted.
-// Otherwise, the column name is formatted. Each column is separated by commas
-// and includes the direction of the index if the index is not an inverted
-// index.
-func FormatIndexElements(
-	ctx context.Context,
-	table catalog.TableDescriptor,
-	index *descpb.IndexDescriptor,
-	f *tree.FmtCtx,
-	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
-) error {
-	startIdx := index.ExplicitColumnStartIdx()
-	for i, n := startIdx, len(index.KeyColumnIDs); i < n; i++ {
-		col, err := table.FindColumnWithID(index.KeyColumnIDs[i])
-		if err != nil {
-			return err
-		}
-		if i > startIdx {
-			f.WriteString(", ")
-		}
-		if col.IsExpressionIndexColumn() {
-			expr, err := schemaexpr.FormatExprForExpressionIndexDisplay(
-				ctx, table, col.GetComputeExpr(), semaCtx, sessionData, tree.FmtParsable,
-			)
-			if err != nil {
-				return err
-			}
-			f.WriteString(expr)
-		} else {
-			f.FormatNameP(&index.KeyColumnNames[i])
-		}
-		if index.Type != descpb.IndexDescriptor_INVERTED {
-			f.WriteByte(' ')
-			f.WriteString(index.KeyColumnDirections[i].String())
-		}
-	}
-	return nil
-}
-
-// formatStorageConfigs writes the index's storage configurations to the given
-// format context.
-func formatStorageConfigs(
-	table catalog.TableDescriptor, index *descpb.IndexDescriptor, f *tree.FmtCtx,
-) error {
 	if index.GeoConfig.S2Geometry != nil || index.GeoConfig.S2Geography != nil {
 		var s2Config *geoindex.S2Config
 
@@ -197,11 +120,11 @@ func formatStorageConfigs(
 		if index.GeoConfig.S2Geometry != nil {
 			col, err := table.FindColumnWithID(index.InvertedColumnID())
 			if err != nil {
-				return errors.Wrapf(err, "expected column %q to exist in table", index.InvertedColumnName())
+				return "", errors.Wrapf(err, "expected column %q to exist in table", index.InvertedColumnName())
 			}
 			defaultConfig, err := geoindex.GeometryIndexConfigForSRID(col.GetType().GeoSRIDOrZero())
 			if err != nil {
-				return errors.Wrapf(err, "expected SRID definition for %d", col.GetType().GeoSRIDOrZero())
+				return "", errors.Wrapf(err, "expected SRID definition for %d", col.GetType().GeoSRIDOrZero())
 			}
 			cfg := index.GeoConfig.S2Geometry
 
@@ -234,5 +157,14 @@ func formatStorageConfigs(
 		}
 	}
 
-	return nil
+	if index.IsPartial() {
+		f.WriteString(" WHERE ")
+		pred, err := schemaexpr.FormatExprForDisplay(ctx, table, index.Predicate, semaCtx, tree.FmtParsable)
+		if err != nil {
+			return "", err
+		}
+		f.WriteString(pred)
+	}
+
+	return f.CloseAndGetString(), nil
 }

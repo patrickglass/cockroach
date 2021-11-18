@@ -77,15 +77,6 @@ type unionNode struct {
 	// all indicates if the operation is the ALL or DISTINCT version
 	all bool
 
-	// streamingOrdering specifies the ordering on both inputs. If not empty, all
-	// columns must be included in this ordering.
-	streamingOrdering colinfo.ColumnOrdering
-
-	// reqOrdering specifies the required output ordering. If not empty, both
-	// inputs are already ordered according to streamingOrdering, and reqOrdering
-	// is a prefix of streamingOrdering.
-	reqOrdering ReqOrdering
-
 	// hardLimit can only be set for UNION ALL operations. It is used to implement
 	// locality optimized search, and instructs the execution engine that it
 	// should execute the left node to completion and possibly short-circuit if
@@ -95,12 +86,7 @@ type unionNode struct {
 }
 
 func (p *planner) newUnionNode(
-	typ tree.UnionType,
-	all bool,
-	left, right planNode,
-	streamingOrdering colinfo.ColumnOrdering,
-	reqOrdering ReqOrdering,
-	hardLimit uint64,
+	typ tree.UnionType, all bool, left, right planNode, hardLimit uint64,
 ) (planNode, error) {
 	emitAll := false
 	switch typ {
@@ -151,16 +137,14 @@ func (p *planner) newUnionNode(
 	}
 
 	node := &unionNode{
-		right:             right,
-		left:              left,
-		columns:           unionColumns,
-		inverted:          inverted,
-		emitAll:           emitAll,
-		unionType:         typ,
-		all:               all,
-		streamingOrdering: streamingOrdering,
-		reqOrdering:       reqOrdering,
-		hardLimit:         hardLimit,
+		right:     right,
+		left:      left,
+		columns:   unionColumns,
+		inverted:  inverted,
+		emitAll:   emitAll,
+		unionType: typ,
+		all:       all,
+		hardLimit: hardLimit,
 	}
 	return node, nil
 }

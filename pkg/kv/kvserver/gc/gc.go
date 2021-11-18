@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/abortspan"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
@@ -30,7 +31,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/bufalloc"
-	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -60,53 +60,52 @@ var IntentAgeThreshold = settings.RegisterDurationSetting(
 	},
 )
 
-// MaxIntentsPerCleanupBatch is the maximum number of intents that GC will send
+// MaxIntentsPerCleanupBatch is a maximum number of intents that GC will send
 // for intent resolution as a single batch.
-//
-// The setting is also used by foreground requests like QueryResolvedTimestamp
-// that do not need to resolve intents synchronously when they encounter them,
-// but do want to perform best-effort asynchronous intent resolution. The
-// setting dictates how many intents these requests will collect at a time.
-//
-// The default value is set to half of the maximum lock table size at the time
-// of writing. This value is subject to tuning in real environment as we have
-// more data available.
+// Default value is set to half of the maximum lock table size at the time
+// of writing.
+// This value is subject to tuning in real environment as we have more
+// data available.
 var MaxIntentsPerCleanupBatch = settings.RegisterIntSetting(
 	"kv.gc.intent_cleanup_batch_size",
 	"if non zero, gc will split found intents into batches of this size when trying to resolve them",
 	5000,
-	settings.NonNegativeInt,
+	func(batchSize int64) error {
+		if batchSize < 0 {
+			return errors.New("gc intent cleanup batch size must be non negative")
+		}
+		return nil
+	},
 )
 
-// MaxIntentKeyBytesPerCleanupBatch is the maximum intent bytes that GC will try
-// to send as a single batch to intent resolution. This number is approximate
-// and only includes size of the intent keys.
-//
-// The setting is also used by foreground requests like QueryResolvedTimestamp
-// that do not need to resolve intents synchronously when they encounter them,
-// but do want to perform best-effort asynchronous intent resolution. The
-// setting dictates how many intents these requests will collect at a time.
-//
-// The default value is a conservative limit to prevent pending intent key sizes
-// from ballooning.
+// MaxIntentKeyBytesPerCleanupBatch is maximum number of intent bytes GC will try to
+// send as a single batch to intent resolution. This number is approximate and
+// only includes size of the intent keys.
+// Default value is conservative limit to prevent pending intent key sizes from
+// ballooning.
 var MaxIntentKeyBytesPerCleanupBatch = settings.RegisterIntSetting(
 	"kv.gc.intent_cleanup_batch_byte_size",
 	"if non zero, gc will split found intents into batches of this size when trying to resolve them",
 	1e6,
-	settings.NonNegativeInt,
+	func(batchSize int64) error {
+		if batchSize < 0 {
+			return errors.New("gc intent cleanup batch size must be non negative")
+		}
+		return nil
+	},
 )
 
 // CalculateThreshold calculates the GC threshold given the policy and the
 // current view of time.
-func CalculateThreshold(now hlc.Timestamp, gcttl time.Duration) (threshold hlc.Timestamp) {
-	ttlNanos := gcttl.Nanoseconds()
+func CalculateThreshold(now hlc.Timestamp, policy zonepb.GCPolicy) (threshold hlc.Timestamp) {
+	ttlNanos := int64(policy.TTLSeconds) * time.Second.Nanoseconds()
 	return now.Add(-ttlNanos, 0)
 }
 
 // TimestampForThreshold inverts CalculateThreshold. It returns the timestamp
 // which should be used for now to arrive at the passed threshold.
-func TimestampForThreshold(threshold hlc.Timestamp, gcttl time.Duration) (ts hlc.Timestamp) {
-	ttlNanos := gcttl.Nanoseconds()
+func TimestampForThreshold(threshold hlc.Timestamp, policy zonepb.GCPolicy) (ts hlc.Timestamp) {
+	ttlNanos := int64(policy.TTLSeconds) * time.Second.Nanoseconds()
 	return threshold.Add(ttlNanos, 0)
 }
 
@@ -147,8 +146,8 @@ type Threshold struct {
 type Info struct {
 	// Now is the timestamp used for age computations.
 	Now hlc.Timestamp
-	// GCTTL is the TTL this garbage collection cycle.
-	GCTTL time.Duration
+	// Policy is the policy used for this garbage collection cycle.
+	Policy zonepb.GCPolicy
 	// Stats about the userspace key-values considered, namely the number of
 	// keys with GC'able data, the number of "old" intents and the number of
 	// associated distinct transactions.
@@ -176,7 +175,7 @@ type Info struct {
 	// ResolveTotal is the total number of attempted intent resolutions in
 	// this cycle.
 	ResolveTotal int
-	// Threshold is the computed expiration timestamp. Equal to `Now - GCTTL`.
+	// Threshold is the computed expiration timestamp. Equal to `Now - Policy`.
 	Threshold hlc.Timestamp
 	// AffectedVersionsKeyBytes is the number of (fully encoded) bytes deleted from keys in the storage engine.
 	// Note that this does not account for compression that the storage engine uses to store data on disk. Real
@@ -203,8 +202,6 @@ type RunOptions struct {
 	// process in one go. This number should be lower than intent resolver default to
 	// prevent further splitting in resolver.
 	MaxTxnsPerIntentCleanupBatch int64
-	// IntentCleanupBatchTimeout is the timeout for processing a batch of intents. 0 to disable.
-	IntentCleanupBatchTimeout time.Duration
 }
 
 // CleanupIntentsFunc synchronously resolves the supplied intents
@@ -230,7 +227,7 @@ func Run(
 	snap storage.Reader,
 	now, newThreshold hlc.Timestamp,
 	options RunOptions,
-	gcTTL time.Duration,
+	policy zonepb.GCPolicy,
 	gcer GCer,
 	cleanupIntentsFn CleanupIntentsFunc,
 	cleanupTxnIntentsAsyncFn CleanupTxnIntentsAsyncFunc,
@@ -245,7 +242,7 @@ func Run(
 	}
 
 	info := Info{
-		GCTTL:     gcTTL,
+		Policy:    policy,
 		Now:       now,
 		Threshold: newThreshold,
 	}
@@ -255,7 +252,6 @@ func Run(
 			maxIntentsPerIntentCleanupBatch:        options.MaxIntentsPerIntentCleanupBatch,
 			maxIntentKeyBytesPerIntentCleanupBatch: options.MaxIntentKeyBytesPerIntentCleanupBatch,
 			maxTxnsPerIntentCleanupBatch:           options.MaxTxnsPerIntentCleanupBatch,
-			intentCleanupBatchTimeout:              options.IntentCleanupBatchTimeout,
 		}, cleanupIntentsFn, &info)
 	if err != nil {
 		return Info{}, err
@@ -406,7 +402,7 @@ func processReplicatedKeyRange(
 			}
 			batchGCKeys = nil
 			batchGCKeysBytes = 0
-			alloc = bufalloc.ByteAllocator{}
+			alloc = nil
 		}
 	}
 	// We need to send out last intent cleanup batch.
@@ -443,7 +439,6 @@ type intentBatcherOptions struct {
 	maxIntentsPerIntentCleanupBatch        int64
 	maxIntentKeyBytesPerIntentCleanupBatch int64
 	maxTxnsPerIntentCleanupBatch           int64
-	intentCleanupBatchTimeout              time.Duration
 }
 
 // newIntentBatcher initializes an intentBatcher. Batcher will take ownership of
@@ -509,16 +504,12 @@ func (b *intentBatcher) maybeFlushPendingIntents(ctx context.Context) error {
 		return ctx.Err()
 	}
 
-	var err error
-	cleanupIntentsFn := func(ctx context.Context) error {
-		return b.cleanupIntentsFn(ctx, b.pendingIntents)
-	}
-	if b.options.intentCleanupBatchTimeout > 0 {
-		err = contextutil.RunWithTimeout(
-			ctx, "intent GC batch", b.options.intentCleanupBatchTimeout, cleanupIntentsFn)
-	} else {
-		err = cleanupIntentsFn(ctx)
-	}
+	// FIXME(erikgrinaker): We should have a timeout for suboperations here now
+	// that the overall GC timeout has been increased, to make sure we'll make
+	// progress even with range unavailability. That's probably best done once
+	// batching is implemented, so we'll wait for that:
+	// https://github.com/cockroachdb/cockroach/pull/65847
+	err := b.cleanupIntentsFn(ctx, b.pendingIntents)
 	if err == nil {
 		// IntentTxns and PushTxn will be equal here, since
 		// pushes to transactions whose record lies in this

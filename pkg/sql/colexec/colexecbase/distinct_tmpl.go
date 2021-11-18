@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for distinct.eg.go. It's formatted in a
 // special way, so it's both valid Go and a valid text/template input. This
@@ -24,23 +22,27 @@ package colexecbase
 import (
 	"context"
 
+	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/errors"
 )
 
-////////////////////////////////////////////////////////////////////////////////
-//                                                                            //
-//                                WARNING                                     //
-//                                                                            //
-//  Adding a fake usage of a package here as a workaround for bazel           //
-//  auto-generated code doesn't work - distinct_gen.go needs to be modified.  //
-//                                                                            //
-////////////////////////////////////////////////////////////////////////////////
+// Workaround for bazel auto-generated code. goimports does not automatically
+// pick up the right packages when run within the bazel sandbox.
+var (
+	_ apd.Context
+	_ coldataext.Datum
+	_ duration.Duration
+	_ tree.AggType
+)
 
 // {{/*
 
@@ -69,8 +71,8 @@ const _TYPE_WIDTH = 0
 // {{define "distinctOpConstructor"}}
 
 func newSingleDistinct(
-	input colexecop.Operator, distinctColIdx int, outputCol []bool, t *types.T, nullsAreDistinct bool,
-) colexecop.Operator {
+	input colexecop.Operator, distinctColIdx int, outputCol []bool, t *types.T,
+) (colexecop.Operator, error) {
 	switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
 	// {{range .}}
 	case _CANONICAL_TYPE_FAMILY:
@@ -78,18 +80,15 @@ func newSingleDistinct(
 		// {{range .WidthOverloads}}
 		case _TYPE_WIDTH:
 			return &distinct_TYPEOp{
-				OneInputHelper:   colexecop.MakeOneInputHelper(input),
-				distinctColIdx:   distinctColIdx,
-				outputCol:        outputCol,
-				nullsAreDistinct: nullsAreDistinct,
-			}
+				OneInputNode:   colexecop.NewOneInputNode(input),
+				distinctColIdx: distinctColIdx,
+				outputCol:      outputCol,
+			}, nil
 			// {{end}}
 		}
 		// {{end}}
 	}
-	colexecerror.InternalError(errors.AssertionFailedf("unsupported type %s", t))
-	// This code is unreachable, but the compiler cannot infer that.
-	return nil
+	return nil, errors.Errorf("unsupported distinct type %s", t)
 }
 
 // {{end}}
@@ -114,21 +113,19 @@ type partitioner interface {
 }
 
 // newPartitioner returns a new partitioner on type t.
-func newPartitioner(t *types.T, nullsAreDistinct bool) partitioner {
+func newPartitioner(t *types.T) (partitioner, error) {
 	switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
 	// {{range .}}
 	case _CANONICAL_TYPE_FAMILY:
 		switch t.Width() {
 		// {{range .WidthOverloads}}
 		case _TYPE_WIDTH:
-			return partitioner_TYPE{nullsAreDistinct: nullsAreDistinct}
+			return partitioner_TYPE{}, nil
 			// {{end}}
 		}
 		// {{end}}
 	}
-	colexecerror.InternalError(errors.AssertionFailedf("unsupported type %s", t))
-	// This code is unreachable, but the compiler cannot infer that.
-	return nil
+	return nil, errors.Errorf("unsupported partition type %s", t)
 }
 
 // {{end}}
@@ -147,7 +144,7 @@ type distinct_TYPEOp struct {
 	// still works across batch boundaries.
 	lastVal _GOTYPE
 
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	// distinctColIdx is the index of the column to distinct upon.
 	distinctColIdx int
@@ -157,11 +154,13 @@ type distinct_TYPEOp struct {
 	foundFirstRow bool
 
 	lastValNull bool
-
-	nullsAreDistinct bool
 }
 
 var _ colexecop.ResettableOperator = &distinct_TYPEOp{}
+
+func (p *distinct_TYPEOp) Init() {
+	p.Input.Init()
+}
 
 func (p *distinct_TYPEOp) Reset(ctx context.Context) {
 	p.foundFirstRow = false
@@ -171,8 +170,8 @@ func (p *distinct_TYPEOp) Reset(ctx context.Context) {
 	}
 }
 
-func (p *distinct_TYPEOp) Next() coldata.Batch {
-	batch := p.Input.Next()
+func (p *distinct_TYPEOp) Next(ctx context.Context) coldata.Batch {
+	batch := p.Input.Next(ctx)
 	if batch.Length() == 0 {
 		return batch
 	}
@@ -207,36 +206,32 @@ func (p *distinct_TYPEOp) Next() coldata.Batch {
 		sel = sel[:n]
 		if nulls != nil {
 			for _, idx := range sel {
-				lastVal, lastValNull = checkDistinctWithNulls(idx, idx, lastVal, nulls, lastValNull, col, outputCol, p.nullsAreDistinct, false, false)
+				lastVal, lastValNull = checkDistinctWithNulls(idx, idx, lastVal, nulls, lastValNull, col, outputCol)
 			}
 		} else {
 			for _, idx := range sel {
-				lastVal = checkDistinct(idx, idx, lastVal, col, outputCol, false, false)
+				lastVal = checkDistinct(idx, idx, lastVal, col, outputCol)
 			}
 		}
 	} else {
 		// Eliminate bounds checks for outputCol[idx].
 		_ = outputCol[n-1]
-		// {{if .Sliceable}}
 		// Eliminate bounds checks for col[idx].
 		_ = col.Get(n - 1)
-		// {{end}}
+		// TODO(yuzefovich): add BCE assertions for these.
 		if nulls != nil {
 			for idx := 0; idx < n; idx++ {
-				lastVal, lastValNull = checkDistinctWithNulls(idx, idx, lastVal, nulls, lastValNull, col, outputCol, p.nullsAreDistinct, true, true)
+				lastVal, lastValNull = checkDistinctWithNulls(idx, idx, lastVal, nulls, lastValNull, col, outputCol)
 			}
 		} else {
 			for idx := 0; idx < n; idx++ {
-				lastVal = checkDistinct(idx, idx, lastVal, col, outputCol, true, true)
+				lastVal = checkDistinct(idx, idx, lastVal, col, outputCol)
 			}
 		}
 	}
 
-	if !lastValNull {
-		// We need to perform a deep copy for the next iteration if we didn't have
-		// a null value.
-		execgen.COPYVAL(p.lastVal, lastVal)
-	}
+	// We need to perform a deep copy for the next iteration.
+	execgen.COPYVAL(p.lastVal, lastVal)
 	p.lastValNull = lastValNull
 
 	return batch
@@ -250,9 +245,7 @@ func (p *distinct_TYPEOp) Next() coldata.Batch {
 // operation over it. It writes the same format to outputCol that sorted
 // distinct does: true for every row that differs from the previous row in the
 // input column.
-type partitioner_TYPE struct {
-	nullsAreDistinct bool
-}
+type partitioner_TYPE struct{}
 
 func (p partitioner_TYPE) partitionWithOrder(
 	colVec coldata.Vec, order []int, outputCol []bool, n int,
@@ -266,20 +259,19 @@ func (p partitioner_TYPE) partitionWithOrder(
 
 	col := colVec.TemplateType()
 	// Eliminate bounds checks.
+	_ = col.Get(n - 1)
 	_ = outputCol[n-1]
-	_ = order[n-1]
+	// TODO(yuzefovich): add BCE assertions for these.
 	outputCol[0] = true
 	if nulls != nil {
 		for outputIdx := 0; outputIdx < n; outputIdx++ {
-			//gcassert:bce
 			checkIdx := order[outputIdx]
-			lastVal, lastValNull = checkDistinctWithNulls(checkIdx, outputIdx, lastVal, nulls, lastValNull, col, outputCol, p.nullsAreDistinct, false, true)
+			lastVal, lastValNull = checkDistinctWithNulls(checkIdx, outputIdx, lastVal, nulls, lastValNull, col, outputCol)
 		}
 	} else {
 		for outputIdx := 0; outputIdx < n; outputIdx++ {
-			//gcassert:bce
 			checkIdx := order[outputIdx]
-			lastVal = checkDistinct(checkIdx, outputIdx, lastVal, col, outputCol, false, true)
+			lastVal = checkDistinct(checkIdx, outputIdx, lastVal, col, outputCol)
 		}
 	}
 }
@@ -295,18 +287,17 @@ func (p partitioner_TYPE) partition(colVec coldata.Vec, outputCol []bool, n int)
 	}
 
 	col := colVec.TemplateType()
-	// {{if .Sliceable}}
 	_ = col.Get(n - 1)
-	// {{end}}
 	_ = outputCol[n-1]
+	// TODO(yuzefovich): add BCE assertions for these.
 	outputCol[0] = true
 	if nulls != nil {
 		for idx := 0; idx < n; idx++ {
-			lastVal, lastValNull = checkDistinctWithNulls(idx, idx, lastVal, nulls, lastValNull, col, outputCol, p.nullsAreDistinct, true, true)
+			lastVal, lastValNull = checkDistinctWithNulls(idx, idx, lastVal, nulls, lastValNull, col, outputCol)
 		}
 	} else {
 		for idx := 0; idx < n; idx++ {
-			lastVal = checkDistinct(idx, idx, lastVal, col, outputCol, true, true)
+			lastVal = checkDistinct(idx, idx, lastVal, col, outputCol)
 		}
 	}
 }
@@ -318,27 +309,12 @@ func (p partitioner_TYPE) partition(colVec coldata.Vec, outputCol []bool, n int)
 // compared values were distinct. It presumes that the current batch has no null
 // values.
 // execgen:inline
-// execgen:template<colBCE,outputBCE>
 func checkDistinct(
-	checkIdx int,
-	outputIdx int,
-	lastVal _GOTYPE,
-	col []_GOTYPE,
-	outputCol []bool,
-	colBCE bool,
-	outputBCE bool,
+	checkIdx int, outputIdx int, lastVal _GOTYPE, col []_GOTYPE, outputCol []bool,
 ) _GOTYPE {
-	if colBCE {
-		// {{if .Sliceable}}
-		//gcassert:bce
-		// {{end}}
-	}
 	v := col.Get(checkIdx)
 	var unique bool
 	_ASSIGN_NE(unique, v, lastVal, _, col, _)
-	if outputBCE {
-		//gcassert:bce
-	}
 	outputCol[outputIdx] = outputCol[outputIdx] || unique
 	return v
 }
@@ -347,7 +323,6 @@ func checkDistinct(
 // considers whether the previous and current values are null. It assumes that
 // `nulls` is non-nil.
 // execgen:inline
-// execgen:template<colBCE,outputBCE>
 func checkDistinctWithNulls(
 	checkIdx int,
 	outputIdx int,
@@ -356,41 +331,22 @@ func checkDistinctWithNulls(
 	lastValNull bool,
 	col []_GOTYPE,
 	outputCol []bool,
-	nullsAreDistinct bool,
-	colBCE bool,
-	outputBCE bool,
 ) (lastVal _GOTYPE, lastValNull bool) {
 	null := nulls.NullAt(checkIdx)
 	if null {
-		if !lastValNull || nullsAreDistinct {
-			// The current value is null, and either the previous one is not
-			// (meaning they are definitely distinct) or we treat nulls as
-			// distinct values.
-			if outputBCE {
-				//gcassert:bce
-			}
+		if !lastValNull {
+			// The current value is null while the previous was not.
 			outputCol[outputIdx] = true
 		}
 	} else {
-		if colBCE {
-			// {{if .Sliceable}}
-			//gcassert:bce
-			// {{end}}
-		}
 		v := col.Get(checkIdx)
 		if lastValNull {
 			// The previous value was null while the current is not.
-			if outputBCE {
-				//gcassert:bce
-			}
 			outputCol[outputIdx] = true
 		} else {
 			// Neither value is null, so we must compare.
 			var unique bool
 			_ASSIGN_NE(unique, v, lastVal, _, col, _)
-			if outputBCE {
-				//gcassert:bce
-			}
 			outputCol[outputIdx] = outputCol[outputIdx] || unique
 		}
 		lastVal = v

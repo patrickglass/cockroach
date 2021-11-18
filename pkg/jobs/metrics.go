@@ -25,19 +25,7 @@ import (
 type Metrics struct {
 	JobMetrics [jobspb.NumJobTypes]*JobTypeMetrics
 
-	Changefeed   metric.Struct
-	StreamIngest metric.Struct
-
-	// AdoptIterations counts the number of adopt loops executed by Registry.
-	AdoptIterations *metric.Counter
-
-	// ClaimedJobs counts the number of jobs claimed in adopt loops.
-	ClaimedJobs *metric.Counter
-
-	// ResumedJobs counts the number of jobs resumed by Registry. It doesn't
-	// correlate with the ClaimedJobs counter because a job can be resumed
-	// without an adopt loop, e.g., through a StartableJob.
-	ResumedJobs *metric.Counter
+	Changefeed metric.Struct
 }
 
 // JobTypeMetrics is a metric.Struct containing metrics for each type of job.
@@ -48,9 +36,7 @@ type JobTypeMetrics struct {
 	ResumeFailed           *metric.Counter
 	FailOrCancelCompleted  *metric.Counter
 	FailOrCancelRetryError *metric.Counter
-	// TODO (sajjad): FailOrCancelFailed metric is not updated after the modification
-	// of retrying all reverting jobs. Remove this metric in v22.1.
-	FailOrCancelFailed *metric.Counter
+	FailOrCancelFailed     *metric.Counter
 }
 
 // MetricStruct implements the metric.Struct interface.
@@ -136,32 +122,6 @@ func makeMetaFailOrCancelFailed(typeStr string) metric.Metadata {
 	}
 }
 
-var (
-	metaAdoptIterations = metric.Metadata{
-		Name:        "jobs.adopt_iterations",
-		Help:        "number of job-adopt iterations performed by the registry",
-		Measurement: "iterations",
-		Unit:        metric.Unit_COUNT,
-		MetricType:  io_prometheus_client.MetricType_GAUGE,
-	}
-
-	metaClaimedJobs = metric.Metadata{
-		Name:        "jobs.claimed_jobs",
-		Help:        "number of jobs claimed in job-adopt iterations",
-		Measurement: "jobs",
-		Unit:        metric.Unit_COUNT,
-		MetricType:  io_prometheus_client.MetricType_GAUGE,
-	}
-
-	metaResumedClaimedJobs = metric.Metadata{
-		Name:        "jobs.resumed_claimed_jobs",
-		Help:        "number of claimed-jobs resumed in job-adopt iterations",
-		Measurement: "jobs",
-		Unit:        metric.Unit_COUNT,
-		MetricType:  io_prometheus_client.MetricType_GAUGE,
-	}
-)
-
 // MetricStruct implements the metric.Struct interface.
 func (Metrics) MetricStruct() {}
 
@@ -170,12 +130,6 @@ func (m *Metrics) init(histogramWindowInterval time.Duration) {
 	if MakeChangefeedMetricsHook != nil {
 		m.Changefeed = MakeChangefeedMetricsHook(histogramWindowInterval)
 	}
-	if MakeStreamIngestMetricsHook != nil {
-		m.StreamIngest = MakeStreamIngestMetricsHook(histogramWindowInterval)
-	}
-	m.AdoptIterations = metric.NewCounter(metaAdoptIterations)
-	m.ClaimedJobs = metric.NewCounter(metaClaimedJobs)
-	m.ResumedJobs = metric.NewCounter(metaResumedClaimedJobs)
 	for i := 0; i < jobspb.NumJobTypes; i++ {
 		jt := jobspb.Type(i)
 		if jt == jobspb.TypeUnspecified { // do not track TypeUnspecified
@@ -197,10 +151,6 @@ func (m *Metrics) init(histogramWindowInterval time.Duration) {
 // MakeChangefeedMetricsHook allows for registration of changefeed metrics from
 // ccl code.
 var MakeChangefeedMetricsHook func(time.Duration) metric.Struct
-
-// MakeStreamIngestMetricsHook allows for registration of streaming metrics from
-// ccl code.
-var MakeStreamIngestMetricsHook func(duration time.Duration) metric.Struct
 
 // JobTelemetryMetrics is a telemetry metrics for individual job types.
 type JobTelemetryMetrics struct {

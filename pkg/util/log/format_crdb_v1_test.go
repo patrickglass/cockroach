@@ -57,10 +57,7 @@ func TestCrdbV1EncodeDecode(t *testing.T) {
 			}
 			// Decode.
 			entryStr := buf.String()
-			decoder, err := NewEntryDecoderWithFormat(strings.NewReader(entryStr), WithMarkedSensitiveData, "crdb-v1")
-			if err != nil {
-				td.Fatalf(t, "error while constructing decoder: %v", err)
-			}
+			decoder := NewEntryDecoder(strings.NewReader(entryStr), WithMarkedSensitiveData)
 			var outputEntries []logpb.Entry
 			for {
 				var entry logpb.Entry
@@ -122,19 +119,16 @@ func TestCrdbV1EntryDecoderForVeryLargeEntries(t *testing.T) {
 
 	// Verify the truncation logic for reading logs that are longer than the
 	// default scanner can handle.
-	preambleLength := len(formatEntry(severity.INFO, channel.DEV, t1, 0, "somefile.go", 136, ``, ""))
+	preambleLength := len(formatEntry(severity.INFO, channel.DEV, t1, 0, "clog_test.go", 136, ``, ""))
 	maxMessageLength := bufio.MaxScanTokenSize - preambleLength - 1
 	reallyLongEntry := string(bytes.Repeat([]byte("a"), maxMessageLength))
 	tooLongEntry := reallyLongEntry + "a"
 
-	contents := formatEntry(severity.INFO, channel.DEV, t1, 2, "somefile.go", 138, ``, reallyLongEntry)
-	contents += formatEntry(severity.INFO, channel.DEV, t2, 3, "somefile.go", 139, ``, tooLongEntry)
+	contents := formatEntry(severity.INFO, channel.DEV, t1, 2, "clog_test.go", 138, ``, reallyLongEntry)
+	contents += formatEntry(severity.INFO, channel.DEV, t2, 3, "clog_test.go", 139, ``, tooLongEntry)
 
 	readAllEntries := func(contents string) []logpb.Entry {
-		decoder, err := NewEntryDecoderWithFormat(strings.NewReader(contents), WithFlattenedSensitiveData, "crdb-v1")
-		if err != nil {
-			t.Fatal(err)
-		}
+		decoder := NewEntryDecoder(strings.NewReader(contents), WithFlattenedSensitiveData)
 		var entries []logpb.Entry
 		var entry logpb.Entry
 		for {
@@ -156,7 +150,7 @@ func TestCrdbV1EntryDecoderForVeryLargeEntries(t *testing.T) {
 			Channel:   channel.DEV,
 			Time:      t1.UnixNano(),
 			Goroutine: 2,
-			File:      `somefile.go`,
+			File:      `clog_test.go`,
 			Line:      138,
 			Message:   reallyLongEntry,
 			Counter:   2,
@@ -166,7 +160,7 @@ func TestCrdbV1EntryDecoderForVeryLargeEntries(t *testing.T) {
 			Channel:   channel.DEV,
 			Time:      t2.UnixNano(),
 			Goroutine: 3,
-			File:      `somefile.go`,
+			File:      `clog_test.go`,
 			Line:      139,
 			Message:   tooLongEntry[:maxMessageLength],
 			Counter:   3,

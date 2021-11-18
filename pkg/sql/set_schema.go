@@ -27,7 +27,7 @@ import (
 // prepareSetSchema verifies that a table/type can be set to the desired
 // schema and returns the schema id of the desired schema.
 func (p *planner) prepareSetSchema(
-	ctx context.Context, db catalog.DatabaseDescriptor, desc catalog.MutableDescriptor, schema string,
+	ctx context.Context, desc catalog.MutableDescriptor, schema string,
 ) (descpb.ID, error) {
 
 	var objectName tree.ObjectName
@@ -35,24 +35,23 @@ func (p *planner) prepareSetSchema(
 	case *tabledesc.Mutable:
 		objectName = tree.NewUnqualifiedTableName(tree.Name(desc.GetName()))
 	case *typedesc.Mutable:
-		objectName = tree.NewUnqualifiedTypeName(desc.GetName())
+		objectName = tree.NewUnqualifiedTypeName(tree.Name(desc.GetName()))
 	default:
 		return 0, pgerror.Newf(
 			pgcode.InvalidParameterValue,
 			"no table or type was found for SET SCHEMA command, found %T", t)
 	}
 
+	databaseID := desc.GetParentID()
+	schemaID := desc.GetParentSchemaID()
+
 	// Lookup the schema we want to set to.
-	res, err := p.Descriptors().GetMutableSchemaByName(
-		ctx, p.txn, db, schema, tree.SchemaLookupFlags{
-			Required:       true,
-			RequireMutable: true,
-		})
+	_, res, err := p.ResolveUncachedSchemaDescriptor(ctx, databaseID, schema, true /* required */)
 	if err != nil {
 		return 0, err
 	}
 
-	switch res.SchemaKind() {
+	switch res.Kind {
 	case catalog.SchemaTemporary:
 		return 0, pgerror.Newf(pgcode.FeatureNotSupported,
 			"cannot move objects into or out of temporary schemas")
@@ -64,22 +63,22 @@ func (p *planner) prepareSetSchema(
 	default:
 		// The user needs CREATE privilege on the target schema to move an object
 		// to the schema.
-		err = p.CheckPrivilege(ctx, res, privilege.CREATE)
+		err = p.CheckPrivilege(ctx, res.Desc, privilege.CREATE)
 		if err != nil {
 			return 0, err
 		}
 	}
 
-	desiredSchemaID := res.GetID()
+	desiredSchemaID := res.ID
 
 	// If the schema being changed to is the same as the current schema a no-op
 	// will happen so we don't have to check if there is an object in the schema
 	// with the same name.
-	if desiredSchemaID == desc.GetParentSchemaID() {
+	if desiredSchemaID == schemaID {
 		return desiredSchemaID, nil
 	}
 
-	err = catalogkv.CheckObjectCollision(ctx, p.txn, p.ExecCfg().Codec, db.GetID(), desiredSchemaID, objectName)
+	err = catalogkv.CheckObjectCollision(ctx, p.txn, p.ExecCfg().Codec, databaseID, desiredSchemaID, objectName)
 	if err != nil {
 		return descpb.InvalidID, err
 	}

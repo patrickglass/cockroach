@@ -16,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/errors"
@@ -76,7 +77,7 @@ func (t *PartitionTuple) String() string {
 // DecodePartitionTuple parses columns (which are a prefix of the columns of
 // `idxDesc`) encoded with the "value" encoding and returns the parsed datums.
 // It also reencodes them into a key as they would be for `idxDesc` (accounting
-// for index dirs, subpartitioning, etc).
+// for index dirs, interleaves, subpartitioning, etc).
 //
 // For a list partitioning, this returned key can be used as a prefix scan to
 // select all rows that have the given columns as a prefix (this is true even if
@@ -105,21 +106,21 @@ func DecodePartitionTuple(
 	a *DatumAlloc,
 	codec keys.SQLCodec,
 	tableDesc catalog.TableDescriptor,
-	index catalog.Index,
-	part catalog.Partitioning,
+	idxDesc *descpb.IndexDescriptor,
+	partDesc *descpb.PartitioningDescriptor,
 	valueEncBuf []byte,
 	prefixDatums tree.Datums,
 ) (*PartitionTuple, []byte, error) {
-	if len(prefixDatums)+part.NumColumns() > index.NumKeyColumns() {
+	if len(prefixDatums)+int(partDesc.NumColumns) > len(idxDesc.ColumnIDs) {
 		return nil, nil, fmt.Errorf("not enough columns in index for this partitioning")
 	}
 
 	t := &PartitionTuple{
-		Datums: make(tree.Datums, 0, part.NumColumns()),
+		Datums: make(tree.Datums, 0, int(partDesc.NumColumns)),
 	}
 
-	for i := len(prefixDatums); i < index.NumKeyColumns() && i < len(prefixDatums)+part.NumColumns(); i++ {
-		colID := index.GetKeyColumnID(i)
+	colIDs := idxDesc.ColumnIDs[len(prefixDatums) : len(prefixDatums)+int(partDesc.NumColumns)]
+	for _, colID := range colIDs {
 		col, err := tableDesc.FindColumnWithID(colID)
 		if err != nil {
 			return nil, nil, err
@@ -160,12 +161,12 @@ func DecodePartitionTuple(
 	allDatums := append(prefixDatums, t.Datums...)
 	var colMap catalog.TableColMap
 	for i := range allDatums {
-		colMap.Set(index.GetKeyColumnID(i), i)
+		colMap.Set(idxDesc.ColumnIDs[i], i)
 	}
 
-	indexKeyPrefix := MakeIndexKeyPrefix(codec, tableDesc, index.GetID())
+	indexKeyPrefix := MakeIndexKeyPrefix(codec, tableDesc, idxDesc.ID)
 	key, _, err := EncodePartialIndexKey(
-		tableDesc, index, len(allDatums), colMap, allDatums, indexKeyPrefix)
+		tableDesc, idxDesc, len(allDatums), colMap, allDatums, indexKeyPrefix)
 	if err != nil {
 		return nil, nil, err
 	}

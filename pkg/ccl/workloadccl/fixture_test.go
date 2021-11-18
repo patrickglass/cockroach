@@ -109,6 +109,7 @@ func TestFixture(t *testing.T) {
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop(ctx)
 	sqlDB := sqlutils.MakeSQLRunner(db)
+	sqlDB.Exec(t, `SET CLUSTER SETTING cloudstorage.gs.default.key = $1`, gcsKey)
 
 	gen := makeTestWorkload()
 	flag := fmt.Sprintf(`val=%d`, timeutil.Now().UnixNano())
@@ -196,9 +197,9 @@ func TestImportFixture(t *testing.T) {
 
 	// Since we did not inject stats, the IMPORT should have triggered
 	// automatic stats collection.
-	statsQuery := fmt.Sprintf(`SELECT statistics_name, column_names, row_count, distinct_count, null_count
-           FROM [SHOW STATISTICS FOR TABLE ingest.fx] WHERE row_count = %d`, fixtureTestGenRows)
-	sqlDB.CheckQueryResultsRetry(t, statsQuery,
+	sqlDB.CheckQueryResultsRetry(t,
+		`SELECT statistics_name, column_names, row_count, distinct_count, null_count
+           FROM [SHOW STATISTICS FOR TABLE ingest.fx]`,
 		[][]string{
 			{"__auto__", "{key}", "10", "10", "0"},
 			{"__auto__", "{value}", "10", "1", "0"},

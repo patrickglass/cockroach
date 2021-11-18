@@ -13,6 +13,7 @@ package sql_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs"
@@ -20,7 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqltestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -37,17 +38,16 @@ func TestDrainingNamesAreCleanedOnTypeChangeFailure(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	// Decrease the adopt loop interval so that retries happen quickly.
+	defer sqltestutils.SetTestJobsAdoptInterval()()
+
 	ctx := context.Background()
 	params, _ := tests.CreateTestServerParams()
 	params.Knobs.SQLTypeSchemaChanger = &sql.TypeSchemaChangerTestingKnobs{
 		RunBeforeExec: func() error {
-			// As the job is non-cancelable, return a permanent-marked error so that
-			// the job can revert.
-			return jobs.MarkAsPermanentJobError(errors.New("boom"))
+			return errors.New("boom")
 		},
 	}
-	// Decrease the adopt loop interval so that retries happen quickly.
-	params.Knobs.JobsTestingKnobs = jobs.NewTestingKnobsWithShortIntervals()
 
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
@@ -107,7 +107,7 @@ CREATE TYPE d.t AS ENUM();
 	desc := catalogkv.TestingGetTypeDescriptor(kvDB, keys.SystemSQLCodec, "d", "t")
 	delTypeDesc = func() {
 		// Delete the descriptor.
-		if err := kvDB.Del(ctx, catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, desc.GetID())); err != nil {
+		if err := kvDB.Del(ctx, catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, desc.ID)); err != nil {
 			t.Error(err)
 		}
 	}
@@ -123,6 +123,9 @@ CREATE TYPE d.t AS ENUM();
 func TestTypeSchemaChangeRetriesTransparently(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+
+	// Decrease the adopt loop interval so that retries happen quickly.
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 
 	ctx := context.Background()
 	// Protects errorReturned.
@@ -141,8 +144,6 @@ func TestTypeSchemaChangeRetriesTransparently(t *testing.T) {
 			return context.DeadlineExceeded
 		},
 	}
-	// Decrease the adopt loop interval so that retries happen quickly.
-	params.Knobs.JobsTestingKnobs = jobs.NewTestingKnobsWithShortIntervals()
 
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
@@ -168,6 +169,9 @@ func TestFailedTypeSchemaChangeRetriesTransparently(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	// Decrease the adopt loop interval so that retries happen quickly.
+	defer sqltestutils.SetTestJobsAdoptInterval()()
+
 	ctx := context.Background()
 	// Protects errReturned.
 	var mu syncutil.Mutex
@@ -177,7 +181,7 @@ func TestFailedTypeSchemaChangeRetriesTransparently(t *testing.T) {
 	cleanupSuccessfullyFinished := make(chan struct{})
 	params.Knobs.SQLTypeSchemaChanger = &sql.TypeSchemaChangerTestingKnobs{
 		RunBeforeExec: func() error {
-			return jobs.MarkAsPermanentJobError(errors.New("yikes"))
+			return errors.New("yikes")
 		},
 		RunAfterOnFailOrCancel: func() error {
 			mu.Lock()
@@ -190,14 +194,14 @@ func TestFailedTypeSchemaChangeRetriesTransparently(t *testing.T) {
 			return context.DeadlineExceeded
 		},
 	}
-	// Decrease the adopt loop interval so that retries happen quickly.
-	params.Knobs.JobsTestingKnobs = jobs.NewTestingKnobsWithShortIntervals()
 
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
 
 	// Create a type.
 	_, err := sqlDB.Exec(`
+SET CLUSTER SETTING sql.defaults.drop_enum_value.enabled = true;
+SET enable_drop_enum_value = true;
 CREATE DATABASE d;
 CREATE TYPE d.t AS ENUM();
 `)
@@ -230,14 +234,15 @@ func TestAddDropValuesInTransaction(t *testing.T) {
 
 	ctx := context.Background()
 
-	params, _ := tests.CreateTestServerParams()
 	// Decrease the adopt loop interval so that retries happen quickly.
-	params.Knobs.JobsTestingKnobs = jobs.NewTestingKnobsWithShortIntervals()
-
+	defer sqltestutils.SetTestJobsAdoptInterval()()
+	params, _ := tests.CreateTestServerParams()
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
 
 	if _, err := sqlDB.Exec(`
+SET CLUSTER SETTING sql.defaults.drop_enum_value.enabled = true;
+SET enable_drop_enum_value = true;
 CREATE DATABASE d;
 USE d;
 CREATE TYPE greetings AS ENUM('hi', 'hello', 'yo');
@@ -400,6 +405,8 @@ func TestEnumMemberTransitionIsolation(t *testing.T) {
 
 	// Setup.
 	if _, err := sqlDB.Exec(`
+SET CLUSTER SETTING sql.defaults.drop_enum_value.enabled = true;
+SET enable_drop_enum_value = true;
 CREATE TYPE ab AS ENUM ('a', 'b')`,
 	); err != nil {
 		t.Fatal(err)
@@ -513,18 +520,17 @@ func TestTypeChangeJobCancelSemantics(t *testing.T) {
 			params, _ := tests.CreateTestServerParams()
 
 			// Wait groups for synchronizing various parts of the test.
-			typeSchemaChangeStarted := make(chan struct{})
-			blockTypeSchemaChange := make(chan struct{})
-			finishedSchemaChange := make(chan struct{})
+			var typeSchemaChangeStarted sync.WaitGroup
+			typeSchemaChangeStarted.Add(1)
+			var blockTypeSchemaChange sync.WaitGroup
+			blockTypeSchemaChange.Add(1)
+			var finishedSchemaChange sync.WaitGroup
+			finishedSchemaChange.Add(1)
 
-			params.Knobs.JobsTestingKnobs = jobs.NewTestingKnobsWithShortIntervals()
 			params.Knobs.SQLTypeSchemaChanger = &sql.TypeSchemaChangerTestingKnobs{
-				RunBeforeEnumMemberPromotion: func(ctx context.Context) error {
-					close(typeSchemaChangeStarted)
-					select {
-					case <-blockTypeSchemaChange:
-					case <-ctx.Done():
-					}
+				RunBeforeEnumMemberPromotion: func() error {
+					typeSchemaChangeStarted.Done()
+					blockTypeSchemaChange.Wait()
 					return nil
 				},
 			}
@@ -536,6 +542,8 @@ func TestTypeChangeJobCancelSemantics(t *testing.T) {
 
 			// Setup.
 			_, err := sqlDB.Exec(`
+SET CLUSTER SETTING sql.defaults.drop_enum_value.enabled = true;
+SET enable_drop_enum_value = true;
 CREATE DATABASE db;
 CREATE TYPE db.greetings AS ENUM ('hi', 'yo');
 `)
@@ -549,10 +557,10 @@ CREATE TYPE db.greetings AS ENUM ('hi', 'yo');
 				if !tc.cancelable && err != nil {
 					t.Error(err)
 				}
-				close(finishedSchemaChange)
+				finishedSchemaChange.Done()
 			}()
 
-			<-typeSchemaChangeStarted
+			typeSchemaChangeStarted.Wait()
 
 			_, err = sqlDB.Exec(`CANCEL JOB (
 SELECT job_id FROM [SHOW JOBS]
@@ -583,13 +591,13 @@ WHERE
 						return errors.New("expected error, found none")
 					}
 					if !testutils.IsError(err, "invalid input value for enum") {
-						return errors.Newf("expected invalid input for enum error, found %s", pgerror.FullError(err))
+						return errors.Newf("expected invalid input for enum error, found %v", err)
 					}
 					return nil
 				})
 			}
-			close(blockTypeSchemaChange)
-			<-finishedSchemaChange
+			blockTypeSchemaChange.Done()
+			finishedSchemaChange.Wait()
 		})
 	}
 }

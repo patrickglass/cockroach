@@ -12,14 +12,12 @@ package cli
 
 import (
 	"context"
+	"database/sql/driver"
 	"fmt"
 	"net/url"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlclient"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/server/pgurl"
 	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
 )
@@ -31,7 +29,7 @@ var importDumpFileCmd = &cobra.Command{
 Uploads and imports a local dump file into the cockroach cluster via userfile storage.
 `,
 	Args: cobra.MinimumNArgs(2),
-	RunE: clierrorplus.MaybeShoutError(runDumpFileImport),
+	RunE: maybeShoutError(runDumpFileImport),
 }
 
 var importDumpTableCmd = &cobra.Command{
@@ -41,7 +39,7 @@ var importDumpTableCmd = &cobra.Command{
 Uploads and imports a table from the local dump file into the cockroach cluster via userfile storage.
 `,
 	Args: cobra.MinimumNArgs(3),
-	RunE: clierrorplus.MaybeShoutError(runDumpTableImport),
+	RunE: maybeShoutError(runDumpTableImport),
 }
 
 // importCLITestingKnobs are set when the CLI import command is run from a unit
@@ -80,7 +78,7 @@ func setImportCLITestingKnobs() (importCLITestingKnobs, func()) {
 	}
 }
 
-func runDumpTableImport(cmd *cobra.Command, args []string) (resErr error) {
+func runDumpTableImport(cmd *cobra.Command, args []string) error {
 	tableName := args[0]
 	importFormat := strings.ToLower(args[1])
 	source := args[2]
@@ -88,34 +86,37 @@ func runDumpTableImport(cmd *cobra.Command, args []string) (resErr error) {
 	if err != nil {
 		return err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
+	defer conn.Close()
 	ctx := context.Background()
 	return runImport(ctx, conn, importFormat, source, tableName, singleTable)
 }
 
-func runDumpFileImport(cmd *cobra.Command, args []string) (resErr error) {
+func runDumpFileImport(cmd *cobra.Command, args []string) error {
 	importFormat := strings.ToLower(args[0])
 	source := args[1]
 	conn, err := makeSQLClient("cockroach import db", useDefaultDb)
 	if err != nil {
 		return err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
+	defer conn.Close()
 	ctx := context.Background()
 	return runImport(ctx, conn, importFormat, source, "", multiTable)
 }
 
 func runImport(
-	ctx context.Context,
-	conn clisqlclient.Conn,
-	importFormat, source, tableName string,
-	mode importMode,
+	ctx context.Context, conn *sqlConn, importFormat, source, tableName string, mode importMode,
 ) error {
-	if err := conn.EnsureConn(); err != nil {
+	if err := conn.ensureConn(); err != nil {
 		return err
 	}
 
-	connURL, err := url.Parse(conn.GetURL())
+	reader, err := openUserFile(source)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	connURL, err := url.Parse(conn.url)
 	if err != nil {
 		return err
 	}
@@ -137,7 +138,7 @@ func runImport(
 		_, _ = deleteUserFile(ctx, conn, unescapedUserfileURL)
 	}()
 
-	_, err = uploadUserFile(ctx, conn, source, userfileDestinationURI)
+	_, err = uploadUserFile(ctx, conn, reader, source, userfileDestinationURI)
 	if err != nil {
 		return errors.Wrap(err, "failed to upload file to userfile before importing")
 	}
@@ -150,7 +151,7 @@ func runImport(
 		<-importCLIKnobs.pauseAfterUpload
 	}
 
-	ex := conn.GetDriverConn()
+	ex := conn.conn.(driver.ExecerContext)
 	importCompletedMesssage := func() {
 		switch mode {
 		case singleTable:
@@ -205,14 +206,8 @@ func runImport(
 		return errors.New("unsupported import format")
 	}
 
-	purl, err := pgurl.Parse(conn.GetURL())
-	if err != nil {
-		return err
-	}
-
 	if importCLIKnobs.returnQuery {
-		fmt.Print(importQuery + "\n")
-		fmt.Print(purl.GetDatabase())
+		fmt.Print(importQuery)
 		return nil
 	}
 
@@ -234,7 +229,7 @@ var importCmd = &cobra.Command{
 	Use:   "import [command]",
 	Short: "import a db or table from a local PGDUMP or MYSQLDUMP file",
 	Long:  "import a db or table from a local PGDUMP or MYSQLDUMP file",
-	RunE:  UsageAndErr,
+	RunE:  usageAndErr,
 }
 
 func init() {

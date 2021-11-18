@@ -34,10 +34,16 @@ import (
 // However, if the optimizer can prove that only a small number of rows will
 // be deleted, it'll enable autoCommit for delete range.
 type deleteRangeNode struct {
+	// interleavedFastPath is true if we can take the fast path despite operating
+	// on an interleaved table.
+	interleavedFastPath bool
 	// spans are the spans to delete.
 	spans roachpb.Spans
 	// desc is the table descriptor the delete is operating on.
 	desc catalog.TableDescriptor
+	// interleavedDesc are the table descriptors of any child interleaved tables
+	// the delete is operating on.
+	interleavedDesc []catalog.TableDescriptor
 	// fetcher is around to decode the returned keys from the DeleteRange, so that
 	// we can count the number of rows deleted.
 	fetcher row.Fetcher
@@ -86,28 +92,41 @@ func (d *deleteRangeNode) startExec(params runParams) error {
 	if err := params.p.cancelChecker.Check(); err != nil {
 		return err
 	}
+	if d.interleavedFastPath {
+		for i := range d.spans {
+			d.spans[i].EndKey = d.spans[i].EndKey.PrefixEnd()
+		}
+	}
 
-	// Configure the fetcher, which is only used to decode the returned keys from
-	// the DeleteRange, and is never used to actually fetch kvs.
-	table := row.FetcherTableArgs{
+	allTables := make([]row.FetcherTableArgs, len(d.interleavedDesc)+1)
+	allTables[0] = row.FetcherTableArgs{
 		Desc:  d.desc,
-		Index: d.desc.GetPrimaryIndex(),
+		Index: d.desc.GetPrimaryIndex().IndexDesc(),
+		Spans: d.spans,
+	}
+	for i, interleaved := range d.interleavedDesc {
+		allTables[i+1] = row.FetcherTableArgs{
+			Desc:  interleaved,
+			Index: interleaved.GetPrimaryIndex().IndexDesc(),
+			Spans: d.spans,
+		}
 	}
 	if err := d.fetcher.Init(
 		params.ctx,
 		params.ExecCfg().Codec,
 		false, /* reverse */
+		// TODO(nvanbenschoten): it might make sense to use a FOR_UPDATE locking
+		// strength here. Consider hooking this in to the same knob that will
+		// control whether we perform locking implicitly during DELETEs.
 		descpb.ScanLockingStrength_FOR_NONE,
 		descpb.ScanLockingWaitPolicy_BLOCK,
-		0,     /* lockTimeout */
 		false, /* isCheck */
 		params.p.alloc,
 		nil, /* memMonitor */
-		table,
+		allTables...,
 	); err != nil {
 		return err
 	}
-
 	ctx := params.ctx
 	log.VEvent(ctx, 2, "fast delete: skipping scan")
 	spans := make([]roachpb.Span, len(d.spans))
@@ -119,11 +138,10 @@ func (d *deleteRangeNode) startExec(params runParams) error {
 		// hits the key limit).
 		for len(spans) != 0 {
 			b := params.p.txn.NewBatch()
-			b.Header.MaxSpanRequestKeys = row.TableTruncateChunkSize
-			b.Header.LockTimeout = params.SessionData().LockTimeout
 			d.deleteSpans(params, b, spans)
+			b.Header.MaxSpanRequestKeys = row.TableTruncateChunkSize
 			if err := params.p.txn.Run(ctx, b); err != nil {
-				return row.ConvertBatchError(ctx, d.desc, b)
+				return err
 			}
 
 			spans = spans[:0]
@@ -141,10 +159,9 @@ func (d *deleteRangeNode) startExec(params runParams) error {
 		// the optimizer only enables autoCommit if the maximum possible number of
 		// keys to delete in this command are low, so we're made safe.
 		b := params.p.txn.NewBatch()
-		b.Header.LockTimeout = params.SessionData().LockTimeout
 		d.deleteSpans(params, b, spans)
 		if err := params.p.txn.CommitInBatch(ctx, b); err != nil {
-			return row.ConvertBatchError(ctx, d.desc, b)
+			return err
 		}
 		if resumeSpans, err := d.processResults(b.Results, nil /* resumeSpans */); err != nil {
 			return err
@@ -155,7 +172,7 @@ func (d *deleteRangeNode) startExec(params runParams) error {
 	}
 
 	// Possibly initiate a run of CREATE STATISTICS.
-	params.ExecCfg().StatsRefresher.NotifyMutation(d.desc, d.rowCount)
+	params.ExecCfg().StatsRefresher.NotifyMutation(d.desc.GetID(), d.rowCount)
 
 	return nil
 }

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
@@ -560,6 +561,13 @@ func (r *Replica) AdminMerge(
 	runMergeTxn := func(txn *kv.Txn) error {
 		log.Event(ctx, "merge txn begins")
 		txn.SetDebugName(mergeTxnName)
+
+		// If we aren't certain that all possible nodes in the cluster support a
+		// range merge transaction refreshing its reads while the RHS range is
+		// subsumed, observe the commit timestamp to force a client-side retry.
+		if !r.ClusterSettings().Version.IsActive(ctx, clusterversion.PriorReadSummaries) {
+			_ = txn.CommitTimestamp()
+		}
 
 		// Pipelining might send QueryIntent requests to the RHS after the RHS has
 		// noticed the merge and started blocking all traffic. This causes the merge
@@ -1151,8 +1159,8 @@ func synthesizeTargetsByChangeType(
 // maybeLeaveAtomicChangeReplicas transitions out of the joint configuration if
 // the descriptor indicates one. This involves running a distributed transaction
 // updating said descriptor, the result of which will be returned. The
-// descriptor returned from this method will contain replicas of type LEARNER,
-// NON_VOTER, and VOTER_FULL only.
+// descriptor returned from this method will contain replicas of type LEARNER
+// and VOTER_FULL only.
 func maybeLeaveAtomicChangeReplicas(
 	ctx context.Context, s *Store, desc *roachpb.RangeDescriptor,
 ) (*roachpb.RangeDescriptor, error) {
@@ -1182,7 +1190,7 @@ func maybeLeaveAtomicChangeReplicas(
 
 // maybeLeaveAtomicChangeReplicasAndRemoveLearners transitions out of the joint
 // config (if there is one), and then removes all learners. After this function
-// returns, all remaining replicas will be of type VOTER_FULL or NON_VOTER.
+// returns, all remaining replicas will be of type VOTER_FULL.
 func maybeLeaveAtomicChangeReplicasAndRemoveLearners(
 	ctx context.Context, store *Store, desc *roachpb.RangeDescriptor,
 ) (*roachpb.RangeDescriptor, error) {
@@ -2440,24 +2448,42 @@ func (r *Replica) sendSnapshot(
 		return &benignError{errors.Wrap(errMarkSnapshotError, "raft status not initialized")}
 	}
 
-	// We avoid shipping over the past Raft log in the snapshot by changing
-	// the truncated state (we're allowed to -- it's an unreplicated key and not
-	// subject to mapping across replicas). The actual sending happens here:
-	_ = (*kvBatchSnapshotStrategy)(nil).Send
-	// and results in no log entries being sent at all. Note that
-	// Metadata.Index is really the applied index of the replica.
-	snap.State.TruncatedState = &roachpb.RaftTruncatedState{
-		Index: snap.RaftSnap.Metadata.Index,
-		Term:  snap.RaftSnap.Metadata.Term,
+	usesReplicatedTruncatedState, err := storage.MVCCGetProto(
+		ctx, snap.EngineSnap, keys.RaftTruncatedStateLegacyKey(r.RangeID), hlc.Timestamp{}, nil, storage.MVCCGetOptions{},
+	)
+	if err != nil {
+		return errors.Wrap(err, "loading legacy truncated state")
 	}
 
-	// See comment on DeprecatedUsingAppliedStateKey for why we need to set this
-	// explicitly for snapshots going out to followers.
-	snap.State.DeprecatedUsingAppliedStateKey = true
+	canAvoidSendingLog := !usesReplicatedTruncatedState &&
+		snap.State.TruncatedState.Index < snap.State.RaftAppliedIndex
+
+	if canAvoidSendingLog {
+		// If we're not using a legacy (replicated) truncated state, we avoid
+		// sending the (past) Raft log in the snapshot in the first place and
+		// send only those entries that are actually useful to the follower.
+		// This is done by changing the truncated state, which we're allowed
+		// to do since it is not a replicated key (and thus not subject to
+		// matching across replicas). The actual sending happens here:
+		_ = (*kvBatchSnapshotStrategy)(nil).Send
+		// and results in no log entries being sent at all. Note that
+		// Metadata.Index is really the applied index of the replica.
+		snap.State.TruncatedState = &roachpb.RaftTruncatedState{
+			Index: snap.RaftSnap.Metadata.Index,
+			Term:  snap.RaftSnap.Metadata.Term,
+		}
+	}
 
 	req := SnapshotRequest_Header{
-		State:                                snap.State,
-		DeprecatedUnreplicatedTruncatedState: true,
+		State: snap.State,
+		// Tell the recipient whether it needs to synthesize the new
+		// unreplicated TruncatedState. It could tell by itself by peeking into
+		// the data, but it uses a write only batch for performance which
+		// doesn't support that; this is easier. Notably, this is true if the
+		// snap index itself is the one at which the migration happens.
+		//
+		// See VersionUnreplicatedRaftTruncatedState.
+		UnreplicatedTruncatedState: !usesReplicatedTruncatedState,
 		RaftMessageRequest: RaftMessageRequest{
 			RangeID:     r.RangeID,
 			FromReplica: sender,
@@ -2471,9 +2497,14 @@ func (r *Replica) sendSnapshot(
 			},
 		},
 		RangeSize: r.GetMVCCStats().Total(),
-		Priority:  priority,
-		Strategy:  SnapshotRequest_KV_BATCH,
-		Type:      snapType,
+		// Recipients currently cannot choose to decline any snapshots.
+		// In 19.2 and earlier versions pre-emptive snapshots could be declined.
+		//
+		// TODO(ajwerner): Consider removing the CanDecline flag.
+		CanDecline: false,
+		Priority:   priority,
+		Strategy:   SnapshotRequest_KV_BATCH,
+		Type:       snapType,
 	}
 	newBatchFn := func() storage.Batch {
 		return r.store.Engine().NewUnindexedBatch(true /* writeOnly */)
@@ -2742,6 +2773,9 @@ func (s *Store) relocateReplicas(
 				// Done.
 				return rangeDesc, ctx.Err()
 			}
+			if fn := s.cfg.TestingKnobs.BeforeRelocateOne; fn != nil {
+				fn(ops, leaseTarget, err)
+			}
 
 			opss := [][]roachpb.ReplicationChange{ops}
 			success := true
@@ -2761,10 +2795,6 @@ func (s *Store) relocateReplicas(
 				rangeDesc = *newDesc
 			}
 			if success {
-				if fn := s.cfg.TestingKnobs.OnRelocatedOne; fn != nil {
-					fn(ops, leaseTarget)
-				}
-
 				break
 			}
 		}
@@ -2823,11 +2853,11 @@ func (s *Store) relocateOne(
 			`range %s was either in a joint configuration or had learner replicas: %v`, desc, desc.Replicas())
 	}
 
-	confReader, err := s.GetConfReader()
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "can't relocate range")
+	sysCfg := s.cfg.Gossip.GetSystemConfig()
+	if sysCfg == nil {
+		return nil, nil, fmt.Errorf("no system config available, unable to perform RelocateRange")
 	}
-	conf, err := confReader.GetSpanConfigForKey(ctx, desc.StartKey)
+	zone, err := sysCfg.GetZoneConfigForKey(desc.StartKey)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2876,7 +2906,7 @@ func (s *Store) relocateOne(
 		targetStore, _ := s.allocator.allocateTargetFromList(
 			ctx,
 			candidateStoreList,
-			conf,
+			zone,
 			existingVoters,
 			existingNonVoters,
 			s.allocator.scorerOptions(),
@@ -2947,13 +2977,8 @@ func (s *Store) relocateOne(
 		// overreplicated. If we asked it instead to remove s3 from (s1,s2,s3) it
 		// may not want to do that due to constraints.
 		targetStore, _, err := s.allocator.removeTarget(
-			ctx,
-			conf,
-			args.targetsToRemove(),
-			existingVoters,
-			existingNonVoters,
-			args.targetType,
-			s.allocator.scorerOptions(),
+			ctx, zone, args.targetsToRemove(), existingVoters,
+			existingNonVoters, args.targetType,
 		)
 		if err != nil {
 			return nil, nil, errors.Wrapf(
@@ -3162,7 +3187,7 @@ func (r *Replica) adminScatter(
 	// range. Note that we disable lease transfers until the final step as
 	// transferring the lease prevents any further action on this node.
 	var allowLeaseTransfer bool
-	canTransferLease := func(ctx context.Context, repl *Replica) bool { return allowLeaseTransfer }
+	canTransferLease := func() bool { return allowLeaseTransfer }
 	for re := retry.StartWithCtx(ctx, retryOpts); re.Next(); {
 		requeue, err := rq.processOneChange(ctx, r, canTransferLease, false /* dryRun */)
 		if err != nil {
@@ -3201,6 +3226,15 @@ func (r *Replica) adminScatter(
 
 	ri := r.GetRangeInfo(ctx)
 	return roachpb.AdminScatterResponse{
+		// TODO(pbardea): This is here for compatibility with 20.1, remove in 21.1.
+		DeprecatedRanges: []roachpb.AdminScatterResponse_Range{
+			{
+				Span: roachpb.Span{
+					Key:    ri.Desc.StartKey.AsRawKey(),
+					EndKey: ri.Desc.EndKey.AsRawKey(),
+				},
+			},
+		},
 		RangeInfos: []roachpb.RangeInfo{ri},
 	}, nil
 }
@@ -3221,11 +3255,10 @@ func (r *Replica) adminVerifyProtectedTimestamp(
 	// construct a more informative error to show to the user.
 	if doesNotApplyReason != "" {
 		if !resp.Verified {
-			desc := r.Desc()
 			failedRange := roachpb.AdminVerifyProtectedTimestampResponse_FailedRange{
-				RangeID:  int64(desc.GetRangeID()),
-				StartKey: desc.GetStartKey(),
-				EndKey:   desc.EndKey,
+				RangeID:  int64(r.Desc().GetRangeID()),
+				StartKey: r.Desc().GetStartKey(),
+				EndKey:   r.Desc().EndKey,
 				Reason:   doesNotApplyReason,
 			}
 			resp.VerificationFailedRanges = append(resp.VerificationFailedRanges, failedRange)

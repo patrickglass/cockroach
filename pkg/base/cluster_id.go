@@ -12,9 +12,9 @@ package base
 
 import (
 	"context"
-	"sync/atomic"
 
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
 
@@ -27,7 +27,9 @@ import (
 // - If the node is bootstrapping, a new UUID is generated.
 // - Otherwise, it is determined via gossip with other nodes.
 type ClusterIDContainer struct {
-	clusterID atomic.Value // uuid.UUID
+	syncutil.Mutex
+
+	clusterID uuid.UUID
 }
 
 // String returns the cluster ID, or "?" if it is unset.
@@ -41,27 +43,22 @@ func (c *ClusterIDContainer) String() string {
 
 // Get returns the current cluster ID; uuid.Nil if it is unset.
 func (c *ClusterIDContainer) Get() uuid.UUID {
-	v := c.clusterID.Load()
-	if v == nil {
-		return uuid.Nil
-	}
-	return v.(uuid.UUID)
+	c.Lock()
+	defer c.Unlock()
+	return c.clusterID
 }
 
 // Set sets the current cluster ID. If it is already set, the value must match.
 func (c *ClusterIDContainer) Set(ctx context.Context, val uuid.UUID) {
-	// NOTE: this compare-and-swap is intentionally racy and won't catch all
-	// cases where two different cluster IDs are set. That's ok, as this is
-	// just a sanity check. But if we decide to care, we can use the new
-	// (*atomic.Value).CompareAndSwap API introduced in go1.17.
-	cur := c.Get()
-	if cur == uuid.Nil {
-		c.clusterID.Store(val)
+	c.Lock()
+	defer c.Unlock()
+	if c.clusterID == uuid.Nil {
+		c.clusterID = val
 		if log.V(2) {
 			log.Infof(ctx, "ClusterID set to %s", val)
 		}
-	} else if cur != val {
-		log.Fatalf(ctx, "different ClusterIDs set: %s, then %s", cur, val)
+	} else if c.clusterID != val {
+		log.Fatalf(ctx, "different ClusterIDs set: %s, then %s", c.clusterID, val)
 	}
 }
 
@@ -69,5 +66,7 @@ func (c *ClusterIDContainer) Set(ctx context.Context, val uuid.UUID) {
 //
 // Should only be used in testing code.
 func (c *ClusterIDContainer) Reset(val uuid.UUID) {
-	c.clusterID.Store(val)
+	c.Lock()
+	defer c.Unlock()
+	c.clusterID = val
 }

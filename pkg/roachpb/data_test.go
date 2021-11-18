@@ -12,6 +12,7 @@ package roachpb
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"math/rand"
 	"reflect"
@@ -415,7 +416,7 @@ func TestTransactionBumpEpoch(t *testing.T) {
 // advertised.
 func TestTransactionObservedTimestamp(t *testing.T) {
 	var txn Transaction
-	rng, seed := randutil.NewTestRand()
+	rng, seed := randutil.NewPseudoRand()
 	t.Logf("running with seed %d", seed)
 	ids := append([]int{109, 104, 102, 108, 1000}, rand.Perm(100)...)
 	timestamps := make(map[NodeID]hlc.ClockTimestamp, len(ids))
@@ -1021,7 +1022,6 @@ func TestLeaseEqual(t *testing.T) {
 		ProposedTS            *hlc.ClockTimestamp
 		Epoch                 int64
 		Sequence              LeaseSequence
-		AcquisitionType       LeaseAcquisitionType
 	}
 	// Verify that the lease structure does not change unexpectedly. If a compile
 	// error occurs on the following line of code, update the expectedLease
@@ -1313,45 +1313,6 @@ func TestSpanValid(t *testing.T) {
 		if test.valid != s.Valid() {
 			t.Errorf("%d: expected span %q-%q to return %t for Valid, instead got %t",
 				i, test.start, test.end, test.valid, s.Valid())
-		}
-	}
-}
-
-// TestSpansMemUsage tests that we correctly account for the memory used by a
-// Spans slice.
-func TestSpansMemUsage(t *testing.T) {
-	type testSpan struct {
-		start, end string
-	}
-
-	testData := []struct {
-		spans    []testSpan
-		expected int64
-	}{
-		{[]testSpan{}, SpansOverhead},
-		{[]testSpan{{"", ""}}, SpansOverhead + SpanOverhead},
-		{[]testSpan{{"a", ""}}, SpansOverhead + SpanOverhead + 8},
-		{[]testSpan{{"", "a"}}, SpansOverhead + SpanOverhead + 8},
-		{[]testSpan{{"a", "b"}}, SpansOverhead + SpanOverhead + 16},
-		{[]testSpan{{"abcdefgh", "b"}}, SpansOverhead + SpanOverhead + 16},
-		{[]testSpan{{"abcdefghi", "b"}}, SpansOverhead + SpanOverhead + 24},
-		{[]testSpan{{"a", "b"}, {"c", "d"}}, SpansOverhead + 2*SpanOverhead + 32},
-	}
-	for i, test := range testData {
-		s := make(Spans, len(test.spans))
-		for j := range s {
-			s[j].Key = []byte(test.spans[j].start)
-			s[j].EndKey = []byte(test.spans[j].end)
-		}
-		for j := 0; j <= len(s); j++ {
-			// Test that we account for all memory used even when we reduce the length
-			// below the capacity.
-			reduced := s[:j]
-
-			if actual := reduced.MemUsage(); test.expected != actual {
-				t.Errorf("%d.%d: expected spans %v (sliced from %v) to return %d for MemUsage, instead got %d",
-					i, j, reduced, test.spans, test.expected, actual)
-			}
 		}
 	}
 }
@@ -1712,6 +1673,17 @@ func TestValuePrettyPrint(t *testing.T) {
 		}
 	}
 }
+
+func TestKeyFormat(t *testing.T) {
+	const sample = "\xbd\xb2\x3d\xbc\x20\xe2\x8c\x98"
+	k := Key(sample)
+	expected := ` /Table/53/42/"=\xbc ⌘"`
+	actual := fmt.Sprintf(" %s", k)
+	if expected != actual {
+		t.Errorf("String formatting of key: got %q expected %q", actual, expected)
+	}
+}
+
 func TestUpdateObservedTimestamps(t *testing.T) {
 	f := func(nodeID NodeID, walltime int64) ObservedTimestamp {
 		return ObservedTimestamp{

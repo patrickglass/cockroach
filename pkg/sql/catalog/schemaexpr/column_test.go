@@ -26,7 +26,7 @@ func TestDequalifyColumnRefs(t *testing.T) {
 
 	database := tree.Name("foo")
 	table := tree.Name("bar")
-	tn := tree.MakeTableNameWithSchema(database, tree.PublicSchemaName, table)
+	tn := tree.MakeTableName(database, table)
 
 	cols := []descpb.ColumnDescriptor{
 		{Name: "a", Type: types.Int},
@@ -62,10 +62,7 @@ func TestDequalifyColumnRefs(t *testing.T) {
 			source := colinfo.NewSourceInfoForSingleTable(
 				tn, colinfo.ResultColumnsFromColDescs(
 					descpb.ID(1),
-					len(cols),
-					func(i int) *descpb.ColumnDescriptor {
-						return &cols[i]
-					},
+					cols,
 				),
 			)
 

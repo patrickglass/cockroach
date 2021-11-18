@@ -15,11 +15,8 @@
 package migrations
 
 import (
-	"context"
-
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/migration"
-	"github.com/cockroachdb/errors"
 )
 
 // GetMigration returns the migration corresponding to this version if
@@ -29,120 +26,46 @@ func GetMigration(key clusterversion.ClusterVersion) (migration.Migration, bool)
 	return m, ok
 }
 
-// NoPrecondition is a PreconditionFunc that doesn't check anything.
-func NoPrecondition(context.Context, clusterversion.ClusterVersion, migration.TenantDeps) error {
-	return nil
-}
-
 // registry defines the global mapping between a cluster version and the
 // associated migration. The migration is only executed after a cluster-wide
 // bump of the corresponding version gate.
 var registry = make(map[clusterversion.ClusterVersion]migration.Migration)
 
 var migrations = []migration.Migration{
-	migration.NewSystemMigration(
-		"stop using monolithic encryption-at-rest registry for all stores",
-		toCV(clusterversion.RecordsBasedRegistry),
-		recordsBasedRegistryMigration,
-	),
 	migration.NewTenantMigration(
-		"add the systems.join_tokens table",
-		toCV(clusterversion.JoinTokensTable),
-		NoPrecondition,
-		joinTokensTableMigration,
-	),
-	migration.NewTenantMigration(
-		"delete the deprecated namespace table descriptor at ID=2",
-		toCV(clusterversion.DeleteDeprecatedNamespaceTableDescriptorMigration),
-		NoPrecondition,
-		deleteDeprecatedNamespaceTableDescriptorMigration,
-	),
-	migration.NewTenantMigration(
-		"fix all descriptors",
-		toCV(clusterversion.FixDescriptors),
-		NoPrecondition,
-		fixDescriptorMigration,
-	),
-	migration.NewTenantMigration(
-		"add the system.database_role_settings table",
-		toCV(clusterversion.DatabaseRoleSettings),
-		NoPrecondition,
-		databaseRoleSettingsTableMigration,
-	),
-	migration.NewTenantMigration(
-		"add the system.tenant_usage table",
-		toCV(clusterversion.TenantUsageTable),
-		NoPrecondition,
-		tenantUsageTableMigration,
-	),
-	migration.NewTenantMigration(
-		"add the system.sql_instances table",
-		toCV(clusterversion.SQLInstancesTable),
-		NoPrecondition,
-		sqlInstancesTableMigration,
+		"add the system.migrations table",
+		toCV(clusterversion.LongRunningMigrations),
+		migrationsTableMigration,
 	),
 	migration.NewSystemMigration(
-		"move over all intents to separate lock table",
-		toCV(clusterversion.SeparatedIntentsMigration),
-		separatedIntentsMigration),
+		"use unreplicated TruncatedState and RangeAppliedState for all ranges",
+		toCV(clusterversion.TruncatedAndRangeAppliedStateMigration),
+		truncatedStateMigration,
+	),
 	migration.NewSystemMigration(
-		"run no-op migrate command on all ranges after lock table migration",
-		toCV(clusterversion.PostSeparatedIntentsMigration),
-		postSeparatedIntentsMigration),
-	migration.NewTenantMigration(
-		"add last_run and num_runs columns to system.jobs",
-		toCV(clusterversion.RetryJobsWithExponentialBackoff),
-		NoPrecondition,
-		retryJobsWithExponentialBackoff),
-	migration.NewTenantMigration(
-		"add system.zones table for secondary tenants",
-		toCV(clusterversion.ZonesTableForSecondaryTenants),
-		NoPrecondition,
-		zonesTableForSecondaryTenants,
+		"purge all replicas using the replicated TruncatedState",
+		toCV(clusterversion.PostTruncatedAndRangeAppliedStateMigration),
+		postTruncatedStateMigration,
 	),
 	migration.NewTenantMigration(
-		"add the system.span_configurations table to system tenant",
-		toCV(clusterversion.SpanConfigurationsTable),
-		NoPrecondition,
-		spanConfigurationsTableMigration,
+		"copy all namespace entries to new namespace table",
+		toCV(clusterversion.NamespaceTableWithSchemasMigration),
+		namespaceMigration,
 	),
 	migration.NewTenantMigration(
-		"create indexes on revokedAt and lastUsedAt columns from system.web_sessions",
-		toCV(clusterversion.AlterSystemWebSessionsCreateIndexes),
-		NoPrecondition,
-		alterSystemWebSessionsCreateIndexes,
+		"upgrade old foreign key representation",
+		toCV(clusterversion.ForeignKeyRepresentationMigration),
+		foreignKeyRepresentationUpgrade,
 	),
 	migration.NewTenantMigration(
-		"change system.tenant_usage table to use a single column for consumption",
-		toCV(clusterversion.TenantUsageSingleConsumptionColumn),
-		NoPrecondition,
-		tenantUsageSingleConsumptionColumn,
-	),
-	migration.NewTenantMigration(
-		"add the system.statement_statistics and system.transaction_statistics tables",
-		toCV(clusterversion.SQLStatsTables),
-		NoPrecondition,
-		sqlStatsTablesMigration,
-	),
-	migration.NewTenantMigration(
-		"ensure that draining names are no longer in use",
-		toCV(clusterversion.DrainingNamesMigration),
-		NoPrecondition,
-		ensureNoDrainingNames,
-	),
-	migration.NewTenantMigration(
-		"add column avgSize to table system.table_statistics",
-		toCV(clusterversion.AlterSystemTableStatisticsAddAvgSizeCol),
-		NoPrecondition,
-		alterSystemTableStatisticsAddAvgSize,
+		"fix system.protected_ts_meta privileges",
+		toCV(clusterversion.ProtectedTsMetaPrivilegesMigration),
+		protectedTsMetaPrivilegesMigration,
 	),
 }
 
 func init() {
 	for _, m := range migrations {
-		if _, exists := registry[m.ClusterVersion()]; exists {
-			panic(errors.AssertionFailedf("duplicate migration registration for %v", m.ClusterVersion()))
-		}
 		registry[m.ClusterVersion()] = m
 	}
 }

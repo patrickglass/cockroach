@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexectestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/colcontainerutils"
@@ -41,13 +40,13 @@ func TestNumBatches(t *testing.T) {
 	nBatches := 10
 	noop := colexecop.NewNoop(makeFiniteChunksSourceWithBatchSize(tu.testAllocator, nBatches, coldata.BatchSize()))
 	vsc := newVectorizedStatsCollector(
-		noop, nil /* kvReader */, nil /* columnarizer */, execinfrapb.ComponentID{},
+		noop, nil /* kvReader */, execinfrapb.ComponentID{},
 		timeutil.NewStopWatch(), nil /* memMonitors */, nil, /* diskMonitors */
 		nil, /* inputStatsCollectors */
 	)
-	vsc.Init(ctx)
+	vsc.Init()
 	for {
-		b := vsc.Next()
+		b := vsc.Next(ctx)
 		if b.Length() == 0 {
 			break
 		}
@@ -67,13 +66,13 @@ func TestNumTuples(t *testing.T) {
 	for _, batchSize := range []int{1, 16, 1024} {
 		noop := colexecop.NewNoop(makeFiniteChunksSourceWithBatchSize(tu.testAllocator, nBatches, batchSize))
 		vsc := newVectorizedStatsCollector(
-			noop, nil /* kvReader */, nil /* columnarizer */, execinfrapb.ComponentID{},
+			noop, nil /* kvReader */, execinfrapb.ComponentID{},
 			timeutil.NewStopWatch(), nil /* memMonitors */, nil, /* diskMonitors */
 			nil, /* inputStatsCollectors */
 		)
-		vsc.Init(ctx)
+		vsc.Init()
 		for {
-			b := vsc.Next()
+			b := vsc.Next(ctx)
 			if b.Length() == 0 {
 				break
 			}
@@ -99,48 +98,51 @@ func TestVectorizedStatsCollector(t *testing.T) {
 		timeSource := timeutil.NewTestTimeSource()
 		mjInputWatch := timeutil.NewTestStopWatch(timeSource.Now)
 		leftSource := &timeAdvancingOperator{
-			OneInputHelper: colexecop.MakeOneInputHelper(makeFiniteChunksSourceWithBatchSize(tu.testAllocator, nBatches, coldata.BatchSize())),
-			timeSource:     timeSource,
+			OneInputNode: colexecop.NewOneInputNode(makeFiniteChunksSourceWithBatchSize(tu.testAllocator, nBatches, coldata.BatchSize())),
+			timeSource:   timeSource,
 		}
 		leftInput := newVectorizedStatsCollector(
-			leftSource, nil /* kvReader */, nil /* columnarizer */, execinfrapb.ComponentID{ID: 0},
+			leftSource, nil /* kvReader */, execinfrapb.ComponentID{ID: 0},
 			timeutil.NewTestStopWatch(timeSource.Now), nil /* memMonitors */, nil, /* diskMonitors */
 			nil, /* inputStatsCollectors */
 		)
 		rightSource := &timeAdvancingOperator{
-			OneInputHelper: colexecop.MakeOneInputHelper(makeFiniteChunksSourceWithBatchSize(tu.testAllocator, nBatches, coldata.BatchSize())),
-			timeSource:     timeSource,
+			OneInputNode: colexecop.NewOneInputNode(makeFiniteChunksSourceWithBatchSize(tu.testAllocator, nBatches, coldata.BatchSize())),
+			timeSource:   timeSource,
 		}
 		rightInput := newVectorizedStatsCollector(
-			rightSource, nil /* kvReader */, nil /* columnarizer */, execinfrapb.ComponentID{ID: 1},
+			rightSource, nil /* kvReader */, execinfrapb.ComponentID{ID: 1},
 			timeutil.NewTestStopWatch(timeSource.Now), nil /* memMonitors */, nil, /* diskMonitors */
 			nil, /* inputStatsCollectors */
 		)
-		mergeJoiner := colexecjoin.NewMergeJoinOp(
-			tu.testAllocator, execinfra.DefaultMemoryLimit, queueCfg,
+		mergeJoiner, err := colexecjoin.NewMergeJoinOp(
+			tu.testAllocator, colexecop.DefaultMemoryLimit, queueCfg,
 			colexecop.NewTestingSemaphore(4), descpb.InnerJoin, leftInput, rightInput,
 			[]*types.T{types.Int}, []*types.T{types.Int},
 			[]execinfrapb.Ordering_Column{{ColIdx: 0}},
 			[]execinfrapb.Ordering_Column{{ColIdx: 0}},
-			tu.testDiskAcc, tu.evalCtx,
+			tu.testDiskAcc,
 		)
+		if err != nil {
+			t.Fatal(err)
+		}
 		timeAdvancingMergeJoiner := &timeAdvancingOperator{
-			OneInputHelper: colexecop.MakeOneInputHelper(mergeJoiner),
-			timeSource:     timeSource,
+			OneInputNode: colexecop.NewOneInputNode(mergeJoiner),
+			timeSource:   timeSource,
 		}
 
 		mjStatsCollector := newVectorizedStatsCollector(
-			timeAdvancingMergeJoiner, nil /* kvReader */, nil /* columnarizer */, execinfrapb.ComponentID{ID: 2},
+			timeAdvancingMergeJoiner, nil /* kvReader */, execinfrapb.ComponentID{ID: 2},
 			mjInputWatch, nil /* memMonitors */, nil, /* diskMonitors */
 			[]childStatsCollector{leftInput.(childStatsCollector), rightInput.(childStatsCollector)},
 		)
 
 		// The inputs are identical, so the merge joiner should output
 		// nBatches x coldata.BatchSize() tuples.
-		mjStatsCollector.Init(ctx)
+		mjStatsCollector.Init()
 		batchCount, tupleCount := 0, 0
 		for {
-			b := mjStatsCollector.Next()
+			b := mjStatsCollector.Next(ctx)
 			if b.Length() == 0 {
 				break
 			}
@@ -174,15 +176,19 @@ func makeFiniteChunksSourceWithBatchSize(
 // timeAdvancingOperator is an Operator that advances the time source upon
 // receiving a non-empty batch from its input. It is used for testing only.
 type timeAdvancingOperator struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	timeSource *timeutil.TestTimeSource
 }
 
 var _ colexecop.Operator = &timeAdvancingOperator{}
 
-func (o *timeAdvancingOperator) Next() coldata.Batch {
-	b := o.Input.Next()
+func (o *timeAdvancingOperator) Init() {
+	o.Input.Init()
+}
+
+func (o *timeAdvancingOperator) Next(ctx context.Context) coldata.Batch {
+	b := o.Input.Next(ctx)
 	if b.Length() > 0 {
 		o.timeSource.Advance()
 	}

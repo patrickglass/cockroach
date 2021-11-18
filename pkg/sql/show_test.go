@@ -23,9 +23,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -33,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
-	"github.com/stretchr/testify/require"
 )
 
 func TestShowCreateTable(t *testing.T) {
@@ -51,13 +49,13 @@ func TestShowCreateTable(t *testing.T) {
 	FAMILY "primary" (i, v, t, rowid),
 	FAMILY fam_1_s (s)
 )`,
-			Expect: `CREATE TABLE public.%[1]s (
+			Expect: `CREATE TABLE public.%s (
 	i INT8 NULL,
 	s STRING NULL,
 	v FLOAT8 NOT NULL,
 	t TIMESTAMP NULL DEFAULT now():::TIMESTAMP,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT %[1]s_pkey PRIMARY KEY (rowid ASC),
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	FAMILY "primary" (i, v, t, rowid),
 	FAMILY fam_1_s (s),
 	CONSTRAINT check_i CHECK (i > 0:::INT8)
@@ -72,13 +70,13 @@ func TestShowCreateTable(t *testing.T) {
 	FAMILY "primary" (i, v, t, rowid),
 	FAMILY fam_1_s (s)
 )`,
-			Expect: `CREATE TABLE public.%[1]s (
+			Expect: `CREATE TABLE public.%s (
 	i INT8 NULL,
 	s STRING NULL,
 	v FLOAT8 NOT NULL,
 	t TIMESTAMP NULL DEFAULT now():::TIMESTAMP,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT %[1]s_pkey PRIMARY KEY (rowid ASC),
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	FAMILY "primary" (i, v, t, rowid),
 	FAMILY fam_1_s (s),
 	CONSTRAINT check_i CHECK (i > 0:::INT8)
@@ -92,11 +90,11 @@ func TestShowCreateTable(t *testing.T) {
 	FAMILY "primary" (i, rowid),
 	FAMILY fam_1_s (s)
 )`,
-			Expect: `CREATE TABLE public.%[1]s (
+			Expect: `CREATE TABLE public.%s (
 	i INT8 NULL,
 	s STRING NULL,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT %[1]s_pkey PRIMARY KEY (rowid ASC),
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	FAMILY "primary" (i, rowid),
 	FAMILY fam_1_s (s),
 	CONSTRAINT ck CHECK (i > 0:::INT8)
@@ -106,9 +104,9 @@ func TestShowCreateTable(t *testing.T) {
 			CreateStatement: `CREATE TABLE %s (
 	i INT8 PRIMARY KEY
 )`,
-			Expect: `CREATE TABLE public.%[1]s (
+			Expect: `CREATE TABLE public.%s (
 	i INT8 NOT NULL,
-	CONSTRAINT %[1]s_pkey PRIMARY KEY (i ASC),
+	CONSTRAINT "primary" PRIMARY KEY (i ASC),
 	FAMILY "primary" (i)
 )`,
 		},
@@ -120,13 +118,13 @@ func TestShowCreateTable(t *testing.T) {
 				CREATE INDEX idx_if on %[1]s (f, i) STORING (s, d);
 				CREATE UNIQUE INDEX on %[1]s (d);
 			`,
-			Expect: `CREATE TABLE public.%[1]s (
+			Expect: `CREATE TABLE public.%s (
 	i INT8 NULL,
 	f FLOAT8 NULL,
 	s STRING NULL,
 	d DATE NULL,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT %[1]s_pkey PRIMARY KEY (rowid ASC),
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	INDEX idx_if (f ASC, i ASC) STORING (s, d),
 	UNIQUE INDEX %[1]s_d_key (d ASC),
 	FAMILY "primary" (i, f, d, rowid),
@@ -139,7 +137,7 @@ func TestShowCreateTable(t *testing.T) {
 	CONSTRAINT "pri""mary" PRIMARY KEY ("te""st" ASC),
 	FAMILY "primary" ("te""st")
 )`,
-			Expect: `CREATE TABLE public.%[1]s (
+			Expect: `CREATE TABLE public.%s (
 	"te""st" INT8 NOT NULL,
 	CONSTRAINT "pri""mary" PRIMARY KEY ("te""st" ASC),
 	FAMILY "primary" ("te""st")
@@ -151,11 +149,11 @@ func TestShowCreateTable(t *testing.T) {
 	b int8,
 	index c(a asc, b desc)
 )`,
-			Expect: `CREATE TABLE public.%[1]s (
+			Expect: `CREATE TABLE public.%s (
 	a INT8 NULL,
 	b INT8 NULL,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT %[1]s_pkey PRIMARY KEY (rowid ASC),
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	INDEX c (a ASC, b DESC),
 	FAMILY "primary" (a, b, rowid)
 )`,
@@ -169,14 +167,14 @@ func TestShowCreateTable(t *testing.T) {
 	FOREIGN KEY (i, j) REFERENCES items (a, b),
 	k int REFERENCES items (c)
 )`,
-			Expect: `CREATE TABLE public.%[1]s (
+			Expect: `CREATE TABLE public.%s (
 	i INT8 NULL,
 	j INT8 NULL,
 	k INT8 NULL,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT %[1]s_pkey PRIMARY KEY (rowid ASC),
-	CONSTRAINT %[1]s_i_j_fkey FOREIGN KEY (i, j) REFERENCES public.items(a, b),
-	CONSTRAINT %[1]s_k_fkey FOREIGN KEY (k) REFERENCES public.items(c),
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
+	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES public.items(a, b),
+	CONSTRAINT fk_k_ref_items FOREIGN KEY (k) REFERENCES public.items(c),
 	FAMILY "primary" (i, j, k, rowid)
 )`,
 		},
@@ -189,14 +187,14 @@ func TestShowCreateTable(t *testing.T) {
 	k int REFERENCES items (c) MATCH FULL,
 	FOREIGN KEY (i, j) REFERENCES items (a, b) MATCH FULL
 )`,
-			Expect: `CREATE TABLE public.%[1]s (
+			Expect: `CREATE TABLE public.%s (
 	i INT8 NULL,
 	j INT8 NULL,
 	k INT8 NULL,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT %[1]s_pkey PRIMARY KEY (rowid ASC),
-	CONSTRAINT %[1]s_i_j_fkey FOREIGN KEY (i, j) REFERENCES public.items(a, b) MATCH FULL,
-	CONSTRAINT %[1]s_k_fkey FOREIGN KEY (k) REFERENCES public.items(c) MATCH FULL,
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
+	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES public.items(a, b) MATCH FULL,
+	CONSTRAINT fk_k_ref_items FOREIGN KEY (k) REFERENCES public.items(c) MATCH FULL,
 	FAMILY "primary" (i, j, k, rowid)
 )`,
 		},
@@ -207,10 +205,10 @@ func TestShowCreateTable(t *testing.T) {
 	x INT8,
 	CONSTRAINT fk_ref FOREIGN KEY (x) REFERENCES o.foo (x)
 )`,
-			Expect: `CREATE TABLE public.%[1]s (
+			Expect: `CREATE TABLE public.%s (
 	x INT8 NULL,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT %[1]s_pkey PRIMARY KEY (rowid ASC),
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	CONSTRAINT fk_ref FOREIGN KEY (x) REFERENCES o.public.foo(x),
 	FAMILY "primary" (x, rowid)
 )`,
@@ -224,16 +222,43 @@ func TestShowCreateTable(t *testing.T) {
 	FOREIGN KEY (i, j) REFERENCES items (a, b) ON DELETE SET DEFAULT,
 	k int8 REFERENCES items (c) ON DELETE SET NULL
 )`,
-			Expect: `CREATE TABLE public.%[1]s (
+			Expect: `CREATE TABLE public.%s (
 	i INT8 NULL DEFAULT 123:::INT8,
 	j INT8 NULL DEFAULT 123:::INT8,
 	k INT8 NULL,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT %[1]s_pkey PRIMARY KEY (rowid ASC),
-	CONSTRAINT %[1]s_i_j_fkey FOREIGN KEY (i, j) REFERENCES public.items(a, b) ON DELETE SET DEFAULT,
-	CONSTRAINT %[1]s_k_fkey FOREIGN KEY (k) REFERENCES public.items(c) ON DELETE SET NULL,
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
+	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES public.items(a, b) ON DELETE SET DEFAULT,
+	CONSTRAINT fk_k_ref_items FOREIGN KEY (k) REFERENCES public.items(c) ON DELETE SET NULL,
 	FAMILY "primary" (i, j, k, rowid)
 )`,
+		},
+		// Check that INTERLEAVE dependencies inside the current database
+		// have their db name omitted.
+		{
+			CreateStatement: `CREATE TABLE %s (
+	a INT8,
+	b INT8,
+	PRIMARY KEY (a, b)
+) INTERLEAVE IN PARENT items (a, b)`,
+			Expect: `CREATE TABLE public.%s (
+	a INT8 NOT NULL,
+	b INT8 NOT NULL,
+	CONSTRAINT "primary" PRIMARY KEY (a ASC, b ASC),
+	FAMILY "primary" (a, b)
+) INTERLEAVE IN PARENT public.items (a, b)`,
+		},
+		// Check that INTERLEAVE dependencies outside of the current
+		// database are prefixed by their db name.
+		{
+			CreateStatement: `CREATE TABLE %s (
+	x INT8 PRIMARY KEY
+) INTERLEAVE IN PARENT o.foo (x)`,
+			Expect: `CREATE TABLE public.%s (
+	x INT8 NOT NULL,
+	CONSTRAINT "primary" PRIMARY KEY (x ASC),
+	FAMILY "primary" (x)
+) INTERLEAVE IN PARENT o.public.foo (x)`,
 		},
 		// Check that FK dependencies using MATCH FULL and MATCH SIMPLE are both
 		// pretty-printed properly.
@@ -246,15 +271,15 @@ func TestShowCreateTable(t *testing.T) {
 	FOREIGN KEY (i, j) REFERENCES items (a, b) MATCH SIMPLE ON DELETE SET DEFAULT,
 	FOREIGN KEY (k, l) REFERENCES items (a, b) MATCH FULL ON UPDATE CASCADE
 )`,
-			Expect: `CREATE TABLE public.%[1]s (
+			Expect: `CREATE TABLE public.%s (
 	i INT8 NULL DEFAULT 1:::INT8,
 	j INT8 NULL DEFAULT 2:::INT8,
 	k INT8 NULL DEFAULT 3:::INT8,
 	l INT8 NULL DEFAULT 4:::INT8,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT %[1]s_pkey PRIMARY KEY (rowid ASC),
-	CONSTRAINT %[1]s_i_j_fkey FOREIGN KEY (i, j) REFERENCES public.items(a, b) ON DELETE SET DEFAULT,
-	CONSTRAINT %[1]s_k_l_fkey FOREIGN KEY (k, l) REFERENCES public.items(a, b) MATCH FULL ON UPDATE CASCADE,
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
+	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES public.items(a, b) ON DELETE SET DEFAULT,
+	CONSTRAINT fk_k_ref_items FOREIGN KEY (k, l) REFERENCES public.items(a, b) MATCH FULL ON UPDATE CASCADE,
 	FAMILY "primary" (i, j, k, l, rowid)
 )`,
 		},
@@ -264,12 +289,12 @@ func TestShowCreateTable(t *testing.T) {
 				a INT,
 				INDEX (a) USING HASH WITH BUCKET_COUNT = 8
 			)`,
-			Expect: `CREATE TABLE public.%[1]s (
+			Expect: `CREATE TABLE public.%s (
 	a INT8 NULL,
-	crdb_internal_a_shard_8 INT4 NOT VISIBLE NOT NULL AS (mod(fnv32(crdb_internal.datums_to_bytes(a)), 8:::INT8)) STORED,
+	crdb_internal_a_shard_8 INT4 NOT VISIBLE NOT NULL AS (mod(fnv32(COALESCE(CAST(a AS STRING), '':::STRING)), 8:::INT8)) STORED,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT %[1]s_pkey PRIMARY KEY (rowid ASC),
-	INDEX t12_a_idx (a ASC) USING HASH WITH BUCKET_COUNT = 8,
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
+	INDEX t14_a_idx (a ASC) USING HASH WITH BUCKET_COUNT = 8,
 	FAMILY "primary" (a, crdb_internal_a_shard_8, rowid),
 	CONSTRAINT check_crdb_internal_a_shard_8 CHECK (crdb_internal_a_shard_8 IN (0:::INT8, 1:::INT8, 2:::INT8, 3:::INT8, 4:::INT8, 5:::INT8, 6:::INT8, 7:::INT8))
 )`,
@@ -495,7 +520,7 @@ func TestShowQueries(t *testing.T) {
 	found := false
 	var failure error
 
-	execKnobs.StatementFilter = func(ctx context.Context, _ *sessiondata.SessionData, stmt string, err error) {
+	execKnobs.StatementFilter = func(ctx context.Context, stmt string, err error) {
 		if stmt == selectStmt {
 			found = true
 			const showQuery = "SELECT node_id, (now() - start)::FLOAT8, query FROM [SHOW CLUSTER QUERIES]"
@@ -605,116 +630,6 @@ func TestShowQueries(t *testing.T) {
 
 	if errcount != 1 {
 		t.Fatalf("expected 1 error row, got %d", errcount)
-	}
-}
-
-func TestShowQueriesFillsInValuesForPlaceholders(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	const applicationName = "application"
-	var applicationConnection *gosql.DB
-	var operatorConnection *gosql.DB
-
-	recordedQueries := make(map[string]string)
-
-	testServerArgs := base.TestServerArgs{
-		Knobs: base.TestingKnobs{
-			SQLExecutor: &sql.ExecutorTestingKnobs{
-				// Record the results of SHOW QUERIES for each statement run on the applicationConnection,
-				// so that we can make assertions on them below.
-				StatementFilter: func(ctx context.Context, session *sessiondata.SessionData, stmt string, err error) {
-					// Only observe queries when we're in an application session,
-					// to limit concurrent access to the recordedQueries map.
-					if session.ApplicationName == applicationName {
-						// Only select queries run by the test application itself,
-						// so that we filter out the SELECT query FROM [SHOW QUERIES] statement.
-						// (It's the "grep shows up in `ps | grep foo`" problem.)
-						// And we can assume that there will be only one result row because we do not run
-						// the below test cases in parallel.
-						row := operatorConnection.QueryRow(
-							"SELECT query FROM [SHOW QUERIES] WHERE application_name = $1", applicationName,
-						)
-						var query string
-						err := row.Scan(&query)
-						if err != nil {
-							t.Fatal(err)
-						}
-						recordedQueries[stmt] = query
-					}
-				},
-			},
-		},
-	}
-
-	tc := serverutils.StartNewTestCluster(t, 3,
-		base.TestClusterArgs{
-			ReplicationMode: base.ReplicationManual,
-			ServerArgs:      testServerArgs,
-		},
-	)
-
-	defer tc.Stopper().Stop(context.Background())
-
-	applicationConnection = tc.ServerConn(0)
-	operatorConnection = tc.ServerConn(1)
-
-	// Mark all queries on this connection as coming from the application,
-	// so we can identify them in our filter above.
-	_, err := applicationConnection.Exec("SET application_name TO $1", applicationName)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// For a given statement-with-placeholders and its arguments, how should it look in SHOW QUERIES?
-	testCases := []struct {
-		statement string
-		args      []interface{}
-		expected  string
-	}{
-		{
-			"SELECT upper($1)",
-			[]interface{}{"hello"},
-			"SELECT upper('hello')",
-		},
-	}
-
-	// Perform both as a simple execution and as a prepared statement,
-	// to make sure we're exercising both code paths.
-	queryExecutionMethods := []struct {
-		label string
-		exec  func(*gosql.DB, string, ...interface{}) (gosql.Result, error)
-	}{
-		{
-			"Exec",
-			func(conn *gosql.DB, statement string, args ...interface{}) (gosql.Result, error) {
-				return conn.Exec(statement, args...)
-			},
-		}, {
-			"PrepareAndExec",
-			func(conn *gosql.DB, statement string, args ...interface{}) (gosql.Result, error) {
-				stmt, err := conn.Prepare(statement)
-				if err != nil {
-					return nil, err
-				}
-				defer stmt.Close()
-				return stmt.Exec(args...)
-			},
-		},
-	}
-
-	for _, method := range queryExecutionMethods {
-		for _, test := range testCases {
-			t.Run(fmt.Sprintf("%v/%v", method.label, test.statement), func(t *testing.T) {
-				_, err := method.exec(applicationConnection, test.statement, test.args...)
-
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				require.Equal(t, test.expected, recordedQueries[test.statement])
-			})
-		}
 	}
 }
 
@@ -952,7 +867,7 @@ func TestLintClusterSettingNames(t *testing.T) {
 					return errors.Errorf("%s: part %q has invalid structure", varName, segment)
 				}
 				if tokens[0].TokenID != parser.IDENT {
-					cat, ok := lexbase.KeywordsCategories[tokens[0].Str]
+					cat, ok := lex.KeywordsCategories[tokens[0].Str]
 					if !ok {
 						return errors.Errorf("%s: part %q has invalid structure", varName, segment)
 					}
@@ -995,6 +910,7 @@ func TestLintClusterSettingNames(t *testing.T) {
 				"sql.metrics.statement_details.sample_logical_plans": `sql.metrics.statement_details.sample_logical_plans: use .enabled for booleans`,
 				"sql.trace.log_statement_execute":                    `sql.trace.log_statement_execute: use .enabled for booleans`,
 				"trace.debug.enable":                                 `trace.debug.enable: use .enabled for booleans`,
+				"cloudstorage.gs.default.key":                        `cloudstorage.gs.default.key: part "default" is a reserved keyword`,
 				// These two settings have been deprecated in favor of a new (better named) setting
 				// but the old name is still around to support migrations.
 				// TODO(knz): remove these cases when these settings are retired.
@@ -1004,7 +920,6 @@ func TestLintClusterSettingNames(t *testing.T) {
 				// These use the _timeout suffix to stay consistent with the
 				// corresponding session variables.
 				"sql.defaults.statement_timeout":                   `sql.defaults.statement_timeout: use ".timeout" instead of "_timeout"`,
-				"sql.defaults.lock_timeout":                        `sql.defaults.lock_timeout: use ".timeout" instead of "_timeout"`,
 				"sql.defaults.idle_in_session_timeout":             `sql.defaults.idle_in_session_timeout: use ".timeout" instead of "_timeout"`,
 				"sql.defaults.idle_in_transaction_session_timeout": `sql.defaults.idle_in_transaction_session_timeout: use ".timeout" instead of "_timeout"`,
 			}
@@ -1026,9 +941,9 @@ func TestLintClusterSettingNames(t *testing.T) {
 			if strings.ToLower(desc[0:1]) != desc[0:1] {
 				t.Errorf("%s: description %q must not start with capital", varName, desc)
 			}
-			if sType != "e" && (desc[len(desc)-1] == '.') && !strings.Contains(desc, ". ") {
+			if sType != "e" && strings.Contains(desc, ". ") != (desc[len(desc)-1] == '.') {
 				// TODO(knz): this check doesn't work with the way enum values are added to their descriptions.
-				t.Errorf("%s: description %q must end with period only if it contains a secondary sentence", varName, desc)
+				t.Errorf("%s: description %q must end with period if and only if it contains a secondary sentence", varName, desc)
 			}
 		}
 	}

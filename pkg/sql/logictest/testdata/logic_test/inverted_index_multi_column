@@ -1,15 +1,15 @@
 # Tests for multi-column inverted indexes.
 
 # Err if the last column is not an invertable type.
-statement error column b of type int is not allowed as the last column in an inverted index\nHINT: see the documentation for more information about inverted indexes: https://www.cockroachlabs.com/docs/.*/inverted-indexes.html
+statement error column b of type int is not allowed as the last column in an inverted index\nHINT: see the documentation for more information about inverted indexes
 CREATE TABLE m_err (k INT PRIMARY KEY, a INT, b INT, geom GEOMETRY, INVERTED INDEX (a, b))
 
 # Err if a non-last column is not a non-invertable type.
-statement error column j of type jsonb is only allowed as the last column in an inverted index\nHINT: see the documentation for more information about inverted indexes: https://www.cockroachlabs.com/docs/.*/inverted-indexes.html
+statement error column j of type jsonb is only allowed as the last column in an inverted index\nHINT: see the documentation for more information about inverted indexes
 CREATE TABLE m_err (k INT PRIMARY KEY, j JSON, geom GEOMETRY, INVERTED INDEX (j, geom))
 
 # Err if a non-last column is not a non-invertable type.
-statement error column j of type jsonb is only allowed as the last column in an inverted index\nHINT: see the documentation for more information about inverted indexes: https://www.cockroachlabs.com/docs/.*/inverted-indexes.html
+statement error column j of type jsonb is only allowed as the last column in an inverted index\nHINT: see the documentation for more information about inverted indexes
 CREATE TABLE m_err (k INT PRIMARY KEY, a INT, j JSON, geom GEOMETRY, INVERTED INDEX (a, j, geom))
 
 statement ok
@@ -37,7 +37,7 @@ CREATE TABLE public.s (
    k INT8 NOT NULL,
    a INT8 NULL,
    geom GEOMETRY NULL,
-   CONSTRAINT s_pkey PRIMARY KEY (k ASC),
+   CONSTRAINT "primary" PRIMARY KEY (k ASC),
    INVERTED INDEX s_a_geom_idx (a, geom) WITH (geometry_min_x=0),
    FAMILY fam_0_k (k),
    FAMILY fam_1_a (a),
@@ -63,7 +63,7 @@ CREATE TABLE public.drop_j (
    a INT8 NULL,
    b INT8 NULL,
    rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT drop_j_pkey PRIMARY KEY (rowid ASC),
+   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
    FAMILY fam_0_a_b_j_rowid (a, b, rowid)
 )
 
@@ -86,7 +86,7 @@ CREATE TABLE public.drop_a (
    b INT8 NULL,
    j JSONB NULL,
    rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT drop_a_pkey PRIMARY KEY (rowid ASC),
+   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
    FAMILY fam_0_a_b_j_rowid (b, j, rowid)
 )
 
@@ -103,7 +103,7 @@ CREATE TABLE public.dst (
    b INT8 NULL,
    j JSONB NULL,
    rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT src_pkey PRIMARY KEY (rowid ASC),
+   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
    INVERTED INDEX src_a_j_idx (a, j),
    INVERTED INDEX src_a_b_j_idx (a, b, j),
    FAMILY "primary" (a, b, j, rowid)

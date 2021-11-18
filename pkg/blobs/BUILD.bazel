@@ -13,9 +13,10 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/blobs/blobspb:blobspb_go_proto",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/rpc",
         "//pkg/rpc/nodedialer",
+        "//pkg/util",
         "//pkg/util/fileutil",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_cockroachdb_errors//oserror",
@@ -37,7 +38,7 @@ go_test(
     embed = [":blobs"],
     deps = [
         "//pkg/blobs/blobspb:blobspb_go_proto",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/rpc",
         "//pkg/rpc/nodedialer",
         "//pkg/testutils",

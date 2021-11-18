@@ -99,7 +99,7 @@ func (n *noopProcessor) execStatsForTrace() *execinfrapb.ComponentStats {
 	}
 	return &execinfrapb.ComponentStats{
 		Inputs: []execinfrapb.InputStats{is},
-		Output: n.OutputHelper.Stats(),
+		Output: n.Out.Stats(),
 	}
 }
 

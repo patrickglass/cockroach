@@ -11,13 +11,10 @@
 package sql
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
-	"io/ioutil"
 	"sort"
 
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -159,28 +156,6 @@ func (p *planner) UnsafeUpsertDescriptor(
 		objectType = privilege.Type
 	case catalog.Schema:
 		objectType = privilege.Schema
-	}
-
-	// Check that the descriptor ID is less than the counter used for creating new
-	// descriptor IDs. If not, and if the force flag is set, increment it.
-	maxDescIDKeyVal, err := p.extendedEvalCtx.DB.Get(context.Background(), p.extendedEvalCtx.Codec.DescIDSequenceKey())
-	if err != nil {
-		return err
-	}
-	maxDescID, err := maxDescIDKeyVal.Value.GetInt()
-	if err != nil {
-		return err
-	}
-	if maxDescID <= descID {
-		if !force {
-			return pgerror.Newf(pgcode.InvalidObjectDefinition,
-				"descriptor ID %d must be less than the descriptor ID sequence value %d", descID, maxDescID)
-		}
-		inc := descID - maxDescID + 1
-		_, err = kv.IncrementValRetryable(ctx, p.extendedEvalCtx.DB, p.extendedEvalCtx.Codec.DescIDSequenceKey(), inc)
-		if err != nil {
-			return err
-		}
 	}
 
 	if force {
@@ -410,7 +385,7 @@ func (p *planner) UnsafeUpsertNamespaceEntry(
 		return err
 	}
 	parentID, parentSchemaID, descID := descpb.ID(parentIDInt), descpb.ID(parentSchemaIDInt), descpb.ID(descIDInt)
-	key := catalogkeys.MakeObjectNameKey(p.execCfg.Codec, parentID, parentSchemaID, name)
+	key := catalogkeys.MakeNameMetadataKey(p.execCfg.Codec, parentID, parentSchemaID, name)
 	val, err := p.txn.Get(ctx, key)
 	if err != nil {
 		return errors.Wrapf(err, "failed to read namespace entry (%d, %d, %s)",
@@ -537,7 +512,7 @@ func (p *planner) UnsafeDeleteNamespaceEntry(
 		return err
 	}
 	parentID, parentSchemaID, descID := descpb.ID(parentIDInt), descpb.ID(parentSchemaIDInt), descpb.ID(descIDInt)
-	key := catalogkeys.MakeObjectNameKey(p.execCfg.Codec, parentID, parentSchemaID, name)
+	key := catalogkeys.MakeNameMetadataKey(p.execCfg.Codec, parentID, parentSchemaID, name)
 	val, err := p.txn.Get(ctx, key)
 	if err != nil {
 		return errors.Wrapf(err, "failed to read namespace entry (%d, %d, %s)",
@@ -713,33 +688,4 @@ func (p *planner) ForceDeleteTableData(ctx context.Context, descID int64) error 
 		&eventpb.ForceDeleteTableDataEntry{
 			DescriptorID: uint32(descID),
 		})
-}
-
-func (p *planner) ExternalReadFile(ctx context.Context, uri string) ([]byte, error) {
-	if err := p.RequireAdminRole(ctx, "network I/O"); err != nil {
-		return nil, err
-	}
-
-	conn, err := p.ExecCfg().DistSQLSrv.ExternalStorageFromURI(ctx, uri, p.User())
-	if err != nil {
-		return nil, err
-	}
-
-	file, err := conn.ReadFile(ctx, "")
-	if err != nil {
-		return nil, err
-	}
-	return ioutil.ReadAll(file)
-}
-
-func (p *planner) ExternalWriteFile(ctx context.Context, uri string, content []byte) error {
-	if err := p.RequireAdminRole(ctx, "network I/O"); err != nil {
-		return err
-	}
-
-	conn, err := p.ExecCfg().DistSQLSrv.ExternalStorageFromURI(ctx, uri, p.User())
-	if err != nil {
-		return err
-	}
-	return cloud.WriteFile(ctx, conn, "", bytes.NewReader(content))
 }

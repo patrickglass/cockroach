@@ -16,7 +16,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
@@ -24,7 +23,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 )
 
@@ -32,12 +30,9 @@ import (
 // stream of rows, ordered according to a set of columns. The rows in each input
 // stream are assumed to be ordered according to the same set of columns.
 type OrderedSynchronizer struct {
-	colexecop.InitHelper
-	span *tracing.Span
-
-	accountingHelper      colmem.SetAccountingHelper
+	allocator             *colmem.Allocator
 	memoryLimit           int64
-	inputs                []colexecargs.OpWithMetaInfo
+	inputs                []SynchronizerInput
 	ordering              colinfo.ColumnOrdering
 	typs                  []*types.T
 	canonicalTypeFamilies []types.Family
@@ -53,12 +48,33 @@ type OrderedSynchronizer struct {
 	heap []int
 	// comparators stores one comparator per ordering column.
 	comparators []vecComparator
-	// maxCapacity if non-zero indicates the target capacity of the output
-	// batch. It is set when, after setting a row, we realize that the output
-	// batch has exceeded the memory limit.
-	maxCapacity int
 	output      coldata.Batch
-	outVecs     coldata.TypedVecs
+	outNulls    []*coldata.Nulls
+	// In order to reduce the number of interface conversions, we will get access
+	// to the underlying slice for the output vectors and will use them directly.
+	outBoolCols      []coldata.Bools
+	outBytesCols     []*coldata.Bytes
+	outDecimalCols   []coldata.Decimals
+	outInt16Cols     []coldata.Int16s
+	outInt32Cols     []coldata.Int32s
+	outInt64Cols     []coldata.Int64s
+	outFloat64Cols   []coldata.Float64s
+	outTimestampCols []coldata.Times
+	outIntervalCols  []coldata.Durations
+	outDatumCols     []coldata.DatumVec
+	// outColsMap contains the positions of the corresponding vectors in the
+	// slice for the same types. For example, if we have an output batch with
+	// types = [Int64, Int64, Bool, Bytes, Bool, Int64], then outColsMap will be
+	//                      [0, 1, 0, 0, 1, 2]
+	//                       ^  ^  ^  ^  ^  ^
+	//                       |  |  |  |  |  |
+	//                       |  |  |  |  |  3rd among all Int64's
+	//                       |  |  |  |  2nd among all Bool's
+	//                       |  |  |  1st among all Bytes's
+	//                       |  |  1st among all Bool's
+	//                       |  2nd among all Int64's
+	//                       1st among all Int64's
+	outColsMap []int
 }
 
 var (
@@ -73,7 +89,7 @@ func (o *OrderedSynchronizer) ChildCount(verbose bool) int {
 
 // Child implements the execinfrapb.OpNode interface.
 func (o *OrderedSynchronizer) Child(nth int, verbose bool) execinfra.OpNode {
-	return o.inputs[nth].Root
+	return o.inputs[nth].Op
 }
 
 // NewOrderedSynchronizer creates a new OrderedSynchronizer.
@@ -81,28 +97,27 @@ func (o *OrderedSynchronizer) Child(nth int, verbose bool) execinfra.OpNode {
 func NewOrderedSynchronizer(
 	allocator *colmem.Allocator,
 	memoryLimit int64,
-	inputs []colexecargs.OpWithMetaInfo,
+	inputs []SynchronizerInput,
 	typs []*types.T,
 	ordering colinfo.ColumnOrdering,
-) *OrderedSynchronizer {
-	os := &OrderedSynchronizer{
+) (*OrderedSynchronizer, error) {
+	return &OrderedSynchronizer{
+		allocator:             allocator,
 		memoryLimit:           memoryLimit,
 		inputs:                inputs,
 		ordering:              ordering,
 		typs:                  typs,
 		canonicalTypeFamilies: typeconv.ToCanonicalTypeFamilies(typs),
-	}
-	os.accountingHelper.Init(allocator, typs)
-	return os
+	}, nil
 }
 
 // Next is part of the Operator interface.
-func (o *OrderedSynchronizer) Next() coldata.Batch {
+func (o *OrderedSynchronizer) Next(ctx context.Context) coldata.Batch {
 	if o.inputBatches == nil {
 		o.inputBatches = make([]coldata.Batch, len(o.inputs))
 		o.heap = make([]int, 0, len(o.inputs))
 		for i := range o.inputs {
-			o.inputBatches[i] = o.inputs[i].Root.Next()
+			o.inputBatches[i] = o.inputs[i].Op.Next(ctx)
 			o.updateComparators(i)
 			if o.inputBatches[i].Length() > 0 {
 				o.heap = append(o.heap, i)
@@ -112,143 +127,131 @@ func (o *OrderedSynchronizer) Next() coldata.Batch {
 	}
 	o.resetOutput()
 	outputIdx := 0
-	for outputIdx < o.output.Capacity() && (o.maxCapacity == 0 || outputIdx < o.maxCapacity) {
-		if o.Len() == 0 {
-			// All inputs exhausted.
-			break
-		}
+	o.allocator.PerformOperation(o.output.ColVecs(), func() {
+		for outputIdx < o.output.Capacity() {
+			if o.Len() == 0 {
+				// All inputs exhausted.
+				break
+			}
 
-		minBatch := o.heap[0]
-		// Copy the min row into the output.
-		batch := o.inputBatches[minBatch]
-		srcRowIdx := o.inputIndices[minBatch]
-		if sel := batch.Selection(); sel != nil {
-			srcRowIdx = sel[srcRowIdx]
-		}
-		for i := range o.typs {
-			vec := batch.ColVec(i)
-			if vec.Nulls().MaybeHasNulls() && vec.Nulls().NullAt(srcRowIdx) {
-				o.outVecs.Nulls[i].SetNull(outputIdx)
-			} else {
-				switch o.canonicalTypeFamilies[i] {
-				case types.BoolFamily:
-					switch o.typs[i].Width() {
-					case -1:
+			minBatch := o.heap[0]
+			// Copy the min row into the output.
+			batch := o.inputBatches[minBatch]
+			srcRowIdx := o.inputIndices[minBatch]
+			if sel := batch.Selection(); sel != nil {
+				srcRowIdx = sel[srcRowIdx]
+			}
+			for i := range o.typs {
+				vec := batch.ColVec(i)
+				if vec.Nulls().MaybeHasNulls() && vec.Nulls().NullAt(srcRowIdx) {
+					o.outNulls[i].SetNull(outputIdx)
+				} else {
+					switch o.canonicalTypeFamilies[i] {
+					case types.BoolFamily:
+						switch o.typs[i].Width() {
+						case -1:
+						default:
+							srcCol := vec.Bool()
+							outCol := o.outBoolCols[o.outColsMap[i]]
+							v := srcCol.Get(srcRowIdx)
+							outCol[outputIdx] = v
+						}
+					case types.BytesFamily:
+						switch o.typs[i].Width() {
+						case -1:
+						default:
+							srcCol := vec.Bytes()
+							outCol := o.outBytesCols[o.outColsMap[i]]
+							v := srcCol.Get(srcRowIdx)
+							outCol.Set(outputIdx, v)
+						}
+					case types.DecimalFamily:
+						switch o.typs[i].Width() {
+						case -1:
+						default:
+							srcCol := vec.Decimal()
+							outCol := o.outDecimalCols[o.outColsMap[i]]
+							v := srcCol.Get(srcRowIdx)
+							outCol[outputIdx].Set(&v)
+						}
+					case types.IntFamily:
+						switch o.typs[i].Width() {
+						case 16:
+							srcCol := vec.Int16()
+							outCol := o.outInt16Cols[o.outColsMap[i]]
+							v := srcCol.Get(srcRowIdx)
+							outCol[outputIdx] = v
+						case 32:
+							srcCol := vec.Int32()
+							outCol := o.outInt32Cols[o.outColsMap[i]]
+							v := srcCol.Get(srcRowIdx)
+							outCol[outputIdx] = v
+						case -1:
+						default:
+							srcCol := vec.Int64()
+							outCol := o.outInt64Cols[o.outColsMap[i]]
+							v := srcCol.Get(srcRowIdx)
+							outCol[outputIdx] = v
+						}
+					case types.FloatFamily:
+						switch o.typs[i].Width() {
+						case -1:
+						default:
+							srcCol := vec.Float64()
+							outCol := o.outFloat64Cols[o.outColsMap[i]]
+							v := srcCol.Get(srcRowIdx)
+							outCol[outputIdx] = v
+						}
+					case types.TimestampTZFamily:
+						switch o.typs[i].Width() {
+						case -1:
+						default:
+							srcCol := vec.Timestamp()
+							outCol := o.outTimestampCols[o.outColsMap[i]]
+							v := srcCol.Get(srcRowIdx)
+							outCol[outputIdx] = v
+						}
+					case types.IntervalFamily:
+						switch o.typs[i].Width() {
+						case -1:
+						default:
+							srcCol := vec.Interval()
+							outCol := o.outIntervalCols[o.outColsMap[i]]
+							v := srcCol.Get(srcRowIdx)
+							outCol[outputIdx] = v
+						}
+					case typeconv.DatumVecCanonicalTypeFamily:
+						switch o.typs[i].Width() {
+						case -1:
+						default:
+							srcCol := vec.Datum()
+							outCol := o.outDatumCols[o.outColsMap[i]]
+							v := srcCol.Get(srcRowIdx)
+							outCol.Set(outputIdx, v)
+						}
 					default:
-						srcCol := vec.Bool()
-						outCol := o.outVecs.BoolCols[o.outVecs.ColsMap[i]]
-						v := srcCol.Get(srcRowIdx)
-						outCol.Set(outputIdx, v)
+						colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", o.typs[i].String()))
 					}
-				case types.BytesFamily:
-					switch o.typs[i].Width() {
-					case -1:
-					default:
-						srcCol := vec.Bytes()
-						outCol := o.outVecs.BytesCols[o.outVecs.ColsMap[i]]
-						v := srcCol.Get(srcRowIdx)
-						outCol.Set(outputIdx, v)
-					}
-				case types.DecimalFamily:
-					switch o.typs[i].Width() {
-					case -1:
-					default:
-						srcCol := vec.Decimal()
-						outCol := o.outVecs.DecimalCols[o.outVecs.ColsMap[i]]
-						v := srcCol.Get(srcRowIdx)
-						outCol.Set(outputIdx, v)
-					}
-				case types.IntFamily:
-					switch o.typs[i].Width() {
-					case 16:
-						srcCol := vec.Int16()
-						outCol := o.outVecs.Int16Cols[o.outVecs.ColsMap[i]]
-						v := srcCol.Get(srcRowIdx)
-						outCol.Set(outputIdx, v)
-					case 32:
-						srcCol := vec.Int32()
-						outCol := o.outVecs.Int32Cols[o.outVecs.ColsMap[i]]
-						v := srcCol.Get(srcRowIdx)
-						outCol.Set(outputIdx, v)
-					case -1:
-					default:
-						srcCol := vec.Int64()
-						outCol := o.outVecs.Int64Cols[o.outVecs.ColsMap[i]]
-						v := srcCol.Get(srcRowIdx)
-						outCol.Set(outputIdx, v)
-					}
-				case types.FloatFamily:
-					switch o.typs[i].Width() {
-					case -1:
-					default:
-						srcCol := vec.Float64()
-						outCol := o.outVecs.Float64Cols[o.outVecs.ColsMap[i]]
-						v := srcCol.Get(srcRowIdx)
-						outCol.Set(outputIdx, v)
-					}
-				case types.TimestampTZFamily:
-					switch o.typs[i].Width() {
-					case -1:
-					default:
-						srcCol := vec.Timestamp()
-						outCol := o.outVecs.TimestampCols[o.outVecs.ColsMap[i]]
-						v := srcCol.Get(srcRowIdx)
-						outCol.Set(outputIdx, v)
-					}
-				case types.IntervalFamily:
-					switch o.typs[i].Width() {
-					case -1:
-					default:
-						srcCol := vec.Interval()
-						outCol := o.outVecs.IntervalCols[o.outVecs.ColsMap[i]]
-						v := srcCol.Get(srcRowIdx)
-						outCol.Set(outputIdx, v)
-					}
-				case types.JsonFamily:
-					switch o.typs[i].Width() {
-					case -1:
-					default:
-						srcCol := vec.JSON()
-						outCol := o.outVecs.JSONCols[o.outVecs.ColsMap[i]]
-						v := srcCol.Get(srcRowIdx)
-						outCol.Set(outputIdx, v)
-					}
-				case typeconv.DatumVecCanonicalTypeFamily:
-					switch o.typs[i].Width() {
-					case -1:
-					default:
-						srcCol := vec.Datum()
-						outCol := o.outVecs.DatumCols[o.outVecs.ColsMap[i]]
-						v := srcCol.Get(srcRowIdx)
-						outCol.Set(outputIdx, v)
-					}
-				default:
-					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", o.typs[i].String()))
 				}
 			}
-		}
 
-		// Advance the input batch, fetching a new batch if necessary.
-		if o.inputIndices[minBatch]+1 < o.inputBatches[minBatch].Length() {
-			o.inputIndices[minBatch]++
-		} else {
-			o.inputBatches[minBatch] = o.inputs[minBatch].Root.Next()
-			o.inputIndices[minBatch] = 0
-			o.updateComparators(minBatch)
-		}
-		if o.inputBatches[minBatch].Length() == 0 {
-			heap.Remove(o, 0)
-		} else {
-			heap.Fix(o, 0)
-		}
+			// Advance the input batch, fetching a new batch if necessary.
+			if o.inputIndices[minBatch]+1 < o.inputBatches[minBatch].Length() {
+				o.inputIndices[minBatch]++
+			} else {
+				o.inputBatches[minBatch] = o.inputs[minBatch].Op.Next(ctx)
+				o.inputIndices[minBatch] = 0
+				o.updateComparators(minBatch)
+			}
+			if o.inputBatches[minBatch].Length() == 0 {
+				heap.Remove(o, 0)
+			} else {
+				heap.Fix(o, 0)
+			}
 
-		// Account for the memory of the row we have just set.
-		o.accountingHelper.AccountForSet(outputIdx)
-		outputIdx++
-		if o.maxCapacity == 0 && o.accountingHelper.Allocator.Used() >= o.memoryLimit {
-			o.maxCapacity = outputIdx
+			outputIdx++
 		}
-	}
+	})
 
 	o.output.SetLength(outputIdx)
 	return o.output
@@ -256,23 +259,99 @@ func (o *OrderedSynchronizer) Next() coldata.Batch {
 
 func (o *OrderedSynchronizer) resetOutput() {
 	var reallocated bool
-	o.output, reallocated = o.accountingHelper.ResetMaybeReallocate(
-		o.typs, o.output, 1 /* minDesiredCapacity */, o.memoryLimit,
+	o.output, reallocated = o.allocator.ResetMaybeReallocate(
+		o.typs, o.output, 1 /* minCapacity */, o.memoryLimit,
 	)
 	if reallocated {
-		o.outVecs.SetBatch(o.output)
+		o.outBoolCols = o.outBoolCols[:0]
+		o.outBytesCols = o.outBytesCols[:0]
+		o.outDecimalCols = o.outDecimalCols[:0]
+		o.outInt16Cols = o.outInt16Cols[:0]
+		o.outInt32Cols = o.outInt32Cols[:0]
+		o.outInt64Cols = o.outInt64Cols[:0]
+		o.outFloat64Cols = o.outFloat64Cols[:0]
+		o.outTimestampCols = o.outTimestampCols[:0]
+		o.outIntervalCols = o.outIntervalCols[:0]
+		o.outDatumCols = o.outDatumCols[:0]
+		for i, outVec := range o.output.ColVecs() {
+			o.outNulls[i] = outVec.Nulls()
+			switch typeconv.TypeFamilyToCanonicalTypeFamily(o.typs[i].Family()) {
+			case types.BoolFamily:
+				switch o.typs[i].Width() {
+				case -1:
+				default:
+					o.outColsMap[i] = len(o.outBoolCols)
+					o.outBoolCols = append(o.outBoolCols, outVec.Bool())
+				}
+			case types.BytesFamily:
+				switch o.typs[i].Width() {
+				case -1:
+				default:
+					o.outColsMap[i] = len(o.outBytesCols)
+					o.outBytesCols = append(o.outBytesCols, outVec.Bytes())
+				}
+			case types.DecimalFamily:
+				switch o.typs[i].Width() {
+				case -1:
+				default:
+					o.outColsMap[i] = len(o.outDecimalCols)
+					o.outDecimalCols = append(o.outDecimalCols, outVec.Decimal())
+				}
+			case types.IntFamily:
+				switch o.typs[i].Width() {
+				case 16:
+					o.outColsMap[i] = len(o.outInt16Cols)
+					o.outInt16Cols = append(o.outInt16Cols, outVec.Int16())
+				case 32:
+					o.outColsMap[i] = len(o.outInt32Cols)
+					o.outInt32Cols = append(o.outInt32Cols, outVec.Int32())
+				case -1:
+				default:
+					o.outColsMap[i] = len(o.outInt64Cols)
+					o.outInt64Cols = append(o.outInt64Cols, outVec.Int64())
+				}
+			case types.FloatFamily:
+				switch o.typs[i].Width() {
+				case -1:
+				default:
+					o.outColsMap[i] = len(o.outFloat64Cols)
+					o.outFloat64Cols = append(o.outFloat64Cols, outVec.Float64())
+				}
+			case types.TimestampTZFamily:
+				switch o.typs[i].Width() {
+				case -1:
+				default:
+					o.outColsMap[i] = len(o.outTimestampCols)
+					o.outTimestampCols = append(o.outTimestampCols, outVec.Timestamp())
+				}
+			case types.IntervalFamily:
+				switch o.typs[i].Width() {
+				case -1:
+				default:
+					o.outColsMap[i] = len(o.outIntervalCols)
+					o.outIntervalCols = append(o.outIntervalCols, outVec.Interval())
+				}
+			case typeconv.DatumVecCanonicalTypeFamily:
+				switch o.typs[i].Width() {
+				case -1:
+				default:
+					o.outColsMap[i] = len(o.outDatumCols)
+					o.outDatumCols = append(o.outDatumCols, outVec.Datum())
+				}
+			default:
+				colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", o.typs[i]))
+			}
+		}
 	}
 }
 
 // Init is part of the Operator interface.
-func (o *OrderedSynchronizer) Init(ctx context.Context) {
-	if !o.InitHelper.Init(ctx) {
-		return
-	}
-	o.Ctx, o.span = execinfra.ProcessorSpan(o.Ctx, "ordered sync")
+func (o *OrderedSynchronizer) Init() {
 	o.inputIndices = make([]int, len(o.inputs))
+	o.outNulls = make([]*coldata.Nulls, len(o.typs))
+	o.outColsMap = make([]int, len(o.typs))
 	for i := range o.inputs {
-		o.inputs[i].Root.Init(o.Ctx)
+		o.inputs[i].Op.Init()
 	}
 	o.comparators = make([]vecComparator, len(o.ordering))
 	for i := range o.ordering {
@@ -281,33 +360,18 @@ func (o *OrderedSynchronizer) Init(ctx context.Context) {
 	}
 }
 
-func (o *OrderedSynchronizer) DrainMeta() []execinfrapb.ProducerMetadata {
+func (o *OrderedSynchronizer) DrainMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
 	var bufferedMeta []execinfrapb.ProducerMetadata
-	if o.span != nil {
-		for i := range o.inputs {
-			for _, stats := range o.inputs[i].StatsCollectors {
-				o.span.RecordStructured(stats.GetStats())
-			}
-		}
-		if meta := execinfra.GetTraceDataAsMetadata(o.span); meta != nil {
-			bufferedMeta = append(bufferedMeta, *meta)
-		}
-	}
 	for _, input := range o.inputs {
-		bufferedMeta = append(bufferedMeta, input.MetadataSources.DrainMeta()...)
+		bufferedMeta = append(bufferedMeta, input.MetadataSources.DrainMeta(ctx)...)
 	}
 	return bufferedMeta
 }
 
-func (o *OrderedSynchronizer) Close() error {
-	o.accountingHelper.Release()
+func (o *OrderedSynchronizer) Close(ctx context.Context) error {
 	for _, input := range o.inputs {
-		input.ToClose.CloseAndLogOnErr(o.EnsureCtx(), "ordered synchronizer")
+		input.ToClose.CloseAndLogOnErr(ctx, "ordered synchronizer")
 	}
-	if o.span != nil {
-		o.span.Finish()
-	}
-	*o = OrderedSynchronizer{}
 	return nil
 }
 

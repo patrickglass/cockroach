@@ -16,13 +16,12 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/errors"
 )
 
 // LookupNamespaceID implements tree.PrivilegedAccessor.
@@ -31,21 +30,35 @@ import (
 func (p *planner) LookupNamespaceID(
 	ctx context.Context, parentID int64, name string,
 ) (tree.DInt, bool, error) {
-	query := fmt.Sprintf(
-		`SELECT id FROM [%d AS namespace] WHERE "parentID" = $1 AND "parentSchemaID" IN (0, 29) AND name = $2`,
-		keys.NamespaceTableID,
-	)
-	r, err := p.ExtendedEvalContext().ExecCfg.InternalExecutor.QueryRowEx(
-		ctx,
-		"crdb-internal-get-descriptor-id",
-		p.txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
-		query,
-		parentID,
-		name,
-	)
-	if err != nil {
-		return 0, false, err
+	var r tree.Datums
+	for _, t := range []struct {
+		tableName   string
+		extraClause string
+	}{
+		{fmt.Sprintf("[%d AS namespace]", keys.NamespaceTableID), `AND "parentSchemaID" IN (0, 29)`},
+		{fmt.Sprintf("[%d AS namespace]", keys.DeprecatedNamespaceTableID), ""},
+	} {
+		query := fmt.Sprintf(
+			`SELECT id FROM %s WHERE "parentID" = $1 AND name = $2 %s`,
+			t.tableName,
+			t.extraClause,
+		)
+		var err error
+		r, err = p.ExtendedEvalContext().ExecCfg.InternalExecutor.QueryRowEx(
+			ctx,
+			"crdb-internal-get-descriptor-id",
+			p.txn,
+			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+			query,
+			parentID,
+			name,
+		)
+		if err != nil {
+			return 0, false, err
+		}
+		if r != nil {
+			break
+		}
 	}
 	if r == nil {
 		return 0, false, nil
@@ -87,22 +100,12 @@ func (p *planner) LookupZoneConfigByNamespaceID(
 // to check the permissions of a descriptor given its ID, or the id given
 // is not a descriptor of a table or database.
 func (p *planner) checkDescriptorPermissions(ctx context.Context, id descpb.ID) error {
-	desc, err := p.Descriptors().GetImmutableDescriptorByID(
-		ctx, p.txn, id,
-		tree.CommonLookupFlags{
-			IncludeDropped: true,
-			IncludeOffline: true,
-			// Note that currently the ByID API implies required regardless of whether it
-			// is set. Set it just to be explicit.
-			Required: true,
-		},
-	)
+	desc, err := catalogkv.GetDescriptorByID(ctx, p.txn, p.ExecCfg().Codec, id)
 	if err != nil {
-		// Filter the error due to the descriptor not existing.
-		if errors.Is(err, catalog.ErrDescriptorNotFound) {
-			err = nil
-		}
 		return err
+	}
+	if desc == nil {
+		return nil
 	}
 	if err := p.CheckAnyPrivilege(ctx, desc); err != nil {
 		return pgerror.New(pgcode.InsufficientPrivilege, "insufficient privilege")

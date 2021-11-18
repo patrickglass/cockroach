@@ -22,10 +22,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils/distsqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
@@ -68,7 +66,7 @@ func TestWindowerAccountingForResults(t *testing.T) {
 	}
 
 	post := &execinfrapb.PostProcessSpec{}
-	input := execinfra.NewRepeatableRowSource(types.OneIntCol, randgen.MakeIntRows(1000, 1))
+	input := execinfra.NewRepeatableRowSource(rowenc.OneIntCol, rowenc.MakeIntRows(1000, 1))
 	aggSpec := execinfrapb.ArrayAgg
 	spec := execinfrapb.WindowerSpec{
 		PartitionBy: []uint32{},
@@ -90,7 +88,7 @@ func TestWindowerAccountingForResults(t *testing.T) {
 		}},
 	}
 	output := distsqlutils.NewRowBuffer(
-		types.OneIntCol, nil, distsqlutils.RowBufferArgs{},
+		rowenc.OneIntCol, nil, distsqlutils.RowBufferArgs{},
 	)
 
 	d, err := newWindower(flowCtx, 0 /* processorID */, &spec, input, post, output)
@@ -214,9 +212,9 @@ func BenchmarkWindower(b *testing.B) {
 	}
 
 	rowsGenerators := []func(int, int) rowenc.EncDatumRows{
-		randgen.MakeIntRows,
+		rowenc.MakeIntRows,
 		func(numRows, numCols int) rowenc.EncDatumRows {
-			return randgen.MakeRepeatedIntRows(numRows/100, numRows, numCols)
+			return rowenc.MakeRepeatedIntRows(numRows/100, numRows, numCols)
 		},
 	}
 	skipRepeatedSpecs := map[int]bool{0: true, 1: true}
@@ -247,7 +245,7 @@ func BenchmarkWindower(b *testing.B) {
 			b.Run(runName, func(b *testing.B) {
 				post := &execinfrapb.PostProcessSpec{}
 				disposer := &rowDisposer{}
-				input := execinfra.NewRepeatableRowSource(types.ThreeIntCols, rowsGenerator(numRows, numCols))
+				input := execinfra.NewRepeatableRowSource(rowenc.ThreeIntCols, rowsGenerator(numRows, numCols))
 
 				b.SetBytes(int64(8 * numRows * numCols))
 				b.ResetTimer()

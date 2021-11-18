@@ -19,15 +19,10 @@ import (
 
 // FakeResumer calls optional callbacks during the job lifecycle.
 type FakeResumer struct {
-	OnResume      func(context.Context) error
-	FailOrCancel  func(context.Context) error
-	Success       func() error
-	PauseRequest  onPauseRequestFunc
-	TraceRealSpan bool
-}
-
-func (d FakeResumer) ForceRealSpan() bool {
-	return d.TraceRealSpan
+	OnResume     func(context.Context) error
+	FailOrCancel func(context.Context) error
+	Success      func() error
+	PauseRequest onPauseRequestFunc
 }
 
 var _ Resumer = FakeResumer{}
@@ -71,10 +66,9 @@ func (j *Job) Started(ctx context.Context) error {
 	return j.started(ctx, nil /* txn */)
 }
 
-// Reverted is a wrapper around the internal function that moves a job to the
-// reverting state.
-func (j *Job) Reverted(ctx context.Context, err error) error {
-	return j.reverted(ctx, nil /* txn */, err, nil)
+// Created is a test only function that inserts a new jobs table row.
+func (j *Job) Created(ctx context.Context) error {
+	return j.deprecatedInsert(ctx, nil /* txn */, j.ID(), nil /* lease */, nil /* session */)
 }
 
 // Paused is a wrapper around the internal function that moves a job to the
@@ -94,27 +88,3 @@ func (j *Job) Failed(ctx context.Context, causingErr error) error {
 func (j *Job) Succeeded(ctx context.Context) error {
 	return j.succeeded(ctx, nil /* txn */, nil /* fn */)
 }
-
-const (
-	AdoptQuery                     = claimQuery
-	CancelQuery                    = pauseAndCancelUpdate
-	GcQuery                        = expiredJobsQuery
-	RemoveClaimsQuery              = removeClaimsQuery
-	ProcessJobsQuery               = processQueryWithBackoff
-	IntervalBaseSettingKey         = intervalBaseSettingKey
-	AdoptIntervalSettingKey        = adoptIntervalSettingKey
-	CancelIntervalSettingKey       = cancelIntervalSettingKey
-	GcIntervalSettingKey           = gcIntervalSettingKey
-	RetentionTimeSettingKey        = retentionTimeSettingKey
-	DefaultAdoptInterval           = defaultAdoptInterval
-	ExecutionErrorsMaxEntriesKey   = executionErrorsMaxEntriesKey
-	ExecutionErrorsMaxEntrySizeKey = executionErrorsMaxEntrySizeKey
-)
-
-var (
-	AdoptIntervalSetting            = adoptIntervalSetting
-	CancelIntervalSetting           = cancelIntervalSetting
-	CancellationsUpdateLimitSetting = cancellationsUpdateLimitSetting
-	GcIntervalSetting               = gcIntervalSetting
-	RetentionTimeSetting            = retentionTimeSetting
-)

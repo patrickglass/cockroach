@@ -11,7 +11,6 @@
 package settings
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -43,7 +42,7 @@ type Values struct {
 		syncutil.Mutex
 		// NB: any in place modification to individual slices must also hold the
 		// lock, e.g. if we ever add RemoveOnChange or something.
-		onChange [MaxSettings][]func(ctx context.Context)
+		onChange [MaxSettings][]func()
 	}
 	// opaque is an arbitrary object that can be set by a higher layer to make it
 	// accessible from certain callbacks (like state machine transformers).
@@ -93,10 +92,10 @@ var TestOpaque interface{} = testOpaqueType{}
 // variables to their defaults.
 //
 // The opaque argument can be retrieved later via Opaque().
-func (sv *Values) Init(ctx context.Context, opaque interface{}) {
+func (sv *Values) Init(opaque interface{}) {
 	sv.opaque = opaque
 	for _, s := range registry {
-		s.setToDefault(ctx, sv)
+		s.setToDefault(sv)
 	}
 }
 
@@ -105,12 +104,12 @@ func (sv *Values) Opaque() interface{} {
 	return sv.opaque
 }
 
-func (sv *Values) settingChanged(ctx context.Context, slotIdx int) {
+func (sv *Values) settingChanged(slotIdx int) {
 	sv.changeMu.Lock()
 	funcs := sv.changeMu.onChange[slotIdx-1]
 	sv.changeMu.Unlock()
 	for _, fn := range funcs {
-		fn(ctx)
+		fn()
 	}
 }
 
@@ -122,9 +121,9 @@ func (c *valuesContainer) getGeneric(slotIdx int) interface{} {
 	return c.genericVals[slotIdx-1].Load()
 }
 
-func (sv *Values) setInt64(ctx context.Context, slotIdx int, newVal int64) {
+func (sv *Values) setInt64(slotIdx int, newVal int64) {
 	if sv.container.setInt64Val(slotIdx-1, newVal) {
-		sv.settingChanged(ctx, slotIdx)
+		sv.settingChanged(slotIdx)
 	}
 }
 
@@ -162,9 +161,9 @@ func (sv *Values) getDefaultOverride(slotIdx int) (bool, int64, *atomic.Value) {
 		&sv.overridesMu.defaultOverrides.genericVals[slotIdx]
 }
 
-func (sv *Values) setGeneric(ctx context.Context, slotIdx int, newVal interface{}) {
+func (sv *Values) setGeneric(slotIdx int, newVal interface{}) {
 	sv.container.setGenericVal(slotIdx-1, newVal)
-	sv.settingChanged(ctx, slotIdx)
+	sv.settingChanged(slotIdx)
 }
 
 func (sv *Values) getInt64(slotIdx int) int64 {
@@ -178,7 +177,7 @@ func (sv *Values) getGeneric(slotIdx int) interface{} {
 // setOnChange installs a callback to be called when a setting's value changes.
 // `fn` should avoid doing long-running or blocking work as it is called on the
 // goroutine which handles all settings updates.
-func (sv *Values) setOnChange(slotIdx int, fn func(ctx context.Context)) {
+func (sv *Values) setOnChange(slotIdx int, fn func()) {
 	sv.changeMu.Lock()
 	sv.changeMu.onChange[slotIdx-1] = append(sv.changeMu.onChange[slotIdx-1], fn)
 	sv.changeMu.Unlock()
@@ -220,7 +219,7 @@ type WritableSetting interface {
 	// SetOnChange installs a callback to be called when a setting's value
 	// changes. `fn` should avoid doing long-running or blocking work as it is
 	// called on the goroutine which handles all settings updates.
-	SetOnChange(sv *Values, fn func(ctx context.Context))
+	SetOnChange(sv *Values, fn func())
 	// ErrorHint returns a hint message to be displayed to the user when there's
 	// an error.
 	ErrorHint() (bool, string)
@@ -230,7 +229,7 @@ type extendedSetting interface {
 	WritableSetting
 
 	isRetired() bool
-	setToDefault(ctx context.Context, sv *Values)
+	setToDefault(sv *Values)
 	setDescription(desc string)
 	setSlotIdx(slotIdx int)
 	getSlotIdx() int
@@ -344,14 +343,14 @@ func (i *common) SetRetired() {
 // SetOnChange installs a callback to be called when a setting's value changes.
 // `fn` should avoid doing long-running or blocking work as it is called on the
 // goroutine which handles all settings updates.
-func (i *common) SetOnChange(sv *Values, fn func(ctx context.Context)) {
+func (i *common) SetOnChange(sv *Values, fn func()) {
 	sv.setOnChange(i.slotIdx, fn)
 }
 
 type numericSetting interface {
 	Setting
 	Validate(i int64) error
-	set(ctx context.Context, sv *Values, i int64) error
+	set(sv *Values, i int64) error
 }
 
 // TestingIsReportable is used in testing for reportability.

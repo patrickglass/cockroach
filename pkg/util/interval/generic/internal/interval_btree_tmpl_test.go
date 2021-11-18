@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//go:build ignore
 // +build ignore
 
 package internal
@@ -557,18 +556,6 @@ func run(tb testing.TB, name string, f func(testing.TB)) {
 	}
 }
 
-func iters(tb testing.TB, count int) int {
-	switch v := tb.(type) {
-	case *testing.T:
-		return count
-	case *testing.B:
-		return v.N
-	default:
-		tb.Fatalf("unknown %T", tb)
-		return 0
-	}
-}
-
 func verify(tb testing.TB, tr *btree) {
 	if tt, ok := tb.(*testing.T); ok {
 		tr.Verify(tt)
@@ -593,8 +580,7 @@ func startTimer(tb testing.TB) {
 	}
 }
 
-func runBTreeInsert(tb testing.TB, count int) {
-	iters := iters(tb, count)
+func runBTreeInsert(tb testing.TB, count, iters int) {
 	insertP := perm(count)
 	resetTimer(tb)
 	for i := 0; i < iters; {
@@ -610,8 +596,7 @@ func runBTreeInsert(tb testing.TB, count int) {
 	}
 }
 
-func runBTreeDelete(tb testing.TB, count int) {
-	iters := iters(tb, count)
+func runBTreeDelete(tb testing.TB, count, iters int) {
 	insertP, removeP := perm(count), perm(count)
 	resetTimer(tb)
 	for i := 0; i < iters; {
@@ -636,8 +621,7 @@ func runBTreeDelete(tb testing.TB, count int) {
 	}
 }
 
-func runBTreeDeleteInsert(tb testing.TB, count int) {
-	iters := iters(tb, count)
+func runBTreeDeleteInsert(tb testing.TB, count, iters int) {
 	insertP := perm(count)
 	var tr btree
 	for _, item := range insertP {
@@ -654,8 +638,7 @@ func runBTreeDeleteInsert(tb testing.TB, count int) {
 	}
 }
 
-func runBTreeDeleteInsertCloneOnce(tb testing.TB, count int) {
-	iters := iters(tb, count)
+func runBTreeDeleteInsertCloneOnce(tb testing.TB, count, iters int) {
 	insertP := perm(count)
 	var tr btree
 	for _, item := range insertP {
@@ -673,10 +656,9 @@ func runBTreeDeleteInsertCloneOnce(tb testing.TB, count int) {
 	}
 }
 
-func runBTreeDeleteInsertCloneEachTime(tb testing.TB, count int) {
+func runBTreeDeleteInsertCloneEachTime(tb testing.TB, count, iters int) {
 	for _, reset := range []bool{false, true} {
 		run(tb, fmt.Sprintf("reset=%t", reset), func(tb testing.TB) {
-			iters := iters(tb, count)
 			insertP := perm(count)
 			var tr, trReset btree
 			for _, item := range insertP {
@@ -711,27 +693,27 @@ func randCount() int {
 
 func TestBTreeInsert(t *testing.T) {
 	count := randCount()
-	runBTreeInsert(t, count)
+	runBTreeInsert(t, count, count)
 }
 
 func TestBTreeDelete(t *testing.T) {
 	count := randCount()
-	runBTreeDelete(t, count)
+	runBTreeDelete(t, count, count)
 }
 
 func TestBTreeDeleteInsert(t *testing.T) {
 	count := randCount()
-	runBTreeDeleteInsert(t, count)
+	runBTreeDeleteInsert(t, count, count)
 }
 
 func TestBTreeDeleteInsertCloneOnce(t *testing.T) {
 	count := randCount()
-	runBTreeDeleteInsertCloneOnce(t, count)
+	runBTreeDeleteInsertCloneOnce(t, count, count)
 }
 
 func TestBTreeDeleteInsertCloneEachTime(t *testing.T) {
 	count := randCount()
-	runBTreeDeleteInsertCloneEachTime(t, count)
+	runBTreeDeleteInsertCloneEachTime(t, count, count)
 }
 
 // TestBTreeSeekOverlapRandom tests btree iterator overlap operations using
@@ -881,21 +863,21 @@ func forBenchmarkSizes(b *testing.B, f func(b *testing.B, count int)) {
 // BenchmarkBTreeInsert measures btree insertion performance.
 func BenchmarkBTreeInsert(b *testing.B) {
 	forBenchmarkSizes(b, func(b *testing.B, count int) {
-		runBTreeInsert(b, count)
+		runBTreeInsert(b, count, b.N)
 	})
 }
 
 // BenchmarkBTreeDelete measures btree deletion performance.
 func BenchmarkBTreeDelete(b *testing.B) {
 	forBenchmarkSizes(b, func(b *testing.B, count int) {
-		runBTreeDelete(b, count)
+		runBTreeDelete(b, count, b.N)
 	})
 }
 
 // BenchmarkBTreeDeleteInsert measures btree deletion and insertion performance.
 func BenchmarkBTreeDeleteInsert(b *testing.B) {
 	forBenchmarkSizes(b, func(b *testing.B, count int) {
-		runBTreeDeleteInsert(b, count)
+		runBTreeDeleteInsert(b, count, b.N)
 	})
 }
 
@@ -903,7 +885,7 @@ func BenchmarkBTreeDeleteInsert(b *testing.B) {
 // performance after the tree has been copy-on-write cloned once.
 func BenchmarkBTreeDeleteInsertCloneOnce(b *testing.B) {
 	forBenchmarkSizes(b, func(b *testing.B, count int) {
-		runBTreeDeleteInsertCloneOnce(b, count)
+		runBTreeDeleteInsertCloneOnce(b, count, b.N)
 	})
 }
 
@@ -911,7 +893,7 @@ func BenchmarkBTreeDeleteInsertCloneOnce(b *testing.B) {
 // performance while the tree is repeatedly copy-on-write cloned.
 func BenchmarkBTreeDeleteInsertCloneEachTime(b *testing.B) {
 	forBenchmarkSizes(b, func(b *testing.B, count int) {
-		runBTreeDeleteInsertCloneEachTime(b, count)
+		runBTreeDeleteInsertCloneEachTime(b, count, b.N)
 	})
 }
 

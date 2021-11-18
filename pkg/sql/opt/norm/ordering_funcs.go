@@ -13,13 +13,14 @@ package norm
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 )
 
 // CanSimplifyLimitOffsetOrdering returns true if the ordering required by the
 // Limit or Offset operator can be made less restrictive, so that the input
 // operator has more ordering choices.
 func (c *CustomFuncs) CanSimplifyLimitOffsetOrdering(
-	in memo.RelExpr, ordering props.OrderingChoice,
+	in memo.RelExpr, ordering physical.OrderingChoice,
 ) bool {
 	return c.canSimplifyOrdering(in, ordering)
 }
@@ -28,8 +29,8 @@ func (c *CustomFuncs) CanSimplifyLimitOffsetOrdering(
 // Offset operator less restrictive by removing optional columns, adding
 // equivalent columns, and removing redundant columns.
 func (c *CustomFuncs) SimplifyLimitOffsetOrdering(
-	input memo.RelExpr, ordering props.OrderingChoice,
-) props.OrderingChoice {
+	input memo.RelExpr, ordering physical.OrderingChoice,
+) physical.OrderingChoice {
 	return c.simplifyOrdering(input, ordering)
 }
 
@@ -139,29 +140,7 @@ func (c *CustomFuncs) SimplifyExplainOrdering(
 	return &copy
 }
 
-// CanSimplifyWithBindingOrdering returns true if the ordering required by the
-// WithBinding operator can be made less restrictive, so that the input operator
-// has more ordering choices.
-func (c *CustomFuncs) CanSimplifyWithBindingOrdering(
-	in memo.RelExpr, private *memo.WithPrivate,
-) bool {
-	return c.canSimplifyOrdering(in, private.BindingOrdering)
-}
-
-// SimplifyWithBindingOrdering makes the ordering required by the WithBinding operator
-// less restrictive by removing optional columns, adding equivalent columns, and
-// removing redundant columns.
-func (c *CustomFuncs) SimplifyWithBindingOrdering(
-	in memo.RelExpr, private *memo.WithPrivate,
-) *memo.WithPrivate {
-	// Copy WithBindingPrivate and its physical properties to stack and replace
-	// Ordering field in the copied properties.
-	copy := *private
-	copy.BindingOrdering = c.simplifyOrdering(in, private.BindingOrdering)
-	return &copy
-}
-
-func (c *CustomFuncs) canSimplifyOrdering(in memo.RelExpr, ordering props.OrderingChoice) bool {
+func (c *CustomFuncs) canSimplifyOrdering(in memo.RelExpr, ordering physical.OrderingChoice) bool {
 	// If any ordering is allowed, nothing to simplify.
 	if ordering.Any() {
 		return false
@@ -170,8 +149,8 @@ func (c *CustomFuncs) canSimplifyOrdering(in memo.RelExpr, ordering props.Orderi
 }
 
 func (c *CustomFuncs) simplifyOrdering(
-	in memo.RelExpr, ordering props.OrderingChoice,
-) props.OrderingChoice {
+	in memo.RelExpr, ordering physical.OrderingChoice,
+) physical.OrderingChoice {
 	simplified := ordering.Copy()
 	simplified.Simplify(&in.Relational().FuncDeps)
 	return simplified

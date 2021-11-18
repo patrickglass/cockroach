@@ -3,12 +3,9 @@
 
 package lock
 
-import (
-	fmt "fmt"
-	_ "github.com/gogo/protobuf/gogoproto"
-	proto "github.com/gogo/protobuf/proto"
-	math "math"
-)
+import proto "github.com/gogo/protobuf/proto"
+import fmt "fmt"
+import math "math"
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
@@ -19,7 +16,7 @@ var _ = math.Inf
 // is compatible with the proto package it is being compiled against.
 // A compilation error at this line likely means your copy of the
 // proto package needs to be updated.
-const _ = proto.GoGoProtoPackageIsVersion3 // please upgrade the proto package
+const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
 
 // Strength represents the different locking modes that determine how key-values
 // can be accessed by concurrent transactions.
@@ -147,7 +144,6 @@ var Strength_name = map[int32]string{
 	2: "Upgrade",
 	3: "Exclusive",
 }
-
 var Strength_value = map[string]int32{
 	"None":      0,
 	"Shared":    1,
@@ -158,9 +154,8 @@ var Strength_value = map[string]int32{
 func (x Strength) String() string {
 	return proto.EnumName(Strength_name, int32(x))
 }
-
 func (Strength) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_828a6b2fccefea6b, []int{0}
+	return fileDescriptor_locking_eecdbf5930525074, []int{0}
 }
 
 // Durability represents the different durability properties of a lock acquired
@@ -191,7 +186,6 @@ var Durability_name = map[int32]string{
 	0: "Replicated",
 	1: "Unreplicated",
 }
-
 var Durability_value = map[string]int32{
 	"Replicated":   0,
 	"Unreplicated": 1,
@@ -200,9 +194,8 @@ var Durability_value = map[string]int32{
 func (x Durability) String() string {
 	return proto.EnumName(Durability_name, int32(x))
 }
-
 func (Durability) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_828a6b2fccefea6b, []int{1}
+	return fileDescriptor_locking_eecdbf5930525074, []int{1}
 }
 
 // WaitPolicy specifies the behavior of a request when it encounters conflicting
@@ -228,7 +221,6 @@ var WaitPolicy_name = map[int32]string{
 	0: "Block",
 	1: "Error",
 }
-
 var WaitPolicy_value = map[string]int32{
 	"Block": 0,
 	"Error": 1,
@@ -237,9 +229,8 @@ var WaitPolicy_value = map[string]int32{
 func (x WaitPolicy) String() string {
 	return proto.EnumName(WaitPolicy_name, int32(x))
 }
-
 func (WaitPolicy) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_828a6b2fccefea6b, []int{2}
+	return fileDescriptor_locking_eecdbf5930525074, []int{2}
 }
 
 func init() {
@@ -249,10 +240,10 @@ func init() {
 }
 
 func init() {
-	proto.RegisterFile("kv/kvserver/concurrency/lock/locking.proto", fileDescriptor_828a6b2fccefea6b)
+	proto.RegisterFile("kv/kvserver/concurrency/lock/locking.proto", fileDescriptor_locking_eecdbf5930525074)
 }
 
-var fileDescriptor_828a6b2fccefea6b = []byte{
+var fileDescriptor_locking_eecdbf5930525074 = []byte{
 	// 275 bytes of a gzipped FileDescriptorProto
 	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x4c, 0xcf, 0xbd, 0x4e, 0xc3, 0x30,
 	0x10, 0xc0, 0x71, 0x1b, 0x42, 0x69, 0x8f, 0x0f, 0x59, 0x16, 0x53, 0x07, 0x0f, 0x0c, 0x1d, 0x32,

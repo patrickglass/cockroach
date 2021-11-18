@@ -1,5 +1,3 @@
-load("@rules_proto//proto:defs.bzl", "proto_library")
-load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 load("//build:STRINGER.bzl", "stringer")
 
@@ -14,8 +12,8 @@ go_library(
         "setters.go",
         "zone_cache.go",
         ":gen-field-stringer",  # keep
+        ":gen-parsemode-stringer",  # keep
     ],
-    embed = [":pgdate_go_proto"],
     importpath = "github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate",
     visibility = ["//visibility:public"],
     deps = [
@@ -44,7 +42,6 @@ go_test(
         "//pkg/util/timeutil",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_lib_pq//:pq",
-        "@com_github_stretchr_testify//require",
     ],
 )
 
@@ -54,17 +51,8 @@ stringer(
     typ = "field",
 )
 
-proto_library(
-    name = "pgdate_proto",
-    srcs = ["pgdate.proto"],
-    strip_import_prefix = "/pkg",
-    visibility = ["//visibility:public"],
-)
-
-go_proto_library(
-    name = "pgdate_go_proto",
-    compilers = ["//pkg/cmd/protoc-gen-gogoroach:protoc-gen-gogoroach_compiler"],
-    importpath = "github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate",
-    proto = ":pgdate_proto",
-    visibility = ["//visibility:public"],
+stringer(
+    name = "gen-parsemode-stringer",
+    src = "parsing.go",
+    typ = "ParseMode",
 )

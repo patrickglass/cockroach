@@ -1,2 +1,0 @@
-scrub_table_stmt ::=
-	'EXPERIMENTAL' 'SCRUB' 'TABLE' table_name opt_as_of_clause opt_scrub_options_clause

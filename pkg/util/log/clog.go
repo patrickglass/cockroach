@@ -22,7 +22,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
 	"github.com/cockroachdb/cockroach/pkg/util/log/channel"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
@@ -106,9 +105,6 @@ type loggingT struct {
 		syncutil.RWMutex
 		idPayload
 	}
-
-	allSinkInfos sinkInfoRegistry
-	allLoggers   loggerRegistry
 }
 
 type idPayload struct {
@@ -137,9 +133,8 @@ type sinkInfo struct {
 	// sink is where the log entries should be written.
 	sink logSink
 
-	// Levels at or beyond which entries are output to this sink.
-	// There is one entry per channel.
-	threshold channelThresholds
+	// Level at or beyond which entries are output to this sink.
+	threshold Severity
 
 	// editor is the optional step that occurs prior to emitting the log
 	// entry.
@@ -161,28 +156,6 @@ type sinkInfo struct {
 	// redact and redactable memorize the input configuration
 	// that was used to create the editor above.
 	redact, redactable bool
-}
-
-type channelThresholds struct {
-	sevPerChannel [logpb.Channel_CHANNEL_MAX]Severity
-}
-
-func (c *channelThresholds) get(ch logpb.Channel) Severity {
-	return c.sevPerChannel[int(ch)]
-}
-
-// set modifies the threshold for the given channel, assuming
-// there is no concurrent access.
-func (c *channelThresholds) set(ch logpb.Channel, threshold Severity) {
-	c.sevPerChannel[int(ch)] = threshold
-}
-
-// setAll modifies the threshold for all channels, assuming
-// there is no concurrent access.
-func (c *channelThresholds) setAll(sev Severity) {
-	for i := 0; i < int(logpb.Channel_CHANNEL_MAX); i++ {
-		c.sevPerChannel[i] = sev
-	}
 }
 
 // loggerT represents the logging source for a given log channel.
@@ -295,9 +268,8 @@ func (l *loggerT) outputLogEntry(entry logEntry) {
 	setActive()
 	var fatalTrigger chan struct{}
 	extraFlush := false
-	isFatal := entry.sev == severity.FATAL
 
-	if isFatal {
+	if entry.sev == severity.FATAL {
 		extraFlush = true
 		logging.signalFatalCh()
 
@@ -367,7 +339,13 @@ func (l *loggerT) outputLogEntry(entry logEntry) {
 	// not eliminate the event.
 	someSinkActive := false
 	for i, s := range l.sinkInfos {
-		if entry.sev < s.threshold.get(entry.ch) || !s.sink.active() {
+		// Note: we need to use the .Get() method instead of reading the
+		// severity threshold directly, because some tests are unruly and
+		// let goroutines live and perform log calls beyond their
+		// Stopper's Stop() call (e.g. the pgwire async processing
+		// goroutine). These asynchronous log calls are concurrent with
+		// the stderrSinkInfo update in (*TestLogScope).Close().
+		if entry.sev < s.threshold.Get() || !s.sink.active() {
 			continue
 		}
 		editedEntry := entry
@@ -377,7 +355,7 @@ func (l *loggerT) outputLogEntry(entry logEntry) {
 		// the formatter.
 		editedEntry.counter = atomic.AddUint64(&s.msgCount, 1)
 
-		// Process the redaction spec.
+		// Process the redation spec.
 		editedEntry.payload = maybeRedactEntry(editedEntry.payload, s.editor)
 
 		// Format the entry for this sink.
@@ -402,7 +380,7 @@ func (l *loggerT) outputLogEntry(entry logEntry) {
 				// The sink was not accepting entries at this level. Nothing to do.
 				continue
 			}
-			if err := s.sink.output(bufs.b[i].Bytes(), sinkOutputOptions{extraFlush: extraFlush, forceSync: isFatal}); err != nil {
+			if err := s.sink.output(extraFlush, bufs.b[i].Bytes()); err != nil {
 				if !s.criticality {
 					// An error on this sink is not critical. Just report
 					// the error and move on.
@@ -432,7 +410,7 @@ func (l *loggerT) outputLogEntry(entry logEntry) {
 	}
 
 	// Flush and exit on fatal logging.
-	if isFatal {
+	if entry.sev == severity.FATAL {
 		close(fatalTrigger)
 		// Note: although it seems like the function is allowed to return
 		// below when s == severity.FATAL, this is not so, because the

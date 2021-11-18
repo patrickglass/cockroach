@@ -12,7 +12,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
 	_ "github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl"     // Ensure changefeed init hooks run.
 	_ "github.com/cockroachdb/cockroach/pkg/ccl/kvccl/kvtenantccl" // Ensure we can start tenant.
 	"github.com/cockroachdb/cockroach/pkg/ccl/streamingccl"
@@ -27,10 +26,9 @@ import (
 // channelFeedSource wraps the eventsCh returned from a client. It expects that
 // no errors are returned from the client.
 type channelFeedSource struct {
-	t               *testing.T
-	cancelIngestion context.CancelFunc
-	eventCh         chan streamingccl.Event
-	errCh           chan error
+	t       *testing.T
+	eventCh chan streamingccl.Event
+	errCh   chan error
 }
 
 var _ streamingtest.FeedSource = (*channelFeedSource)(nil)
@@ -50,18 +48,15 @@ func (f *channelFeedSource) Next() (streamingccl.Event, bool) {
 }
 
 // Close implements the streamingtest.FeedSource interface.
-func (f *channelFeedSource) Close(ctx context.Context) {
-	f.cancelIngestion()
+func (f *channelFeedSource) Close() {
+	close(f.eventCh)
 }
 
 func TestSinklessReplicationClient(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-
 	defer log.Scope(t).Close(t)
-	h, cleanup := streamingtest.NewReplicationHelper(t, base.TestServerArgs{})
+	h, cleanup := streamingtest.NewReplicationHelper(t)
 	defer cleanup()
-
-	ctx := context.Background()
 
 	h.Tenant.SQL.Exec(t, `
 CREATE DATABASE d;
@@ -73,15 +68,21 @@ INSERT INTO d.t2 VALUES (2);
 
 	t1 := catalogkv.TestingGetTableDescriptor(h.SysServer.DB(), h.Tenant.Codec, "d", "t1")
 
-	client := &sinklessReplicationClient{remote: &h.PGUrl}
+	pgURL := h.PGUrl
+	q := pgURL.Query()
+	q.Set(TenantID, h.Tenant.ID.String())
+	pgURL.RawQuery = q.Encode()
 
-	id, err := client.Create(ctx, h.Tenant.ID)
-	require.NoError(t, err)
+	sa := streamingccl.StreamAddress(pgURL.String())
 
-	top, err := client.Plan(ctx, id)
+	client := &sinklessReplicationClient{}
+	top, err := client.GetTopology(sa)
 	require.NoError(t, err)
-	require.Equal(t, 1, len(top))
-	token := top[0].SubscriptionToken
+	require.Equal(t, 1, len(top.Partitions))
+	pa := top.Partitions[0]
+	require.Equal(t, streamingccl.PartitionAddress(pgURL.String()), pa)
+
+	ctx := context.Background()
 
 	h.Tenant.SQL.Exec(t, `UPDATE d.t1 SET b = 'world' WHERE i = 42`)
 
@@ -91,35 +92,22 @@ INSERT INTO d.t2 VALUES (2);
 
 	t.Run("replicate_existing_tenant", func(t *testing.T) {
 		clientCtx, cancelIngestion := context.WithCancel(ctx)
-		eventCh, errCh, err := client.Subscribe(clientCtx, id, token, startTime)
+		eventCh, errCh, err := client.ConsumePartition(clientCtx, pa, startTime)
 		require.NoError(t, err)
-		feedSource := &channelFeedSource{cancelIngestion: cancelIngestion, eventCh: eventCh, errCh: errCh}
+		feedSource := &channelFeedSource{eventCh: eventCh, errCh: errCh}
 		feed := streamingtest.MakeReplicationFeed(t, feedSource)
 
 		// We should observe 2 versions of this key: one with ("привет", "world"), and a later
 		// version ("привет", "мир")
 		expected := streamingtest.EncodeKV(t, h.Tenant.Codec, t1, 42, "привет", "world")
-		firstObserved := feed.ObserveKey(ctx, expected.Key)
+		firstObserved := feed.ObserveKey(expected.Key)
 		require.Equal(t, expected.Value.RawBytes, firstObserved.Value.RawBytes)
 
 		expected = streamingtest.EncodeKV(t, h.Tenant.Codec, t1, 42, "привет", "мир")
-		secondObserved := feed.ObserveKey(ctx, expected.Key)
+		secondObserved := feed.ObserveKey(expected.Key)
 		require.Equal(t, expected.Value.RawBytes, secondObserved.Value.RawBytes)
 
-		feed.ObserveResolved(ctx, secondObserved.Value.Timestamp)
-		cancelIngestion()
-	})
-
-	t.Run("stream-address-disconnects", func(t *testing.T) {
-		clientCtx, cancelIngestion := context.WithCancel(ctx)
-		eventCh, errCh, err := client.Subscribe(clientCtx, id, token, startTime)
-		require.NoError(t, err)
-		feedSource := &channelFeedSource{eventCh: eventCh, errCh: errCh}
-		feed := streamingtest.MakeReplicationFeed(t, feedSource)
-
-		h.SysServer.Stopper().Stop(clientCtx)
-
-		require.True(t, feed.ObserveGeneration(clientCtx))
+		feed.ObserveResolved(secondObserved.Value.Timestamp)
 		cancelIngestion()
 	})
 }

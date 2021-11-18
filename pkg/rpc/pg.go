@@ -13,77 +13,66 @@ package rpc
 import (
 	"net/url"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/server/pgurl"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
-	"github.com/cockroachdb/cockroach/pkg/util/netutil/addr"
 )
 
 // LoadSecurityOptions extends a url.Values with SSL settings suitable for
 // the given server config.
-func (ctx *SecurityContext) LoadSecurityOptions(u *pgurl.URL, username security.SQLUsername) error {
-	u.WithUsername(username.Normalized())
+func (ctx *SecurityContext) LoadSecurityOptions(
+	options url.Values, username security.SQLUsername,
+) error {
 	if ctx.config.Insecure {
-		u.WithInsecure()
-	} else if net, _, _ := u.GetNetworking(); net == pgurl.ProtoTCP {
-		tlsUsed, tlsMode, caCertPath := u.GetTLSOptions()
-		if !tlsUsed {
+		options.Set("sslmode", "disable")
+		options.Del("sslrootcert")
+		options.Del("sslcert")
+		options.Del("sslkey")
+	} else {
+		sslMode := options.Get("sslmode")
+		if sslMode == "disable" {
 			// TLS explicitly disabled by client. Nothing to do here.
+			options.Del("sslrootcert")
+			options.Del("sslcert")
+			options.Del("sslkey")
 			return nil
 		}
 		// Default is to verify the server's identity.
-		if tlsMode == pgurl.TLSUnspecified {
-			tlsMode = pgurl.TLSVerifyFull
+		if sslMode == "" {
+			options.Set("sslmode", "verify-full")
 		}
 
-		if caCertPath == "" {
-			// Fetch CA cert. This is required to exist, so try to load it. We use
-			// the fact that GetCertificateManager checks that "some certs" exist
-			// and want to return "its error" here since we test it in
-			// test_url_db_override.tcl.
-			if _, err := ctx.GetCertificateManager(); err != nil {
-				return wrapError(err)
+		if sslMode != "require" {
+			// verify-ca and verify-full need a CA certificate.
+			if options.Get("sslrootcert") == "" {
+				// Fetch CA cert. This is required to exist, so try to load it. We use
+				// the fact that GetCertificateManager checks that "some certs" exist
+				// and want to return "its error" here since we test it in
+				// test_url_db_override.tcl.
+				if _, err := ctx.GetCertificateManager(); err != nil {
+					return wrapError(err)
+				}
+				options.Set("sslrootcert", ctx.CACertPath())
 			}
-			caCertPath = ctx.CACertPath()
+		} else {
+			// require does not check the CA.
+			options.Del("sslrootcert")
 		}
 
-		// (Re)populate the transport information.
-		u.WithTransport(pgurl.TransportTLS(tlsMode, caCertPath))
-
+		// Fetch certs, but don't fail if they're absent, we may be using a
+		// password.
+		certPath, keyPath := ctx.getClientCertPaths(username)
 		var missing bool // certs found on file system?
 		loader := security.GetAssetLoader()
-
-		// Fetch client certs, but don't fail if they're absent, we may be
-		// using a password.
-		certPath := ctx.ClientCertPath(username)
-		keyPath := ctx.ClientKeyPath(username)
-		_, err1 := loader.Stat(certPath)
-		_, err2 := loader.Stat(keyPath)
-		if err1 != nil || err2 != nil {
-			missing = true
-		}
-		// If the command specifies user node, and we did not find
-		// client.node.crt, try with just node.crt.
-		if missing && username.IsNodeUser() {
-			missing = false
-			certPath = ctx.NodeCertPath()
-			keyPath = ctx.NodeKeyPath()
-			_, err1 = loader.Stat(certPath)
-			_, err2 = loader.Stat(keyPath)
-			if err1 != nil || err2 != nil {
+		for _, f := range []string{certPath, keyPath} {
+			if _, err := loader.Stat(f); err != nil {
 				missing = true
 			}
 		}
-
-		// If we found some certs, add them to the URL authentication
-		// method.
 		if !missing {
-			pwEnabled, hasPw, pwd := u.GetAuthnPassword()
-			if !pwEnabled {
-				u.WithAuthn(pgurl.AuthnClientCert(certPath, keyPath))
-			} else {
-				u.WithAuthn(pgurl.AuthnPasswordAndCert(certPath, keyPath, hasPw, pwd))
+			if options.Get("sslcert") == "" {
+				options.Set("sslcert", certPath)
+			}
+			if options.Get("sslkey") == "" {
+				options.Set("sslkey", keyPath)
 			}
 		}
 	}
@@ -92,15 +81,16 @@ func (ctx *SecurityContext) LoadSecurityOptions(u *pgurl.URL, username security.
 
 // PGURL constructs a URL for the postgres endpoint, given a server
 // config. There is no default database set.
-func (ctx *SecurityContext) PGURL(user *url.Userinfo) (*pgurl.URL, error) {
-	host, port, _ := addr.SplitHostPort(ctx.config.SQLAdvertiseAddr, base.DefaultPort)
-	u := pgurl.New().
-		WithNet(pgurl.NetTCP(host, port)).
-		WithDatabase(catalogkeys.DefaultDatabaseName)
-
+func (ctx *SecurityContext) PGURL(user *url.Userinfo) (*url.URL, error) {
+	options := url.Values{}
 	username, _ := security.MakeSQLUsernameFromUserInput(user.Username(), security.UsernameValidation)
-	if err := ctx.LoadSecurityOptions(u, username); err != nil {
+	if err := ctx.LoadSecurityOptions(options, username); err != nil {
 		return nil, err
 	}
-	return u, nil
+	return &url.URL{
+		Scheme:   "postgresql",
+		User:     user,
+		Host:     ctx.config.SQLAdvertiseAddr,
+		RawQuery: options.Encode(),
+	}, nil
 }

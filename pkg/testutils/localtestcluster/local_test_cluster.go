@@ -109,8 +109,8 @@ func (ltc *LocalTestCluster) Start(t testing.TB, baseCtx *base.Config, initFacto
 
 	ltc.Manual = hlc.NewManualClock(123)
 	ltc.Clock = hlc.NewClock(ltc.Manual.UnixNano, 50*time.Millisecond)
-	cfg := kvserver.TestStoreConfigWithRandomizedClusterSeparatedIntentsMigration(ltc.Clock)
-	ambient := log.AmbientContext{Tracer: cfg.AmbientCtx.Tracer}
+	cfg := kvserver.TestStoreConfig(ltc.Clock)
+	ambient := log.AmbientContext{Tracer: cfg.Settings.Tracer}
 	nc := &base.NodeIDContainer{}
 	ambient.AddLogTag("n", nc)
 
@@ -133,16 +133,13 @@ func (ltc *LocalTestCluster) Start(t testing.TB, baseCtx *base.Config, initFacto
 	clusterID := &cfg.RPCContext.ClusterID
 	server := rpc.NewServer(cfg.RPCContext) // never started
 	ltc.Gossip = gossip.New(ambient, clusterID, nc, cfg.RPCContext, server, ltc.stopper, metric.NewRegistry(), roachpb.Locality{}, zonepb.DefaultZoneConfigRef())
-	var err error
-	ltc.Eng, err = storage.Open(
+	ltc.Eng = storage.NewInMem(
 		ambient.AnnotateCtx(context.Background()),
-		storage.InMemory(),
-		storage.CacheSize(0),
-		storage.MaxSize(50<<20 /* 50 MiB */),
+		roachpb.Attributes{},
+		0,      /* cacheSize */
+		50<<20, /* storeSize */
+		storage.MakeRandomSettingsForSeparatedIntents(),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	ltc.stopper.AddCloser(ltc.Eng)
 
 	ltc.Stores = kvserver.NewStores(ambient, ltc.Clock)
@@ -158,7 +155,7 @@ func (ltc *LocalTestCluster) Start(t testing.TB, baseCtx *base.Config, initFacto
 		NodeID:       base.NewSQLIDContainer(0, &nodeIDContainer),
 	}
 	ltc.DB = kv.NewDBWithContext(cfg.AmbientCtx, factory, ltc.Clock, *ltc.dbContext)
-	transport := kvserver.NewDummyRaftTransport(cfg.Settings, cfg.AmbientCtx.Tracer)
+	transport := kvserver.NewDummyRaftTransport(cfg.Settings)
 	// By default, disable the replica scanner and split queue, which
 	// confuse tests using LocalTestCluster.
 	if ltc.StoreTestingKnobs == nil {
@@ -182,8 +179,7 @@ func (ltc *LocalTestCluster) Start(t testing.TB, baseCtx *base.Config, initFacto
 		Settings:                cfg.Settings,
 		HistogramWindowInterval: cfg.HistogramWindowInterval,
 	})
-	ctx := context.TODO()
-	kvserver.TimeUntilStoreDead.Override(ctx, &cfg.Settings.SV, kvserver.TestTimeUntilStoreDead)
+	kvserver.TimeUntilStoreDead.Override(&cfg.Settings.SV, kvserver.TestTimeUntilStoreDead)
 	cfg.StorePool = kvserver.NewStorePool(
 		cfg.AmbientCtx,
 		cfg.Settings,
@@ -195,6 +191,7 @@ func (ltc *LocalTestCluster) Start(t testing.TB, baseCtx *base.Config, initFacto
 	)
 	cfg.Transport = transport
 	cfg.ClosedTimestampReceiver = sidetransport.NewReceiver(nc, ltc.stopper, ltc.Stores, nil /* testingKnobs */)
+	ctx := context.TODO()
 
 	if err := kvserver.WriteClusterVersion(ctx, ltc.Eng, clusterversion.TestingClusterVersion); err != nil {
 		t.Fatalf("unable to write cluster version: %s", err)
@@ -210,7 +207,7 @@ func (ltc *LocalTestCluster) Start(t testing.TB, baseCtx *base.Config, initFacto
 	var splits []roachpb.RKey
 	if !ltc.DontCreateSystemRanges {
 		schema := bootstrap.MakeMetadataSchema(
-			keys.SystemSQLCodec, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef(),
+			keys.SystemSQLCodec, cfg.DefaultZoneConfig, cfg.DefaultSystemZoneConfig,
 		)
 		var tableSplits []roachpb.RKey
 		initialValues, tableSplits = schema.GetInitialValues()

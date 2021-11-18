@@ -196,7 +196,8 @@ func TestRangefeedIsRoutedToNonVoter(t *testing.T) {
 	clusterArgs.ReplicationMode = base.ReplicationManual
 	// NB: setupClusterForClosedTSTesting sets a low closed timestamp target
 	// duration.
-	tc, _, desc := setupClusterForClosedTSTesting(ctx, t, testingTargetDuration, clusterArgs, "cttest", "kv")
+	tc, _, desc := setupClusterForClosedTSTesting(ctx, t, testingTargetDuration,
+		testingCloseFraction, clusterArgs, "cttest", "kv")
 	defer tc.Stopper().Stop(ctx)
 	tc.AddNonVotersOrFatal(t, desc.StartKey.AsRawKey(), tc.Target(1))
 
@@ -207,10 +208,10 @@ func TestRangefeedIsRoutedToNonVoter(t *testing.T) {
 
 	startTS := db.Clock().Now()
 	rangefeedCtx, rangefeedCancel := context.WithCancel(ctx)
-	rangefeedCtx, getRecAndFinish := tracing.ContextWithRecordingSpan(rangefeedCtx,
+	rangefeedCtx, getRec, cancel := tracing.ContextWithRecordingSpan(rangefeedCtx,
 		tracing.NewTracer(),
 		"rangefeed over non-voter")
-	defer getRecAndFinish()
+	defer cancel()
 
 	// Do a read on the range to make sure that the dist sender learns about the
 	// latest state of the range (with the new non-voter).
@@ -239,5 +240,5 @@ func TestRangefeedIsRoutedToNonVoter(t *testing.T) {
 	}
 	rangefeedCancel()
 	require.Regexp(t, "context canceled", <-rangefeedErrChan)
-	require.Regexp(t, "attempting to create a RangeFeed over replica.*2NON_VOTER", getRecAndFinish().String())
+	require.Regexp(t, "attempting to create a RangeFeed over replica.*2NON_VOTER", getRec().String())
 }

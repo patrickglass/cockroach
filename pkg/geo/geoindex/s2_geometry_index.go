@@ -83,9 +83,9 @@ func GeometryIndexConfigForSRID(srid geopb.SRID) (*Config, error) {
 	if srid == 0 {
 		return DefaultGeometryIndexConfig(), nil
 	}
-	p, err := geoprojbase.Projection(srid)
-	if err != nil {
-		return nil, err
+	p, exists := geoprojbase.Projection(srid)
+	if !exists {
+		return nil, errors.Newf("expected definition for SRID %d", srid)
 	}
 	b := p.Bounds
 	minX, maxX, minY, maxY := b.MinX, b.MaxX, b.MinY, b.MaxY
