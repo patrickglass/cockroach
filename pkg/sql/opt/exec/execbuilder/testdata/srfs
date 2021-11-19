@@ -91,13 +91,13 @@ vectorized: true
 │   ├── • scan
 │   │     columns: (a)
 │   │     estimated row count: 1,000 (missing stats)
-│   │     table: t@t_pkey
+│   │     table: t@primary
 │   │     spans: FULL SCAN
 │   │
 │   └── • scan
 │         columns: (b)
 │         estimated row count: 1,000 (missing stats)
-│         table: u@u_pkey
+│         table: u@primary
 │         spans: FULL SCAN
 │
 └── • project set
@@ -134,7 +134,7 @@ vectorized: true
     └── • scan
           columns: (a)
           estimated row count: 1,000 (missing stats)
-          table: data@data_pkey
+          table: data@primary
           spans: FULL SCAN
 
 statement ok
@@ -182,14 +182,14 @@ vectorized: true
             │     columns: (x, y)
             │     ordering: +x
             │     estimated row count: 1,000 (missing stats)
-            │     table: xy@xy_pkey
+            │     table: xy@primary
             │     spans: FULL SCAN
             │
             └── • scan
                   columns: (x, z)
                   ordering: +x
                   estimated row count: 1,000 (missing stats)
-                  table: xz@xz_pkey
+                  table: xz@primary
                   spans: FULL SCAN
 
 query T
@@ -220,13 +220,13 @@ vectorized: true
         │   └── • scan
         │         columns: (x, y)
         │         estimated row count: 1,000 (missing stats)
-        │         table: xy@xy_pkey
+        │         table: xy@primary
         │         spans: FULL SCAN
         │
         └── • scan
               columns: (x, z)
               estimated row count: 1,000 (missing stats)
-              table: xz@xz_pkey
+              table: xz@primary
               spans: FULL SCAN
 
 query T
@@ -259,14 +259,14 @@ vectorized: true
         │     columns: (x, y)
         │     ordering: +x
         │     estimated row count: 1,000 (missing stats)
-        │     table: xy@xy_pkey
+        │     table: xy@primary
         │     spans: FULL SCAN
         │
         └── • scan
               columns: (x, z)
               ordering: +x
               estimated row count: 1,000 (missing stats)
-              table: xz@xz_pkey
+              table: xz@primary
               spans: FULL SCAN
 
 query T
@@ -290,7 +290,7 @@ vectorized: true
 │       └── • scan
 │             columns: (z)
 │             estimated row count: 1,000 (missing stats)
-│             table: xz@xz_pkey
+│             table: xz@primary
 │             spans: FULL SCAN
 │
 └── • subquery
@@ -313,7 +313,7 @@ vectorized: true
                 └── • scan
                       columns: (x, y)
                       estimated row count: 1,000 (missing stats)
-                      table: xy@xy_pkey
+                      table: xy@primary
                       spans: FULL SCAN
 
 # Regression test for #24676.
@@ -369,7 +369,7 @@ vectorized: true
                 │   └── • scan
                 │         columns: (id, data)
                 │         estimated row count: 1,000 (missing stats)
-                │         table: groups@groups_pkey
+                │         table: groups@primary
                 │         spans: FULL SCAN
                 │
                 └── • render
@@ -381,7 +381,7 @@ vectorized: true
                     └── • scan
                           columns: (data)
                           estimated row count: 1,000 (missing stats)
-                          table: groups@groups_pkey
+                          table: groups@primary
                           spans: FULL SCAN
 
 # Regression test for #32162.
@@ -424,44 +424,48 @@ ORDER BY a0.created_at
 distribution: local
 vectorized: true
 ·
-• top-k
+• limit
 │ columns: (id, body, description, title, slug, tag_list, user_id, created_at, updated_at)
-│ ordering: +created_at
 │ estimated row count: 10 (missing stats)
-│ order: +any_not_null
-│ k: 10
+│ count: 10
 │
-└── • group (hash)
+└── • sort
     │ columns: (id, any_not_null, any_not_null, any_not_null, any_not_null, any_not_null, any_not_null, any_not_null, any_not_null)
+    │ ordering: +any_not_null
     │ estimated row count: 14 (missing stats)
-    │ aggregate 0: any_not_null(body)
-    │ aggregate 1: any_not_null(description)
-    │ aggregate 2: any_not_null(title)
-    │ aggregate 3: any_not_null(slug)
-    │ aggregate 4: any_not_null(tag_list)
-    │ aggregate 5: any_not_null(user_id)
-    │ aggregate 6: any_not_null(created_at)
-    │ aggregate 7: any_not_null(updated_at)
-    │ group by: id
+    │ order: +any_not_null
     │
-    └── • project
-        │ columns: (id, body, description, title, slug, tag_list, user_id, created_at, updated_at)
+    └── • group
+        │ columns: (id, any_not_null, any_not_null, any_not_null, any_not_null, any_not_null, any_not_null, any_not_null, any_not_null)
+        │ estimated row count: 14 (missing stats)
+        │ aggregate 0: any_not_null(body)
+        │ aggregate 1: any_not_null(description)
+        │ aggregate 2: any_not_null(title)
+        │ aggregate 3: any_not_null(slug)
+        │ aggregate 4: any_not_null(tag_list)
+        │ aggregate 5: any_not_null(user_id)
+        │ aggregate 6: any_not_null(created_at)
+        │ aggregate 7: any_not_null(updated_at)
+        │ group by: id
         │
-        └── • filter
-            │ columns: (id, body, description, title, slug, tag_list, user_id, created_at, updated_at, unnest)
-            │ estimated row count: 14 (missing stats)
-            │ filter: unnest = 'dragons'
+        └── • project
+            │ columns: (id, body, description, title, slug, tag_list, user_id, created_at, updated_at)
             │
-            └── • project set
+            └── • filter
                 │ columns: (id, body, description, title, slug, tag_list, user_id, created_at, updated_at, unnest)
-                │ estimated row count: 10,000 (missing stats)
-                │ render 0: unnest(tag_list)
+                │ estimated row count: 14 (missing stats)
+                │ filter: unnest = 'dragons'
                 │
-                └── • scan
-                      columns: (id, body, description, title, slug, tag_list, user_id, created_at, updated_at)
-                      estimated row count: 1,000 (missing stats)
-                      table: articles@articles_pkey
-                      spans: FULL SCAN
+                └── • project set
+                    │ columns: (id, body, description, title, slug, tag_list, user_id, created_at, updated_at, unnest)
+                    │ estimated row count: 10,000 (missing stats)
+                    │ render 0: unnest(tag_list)
+                    │
+                    └── • scan
+                          columns: (id, body, description, title, slug, tag_list, user_id, created_at, updated_at)
+                          estimated row count: 1,000 (missing stats)
+                          table: articles@primary
+                          spans: FULL SCAN
 
 # Regression test for #32723.
 query T

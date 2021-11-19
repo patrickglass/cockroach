@@ -643,6 +643,10 @@ var postgresStatementMutator MultiStatementMutation = func(rng *rand.Rand, stmts
 		case *tree.SetClusterSetting, *tree.SetVar:
 			continue
 		case *tree.CreateTable:
+			if stmt.Interleave != nil {
+				stmt.Interleave = nil
+				changed = true
+			}
 			if stmt.PartitionByTable != nil {
 				stmt.PartitionByTable = nil
 				changed = true
@@ -670,6 +674,10 @@ var postgresStatementMutator MultiStatementMutation = func(rng *rand.Rand, stmts
 						changed = true
 					}
 				case *tree.UniqueConstraintTableDef:
+					if def.Interleave != nil {
+						def.Interleave = nil
+						changed = true
+					}
 					if def.PartitionByIndex != nil {
 						def.PartitionByIndex = nil
 						changed = true
@@ -706,6 +714,10 @@ func postgresCreateTableMutator(
 		mutated = append(mutated, stmt)
 		switch stmt := stmt.(type) {
 		case *tree.CreateTable:
+			if stmt.Interleave != nil {
+				stmt.Interleave = nil
+				changed = true
+			}
 			// Get all the column types first.
 			colTypes := make(map[string]*types.T)
 			for _, def := range stmt.Defs {

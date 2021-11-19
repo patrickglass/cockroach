@@ -158,14 +158,9 @@ export const sessionsPagePropsFixture: SessionsPageProps = {
   },
   sessions: sessionsList,
   sessionsError: null,
-  sortSetting: {
-    ascending: false,
-    columnTitle: "statementAge",
-  },
   refreshSessions: () => {},
   cancelSession: (req: CancelSessionRequestMessage) => {},
   cancelQuery: (req: CancelQueryRequestMessage) => {},
-  onSortingChange: () => {},
 };
 
 export const sessionsPagePropsEmptyFixture: SessionsPageProps = {
@@ -184,12 +179,7 @@ export const sessionsPagePropsEmptyFixture: SessionsPageProps = {
   },
   sessions: [],
   sessionsError: null,
-  sortSetting: {
-    ascending: false,
-    columnTitle: "statementAge",
-  },
   refreshSessions: () => {},
   cancelSession: (req: CancelSessionRequestMessage) => {},
   cancelQuery: (req: CancelQueryRequestMessage) => {},
-  onSortingChange: () => {},
 };

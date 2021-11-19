@@ -237,6 +237,10 @@ func (n *alterTableSetLocalityNode) alterTableLocalityToRegionalByRow(
 		primaryIndexColIdxStart = int(n.tableDesc.PrimaryIndex.Partitioning.NumImplicitColumns)
 	}
 
+	if n.tableDesc.IsInterleaved() {
+		return interleaveOnRegionalByRowError()
+	}
+
 	for _, idx := range n.tableDesc.AllIndexes() {
 		if idx.IsSharded() {
 			return pgerror.Newf(

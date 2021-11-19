@@ -285,6 +285,7 @@ describe("selectStatement", () => {
     assert.deepEqual(result.app, [stmtA.key.key_data.app]);
     assert.deepEqual(result.distSQL, { numerator: 0, denominator: 1 });
     assert.deepEqual(result.vec, { numerator: 0, denominator: 1 });
+    assert.deepEqual(result.opt, { numerator: 0, denominator: 1 });
     assert.deepEqual(result.failed, { numerator: 0, denominator: 1 });
     assert.deepEqual(result.node_id, [stmtA.key.node_id]);
   });
@@ -310,6 +311,7 @@ describe("selectStatement", () => {
     ]);
     assert.deepEqual(result.distSQL, { numerator: 0, denominator: 3 });
     assert.deepEqual(result.vec, { numerator: 0, denominator: 3 });
+    assert.deepEqual(result.opt, { numerator: 0, denominator: 3 });
     assert.deepEqual(result.failed, { numerator: 0, denominator: 3 });
     assert.deepEqual(result.node_id, [stmtA.key.node_id]);
   });
@@ -332,19 +334,20 @@ describe("selectStatement", () => {
     assert.deepEqual(result.app, [stmtA.key.key_data.app]);
     assert.deepEqual(result.distSQL, { numerator: 0, denominator: 3 });
     assert.deepEqual(result.vec, { numerator: 0, denominator: 3 });
+    assert.deepEqual(result.opt, { numerator: 0, denominator: 3 });
     assert.deepEqual(result.failed, { numerator: 0, denominator: 3 });
     assert.deepEqual(result.node_id, [1, 2, 3]);
   });
 
-  it("coalesces statements with differing distSQL, vec and failed values", () => {
-    const stmtA = makeFingerprint(1, "", 1, false, false, false);
-    const stmtB = makeFingerprint(1, "", 1, false, true, true);
-    const stmtC = makeFingerprint(1, "", 1, true, false, false);
-    const stmtD = makeFingerprint(1, "", 1, true, true, true);
-    const stmtE = makeFingerprint(1, "", 1, false, false, false);
-    const stmtF = makeFingerprint(1, "", 1, false, true, true);
-    const stmtG = makeFingerprint(1, "", 1, true, false, false);
-    const stmtH = makeFingerprint(1, "", 1, true, true, true);
+  it("coalesces statements with differing distSQL, vec, opt and failed values", () => {
+    const stmtA = makeFingerprint(1, "", 1, false, false, false, false);
+    const stmtB = makeFingerprint(1, "", 1, false, false, true, true);
+    const stmtC = makeFingerprint(1, "", 1, false, true, false, false);
+    const stmtD = makeFingerprint(1, "", 1, false, true, true, true);
+    const stmtE = makeFingerprint(1, "", 1, true, false, false, false);
+    const stmtF = makeFingerprint(1, "", 1, true, false, true, true);
+    const stmtG = makeFingerprint(1, "", 1, true, true, false, false);
+    const stmtH = makeFingerprint(1, "", 1, true, true, true, true);
     const sumCount = stmtA.stats.count
       .add(stmtB.stats.count)
       .add(stmtC.stats.count)
@@ -373,6 +376,7 @@ describe("selectStatement", () => {
     assert.deepEqual(result.app, [stmtA.key.key_data.app]);
     assert.deepEqual(result.distSQL, { numerator: 4, denominator: 8 });
     assert.deepEqual(result.vec, { numerator: 4, denominator: 8 });
+    assert.deepEqual(result.opt, { numerator: 4, denominator: 8 });
     assert.deepEqual(result.failed, { numerator: 4, denominator: 8 });
     assert.deepEqual(result.node_id, [stmtA.key.node_id]);
   });
@@ -396,6 +400,7 @@ describe("selectStatement", () => {
     assert.deepEqual(result.app, [stmtA.key.key_data.app]);
     assert.deepEqual(result.distSQL, { numerator: 0, denominator: 1 });
     assert.deepEqual(result.vec, { numerator: 0, denominator: 1 });
+    assert.deepEqual(result.opt, { numerator: 0, denominator: 1 });
     assert.deepEqual(result.failed, { numerator: 0, denominator: 1 });
     assert.deepEqual(result.node_id, [stmtA.key.node_id]);
   });
@@ -419,6 +424,7 @@ describe("selectStatement", () => {
     assert.deepEqual(result.app, [stmtA.key.key_data.app]);
     assert.deepEqual(result.distSQL, { numerator: 0, denominator: 1 });
     assert.deepEqual(result.vec, { numerator: 0, denominator: 1 });
+    assert.deepEqual(result.opt, { numerator: 0, denominator: 1 });
     assert.deepEqual(result.failed, { numerator: 0, denominator: 1 });
     assert.deepEqual(result.node_id, [stmtA.key.node_id]);
   });
@@ -443,6 +449,7 @@ describe("selectStatement", () => {
     assert.deepEqual(result.app, ["$ internal"]);
     assert.deepEqual(result.distSQL, { numerator: 0, denominator: 1 });
     assert.deepEqual(result.vec, { numerator: 0, denominator: 1 });
+    assert.deepEqual(result.opt, { numerator: 0, denominator: 1 });
     assert.deepEqual(result.failed, { numerator: 0, denominator: 1 });
     assert.deepEqual(result.node_id, [stmtA.key.node_id]);
   });
@@ -455,6 +462,7 @@ function makeFingerprint(
   distSQL: boolean = false,
   failed: boolean = false,
   vec: boolean = false,
+  opt: boolean = false,
 ) {
   return {
     key: {
@@ -463,6 +471,7 @@ function makeFingerprint(
         app,
         distSQL,
         vec,
+        opt,
         failed,
       },
       node_id: nodeId,

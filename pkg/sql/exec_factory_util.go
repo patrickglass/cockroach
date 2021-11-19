@@ -33,7 +33,6 @@ func constructPlan(
 	subqueries []exec.Subquery,
 	cascades []exec.Cascade,
 	checks []exec.Node,
-	rootRowCount int64,
 ) (exec.Plan, error) {
 	res := &planComponents{}
 	assignPlan := func(plan *planMaybePhysical, node exec.Node) {
@@ -47,7 +46,6 @@ func constructPlan(
 		}
 	}
 	assignPlan(&res.main, root)
-	res.mainRowCount = rootRowCount
 	if len(subqueries) > 0 {
 		res.subqueryPlans = make([]subquery, len(subqueries))
 		for i := range subqueries {
@@ -67,7 +65,6 @@ func constructPlan(
 				return nil, errors.Errorf("invalid SubqueryMode %d", in.Mode)
 			}
 			out.expanded = true
-			out.rowCount = in.RowCount
 			assignPlan(&out.plan, in.Root)
 		}
 	}
@@ -108,7 +105,7 @@ func makeScanColumnsConfig(table cat.Table, cols exec.TableColumnOrdinalSet) sca
 			typ := col.DatumType()
 			colOrd = col.InvertedSourceColumnOrdinal()
 			col = table.Column(colOrd)
-			colCfg.invertedColumn = &struct {
+			colCfg.virtualColumn = &struct {
 				colID tree.ColumnID
 				typ   *types.T
 			}{
@@ -201,19 +198,9 @@ func getResultColumnsForGroupBy(
 	return columns
 }
 
-// convertNodeOrdinalsToInts converts a slice of exec.NodeColumnOrdinals to a slice
+// convertOrdinalsToInts converts a slice of exec.NodeColumnOrdinals to a slice
 // of ints.
-func convertNodeOrdinalsToInts(ordinals []exec.NodeColumnOrdinal) []int {
-	ints := make([]int, len(ordinals))
-	for i := range ordinals {
-		ints[i] = int(ordinals[i])
-	}
-	return ints
-}
-
-// convertTableOrdinalsToInts converts a slice of exec.TableColumnOrdinal to a
-// slice of ints.
-func convertTableOrdinalsToInts(ordinals []exec.TableColumnOrdinal) []int {
+func convertOrdinalsToInts(ordinals []exec.NodeColumnOrdinal) []int {
 	ints := make([]int, len(ordinals))
 	for i := range ordinals {
 		ints[i] = int(ordinals[i])

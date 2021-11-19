@@ -1,5 +1,4 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
-load("//build:STRINGER.bzl", "stringer")
 
 go_library(
     name = "storage",
@@ -13,6 +12,7 @@ go_library(
         "engine.go",
         "engine_key.go",
         "error.go",
+        "file_util.go",
         "in_mem.go",
         "intent_interleaving_iter.go",
         "intent_reader_writer.go",
@@ -28,16 +28,15 @@ go_library(
         "pebble_iterator.go",
         "pebble_merge.go",
         "pebble_mvcc_scanner.go",
-        "resource_limiter.go",
         "row_counter.go",
         "slice.go",
         "slice_go1.9.go",
+        "sst_info.go",
         "sst_iterator.go",
         "sst_writer.go",
-        "store_properties.go",
+        "temp_dir.go",
         "temp_engine.go",
         "testing_knobs.go",
-        ":gen-resourcelimitreached-stringer",  # keep
     ],
     importpath = "github.com/cockroachdb/cockroach/pkg/storage",
     visibility = ["//visibility:public"],
@@ -64,6 +63,7 @@ go_library(
         "//pkg/util/log",
         "//pkg/util/mon",
         "//pkg/util/protoutil",
+        "//pkg/util/stop",
         "//pkg/util/syncutil",
         "//pkg/util/sysutil",
         "//pkg/util/timeutil",
@@ -80,7 +80,6 @@ go_library(
         "@com_github_cockroachdb_pebble//vfs/atomicfs",
         "@com_github_cockroachdb_redact//:redact",
         "@com_github_dustin_go_humanize//:go-humanize",
-        "@com_github_elastic_gosigar//:gosigar",
         "@com_github_gogo_protobuf//proto",
     ],
 )
@@ -96,6 +95,7 @@ go_test(
         "disk_map_test.go",
         "engine_key_test.go",
         "engine_test.go",
+        "file_util_test.go",
         "intent_interleaving_iter_test.go",
         "intent_reader_writer_test.go",
         "main_test.go",
@@ -109,9 +109,10 @@ go_test(
         "pebble_file_registry_test.go",
         "pebble_mvcc_scanner_test.go",
         "pebble_test.go",
-        "resource_limiter_test.go",
+        "sst_info_test.go",
         "sst_iterator_test.go",
         "sst_writer_test.go",
+        "temp_dir_test.go",
         "temp_engine_test.go",
     ],
     data = glob(["testdata/**"]),
@@ -141,6 +142,7 @@ go_test(
         "//pkg/util/protoutil",
         "//pkg/util/randutil",
         "//pkg/util/shuffle",
+        "//pkg/util/stop",
         "//pkg/util/sysutil",
         "//pkg/util/timeutil",
         "//pkg/util/uint128",
@@ -150,17 +152,10 @@ go_test(
         "@com_github_cockroachdb_errors//oserror",
         "@com_github_cockroachdb_pebble//:pebble",
         "@com_github_cockroachdb_pebble//vfs",
-        "@com_github_cockroachdb_redact//:redact",
         "@com_github_kr_pretty//:pretty",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@org_golang_google_protobuf//proto",
         "@org_golang_x_sync//errgroup",
     ],
-)
-
-stringer(
-    name = "gen-resourcelimitreached-stringer",
-    src = "resource_limiter.go",
-    typ = "ResourceLimitReached",
 )

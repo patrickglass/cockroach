@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scgraphviz"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 )
@@ -67,7 +66,7 @@ func (n *explainDDLNode) startExec(params runParams) error {
 		}
 	}
 	sc, err := scplan.MakePlan(scNodes.plannedState, scplan.Params{
-		ExecutionPhase: scop.PostCommitPhase,
+		ExecutionPhase: scplan.PostCommitPhase,
 		// TODO(ajwerner): Populate created descriptors.
 	})
 	if err != nil {

@@ -29,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/colcontainerutils"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/marusama/semaphore"
 	"github.com/stretchr/testify/require"
 )
@@ -60,8 +61,6 @@ func TestWindowFunctions(t *testing.T) {
 	semaCtx := tree.MakeSemaContext()
 	queueCfg, cleanup := colcontainerutils.NewTestingDiskQueueCfg(t, true /* inMem */)
 	defer cleanup()
-	var monitorRegistry colexecargs.MonitorRegistry
-	defer monitorRegistry.Close(ctx)
 
 	dec := func(val string) apd.Decimal {
 		res, _, err := apd.NewFromString(val)
@@ -88,6 +87,8 @@ func TestWindowFunctions(t *testing.T) {
 	avgFn := execinfrapb.AggregatorSpec_AVG
 	maxFn := execinfrapb.AggregatorSpec_MAX
 
+	accounts := make([]*mon.BoundAccount, 0)
+	monitors := make([]*mon.BytesMonitor, 0)
 	for _, spillForced := range []bool{true} {
 		flowCtx.Cfg.TestingKnobs.ForceDiskSpill = spillForced
 		for _, tc := range []windowFnTestCase{
@@ -1031,7 +1032,6 @@ func TestWindowFunctions(t *testing.T) {
 			},
 		} {
 			log.Infof(ctx, "spillForced=%t/%s", spillForced, tc.windowerSpec.WindowFns[0].Func.String())
-			var toClose []colexecop.Closers
 			var semsToCheck []semaphore.Semaphore
 			colexectestutils.RunTests(t, testAllocator, []colexectestutils.Tuples{tc.tuples}, tc.expected, colexectestutils.UnorderedVerifier, func(sources []colexecop.Operator) (colexecop.Operator, error) {
 				tc.init()
@@ -1072,22 +1072,26 @@ func TestWindowFunctions(t *testing.T) {
 					StreamingMemAccount: testMemAcc,
 					DiskQueueCfg:        queueCfg,
 					FDSemaphore:         sem,
-					MonitorRegistry:     &monitorRegistry,
 				}
 				semsToCheck = append(semsToCheck, sem)
+				args.TestingKnobs.UseStreamingMemAccountForBuffering = true
 				result, err := colexecargs.TestNewColOperator(ctx, flowCtx, args)
-				toClose = append(toClose, result.ToClose)
+				accounts = append(accounts, result.OpAccounts...)
+				monitors = append(monitors, result.OpMonitors...)
 				return result.Root, err
 			})
-			// Close all closers manually (in production this is done on the
-			// flow cleanup).
-			for _, c := range toClose {
-				require.NoError(t, c.Close())
-			}
 			for i, sem := range semsToCheck {
 				require.Equal(t, 0, sem.GetCount(), "sem still reports open FDs at index %d", i)
 			}
 		}
+	}
+
+	for _, acc := range accounts {
+		acc.Close(ctx)
+	}
+
+	for _, m := range monitors {
+		m.Stop(ctx)
 	}
 }
 

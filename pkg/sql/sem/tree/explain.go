@@ -72,9 +72,6 @@ const (
 	//
 	ExplainDDL
 
-	// ExplainGist generates a plan "gist".
-	ExplainGist
-
 	numExplainModes = iota
 )
 
@@ -85,7 +82,6 @@ var explainModeStrings = [...]string{
 	ExplainVec:     "VEC",
 	ExplainDebug:   "DEBUG",
 	ExplainDDL:     "DDL",
-	ExplainGist:    "GIST",
 }
 
 var explainModeStringMap = func() map[string]ExplainMode {

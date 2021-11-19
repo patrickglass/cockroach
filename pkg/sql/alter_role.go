@@ -33,7 +33,7 @@ import (
 
 // alterRoleNode represents an ALTER ROLE ... [WITH] OPTION... statement.
 type alterRoleNode struct {
-	roleName    security.SQLUsername
+	userNameInfo
 	ifExists    bool
 	isRole      bool
 	roleOptions roleoption.List
@@ -41,10 +41,10 @@ type alterRoleNode struct {
 
 // alterRoleSetNode represents an `ALTER ROLE ... SET` statement.
 type alterRoleSetNode struct {
-	roleName security.SQLUsername
-	ifExists bool
-	isRole   bool
-	allRoles bool
+	userNameInfo userNameInfo
+	ifExists     bool
+	isRole       bool
+	allRoles     bool
 	// dbDescID == 0 means all databases.
 	dbDescID    descpb.ID
 	setVarKind  setVarBehavior
@@ -72,7 +72,7 @@ func (p *planner) AlterRole(ctx context.Context, n *tree.AlterRole) (planNode, e
 
 func (p *planner) AlterRoleNode(
 	ctx context.Context,
-	roleSpec tree.RoleSpec,
+	nameE tree.Expr,
 	ifExists bool,
 	isRole bool,
 	opName string,
@@ -103,16 +103,16 @@ func (p *planner) AlterRoleNode(
 		return nil, err
 	}
 
-	roleName, err := roleSpec.ToSQLUsername(p.SessionData(), security.UsernameValidation)
+	ua, err := p.getUserAuthInfo(ctx, nameE, opName)
 	if err != nil {
 		return nil, err
 	}
 
 	return &alterRoleNode{
-		roleName:    roleName,
-		ifExists:    ifExists,
-		isRole:      isRole,
-		roleOptions: roleOptions,
+		userNameInfo: ua,
+		ifExists:     ifExists,
+		isRole:       isRole,
+		roleOptions:  roleOptions,
 	}, nil
 }
 
@@ -148,12 +148,20 @@ func (n *alterRoleNode) startExec(params runParams) error {
 		sqltelemetry.IncIAMAlterCounter(sqltelemetry.User)
 		opName = "alter-user"
 	}
-	if n.roleName.Undefined() {
-		return pgerror.New(pgcode.InvalidParameterValue, "no username specified")
+	name, err := n.name()
+	if err != nil {
+		return err
 	}
-	if n.roleName.IsAdminRole() {
+	if name == "" {
+		return errNoUserNameSpecified
+	}
+	if name == "admin" {
 		return pgerror.Newf(pgcode.InsufficientPrivilege,
 			"cannot edit admin role")
+	}
+	normalizedUsername, err := NormalizeAndValidateUsername(name)
+	if err != nil {
+		return err
 	}
 
 	// Check if role exists.
@@ -163,7 +171,7 @@ func (n *alterRoleNode) startExec(params runParams) error {
 		params.p.txn,
 		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		fmt.Sprintf("SELECT 1 FROM %s WHERE username = $1", sessioninit.UsersTableName),
-		n.roleName,
+		normalizedUsername,
 	)
 	if err != nil {
 		return err
@@ -172,10 +180,10 @@ func (n *alterRoleNode) startExec(params runParams) error {
 		if n.ifExists {
 			return nil
 		}
-		return pgerror.Newf(pgcode.UndefinedObject, "role/user %s does not exist", n.roleName)
+		return errors.Newf("role/user %s does not exist", normalizedUsername)
 	}
 
-	isAdmin, err := params.p.UserHasAdminRole(params.ctx, n.roleName)
+	isAdmin, err := params.p.UserHasAdminRole(params.ctx, normalizedUsername)
 	if err != nil {
 		return err
 	}
@@ -225,7 +233,7 @@ func (n *alterRoleNode) startExec(params runParams) error {
 			opName,
 			params.p.txn,
 			`UPDATE system.users SET "hashedPassword" = $2 WHERE username = $1`,
-			n.roleName,
+			normalizedUsername,
 			hashedPassword,
 		)
 		if err != nil {
@@ -246,7 +254,7 @@ func (n *alterRoleNode) startExec(params runParams) error {
 	}
 
 	for stmt, value := range stmts {
-		qargs := []interface{}{n.roleName}
+		qargs := []interface{}{normalizedUsername}
 
 		if value != nil {
 			isNull, val, err := value()
@@ -291,7 +299,7 @@ func (n *alterRoleNode) startExec(params runParams) error {
 	return params.p.logEvent(params.ctx,
 		0, /* no target */
 		&eventpb.AlterRole{
-			RoleName: n.roleName.Normalized(),
+			RoleName: normalizedUsername.Normalized(),
 			Options:  optStrs,
 		})
 }
@@ -327,10 +335,10 @@ func (p *planner) AlterRoleSet(ctx context.Context, n *tree.AlterRoleSet) (planN
 			clusterversion.ByKey(clusterversion.DatabaseRoleSettings))
 	}
 
-	var roleName security.SQLUsername
+	var ua userNameInfo
 	if !n.AllRoles {
 		var err error
-		roleName, err = n.RoleName.ToSQLUsername(p.SessionData(), security.UsernameValidation)
+		ua, err = p.getUserAuthInfo(ctx, n.RoleName, "ALTER ROLE")
 		if err != nil {
 			return nil, err
 		}
@@ -352,15 +360,15 @@ func (p *planner) AlterRoleSet(ctx context.Context, n *tree.AlterRoleSet) (planN
 	}
 
 	return &alterRoleSetNode{
-		roleName:    roleName,
-		ifExists:    n.IfExists,
-		isRole:      n.IsRole,
-		allRoles:    n.AllRoles,
-		dbDescID:    dbDescID,
-		setVarKind:  setVarKind,
-		varName:     varName,
-		sVar:        sVar,
-		typedValues: typedValues,
+		userNameInfo: ua,
+		ifExists:     n.IfExists,
+		isRole:       n.IsRole,
+		allRoles:     n.AllRoles,
+		dbDescID:     dbDescID,
+		setVarKind:   setVarKind,
+		varName:      varName,
+		sVar:         sVar,
+		typedValues:  typedValues,
 	}, nil
 }
 
@@ -424,7 +432,7 @@ func (p *planner) processSetOrResetClause(
 			ctx, expr, nil, tree.IndexedVarHelper{}, types.String, false, "ALTER ROLE ... SET ",
 		)
 		if err != nil {
-			return unknown, "", sessionVar{}, nil, wrapSetVarError(err, varName, expr.String())
+			return unknown, "", sessionVar{}, nil, wrapSetVarError(varName, expr.String(), "%v", err)
 		}
 		typedValues = append(typedValues, typedValue)
 	}
@@ -536,20 +544,28 @@ func (n *alterRoleSetNode) startExec(params runParams) error {
 // to make sure the role is safe to edit.
 func (n *alterRoleSetNode) getRoleName(
 	params runParams, opName string,
-) (needsUpdate bool, retRoleName security.SQLUsername, err error) {
+) (needsUpdate bool, roleName security.SQLUsername, err error) {
 	if n.allRoles {
 		return true, security.MakeSQLUsernameFromPreNormalizedString(""), nil
 	}
-	if n.roleName.Undefined() {
-		return false, security.SQLUsername{}, pgerror.New(pgcode.InvalidParameterValue, "no username specified")
+	name, err := n.userNameInfo.name()
+	if err != nil {
+		return false, security.SQLUsername{}, err
 	}
-	if n.roleName.IsAdminRole() {
+	if name == "" {
+		return false, security.SQLUsername{}, errNoUserNameSpecified
+	}
+	roleName, err = NormalizeAndValidateUsername(name)
+	if err != nil {
+		return false, security.SQLUsername{}, err
+	}
+	if roleName.IsAdminRole() {
 		return false, security.SQLUsername{}, pgerror.Newf(pgcode.InsufficientPrivilege, "cannot edit admin role")
 	}
-	if n.roleName.IsRootUser() {
+	if roleName.IsRootUser() {
 		return false, security.SQLUsername{}, pgerror.Newf(pgcode.InsufficientPrivilege, "cannot edit root user")
 	}
-	if n.roleName.IsPublicRole() {
+	if roleName.IsPublicRole() {
 		return false, security.SQLUsername{}, pgerror.Newf(pgcode.InsufficientPrivilege, "cannot edit public role")
 	}
 	// Check if role exists.
@@ -559,7 +575,7 @@ func (n *alterRoleSetNode) getRoleName(
 		params.p.txn,
 		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		fmt.Sprintf("SELECT 1 FROM %s WHERE username = $1", sessioninit.UsersTableName),
-		n.roleName,
+		roleName,
 	)
 	if err != nil {
 		return false, security.SQLUsername{}, err
@@ -568,9 +584,9 @@ func (n *alterRoleSetNode) getRoleName(
 		if n.ifExists {
 			return false, security.SQLUsername{}, nil
 		}
-		return false, security.SQLUsername{}, errors.Newf("role/user %s does not exist", n.roleName)
+		return false, security.SQLUsername{}, errors.Newf("role/user %s does not exist", roleName)
 	}
-	isAdmin, err := params.p.UserHasAdminRole(params.ctx, n.roleName)
+	isAdmin, err := params.p.UserHasAdminRole(params.ctx, roleName)
 	if err != nil {
 		return false, security.SQLUsername{}, err
 	}
@@ -579,7 +595,7 @@ func (n *alterRoleSetNode) getRoleName(
 			return false, security.SQLUsername{}, err
 		}
 	}
-	return true, n.roleName, nil
+	return true, roleName, nil
 }
 
 // makeNewSettings first loads the existing settings for the (role, db), then

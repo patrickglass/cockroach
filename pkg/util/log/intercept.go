@@ -119,13 +119,17 @@ func (i *interceptorSink) active() bool {
 	return atomic.LoadUint32(&i.activeCount) > 0
 }
 
-func (i *interceptorSink) output(b []byte, _ sinkOutputOptions) error {
+func (i *interceptorSink) output(_ bool, b []byte) error {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	for _, fn := range i.mu.fns {
 		fn.Intercept(b)
 	}
 	return nil
+}
+
+func (i *interceptorSink) emergencyOutput(b []byte) {
+	_ = i.output(false, b)
 }
 
 func (i *interceptorSink) attachHints(stacks []byte) []byte { return stacks }

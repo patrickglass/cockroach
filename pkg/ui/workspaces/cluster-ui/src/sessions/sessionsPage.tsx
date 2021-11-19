@@ -9,7 +9,7 @@
 // licenses/APL.txt.
 
 import React from "react";
-import { isNil } from "lodash";
+import { isNil, merge } from "lodash";
 
 import { syncHistory } from "src/util/query";
 import { appAttr } from "src/util/constants";
@@ -23,7 +23,6 @@ import classNames from "classnames/bind";
 import { sessionsTable } from "src/util/docs";
 
 import emptyTableResultsIcon from "../assets/emptyState/empty-table-results.svg";
-import SQLActivityError from "../sqlActivity/errorComponent";
 
 import { Pagination, ResultsPerPageLabel } from "src/pagination";
 import { SortSetting, ISortedTablePagination } from "src/sortedtable";
@@ -52,23 +51,19 @@ const sessionsPageCx = classNames.bind(sessionPageStyles);
 export interface OwnProps {
   sessions: SessionInfo[];
   sessionsError: Error | Error[];
-  sortSetting: SortSetting;
   refreshSessions: () => void;
   cancelSession: (payload: ICancelSessionRequest) => void;
   cancelQuery: (payload: ICancelQueryRequest) => void;
   isCloud?: boolean;
   onPageChanged?: (newPage: number) => void;
-  onSortingChange?: (
-    name: string,
-    columnTitle: string,
-    ascending: boolean,
-  ) => void;
+  onSortingChange?: (columnName: string) => void;
   onSessionClick?: () => void;
   onTerminateSessionClick?: () => void;
   onTerminateStatementClick?: () => void;
 }
 
 export interface SessionsPageState {
+  sortSetting: SortSetting;
   pagination: ISortedTablePagination;
 }
 
@@ -83,35 +78,45 @@ export class SessionsPage extends React.Component<
 
   constructor(props: SessionsPageProps) {
     super(props);
-    this.state = {
+    const defaultState = {
+      sortSetting: {
+        // Sort by Statement Age column as default option.
+        ascending: false,
+        columnTitle: "statementAge",
+      },
       pagination: {
         pageSize: 20,
         current: 1,
       },
     };
+
+    const stateFromHistory = this.getStateFromHistory();
+    this.state = merge(defaultState, stateFromHistory);
     this.terminateSessionRef = React.createRef();
     this.terminateQueryRef = React.createRef();
-
-    const { history } = this.props;
-    const searchParams = new URLSearchParams(history.location.search);
-    const ascending = (searchParams.get("ascending") || undefined) === "true";
-    const columnTitle = searchParams.get("columnTitle") || undefined;
-    const sortSetting = this.props.sortSetting;
-
-    if (
-      this.props.onSortingChange &&
-      columnTitle &&
-      (sortSetting.columnTitle != columnTitle ||
-        sortSetting.ascending != ascending)
-    ) {
-      this.props.onSortingChange("Sessions", columnTitle, ascending);
-    }
   }
 
+  getStateFromHistory = (): Partial<SessionsPageState> => {
+    const { history } = this.props;
+    const searchParams = new URLSearchParams(history.location.search);
+    const ascending = searchParams.get("ascending") || undefined;
+    const columnTitle = searchParams.get("columnTitle") || undefined;
+
+    return {
+      sortSetting: {
+        ascending: ascending === "true",
+        columnTitle: columnTitle,
+      },
+    };
+  };
+
   changeSortSetting = (ss: SortSetting): void => {
-    if (this.props.onSortingChange) {
-      this.props.onSortingChange("Sessions", ss.columnTitle, ss.ascending);
-    }
+    const { onSortingChange } = this.props;
+    onSortingChange && onSortingChange(ss.columnTitle);
+
+    this.setState({
+      sortSetting: ss,
+    });
 
     syncHistory(
       {
@@ -137,7 +142,7 @@ export class SessionsPage extends React.Component<
     this.props.refreshSessions();
   }
 
-  componentDidUpdate = (): void => {
+  componentDidUpdate = (__: SessionsPageProps, _: SessionsPageState): void => {
     this.props.refreshSessions();
   };
 
@@ -189,7 +194,7 @@ export class SessionsPage extends React.Component<
                 }
               />
             }
-            sortSetting={this.props.sortSetting}
+            sortSetting={this.state.sortSetting}
             onChangeSortSetting={this.changeSortSetting}
             pagination={pagination}
           />
@@ -212,11 +217,6 @@ export class SessionsPage extends React.Component<
           loading={isNil(this.props.sessions)}
           error={this.props.sessionsError}
           render={this.renderSessions}
-          renderError={() =>
-            SQLActivityError({
-              statsType: "sessions",
-            })
-          }
         />
         <TerminateSessionModal
           ref={this.terminateSessionRef}

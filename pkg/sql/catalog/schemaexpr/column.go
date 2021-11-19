@@ -20,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
@@ -79,11 +78,7 @@ func dequalifyColumnRefs(
 // converts user defined types in default and computed expressions to a
 // human-readable form.
 func FormatColumnForDisplay(
-	ctx context.Context,
-	tbl catalog.TableDescriptor,
-	col catalog.Column,
-	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
+	ctx context.Context, tbl catalog.TableDescriptor, col catalog.Column, semaCtx *tree.SemaContext,
 ) (string, error) {
 	f := tree.NewFmtCtx(tree.FmtSimple)
 	name := col.GetName()
@@ -113,7 +108,7 @@ func FormatColumnForDisplay(
 
 		} else {
 			f.WriteString(" DEFAULT ")
-			defExpr, err := FormatExprForDisplay(ctx, tbl, col.GetDefaultExpr(), semaCtx, sessionData, tree.FmtParsable)
+			defExpr, err := FormatExprForDisplay(ctx, tbl, col.GetDefaultExpr(), semaCtx, tree.FmtParsable)
 			if err != nil {
 				return "", err
 			}
@@ -122,7 +117,7 @@ func FormatColumnForDisplay(
 	}
 	if col.HasOnUpdate() {
 		f.WriteString(" ON UPDATE ")
-		onUpdateExpr, err := FormatExprForDisplay(ctx, tbl, col.GetOnUpdateExpr(), semaCtx, sessionData, tree.FmtParsable)
+		onUpdateExpr, err := FormatExprForDisplay(ctx, tbl, col.GetOnUpdateExpr(), semaCtx, tree.FmtParsable)
 		if err != nil {
 			return "", err
 		}
@@ -130,7 +125,7 @@ func FormatColumnForDisplay(
 	}
 	if col.IsComputed() {
 		f.WriteString(" AS (")
-		compExpr, err := FormatExprForDisplay(ctx, tbl, col.GetComputeExpr(), semaCtx, sessionData, tree.FmtParsable)
+		compExpr, err := FormatExprForDisplay(ctx, tbl, col.GetComputeExpr(), semaCtx, tree.FmtParsable)
 		if err != nil {
 			return "", err
 		}

@@ -374,7 +374,7 @@ func startServer(t *testing.T) *TestServer {
 func newRPCTestContext(ts *TestServer, cfg *base.Config) *rpc.Context {
 	rpcContext := rpc.NewContext(rpc.ContextOptions{
 		TenantID:   roachpb.SystemTenantID,
-		AmbientCtx: log.AmbientContext{Tracer: ts.Tracer()},
+		AmbientCtx: log.AmbientContext{Tracer: ts.ClusterSettings().Tracer},
 		Config:     cfg,
 		Clock:      ts.Clock(),
 		Stopper:    ts.Stopper(),
@@ -1865,7 +1865,7 @@ func TestStatusAPIStatements(t *testing.T) {
 	}
 
 	// Grant VIEWACTIVITY.
-	thirdServerSQL.Exec(t, fmt.Sprintf("ALTER USER %s VIEWACTIVITY", authenticatedUserNameNoAdmin().Normalized()))
+	thirdServerSQL.Exec(t, "ALTER USER $1 VIEWACTIVITY", authenticatedUserNameNoAdmin().Normalized())
 
 	testPath := func(path string, expectedStmts []string) {
 		// Hit query endpoint.
@@ -1968,7 +1968,7 @@ func TestStatusAPICombinedStatements(t *testing.T) {
 	}
 
 	// Grant VIEWACTIVITY.
-	thirdServerSQL.Exec(t, fmt.Sprintf("ALTER USER %s VIEWACTIVITY", authenticatedUserNameNoAdmin().Normalized()))
+	thirdServerSQL.Exec(t, "ALTER USER $1 VIEWACTIVITY", authenticatedUserNameNoAdmin().Normalized())
 
 	testPath := func(path string, expectedStmts []string) {
 		// Hit query endpoint.
@@ -2160,7 +2160,7 @@ func TestListActivitySecurity(t *testing.T) {
 			// Note that for this query to work, it is crucial that
 			// getStatusJSONProtoWithAdminOption below is called at least once,
 			// on the previous test case, so that the user exists.
-			_, err := db.Exec(fmt.Sprintf("ALTER USER %s VIEWACTIVITY", myUser))
+			_, err := db.Exec("ALTER USER $1 VIEWACTIVITY", myUser)
 			require.NoError(t, err)
 		}
 		err := getStatusJSONProtoWithAdminOption(s, tc.endpoint, tc.response, tc.requestWithAdmin)
@@ -2182,7 +2182,7 @@ func TestListActivitySecurity(t *testing.T) {
 			}
 		}
 		if tc.requestWithViewActivityGranted {
-			_, err := db.Exec(fmt.Sprintf("ALTER USER %s NOVIEWACTIVITY", myUser))
+			_, err := db.Exec("ALTER USER $1 NOVIEWACTIVITY", myUser)
 			require.NoError(t, err)
 		}
 	}
@@ -2669,17 +2669,6 @@ func TestStatusServer_nodeStatusToResp(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	var nodeStatus = &statuspb.NodeStatus{
-		StoreStatuses: []statuspb.StoreStatus{
-			{Desc: roachpb.StoreDescriptor{
-				Properties: roachpb.StoreProperties{
-					Encrypted: true,
-					FileStoreProperties: &roachpb.FileStoreProperties{
-						Path:   "/secret",
-						FsType: "ext4",
-					},
-				},
-			}},
-		},
 		Desc: roachpb.NodeDescriptor{
 			Address: util.UnresolvedAddr{
 				NetworkField: "network",
@@ -2707,9 +2696,6 @@ func TestStatusServer_nodeStatusToResp(t *testing.T) {
 	require.Empty(t, resp.Desc.Attrs.Attrs)
 	require.Empty(t, resp.Desc.LocalityAddress)
 	require.Empty(t, resp.Desc.SQLAddress)
-	require.True(t, resp.StoreStatuses[0].Desc.Properties.Encrypted)
-	require.NotEmpty(t, resp.StoreStatuses[0].Desc.Properties.FileStoreProperties.FsType)
-	require.Empty(t, resp.StoreStatuses[0].Desc.Properties.FileStoreProperties.Path)
 
 	// Now fetch all the node statuses as admin.
 	resp = nodeStatusToResp(nodeStatus, true)
@@ -2719,9 +2705,6 @@ func TestStatusServer_nodeStatusToResp(t *testing.T) {
 	require.NotEmpty(t, resp.Desc.Attrs.Attrs)
 	require.NotEmpty(t, resp.Desc.LocalityAddress)
 	require.NotEmpty(t, resp.Desc.SQLAddress)
-	require.True(t, resp.StoreStatuses[0].Desc.Properties.Encrypted)
-	require.NotEmpty(t, resp.StoreStatuses[0].Desc.Properties.FileStoreProperties.FsType)
-	require.NotEmpty(t, resp.StoreStatuses[0].Desc.Properties.FileStoreProperties.Path)
 }
 
 func TestStatusAPIContentionEvents(t *testing.T) {

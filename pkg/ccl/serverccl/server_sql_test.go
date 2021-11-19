@@ -11,7 +11,6 @@ package serverccl
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/ioutil"
 	"net/http"
 	"testing"
@@ -22,11 +21,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/distsql"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -189,62 +186,4 @@ func TestNonExistentTenant(t *testing.T) {
 		})
 	require.Error(t, err)
 	require.Equal(t, "system DB uninitialized, check if tenant is non existent", err.Error())
-}
-
-// TestTenantRowIDs confirms `unique_rowid()` works as expected in a
-// multi-tenant setup.
-func TestTenantRowIDs(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-
-	tc := serverutils.StartNewTestCluster(t, 3, base.TestClusterArgs{})
-	defer tc.Stopper().Stop(ctx)
-	const numRows = 10
-	tenant, db := serverutils.StartTenant(
-		t,
-		tc.Server(0),
-		base.TestTenantArgs{TenantID: serverutils.TestTenantID()},
-	)
-	defer db.Close()
-	sqlDB := sqlutils.MakeSQLRunner(db)
-	sqlDB.Exec(t, `CREATE TABLE foo(key INT PRIMARY KEY DEFAULT unique_rowid(), val INT)`)
-	sqlDB.Exec(t, fmt.Sprintf("INSERT INTO foo (val) SELECT * FROM generate_series(1, %d)", numRows))
-
-	// Verify that the rows are inserted successfully and that the row ids
-	// are based on the SQL instance ID.
-	rows := sqlDB.Query(t, "SELECT key FROM foo")
-	defer rows.Close()
-	rowCount := 0
-	instanceID := int(tenant.SQLInstanceID())
-	for rows.Next() {
-		var key int
-		if err := rows.Scan(&key); err != nil {
-			t.Fatal(err)
-		}
-		require.Equal(t, instanceID, key&instanceID)
-		rowCount++
-	}
-	require.Equal(t, numRows, rowCount)
-}
-
-// TestNoInflightTracesVirtualTableOnTenant verifies that internal inflight traces table
-// is correctly handled by tenants (which don't provide this functionality as of now).
-func TestNoInflightTracesVirtualTableOnTenant(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	args := base.TestClusterArgs{}
-	tc := testcluster.StartTestCluster(t, 2 /* nodes */, args)
-	defer tc.Stopper().Stop(ctx)
-
-	tenn, err := tc.Server(0).StartTenant(ctx, base.TestTenantArgs{TenantID: serverutils.TestTenantID()})
-	require.NoError(t, err, "Failed to start tenant node")
-	ex := tenn.DistSQLServer().(*distsql.ServerImpl).ServerConfig.Executor
-	_, err = ex.Exec(ctx, "get table", nil, /* txn */
-		"select * from crdb_internal.cluster_inflight_traces WHERE trace_id = 4;")
-	require.Error(t, err, "cluster_inflight_traces should be unsupported")
-	require.Contains(t, err.Error(), "table crdb_internal.cluster_inflight_traces is not implemented on tenants")
 }

@@ -22,7 +22,6 @@ import "sql/catalog/descpb/tenant.proto";
 import "util/hlc/timestamp.proto";
 import "sql/schemachanger/scpb/scpb.proto";
 import "clusterversion/cluster_version.proto";
-import "google/protobuf/timestamp.proto";
 
 enum EncryptionMode {
   Passphrase = 0;
@@ -72,9 +71,6 @@ message StreamIngestionDetails {
   // StreamAddress locates the stream. It enables the client to find the
   // addresses of the stream's partitions.
   string stream_address = 1;
-  
-  uint64 stream_id = 4 [(gogoproto.customname) = "StreamID"];
-  
   // Span is the keyspan into which this job will ingest KVs.
   //
   // The stream should emit all changes for a given span, and no changes outside
@@ -83,8 +79,6 @@ message StreamIngestionDetails {
   roachpb.Span span = 2 [(gogoproto.nullable) = false];
   // The job will ingest events from StartTime onwards.
   util.hlc.Timestamp start_time = 3 [(gogoproto.nullable) = false];
-  
-  uint64 tenant_id = 5 [(gogoproto.customname) = "TenantID"];
 }
 
 message StreamIngestionProgress {
@@ -105,16 +99,6 @@ message StreamIngestionProgress {
   map<string, PartitionProgress> partition_progress = 2 [(gogoproto.nullable) = false];
 }
 
-
-message StreamReplicationDetails {
-  // Key spans we are replicating
-  repeated roachpb.Span spans = 1;
-}
-
-message StreamReplicationProgress {
-  // Expiration timestamp of consumer heartbeat
-  google.protobuf.Timestamp expiration = 1 [(gogoproto.nullable) = false, (gogoproto.stdtime) = true];
-}
 
 message SchedulePTSChainingRecord {
   enum PTSAction {
@@ -184,9 +168,6 @@ message RestoreDetails {
     // ToExisting represents whether this descriptor is being remapped to a
     // descriptor that already exists in the cluster.
     bool to_existing = 3;
-
-    // NewDBName represents the new name given to a restored database during a database restore
-    string new_db_name = 4 [(gogoproto.customname) = "NewDBName"];
   }
   message BackupLocalityInfo {
     map<string, string> uris_by_original_locality_kv = 1 [(gogoproto.customname) = "URIsByOriginalLocalityKV"];
@@ -425,15 +406,7 @@ message NewSchemaChangeDetails {
 
 // NewSchemaChangeProgress is the persisted progress for the new schema change job.
 message NewSchemaChangeProgress {
-  // Tracks the current status of nodes in an ordered manner for
-  // keeping track of progress.
   repeated cockroach.sql.schemachanger.scpb.Status states = 1;
-  // Statements for the schema changes which this job is currently
-  // running work for. A transaction can have multiple statements
-  // for example associated.
-  repeated cockroach.sql.schemachanger.scpb.Statement statements = 2;
-  // Authorization information for the schema change.
-  cockroach.sql.schemachanger.scpb.Authorization authorization = 3;
 }
 
 // AutoSpanConfigReconciliationDetails is the job detail information for the
@@ -496,7 +469,14 @@ message SchemaChangeGCDetails {
   // Indexes to GC.
   repeated DroppedIndex indexes = 1 [(gogoproto.nullable) = false];
 
-  reserved 4, 5;
+  // The below two fields are used only in the case of TRUNCATE operating on
+  // tables with interleaved indexes. They are only set together.
+
+  // InterleavedTable is the table being truncated. In particular, it is the
+  // TableDescriptor before any of the truncate modifications have been applied.
+  sqlbase.TableDescriptor interleaved_table = 4;
+  // InterleavedIndexes is the set of interleaved indexes to truncate.
+  repeated sqlbase.IndexDescriptor interleaved_indexes = 5 [(gogoproto.nullable) = false];
 
   // Entire tables to GC.
   repeated DroppedID tables = 2 [(gogoproto.nullable) = false];
@@ -610,12 +590,12 @@ message ChangefeedTarget {
 message ChangefeedDetails {
   // Targets contains the user-specified tables and databases to watch, mapping
   // the descriptor id to the name at the time of changefeed creating. There is
-  // a 1:1 correspondence between unique targets in the original sql query and
+  // a 1:1 correspondance between unique targets in the original sql query and
   // entries in this map.
   //
   // - A watched table is stored here under its table id
   // - TODO(dan): A watched database is stored here under its database id
-  // - TODO(dan): A db.* expansion is treated identically to watching the
+  // - TODO(dan): A db.* expansion is treated identicially to watching the
   //   database
   //
   // Note that the TODOs mean this field currently is guaranteed to only hold
@@ -675,7 +655,7 @@ message ChangefeedProgress {
 
   // Checkpoint describes changefeed checkpoint.
   // Checkpoints are needed when performing certain operations, such as backfill.
-  // When changefeed restarts from previous high water mark timestamp, all
+  // When changefeed restarts from previouis high water mark timestamp, all
   // spans in checkpoint fill be filtered out during initial scan.
   // That is: this checkpoint describes spans that have already advanced to the high water mark.
   message Checkpoint {
@@ -689,7 +669,7 @@ message ChangefeedProgress {
   // corresponding to this job. While the job ought to clean up the record
   // when it enters a terminal state, there may be cases where it cannot or
   // does not run the code to do so. To deal with this there is a background
-  // reconciliation loop to ensure that protected timestamps are cleaned up.
+  // reconcilliation loop to ensure that protected timestamps are cleaned up.
   //
   // A record is created with the job if the job requires an initial backfill.
   // Furthermore, once subsequent backfills begin, record will be created and
@@ -797,7 +777,6 @@ message Payload {
     MigrationDetails migration = 25;
     AutoSpanConfigReconciliationDetails autoSpanConfigReconciliation = 27;
     AutoSQLStatsCompactionDetails autoSQLStatsCompaction = 30;
-    StreamReplicationDetails streamReplication = 33;
   }
   reserved 26;
   // PauseReason is used to describe the reason that the job is currently paused
@@ -809,7 +788,7 @@ message Payload {
   // the jobs.execution_errors.max_entries cluster setting.
   repeated RetriableExecutionFailure retriable_execution_failure_log = 32;
 
-  // NEXT ID: 34.
+  // NEXT ID: 33.
 }
 
 message Progress {
@@ -834,10 +813,9 @@ message Progress {
     MigrationProgress migration = 20;
     AutoSpanConfigReconciliationProgress AutoSpanConfigReconciliation = 22;
     AutoSQLStatsCompactionProgress autoSQLStatsCompaction = 23;
-    StreamReplicationProgress streamReplication = 24;
   }
 
-  uint64 trace_id = 21 [(gogoproto.nullable) = false, (gogoproto.customname) = "TraceID", (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb.TraceID"];
+  uint64 trace_id = 21 [(gogoproto.customname) = "TraceID"];
 }
 
 enum Type {
@@ -861,7 +839,6 @@ enum Type {
   MIGRATION = 12 [(gogoproto.enumvalue_customname) = "TypeMigration"];
   AUTO_SPAN_CONFIG_RECONCILIATION = 13 [(gogoproto.enumvalue_customname) = "TypeAutoSpanConfigReconciliation"];
   AUTO_SQL_STATS_COMPACTION = 14 [(gogoproto.enumvalue_customname) = "TypeAutoSQLStatsCompaction"];
-  STREAM_REPLICATION = 15 [(gogoproto.enumvalue_customname) = "TypeStreamReplication"];
 }
 
 message Job {

@@ -11,7 +11,6 @@
 package builtins
 
 import (
-	"fmt"
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -38,7 +37,6 @@ func init() {
 	initGeoBuiltins()
 	initPGBuiltins()
 	initMathBuiltins()
-	initReplicationBuiltins()
 
 	AllBuiltinNames = make([]string, 0, len(builtins))
 	AllAggregateBuiltinNames = make([]string, 0, len(aggregates))
@@ -55,32 +53,6 @@ func init() {
 			AllAggregateBuiltinNames = append(AllAggregateBuiltinNames, name)
 		} else if def.props.Class == tree.WindowClass {
 			AllWindowBuiltinNames = append(AllWindowBuiltinNames, name)
-		}
-		for _, overload := range def.overloads {
-			fnCount := 0
-			if overload.Fn != nil {
-				fnCount++
-			}
-			if overload.FnWithExprs != nil {
-				fnCount++
-			}
-			if overload.Generator != nil {
-				overload.Fn = unsuitableUseOfGeneratorFn
-				overload.FnWithExprs = unsuitableUseOfGeneratorFnWithExprs
-				fnCount++
-			}
-			if overload.GeneratorWithExprs != nil {
-				overload.Fn = unsuitableUseOfGeneratorFn
-				overload.FnWithExprs = unsuitableUseOfGeneratorFnWithExprs
-				fnCount++
-			}
-			if fnCount > 1 {
-				panic(fmt.Sprintf(
-					"builtin %s: at most 1 of Fn, FnWithExprs, Generator, and GeneratorWithExprs"+
-						"must be set on overloads; (found %d)",
-					name, fnCount,
-				))
-			}
 		}
 	}
 

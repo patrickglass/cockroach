@@ -162,7 +162,7 @@ func runSelOpBenchmarks(
 	makeSelOp func(source *colexecop.RepeatableBatchSource) (colexecop.Operator, error),
 	inputTypes []*types.T,
 ) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	for _, useSel := range []bool{true, false} {
 		for _, hasNulls := range []bool{true, false} {
 			batch := testAllocator.NewMemBatchWithMaxCapacity(inputTypes)

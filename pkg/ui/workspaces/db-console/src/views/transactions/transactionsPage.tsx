@@ -62,12 +62,6 @@ export const selectDateRange = createSelector(
   },
 );
 
-export const sortSettingLocalSetting = new LocalSetting(
-  "sortSetting/TransactionsPage",
-  (state: AdminUIState) => state.localSettings,
-  { ascending: false, columnTitle: "executionCount" },
-);
-
 export const transactionColumnsLocalSetting = new LocalSetting(
   "showColumns/TransactionPage",
   (state: AdminUIState) => state.localSettings,
@@ -84,7 +78,6 @@ const TransactionsPageConnected = withRouter(
       error: selectLastError(state),
       nodeRegions: nodeRegionsByIDSelector(state),
       columns: transactionColumnsLocalSetting.selectorToArray(state),
-      sortSetting: sortSettingLocalSetting.selector(state),
     }),
     {
       refreshData: refreshStatements,
@@ -98,15 +91,6 @@ const TransactionsPageConnected = withRouter(
         transactionColumnsLocalSetting.set(
           value.length === 0 ? " " : value.join(","),
         ),
-      onSortingChange: (
-        _tableName: string,
-        columnName: string,
-        ascending: boolean,
-      ) =>
-        sortSettingLocalSetting.set({
-          ascending: ascending,
-          columnTitle: columnName,
-        }),
     },
   )(TransactionsPage),
 );

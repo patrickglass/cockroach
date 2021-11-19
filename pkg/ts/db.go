@@ -20,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
-	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 )
@@ -35,7 +34,6 @@ var (
 	resolution10sDefaultRollupThreshold          = 10 * 24 * time.Hour
 	resolution30mDefaultPruneThreshold           = 90 * 24 * time.Hour
 	resolution50nsDefaultPruneThreshold          = 1 * time.Millisecond
-	storeDataTimeout                             = 1 * time.Minute
 )
 
 // TimeseriesStorageEnabled controls whether to store timeseries data to disk.
@@ -118,7 +116,7 @@ func NewDB(db *kv.DB, settings *cluster.Settings) *DB {
 	}
 }
 
-// A DataSource can be queried for a slice of time series data.
+// A DataSource can be queryied for a slice of time series data.
 type DataSource interface {
 	GetTimeSeriesData() []tspb.TimeSeriesData
 }
@@ -182,25 +180,21 @@ func (p *poller) poll() {
 		return
 	}
 
-	ctx := p.AnnotateCtx(context.Background())
-	if err := p.stopper.RunTask(ctx, "ts.poller: poll", func(ctx context.Context) {
+	bgCtx := p.AnnotateCtx(context.Background())
+	if err := p.stopper.RunTask(bgCtx, "ts.poller: poll", func(bgCtx context.Context) {
 		data := p.source.GetTimeSeriesData()
 		if len(data) == 0 {
 			return
 		}
 
-		const opName = "ts-poll"
-		ctx, span := p.AnnotateCtxWithSpan(ctx, opName)
+		ctx, span := p.AnnotateCtxWithSpan(bgCtx, "ts-poll")
 		defer span.Finish()
-		if err := contextutil.RunWithTimeout(ctx, opName, storeDataTimeout,
-			func(ctx context.Context) error {
-				return p.db.StoreData(ctx, p.r, data)
-			},
-		); err != nil {
+
+		if err := p.db.StoreData(ctx, p.r, data); err != nil {
 			log.Warningf(ctx, "error writing time series data: %s", err)
 		}
 	}); err != nil {
-		log.Warningf(ctx, "%v", err)
+		log.Warningf(bgCtx, "%v", err)
 	}
 }
 

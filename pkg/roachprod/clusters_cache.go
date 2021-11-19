@@ -20,6 +20,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachprod/cloud"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/config"
+	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/vm"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/vm/local"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -33,10 +34,6 @@ import (
 // clusters. It is also used as the "source of truth" for the local cluster.
 //
 // Each cluster corresponds to a json file in this directory.
-
-// syncedClusters stores the synced clusters metadata, populated from the
-// clusters cache.
-var syncedClusters cloud.Clusters
 
 // InitDirs initializes the directories for storing cluster metadata and debug
 // logs.
@@ -114,15 +111,14 @@ func shouldIgnoreCluster(c *cloud.Cluster) bool {
 }
 
 // LoadClusters reads the cached cluster metadata from config.ClustersDir and
-// populates syncedClusters. It is assumed that this is called when the process
-// starts, before any roachprod operations.
+// populates install.Clusters.
 func LoadClusters() error {
-	syncedClusters = make(cloud.Clusters)
-
 	clusterNames, err := listClustersInCache()
 	if err != nil {
 		return err
 	}
+
+	debugDir := os.ExpandEnv(config.DefaultDebugDir)
 
 	for _, name := range clusterNames {
 		c, err := loadCluster(name)
@@ -137,7 +133,16 @@ func LoadClusters() error {
 			continue
 		}
 
-		syncedClusters[c.Name] = c
+		sc := &install.SyncedCluster{
+			Cluster:  *c,
+			DebugDir: debugDir,
+		}
+
+		for _, vm := range c.VMs {
+			sc.Localities = append(sc.Localities, vm.Locality())
+		}
+
+		install.Clusters[sc.Name] = sc
 
 		if config.IsLocalClusterName(c.Name) {
 			// Add the local cluster to the local provider.

@@ -33,8 +33,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/build/bazel"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
-	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -42,8 +40,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/execbuilder"
+	_ "github.com/cockroachdb/cockroach/pkg/sql/opt/exec/execbuilder" // for ExprFmtHideScalars.
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/optbuilder"
@@ -56,10 +53,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
-	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/treeprinter"
 	"github.com/cockroachdb/datadriven"
@@ -181,12 +175,8 @@ type Flags struct {
 	PreferLookupJoinsForFKs bool
 
 	// PropagateInputOrdering is the default value for
-	// SessionData.PropagateInputOrdering.
+	// SessionData.PropagateInputOrdering
 	PropagateInputOrdering bool
-
-	// NullOrderedLast is the default value for
-	// SessionData.NullOrderedLast.
-	NullOrderedLast bool
 
 	// Locality specifies the location of the planning node as a set of user-
 	// defined key/value pairs, ordered from most inclusive to least inclusive.
@@ -493,7 +483,6 @@ func (ot *OptTester) RunCommand(tb testing.TB, d *datadriven.TestData) string {
 	ot.evalCtx.SessionData().ReorderJoinsLimit = int64(ot.Flags.JoinLimit)
 	ot.evalCtx.SessionData().PreferLookupJoinsForFKs = ot.Flags.PreferLookupJoinsForFKs
 	ot.evalCtx.SessionData().PropagateInputOrdering = ot.Flags.PropagateInputOrdering
-	ot.evalCtx.SessionData().NullOrderedLast = ot.Flags.NullOrderedLast
 
 	ot.evalCtx.TestingKnobs.OptimizerCostPerturbation = ot.Flags.PerturbCost
 	ot.evalCtx.Locality = ot.Flags.Locality
@@ -847,12 +836,6 @@ func (f *Flags) Set(arg datadriven.CmdArg) error {
 	case "prefer-lookup-joins-for-fks":
 		f.PreferLookupJoinsForFKs = true
 
-	case "null-ordered-last":
-		if len(arg.Vals) > 0 {
-			return fmt.Errorf("unknown vals for null-ordered-last")
-		}
-		f.NullOrderedLast = true
-
 	case "rule":
 		if len(arg.Vals) != 1 {
 			return fmt.Errorf("rule requires one argument")
@@ -1011,7 +994,7 @@ func (f *Flags) Set(arg datadriven.CmdArg) error {
 	case "query-args":
 		f.QueryArgs = arg.Vals
 
-	case "propagate-input-ordering":
+	case "preserve-input-order":
 		f.PropagateInputOrdering = true
 
 	default:
@@ -1513,19 +1496,9 @@ func (ot *OptTester) encodeOptstepsURL(normDiff, exploreDiff string) (url.URL, e
 		Scheme: "https",
 		Host:   "raduberinde.github.io",
 		Path:   "optsteps.html",
-	}
-	const githubPagesMaxURLLength = 8100
-	if compressed.Len() > githubPagesMaxURLLength {
-		// If the compressed data is longer than the maximum allowed URL length
-		// for the GitHub Pages server, we include it as a fragment. This
-		// prevents the browser from sending this data to the server, avoiding a
-		// 414 error from GitHub Pages.
-		url.Fragment = compressed.String()
-	} else {
-		// Otherwise, the compressed data is included as a query parameter. This
-		// is preferred because the URL remains valid when anchor links are
-		// clicked and fragments are added to the URL by the browser.
-		url.RawQuery = compressed.String()
+		// We could use Fragment (which avoids the data being sent to the server),
+		// but then the link will become invalid when a real fragment link is used.
+		RawQuery: compressed.String(),
 	}
 	return url, nil
 }
@@ -2046,19 +2019,4 @@ func ruleFromString(str string) (opt.RuleName, error) {
 	}
 
 	return opt.InvalidRuleName, fmt.Errorf("rule '%s' does not exist", str)
-}
-
-// ExecBuild is used for testing to expose makeOptimizer.
-func (ot *OptTester) ExecBuild(f exec.Factory, mem *memo.Memo, expr opt.Expr) (exec.Plan, error) {
-	// For DDL we need a fresh root transaction that isn't system tenant.
-	if opt.IsDDLOp(expr) {
-		ot.evalCtx.Codec = keys.MakeSQLCodec(roachpb.MakeTenantID(5))
-		factory := kv.MockTxnSenderFactory{}
-		clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
-		stopper := stop.NewStopper()
-		db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock, stopper)
-		ot.evalCtx.Txn = kv.NewTxn(context.Background(), db, 1)
-	}
-	bld := execbuilder.New(f, ot.makeOptimizer(), mem, ot.catalog, expr, &ot.evalCtx, true)
-	return bld.Build()
 }

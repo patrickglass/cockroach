@@ -70,7 +70,6 @@ go_library(
         "//pkg/sql/scrub",
         "//pkg/sql/sem/builtins",
         "//pkg/sql/sem/tree",
-        "//pkg/sql/sessiondata",
         "//pkg/sql/span",
         "//pkg/sql/sqlerrors",
         "//pkg/sql/sqltelemetry",

@@ -425,21 +425,39 @@ func mysqlTableToCockroach(
 			seqVals[id] = startingValue
 		}
 		var err error
-		privilegeDesc := descpb.NewBasePrivilegeDescriptor(owner)
-		seqDesc, err = sql.NewSequenceTableDesc(
-			ctx,
-			seqName,
-			opts,
-			parentDB.GetID(),
-			keys.PublicSchemaID,
-			id,
-			time,
-			privilegeDesc,
-			tree.PersistencePermanent,
-			nil, /* params */
-			// If this is multi-region, this will get added by WriteDescriptors.
-			false, /* isMultiRegion */
-		)
+		if p != nil {
+			priv := descpb.NewDefaultPrivilegeDescriptor(owner)
+			seqDesc, err = sql.NewSequenceTableDesc(
+				ctx,
+				seqName,
+				opts,
+				parentDB.GetID(),
+				keys.PublicSchemaID,
+				id,
+				time,
+				priv,
+				tree.PersistencePermanent,
+				nil, /* params */
+				// If this is multi-region, this will get added by WriteDescriptors.
+				false, /* isMultiRegion */
+			)
+		} else {
+			priv := descpb.NewDefaultPrivilegeDescriptor(owner)
+			seqDesc, err = sql.NewSequenceTableDesc(
+				ctx,
+				seqName,
+				opts,
+				parentDB.GetID(),
+				keys.PublicSchemaID,
+				id,
+				time,
+				priv,
+				tree.PersistencePermanent,
+				nil, /* params */
+				// If this is multi-region, this will get added by WriteDescriptors.
+				false, /* isMultiRegion */
+			)
+		}
 		if err != nil {
 			return nil, nil, err
 		}
@@ -481,11 +499,6 @@ func mysqlTableToCockroach(
 		}
 
 		idxName := safeName(raw.Info.Name)
-		// In MySQL, all PRIMARY KEY have the constraint name PRIMARY.
-		// To match PostgreSQL, we want to rename this to the appropriate form.
-		if raw.Info.Primary {
-			idxName = tree.Name(tabledesc.PrimaryKeyIndexName(name))
-		}
 		idx := tree.IndexTableDef{Name: idxName, Columns: elems}
 		if raw.Info.Primary || raw.Info.Unique {
 			stmt.Defs = append(stmt.Defs, &tree.UniqueConstraintTableDef{IndexTableDef: idx, PrimaryKey: raw.Info.Primary})

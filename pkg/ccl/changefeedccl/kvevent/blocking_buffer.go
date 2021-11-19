@@ -34,7 +34,6 @@ type blockingBuffer struct {
 	mu struct {
 		syncutil.Mutex
 		closed  bool             // True when buffer closed.
-		reason  error            // Reason buffer is closed.
 		drainCh chan struct{}    // Set when Drain request issued.
 		blocked bool             // Set when event is blocked, waiting to acquire quota.
 		queue   bufferEntryQueue // Queue of added events.
@@ -75,7 +74,7 @@ func (b *blockingBuffer) pop() (e *bufferEntry, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.mu.closed {
-		return nil, ErrBufferClosed{reason: b.mu.reason}
+		return nil, ErrBufferClosed
 	}
 
 	e = b.mu.queue.dequeue()
@@ -107,10 +106,6 @@ func (b *blockingBuffer) pop() (e *bufferEntry, err error) {
 func (b *blockingBuffer) notifyOutOfQuota() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	if b.mu.closed {
-		return
-	}
 	b.mu.blocked = true
 
 	select {
@@ -158,17 +153,11 @@ func (b *blockingBuffer) ensureOpenedLocked(ctx context.Context) error {
 	return nil
 }
 
-func (b *blockingBuffer) enqueue(ctx context.Context, be *bufferEntry) (err error) {
+func (b *blockingBuffer) enqueue(ctx context.Context, be *bufferEntry) error {
 	// Enqueue message, and signal if anybody is waiting.
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	defer func() {
-		if err != nil {
-			bufferEntryPool.Put(be)
-		}
-	}()
-
-	if err = b.ensureOpenedLocked(ctx); err != nil {
+	if err := b.ensureOpenedLocked(ctx); err != nil {
 		return err
 	}
 
@@ -241,10 +230,29 @@ func (b *blockingBuffer) Drain(ctx context.Context) error {
 	return nil
 }
 
-// CloseWithReason implements Writer interface.
-func (b *blockingBuffer) CloseWithReason(ctx context.Context, reason error) error {
+// Close implements Writer interface.
+func (b *blockingBuffer) Close(ctx context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.mu.closed {
+		logcrash.ReportOrPanic(ctx, b.sv, "close called multiple times")
+		return errors.AssertionFailedf("close called multiple times")
+	}
+
+	b.mu.closed = true
+	close(b.signalCh)
+
 	// Close quota pool -- any requests waiting to acquire will receive an error.
+	// It would be nice if we can logcrash if anybody was waiting.
 	b.qp.Close("blocking buffer closing")
+
+	// Release all resources we have queued up.
+	var alloc Alloc
+	for be := b.mu.queue.dequeue(); be != nil; be = b.mu.queue.dequeue() {
+		alloc.Merge(&be.e.alloc)
+	}
+	alloc.Release(ctx)
 
 	// Mark memory quota closed, and close the underlying bound account,
 	// releasing all of its allocated resources at once.
@@ -267,25 +275,6 @@ func (b *blockingBuffer) CloseWithReason(ctx context.Context, reason error) erro
 		quota.acc.Close(ctx)
 		return false
 	})
-
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if b.mu.closed {
-		logcrash.ReportOrPanic(ctx, b.sv, "close called multiple times")
-		return errors.AssertionFailedf("close called multiple times")
-	}
-
-	b.mu.closed = true
-	b.mu.reason = reason
-	close(b.signalCh)
-
-	// Return all queued up entries to the buffer pool.
-	// Note: we do not need to release their resources since we are going to close
-	// bound account anyway.
-	for be := b.mu.queue.dequeue(); be != nil; be = b.mu.queue.dequeue() {
-		bufferEntryPool.Put(be)
-	}
 
 	return nil
 }

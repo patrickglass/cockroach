@@ -12,7 +12,6 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/streamingccl"
-	"github.com/cockroachdb/cockroach/pkg/ccl/streamingccl/streamclient"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -29,7 +28,7 @@ import (
 
 func distStreamIngestionPlanSpecs(
 	streamAddress streamingccl.StreamAddress,
-	topology streamclient.Topology,
+	topology streamingccl.Topology,
 	nodes []roachpb.NodeID,
 	initialHighWater hlc.Timestamp,
 	jobID jobspb.JobID,
@@ -39,7 +38,7 @@ func distStreamIngestionPlanSpecs(
 	streamIngestionSpecs := make([]*execinfrapb.StreamIngestionDataSpec, 0, len(nodes))
 
 	trackedSpans := make([]roachpb.Span, 0)
-	for i, partition := range topology {
+	for i, partition := range topology.Partitions {
 		// Round robin assign the stream partitions to nodes. Partitions 0 through
 		// len(nodes) - 1 creates the spec. Future partitions just add themselves to
 		// the partition addresses.
@@ -53,18 +52,15 @@ func distStreamIngestionPlanSpecs(
 			streamIngestionSpecs = append(streamIngestionSpecs, spec)
 		}
 		n := i % len(nodes)
-
-		streamIngestionSpecs[n].PartitionIds = append(streamIngestionSpecs[n].PartitionIds, partition.ID)
-		streamIngestionSpecs[n].PartitionSpecs = append(streamIngestionSpecs[n].PartitionSpecs,
-			string(partition.SubscriptionToken))
 		streamIngestionSpecs[n].PartitionAddresses = append(streamIngestionSpecs[n].PartitionAddresses,
-			string(partition.SrcAddr))
+			string(partition))
+		partitionKey := roachpb.Key(partition)
 		// We create "fake" spans to uniquely identify the partition. This is used
 		// to keep track of the resolved ts received for a particular partition in
 		// the frontier processor.
 		trackedSpans = append(trackedSpans, roachpb.Span{
-			Key:    roachpb.Key(partition.ID),
-			EndKey: roachpb.Key(partition.ID).Next(),
+			Key:    partitionKey,
+			EndKey: partitionKey.Next(),
 		})
 	}
 

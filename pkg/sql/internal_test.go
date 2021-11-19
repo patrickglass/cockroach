@@ -85,7 +85,7 @@ func TestInternalExecutor(t *testing.T) {
 	}
 
 	// Reset the sequence to a clear value. Next nextval() will return 2.
-	if _, err := db.Exec("SELECT setval('test.seq', 1, true)"); err != nil {
+	if _, err := db.Exec("SELECT setval('test.seq', 1)"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -527,9 +527,8 @@ func TestInternalExecutorPushDetectionInTxn(t *testing.T) {
 
 	ctx := context.Background()
 	params, _ := tests.CreateTestServerParams()
-	si, _, db := serverutils.StartServer(t, params)
-	defer si.Stopper().Stop(ctx)
-	s := si.(*server.TestServer)
+	s, _, db := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(ctx)
 
 	// Setup a pushed txn.
 	txn := db.NewTxn(ctx, "test")
@@ -545,13 +544,13 @@ func TestInternalExecutorPushDetectionInTxn(t *testing.T) {
 	txn.CommitTimestamp()
 	require.True(t, txn.IsSerializablePushAndRefreshNotPossible())
 
-	tr := s.Tracer()
-	execCtx, getRecAndFinish := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
-	defer getRecAndFinish()
+	tr := s.Tracer().(*tracing.Tracer)
+	execCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
+	defer cancel()
 	ie := s.InternalExecutor().(*sql.InternalExecutor)
 	_, err = ie.Exec(execCtx, "test", txn, "select 42")
 	require.NoError(t, err)
-	require.NoError(t, testutils.MatchInOrder(getRecAndFinish().String(),
+	require.NoError(t, testutils.MatchInOrder(collect().String(),
 		"push detected for non-refreshable txn but auto-retry not possible"))
 	require.NotEqual(t, txn.ReadTimestamp(), txn.ProvisionalCommitTimestamp(), "expect txn wts to be pushed")
 

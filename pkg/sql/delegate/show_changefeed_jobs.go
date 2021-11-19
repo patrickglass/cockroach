@@ -30,7 +30,7 @@ WITH payload AS (
     id, 
     crdb_internal.pb_to_json(
       'cockroach.sql.jobs.jobspb.Payload', 
-      payload, false, true
+      payload
     )->'changefeed' AS changefeed_details 
   FROM 
     system.jobs

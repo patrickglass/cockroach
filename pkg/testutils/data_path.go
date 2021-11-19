@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/build/bazel"
-	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,20 +26,14 @@ import (
 // file using TestDataPath(t, "a.txt").
 func TestDataPath(t testing.TB, relative ...string) string {
 	relative = append([]string{"testdata"}, relative...)
-	// dev notifies the library that the test is running in a subdirectory of the
-	// workspace with the environment variable below.
 	if bazel.BuiltWithBazel() {
-		//lint:ignore SA4006 apparently a linter bug.
-		cockroachWorkspace, set := envutil.EnvString("COCKROACH_WORKSPACE", 0)
-		if set {
-			return path.Join(cockroachWorkspace, bazel.RelativeTestTargetPath(), path.Join(relative...))
-		}
 		runfiles, err := bazel.RunfilesPath()
 		require.NoError(t, err)
 		return path.Join(runfiles, bazel.RelativeTestTargetPath(), path.Join(relative...))
 	}
 
-	// Otherwise we're in the package directory and can just return a relative path.
+	// If we're not running in Bazel, we're in the package directory and can
+	// just return a relative path.
 	ret := path.Join(relative...)
 	ret, err := filepath.Abs(ret)
 	require.NoError(t, err)

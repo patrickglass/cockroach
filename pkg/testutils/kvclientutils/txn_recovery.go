@@ -76,8 +76,8 @@ func CheckPushResult(
 	ba := roachpb.BatchRequest{}
 	ba.Add(&pushReq)
 
-	recCtx, collectRecAndFinish := tracing.ContextWithRecordingSpan(ctx, tr, "test trace")
-	defer collectRecAndFinish()
+	recCtx, collectRec, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test trace")
+	defer cancel()
 
 	resp, pErr := db.NonTransactionalSender().Send(recCtx, ba)
 	if pErr != nil {
@@ -101,7 +101,7 @@ func CheckPushResult(
 
 	// Verify that we're not fooling ourselves and that checking for the implicit
 	// commit actually caused the txn recovery procedure to run.
-	recording := collectRecAndFinish()
+	recording := collectRec()
 	var resolutionErr error
 	switch pushExpectation {
 	case ExpectPusheeTxnRecovery:

@@ -108,8 +108,8 @@ func TestBasicHashShardedIndexes(t *testing.T) {
 			t.Fatal(err)
 		}
 		tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, `d`, `kv_primary`)
-		verifyTableDescriptorState(t, tableDesc, "kv_primary_pkey" /* shardedIndexName */)
-		shardColID := getShardColumnID(t, tableDesc, "kv_primary_pkey" /* shardedIndexName */)
+		verifyTableDescriptorState(t, tableDesc, "primary" /* shardedIndexName */)
+		shardColID := getShardColumnID(t, tableDesc, "primary" /* shardedIndexName */)
 
 		// Ensure that secondary indexes on table `kv` have the shard column in their
 		// `KeySuffixColumnIDs` field so they can reconstruct the sharded primary key.

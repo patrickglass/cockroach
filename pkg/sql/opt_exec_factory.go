@@ -148,9 +148,8 @@ func generateScanSpans(
 	params exec.ScanParams,
 ) (roachpb.Spans, error) {
 	sb := span.MakeBuilder(evalCtx, codec, tabDesc, index)
-	defer sb.Release()
 	if params.InvertedConstraint != nil {
-		return sb.SpansFromInvertedSpans(params.InvertedConstraint, params.IndexConstraint, nil /* scratch */)
+		return sb.SpansFromInvertedSpans(params.InvertedConstraint, params.IndexConstraint)
 	}
 	return sb.SpansFromConstraint(params.IndexConstraint, params.NeededCols, false /* forDelete */)
 }
@@ -248,7 +247,8 @@ func constructSimpleProjectForPlanNode(
 		r.reqOrdering = ReqOrdering(reqOrdering)
 		return r, nil
 	}
-	inputCols := planColumns(n)
+	inputCols := planColumns(n.(planNode))
+
 	var rb renderBuilder
 	rb.init(n, reqOrdering)
 
@@ -458,17 +458,14 @@ func (ef *execFactory) ConstructGroupBy(
 	groupColOrdering colinfo.ColumnOrdering,
 	aggregations []exec.AggInfo,
 	reqOrdering exec.OutputOrdering,
-	groupingOrderType exec.GroupingOrderType,
 ) (exec.Node, error) {
 	inputPlan := input.(planNode)
 	inputCols := planColumns(inputPlan)
-	// TODO(harding): Use groupingOrder to determine when to use a hash
-	// aggregator.
 	n := &groupNode{
 		plan:             inputPlan,
 		funcs:            make([]*aggregateFuncHolder, 0, len(groupCols)+len(aggregations)),
 		columns:          getResultColumnsForGroupBy(inputCols, groupCols, aggregations),
-		groupCols:        convertNodeOrdinalsToInts(groupCols),
+		groupCols:        convertOrdinalsToInts(groupCols),
 		groupColOrdering: groupColOrdering,
 		isScalar:         false,
 		reqOrdering:      ReqOrdering(reqOrdering),
@@ -492,7 +489,7 @@ func (ef *execFactory) ConstructGroupBy(
 func (ef *execFactory) addAggregations(n *groupNode, aggregations []exec.AggInfo) error {
 	for i := range aggregations {
 		agg := &aggregations[i]
-		renderIdxs := convertNodeOrdinalsToInts(agg.ArgCols)
+		renderIdxs := convertOrdinalsToInts(agg.ArgCols)
 
 		f := newAggregateFuncHolder(
 			agg.FuncName,
@@ -984,18 +981,6 @@ func (ef *execFactory) ConstructLimit(
 	}, nil
 }
 
-// ConstructTopK is part of the execFactory interface.
-func (ef *execFactory) ConstructTopK(
-	input exec.Node, k int64, ordering exec.OutputOrdering, alreadyOrderedPrefix int,
-) (exec.Node, error) {
-	return &topKNode{
-		plan:                 input.(planNode),
-		k:                    k,
-		ordering:             colinfo.ColumnOrdering(ordering),
-		alreadyOrderedPrefix: alreadyOrderedPrefix,
-	}, nil
-}
-
 // ConstructMax1Row is part of the exec.Factory interface.
 func (ef *execFactory) ConstructMax1Row(input exec.Node, errorText string) (exec.Node, error) {
 	plan := input.(planNode)
@@ -1028,13 +1013,12 @@ func (ef *execFactory) ConstructScanBuffer(ref exec.Node, label string) (exec.No
 
 // ConstructRecursiveCTE is part of the exec.Factory interface.
 func (ef *execFactory) ConstructRecursiveCTE(
-	initial exec.Node, fn exec.RecursiveCTEIterationFn, label string, deduplicate bool,
+	initial exec.Node, fn exec.RecursiveCTEIterationFn, label string,
 ) (exec.Node, error) {
 	return &recursiveCTENode{
 		initial:        initial.(planNode),
 		genIterationFn: fn,
 		label:          label,
-		deduplicate:    deduplicate,
 	}, nil
 }
 
@@ -1103,17 +1087,13 @@ func (ef *execFactory) ConstructWindow(root exec.Node, wi exec.WindowInfo) (exec
 
 // ConstructPlan is part of the exec.Factory interface.
 func (ef *execFactory) ConstructPlan(
-	root exec.Node,
-	subqueries []exec.Subquery,
-	cascades []exec.Cascade,
-	checks []exec.Node,
-	rootRowCount int64,
+	root exec.Node, subqueries []exec.Subquery, cascades []exec.Cascade, checks []exec.Node,
 ) (exec.Plan, error) {
 	// No need to spool at the root.
 	if spool, ok := root.(*spoolNode); ok {
 		root = spool.source
 	}
-	return constructPlan(ef.planner, root, subqueries, cascades, checks, rootRowCount)
+	return constructPlan(ef.planner, root, subqueries, cascades, checks)
 }
 
 // urlOutputter handles writing strings into an encoded URL for EXPLAIN (OPT,
@@ -1727,11 +1707,11 @@ func (ef *execFactory) ConstructDeleteRange(
 	table cat.Table,
 	needed exec.TableColumnOrdinalSet,
 	indexConstraint *constraint.Constraint,
+	interleavedTables []cat.Table,
 	autoCommit bool,
 ) (exec.Node, error) {
 	tabDesc := table.(*optTable).desc
 	sb := span.MakeBuilder(ef.planner.EvalContext(), ef.planner.ExecCfg().Codec, tabDesc, tabDesc.GetPrimaryIndex())
-	defer sb.Release()
 
 	if err := ef.planner.maybeSetSystemConfig(tabDesc.GetID()); err != nil {
 		return nil, err
@@ -1745,11 +1725,19 @@ func (ef *execFactory) ConstructDeleteRange(
 	}
 
 	dr := &deleteRangeNode{
-		spans:             spans,
-		desc:              tabDesc,
-		autoCommitEnabled: autoCommit,
+		interleavedFastPath: false,
+		spans:               spans,
+		desc:                tabDesc,
+		autoCommitEnabled:   autoCommit,
 	}
 
+	if len(interleavedTables) > 0 {
+		dr.interleavedFastPath = true
+		dr.interleavedDesc = make([]catalog.TableDescriptor, len(interleavedTables))
+		for i := range dr.interleavedDesc {
+			dr.interleavedDesc[i] = interleavedTables[i].(*optTable).desc
+		}
+	}
 	return dr, nil
 }
 
@@ -2052,10 +2040,11 @@ func (ef *execFactory) ConstructExplain(
 		return nil, errors.New("ENV only supported with (OPT) option")
 	}
 
-	plan, err := buildFn(&execFactory{
+	explainFactory := explain.NewFactory(&execFactory{
 		planner:   ef.planner,
 		isExplain: true,
 	})
+	plan, err := buildFn(explainFactory)
 	if err != nil {
 		return nil, err
 	}

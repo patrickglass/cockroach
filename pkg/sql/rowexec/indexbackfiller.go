@@ -129,8 +129,8 @@ func (ib *indexBackfiller) constructIndexEntries(
 	var entries []rowenc.IndexEntry
 	for i := range ib.spec.Spans {
 		log.VEventf(ctx, 2, "index backfiller starting span %d of %d: %s",
-			i+1, len(ib.spec.Spans), ib.spec.Spans[i])
-		todo := ib.spec.Spans[i]
+			i+1, len(ib.spec.Spans), ib.spec.Spans[i].Span)
+		todo := ib.spec.Spans[i].Span
 		for todo.Key != nil {
 			startKey := todo.Key
 			readAsOf := ib.spec.ReadAsOf
@@ -145,7 +145,7 @@ func (ib *indexBackfiller) constructIndexEntries(
 
 			// Identify the Span for which we have constructed index entries. This is
 			// used for reporting progress and updating the job details.
-			completedSpan := ib.spec.Spans[i]
+			completedSpan := ib.spec.Spans[i].Span
 			if todo.Key != nil {
 				completedSpan.Key = startKey
 				completedSpan.EndKey = todo.Key
@@ -444,7 +444,7 @@ func (ib *indexBackfiller) buildIndexEntryBatch(
 	}); err != nil {
 		return nil, nil, 0, err
 	}
-	prepTime := timeutil.Since(start)
+	prepTime := timeutil.Now().Sub(start)
 	log.VEventf(ctx, 3, "index backfill stats: entries %d, prepare %+v",
 		len(entries), prepTime)
 

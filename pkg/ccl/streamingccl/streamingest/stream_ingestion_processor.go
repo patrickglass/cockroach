@@ -29,13 +29,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/storage"
-	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
+	"golang.org/x/sync/errgroup"
 )
 
 var minimumFlushInterval = settings.RegisterPublicDurationSettingWithExplicitUnit(
@@ -84,11 +84,11 @@ type streamIngestionProcessor struct {
 
 	// client is a streaming client which provides a stream of events from a given
 	// address.
-	forceClientForTests streamclient.Client
+	client streamclient.Client
 
 	// Checkpoint events may need to be buffered if they arrive within the same
 	// minimumFlushInterval.
-	bufferedCheckpoints map[string]hlc.Timestamp
+	bufferedCheckpoints map[streamingccl.PartitionAddress]hlc.Timestamp
 	// lastFlushTime keeps track of the last time that we flushed due to a
 	// checkpoint timestamp event.
 	lastFlushTime time.Time
@@ -111,10 +111,6 @@ type streamIngestionProcessor struct {
 	// closePoller is used to shutdown the poller that checks the job for a
 	// cutover signal.
 	closePoller chan struct{}
-	// cancelMergeAndWait cancels the merging goroutines and waits for them to
-	// finish. It cannot be called concurrently with Next(), as it consumes from
-	// the merged channel.
-	cancelMergeAndWait func()
 
 	// mu is used to provide thread-safe read-write operations to ingestionErr
 	// and pollingErr.
@@ -137,7 +133,7 @@ type streamIngestionProcessor struct {
 // partitionEvent augments a normal event with the partition it came from.
 type partitionEvent struct {
 	streamingccl.Event
-	partition string
+	partition streamingccl.PartitionAddress
 }
 
 var _ execinfra.Processor = &streamIngestionProcessor{}
@@ -152,13 +148,18 @@ func newStreamIngestionDataProcessor(
 	post *execinfrapb.PostProcessSpec,
 	output execinfra.RowReceiver,
 ) (execinfra.Processor, error) {
+	streamClient, err := streamclient.NewStreamClient(streamingccl.StreamAddress(spec.StreamAddress))
+	if err != nil {
+		return nil, err
+	}
 
 	sip := &streamIngestionProcessor{
 		flowCtx:             flowCtx,
 		spec:                spec,
 		output:              output,
 		curBatch:            make([]storage.MVCCKeyValue, 0),
-		bufferedCheckpoints: make(map[string]hlc.Timestamp),
+		client:              streamClient,
+		bufferedCheckpoints: make(map[streamingccl.PartitionAddress]hlc.Timestamp),
 		maxFlushRateTimer:   timeutil.NewTimer(),
 		cutoverCh:           make(chan struct{}),
 		closePoller:         make(chan struct{}),
@@ -181,7 +182,6 @@ func newStreamIngestionDataProcessor(
 
 // Start is part of the RowSource interface.
 func (sip *streamIngestionProcessor) Start(ctx context.Context) {
-	log.Infof(ctx, "starting ingest proc")
 	ctx = sip.StartInternal(ctx, streamIngestionProcessorName)
 
 	sip.metrics = sip.flowCtx.Cfg.JobRegistry.MetricsStruct().StreamIngest.(*Metrics)
@@ -209,36 +209,24 @@ func (sip *streamIngestionProcessor) Start(ctx context.Context) {
 		}
 	}()
 
-	log.Infof(ctx, "starting %d stream partitions", len(sip.spec.PartitionIds))
-
 	// Initialize the event streams.
-	eventChs := make(map[string]chan streamingccl.Event)
-	errChs := make(map[string]chan error)
-	for i := range sip.spec.PartitionIds {
-		id := sip.spec.PartitionIds[i]
-		spec := streamclient.SubscriptionToken(sip.spec.PartitionSpecs[i])
-		addr := sip.spec.PartitionAddresses[i]
-		var streamClient streamclient.Client
-		if sip.forceClientForTests != nil {
-			streamClient = sip.forceClientForTests
-			log.Infof(ctx, "using testing client")
-		} else {
-			streamClient, err = streamclient.NewStreamClient(streamingccl.StreamAddress(addr))
-			if err != nil {
-				sip.MoveToDraining(errors.Wrapf(err, "creating client for parition spec %q from %q", spec, addr))
-				return
-			}
-		}
-
-		eventCh, errCh, err := streamClient.Subscribe(ctx, streamclient.StreamID(sip.spec.StreamID), spec, sip.spec.StartTime)
+	eventChs := make(map[streamingccl.PartitionAddress]chan streamingccl.Event)
+	errChs := make(map[streamingccl.PartitionAddress]chan error)
+	for _, pa := range sip.spec.PartitionAddresses {
+		partitionAddress := streamingccl.PartitionAddress(pa)
+		eventCh, errCh, err := sip.client.ConsumePartition(ctx, partitionAddress, sip.spec.StartTime)
 		if err != nil {
-			sip.MoveToDraining(errors.Wrapf(err, "consuming partition %v", addr))
+			sip.MoveToDraining(errors.Wrapf(err, "consuming partition %v", partitionAddress))
 			return
 		}
-		eventChs[id] = eventCh
-		errChs[id] = errCh
+		eventChs[partitionAddress] = eventCh
+		errChs[partitionAddress] = errCh
 	}
-	sip.eventCh = sip.merge(ctx, eventChs, errChs)
+	sip.eventCh, err = sip.merge(ctx, eventChs, errChs)
+	if err != nil {
+		sip.MoveToDraining(err)
+		return
+	}
 }
 
 // Next is part of the RowSource interface.
@@ -291,26 +279,20 @@ func (sip *streamIngestionProcessor) ConsumerClosed() {
 }
 
 func (sip *streamIngestionProcessor) close() {
-	if sip.Closed {
-		return
+	if sip.InternalClose() {
+		if sip.batcher != nil {
+			sip.batcher.Close()
+		}
+		if sip.maxFlushRateTimer != nil {
+			sip.maxFlushRateTimer.Stop()
+		}
+		if sip.closePoller != nil {
+			close(sip.closePoller)
+			// Wait for the goroutine to return so that we do not access processor
+			// state once it has shutdown.
+			sip.pollingWaitGroup.Wait()
+		}
 	}
-
-	if sip.batcher != nil {
-		sip.batcher.Close()
-	}
-	if sip.maxFlushRateTimer != nil {
-		sip.maxFlushRateTimer.Stop()
-	}
-	close(sip.closePoller)
-	// Wait for the processor goroutine to return so that we do not access
-	// processor state once it has shutdown.
-	sip.pollingWaitGroup.Wait()
-	// Wait for the merge goroutine.
-	if sip.cancelMergeAndWait != nil {
-		sip.cancelMergeAndWait()
-	}
-
-	sip.InternalClose()
 }
 
 // checkForCutoverSignal periodically loads the job progress to check for the
@@ -369,29 +351,21 @@ func (sip *streamIngestionProcessor) checkForCutoverSignal(
 // channel.
 func (sip *streamIngestionProcessor) merge(
 	ctx context.Context,
-	partitionStreams map[string]chan streamingccl.Event,
-	errorStreams map[string]chan error,
-) chan partitionEvent {
+	partitionStreams map[streamingccl.PartitionAddress]chan streamingccl.Event,
+	errorStreams map[streamingccl.PartitionAddress]chan error,
+) (chan partitionEvent, error) {
 	merged := make(chan partitionEvent)
 
-	ctx, cancel := context.WithCancel(ctx)
-	g := ctxgroup.WithContext(ctx)
-
-	sip.cancelMergeAndWait = func() {
-		cancel()
-		// Wait until the merged channel is closed by the goroutine above.
-		for range merged {
-		}
-	}
+	var g errgroup.Group
 
 	for partition, eventCh := range partitionStreams {
 		partition := partition
 		eventCh := eventCh
 		errCh, ok := errorStreams[partition]
 		if !ok {
-			log.Fatalf(ctx, "could not find error channel for partition %q", partition)
+			return nil, errors.Newf("could not find error channel for partition %q", partition)
 		}
-		g.GoCtx(func(ctx context.Context) error {
+		g.Go(func() error {
 			ctxDone := ctx.Done()
 			for {
 				select {
@@ -426,7 +400,7 @@ func (sip *streamIngestionProcessor) merge(
 		close(merged)
 	}()
 
-	return merged
+	return merged, nil
 }
 
 // consumeEvents handles processing events on the merged event queue and returns
@@ -585,7 +559,7 @@ func (sip *streamIngestionProcessor) flush() (*jobspb.ResolvedSpans, error) {
 	// Reset the current batch.
 	sip.curBatch = nil
 	sip.lastFlushTime = timeutil.Now()
-	sip.bufferedCheckpoints = make(map[string]hlc.Timestamp)
+	sip.bufferedCheckpoints = make(map[streamingccl.PartitionAddress]hlc.Timestamp)
 
 	return &flushedCheckpoints, sip.batcher.Reset(sip.Ctx)
 }

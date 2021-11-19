@@ -141,15 +141,20 @@ var _ colexecop.ResettableOperator = &orderedAggregator{}
 var _ colexecop.ClosableOperator = &orderedAggregator{}
 
 // NewOrderedAggregator creates an ordered aggregator.
-func NewOrderedAggregator(args *colexecagg.NewAggregatorArgs) colexecop.ResettableOperator {
+func NewOrderedAggregator(
+	args *colexecagg.NewAggregatorArgs,
+) (colexecop.ResettableOperator, error) {
 	for _, aggFn := range args.Spec.Aggregations {
 		if aggFn.FilterColIdx != nil {
-			colexecerror.InternalError(errors.AssertionFailedf("filtering ordered aggregation is not supported"))
+			return nil, errors.AssertionFailedf("filtering ordered aggregation is not supported")
 		}
 	}
-	op, groupCol := colexecbase.OrderedDistinctColsToOperators(
+	op, groupCol, err := colexecbase.OrderedDistinctColsToOperators(
 		args.Input, args.Spec.GroupCols, args.InputTypes, false, /* nullsAreDistinct */
 	)
+	if err != nil {
+		return nil, err
+	}
 
 	// We will be reusing the same aggregate functions, so we use 1 as the
 	// allocation size.
@@ -157,7 +162,9 @@ func NewOrderedAggregator(args *colexecagg.NewAggregatorArgs) colexecop.Resettab
 		args, args.Spec.Aggregations, 1 /* allocSize */, colexecagg.OrderedAggKind,
 	)
 	if err != nil {
-		colexecerror.InternalError(err)
+		return nil, errors.AssertionFailedf(
+			"this error should have been checked in isAggregateSupported\n%+v", err,
+		)
 	}
 
 	a := &orderedAggregator{
@@ -171,7 +178,7 @@ func NewOrderedAggregator(args *colexecagg.NewAggregatorArgs) colexecop.Resettab
 		toClose:            toClose,
 	}
 	a.aggHelper = newAggregatorHelper(args, &a.datumAlloc, false /* isHashAgg */, coldata.BatchSize())
-	return a
+	return a, nil
 }
 
 func (a *orderedAggregator) Init(ctx context.Context) {

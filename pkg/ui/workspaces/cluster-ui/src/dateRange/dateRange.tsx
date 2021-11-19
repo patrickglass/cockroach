@@ -21,8 +21,8 @@ import styles from "./dateRange.module.scss";
 const cx = classNames.bind(styles);
 
 function rangeToString(start: Moment, end: Moment): string {
-  const formatStr = "MMM D, h:mm A";
-  const formatStrSameDay = "h:mm A";
+  const formatStr = "MMM D, H:mm";
+  const formatStrSameDay = "H:mm";
 
   const isSameDay = start.isSame(end, "day");
   return `${start.utc().format(formatStr)} - ${end
@@ -31,26 +31,24 @@ function rangeToString(start: Moment, end: Moment): string {
 }
 
 type DateRangeMenuProps = {
-  startInit?: Moment;
-  endInit?: Moment;
+  start: Moment;
+  end: Moment;
   allowedInterval?: [Moment, Moment];
+  closeMenu: () => void;
   onSubmit: (start: Moment, end: Moment) => void;
-  onCancel: () => void;
 };
 
-export function DateRangeMenu({
-  startInit,
-  endInit,
+function DateRangeMenu({
+  start,
+  end,
   allowedInterval,
+  closeMenu,
   onSubmit,
-  onCancel,
 }: DateRangeMenuProps): React.ReactElement {
   const dateFormat = "MMMM D, YYYY";
-  const timeFormat = "h:mm A [(UTC)]";
-  const [startMoment, setStartMoment] = useState<Moment>(
-    startInit || moment.utc(),
-  );
-  const [endMoment, setEndMoment] = useState<Moment>(endInit || moment.utc());
+  const timeFormat = "H:mm [(UTC)]";
+  const [startMoment, setStartMoment] = useState<Moment>(start);
+  const [endMoment, setEndMoment] = useState<Moment>(end);
 
   const onChangeStart = (m?: Moment) => {
     m && setStartMoment(m);
@@ -82,11 +80,12 @@ export function DateRangeMenu({
 
   const onApply = (): void => {
     onSubmit(startMoment, endMoment);
+    closeMenu();
   };
 
   return (
     <div className={cx("popup-content")}>
-      <Text className={cx("label")} textType={TextTypes.BodyStrong}>
+      <Text className={cx("label")} textType={TextTypes.CaptionStrong}>
         Start
       </Text>
       <DatePicker
@@ -103,10 +102,8 @@ export function DateRangeMenu({
         onChange={onChangeStart}
         suffixIcon={<span />}
         value={startMoment}
-        use12Hours
       />
-      <div className={cx("divider")} />
-      <Text className={cx("label")} textType={TextTypes.BodyStrong}>
+      <Text className={cx("label")} textType={TextTypes.CaptionStrong}>
         End
       </Text>
       <DatePicker
@@ -123,7 +120,6 @@ export function DateRangeMenu({
         onChange={onChangeEnd}
         suffixIcon={<span />}
         value={endMoment}
-        use12Hours
       />
       {!isValid && (
         <Alert
@@ -134,7 +130,7 @@ export function DateRangeMenu({
         />
       )}
       <div className={cx("popup-footer")}>
-        <Button onClick={onCancel} type="secondary" textAlign="center">
+        <Button onClick={closeMenu} type="secondary" textAlign="center">
           Cancel
         </Button>
         <Button
@@ -174,18 +170,13 @@ export function DateRange({
     setMenuVisible(false);
   };
 
-  const _onSubmit = (start: Moment, end: Moment) => {
-    onSubmit(start, end);
-    closeMenu();
-  };
-
   const menu = (
     <DateRangeMenu
       allowedInterval={allowedInterval}
-      startInit={start}
-      endInit={end}
-      onSubmit={_onSubmit}
-      onCancel={closeMenu}
+      start={start}
+      end={end}
+      closeMenu={closeMenu}
+      onSubmit={onSubmit}
     />
   );
 

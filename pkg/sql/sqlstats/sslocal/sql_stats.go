@@ -38,6 +38,10 @@ type SQLStats struct {
 	// fingerprints we can store in memory.
 	uniqueTxnFingerprintLimit *settings.IntSetting
 
+	// resetInterval is the interval of how long before the in-memory stats are
+	// being reset.
+	resetInterval *settings.DurationSetting
+
 	mu struct {
 		syncutil.Mutex
 
@@ -63,8 +67,6 @@ type SQLStats struct {
 	// reset interval, the SQLStats will dump all of the stats into if it is not
 	// nil.
 	flushTarget Sink
-
-	knobs *sqlstats.TestingKnobs
 }
 
 func newSQLStats(
@@ -74,8 +76,8 @@ func newSQLStats(
 	curMemBytesCount *metric.Gauge,
 	maxMemBytesHist *metric.Histogram,
 	parentMon *mon.BytesMonitor,
+	resetInterval *settings.DurationSetting,
 	flushTarget Sink,
-	knobs *sqlstats.TestingKnobs,
 ) *SQLStats {
 	monitor := mon.NewMonitor(
 		"SQLStats",
@@ -90,8 +92,8 @@ func newSQLStats(
 		st:                         st,
 		uniqueStmtFingerprintLimit: uniqueStmtFingerprintLimit,
 		uniqueTxnFingerprintLimit:  uniqueTxnFingerprintLimit,
+		resetInterval:              resetInterval,
 		flushTarget:                flushTarget,
-		knobs:                      knobs,
 	}
 	s.mu.apps = make(map[string]*ssmemstorage.Container)
 	s.mu.mon = monitor
@@ -128,7 +130,6 @@ func (s *SQLStats) getStatsForApplication(appName string) *ssmemstorage.Containe
 		&s.atomic.uniqueTxnFingerprintCount,
 		s.mu.mon,
 		appName,
-		s.knobs,
 	)
 	s.mu.apps[appName] = a
 	return a

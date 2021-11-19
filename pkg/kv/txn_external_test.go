@@ -139,10 +139,10 @@ func TestRollbackAfterAmbiguousCommit(t *testing.T) {
 			var tr *tracing.Tracer
 			if leaseHolder.NodeID == 1 {
 				db = tc.Servers[1].DB()
-				tr = tc.Servers[1].TracerI().(*tracing.Tracer)
+				tr = tc.Servers[1].Tracer().(*tracing.Tracer)
 			} else {
 				db = tc.Servers[0].DB()
-				tr = tc.Servers[0].TracerI().(*tracing.Tracer)
+				tr = tc.Servers[0].Tracer().(*tracing.Tracer)
 			}
 
 			txn := db.NewTxn(ctx, "test")
@@ -381,9 +381,9 @@ func testTxnNegotiateAndSendDoesNotBlock(t *testing.T, multiRange, strict, route
 					// Trace the request so we can determine whether it was served as a
 					// follower read. If running on a store with a follower replica and
 					// with a NEAREST routing policy, we expect follower reads.
-					ctx, collectAndFinish := tracing.ContextWithRecordingSpan(
+					ctx, collect, cancel := tracing.ContextWithRecordingSpan(
 						ctx, tracing.NewTracer(), "reader")
-					defer collectAndFinish()
+					defer cancel()
 
 					br, pErr := txn.NegotiateAndSend(ctx, ba)
 					if pErr != nil {
@@ -422,7 +422,7 @@ func testTxnNegotiateAndSendDoesNotBlock(t *testing.T, multiRange, strict, route
 					// where it would be valid for the request to be served by a follower
 					// or redirected to the leaseholder due to timing, so we make no
 					// assertion.
-					rec := collectAndFinish()
+					rec := collect()
 					expFollowerRead := store.StoreID() != lh.StoreID && strict && routeNearest
 					wasFollowerRead := kv.OnlyFollowerReads(rec)
 					ambiguous := !strict && routeNearest

@@ -19,7 +19,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/docs"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
@@ -33,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/sql/vtable"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/errors"
 	"golang.org/x/text/collate"
 )
@@ -435,9 +433,7 @@ https://www.postgresql.org/docs/9.5/infoschema-columns.html`,
 				}
 				colDefault := tree.DNull
 				if column.HasDefault() {
-					colExpr, err := schemaexpr.FormatExprForDisplay(
-						ctx, table, column.GetDefaultExpr(), &p.semaCtx, p.SessionData(), tree.FmtParsable,
-					)
+					colExpr, err := schemaexpr.FormatExprForDisplay(ctx, table, column.GetDefaultExpr(), &p.semaCtx, tree.FmtParsable)
 					if err != nil {
 						return err
 					}
@@ -445,9 +441,7 @@ https://www.postgresql.org/docs/9.5/infoschema-columns.html`,
 				}
 				colComputed := emptyString
 				if column.IsComputed() {
-					colExpr, err := schemaexpr.FormatExprForDisplay(
-						ctx, table, column.GetComputeExpr(), &p.semaCtx, p.SessionData(), tree.FmtSimple,
-					)
+					colExpr, err := schemaexpr.FormatExprForDisplay(ctx, table, column.GetComputeExpr(), &p.semaCtx, tree.FmtSimple)
 					if err != nil {
 						return err
 					}
@@ -1532,10 +1526,7 @@ var informationSchemaSessionVariables = virtualSchemaTable{
 	populate: func(ctx context.Context, p *planner, _ catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
 		for _, vName := range varNames {
 			gen := varGen[vName]
-			value, err := gen.Get(&p.extendedEvalCtx)
-			if err != nil {
-				return err
-			}
+			value := gen.Get(&p.extendedEvalCtx)
 			if err := addRow(
 				tree.NewDString(vName),
 				tree.NewDString(value),
@@ -2495,93 +2486,31 @@ func forEachTableDescWithTableLookupInternalFromDescriptors(
 	return nil
 }
 
-type roleOptions struct {
-	*tree.DJSON
-}
-
-func (r roleOptions) noLogin() (tree.DBool, error) {
-	nologin, err := r.Exists("NOLOGIN")
-	return tree.DBool(nologin), err
-}
-
-func (r roleOptions) validUntil(p *planner) (tree.Datum, error) {
-	const validUntilKey = "VALID UNTIL"
-	jsonValue, err := r.FetchValKey(validUntilKey)
-	if err != nil {
-		return nil, err
-	}
-	if jsonValue == nil {
-		return tree.DNull, nil
-	}
-	validUntilText, err := jsonValue.AsText()
-	if err != nil {
-		return nil, err
-	}
-	if validUntilText == nil {
-		return tree.DNull, nil
-	}
-	validUntil, _, err := pgdate.ParseTimestamp(
-		p.EvalContext().GetRelativeParseTime(),
-		pgdate.DefaultDateStyle(),
-		*validUntilText,
-	)
-	if err != nil {
-		return nil, errors.Errorf("rolValidUntil string %s could not be parsed with datestyle %s", *validUntilText, p.EvalContext().GetDateStyle())
-	}
-	return tree.MakeDTimestampTZ(validUntil, time.Second)
-}
-
-func (r roleOptions) createDB() (tree.DBool, error) {
-	createDB, err := r.Exists("CREATEDB")
-	return tree.DBool(createDB), err
-}
-
-func (r roleOptions) createRole() (tree.DBool, error) {
-	createRole, err := r.Exists("CREATEROLE")
-	return tree.DBool(createRole), err
-}
-
-func forEachRoleQuery(ctx context.Context, p *planner) string {
-	if p.EvalContext().Settings.Version.IsActive(ctx, clusterversion.DatabaseRoleSettings) {
-		return `
-SELECT
-	u.username,
-	"isRole",
-  drs.settings,
-	json_object_agg(COALESCE(ro.option, 'null'), ro.value)
-FROM
-	system.users AS u
-	LEFT JOIN system.role_options AS ro ON
-			ro.username = u.username
-  LEFT JOIN system.database_role_settings AS drs ON 
-			drs.role_name = u.username AND drs.database_id = 0
-GROUP BY
-	u.username, "isRole", drs.settings;
-`
-	}
-
-	return `
-SELECT
-	u.username,
-	"isRole",
-	NULL::STRING[] AS settings,
-	json_object_agg(COALESCE(ro.option, 'null'), ro.value)
-FROM
-	system.users AS u
-	LEFT JOIN system.role_options AS ro ON
-			ro.username = u.username
-GROUP BY
-	u.username, "isRole", settings;
-`
-}
-
 func forEachRole(
 	ctx context.Context,
 	p *planner,
-	fn func(username security.SQLUsername, isRole bool, options roleOptions, settings tree.Datum) error,
+	fn func(username security.SQLUsername, isRole bool, noLogin bool, rolValidUntil *time.Time) error,
 ) error {
-	query := forEachRoleQuery(ctx, p)
-
+	query := `
+SELECT
+	u.username,
+	"isRole",
+	EXISTS(
+		SELECT
+			option
+		FROM
+			system.role_options AS r
+		WHERE
+			r.username = u.username AND option = 'NOLOGIN'
+	)
+		AS nologin,
+	ro.value::TIMESTAMPTZ AS rolvaliduntil
+FROM
+	system.users AS u
+	LEFT JOIN system.role_options AS ro ON
+			ro.username = u.username
+			AND option = 'VALID UNTIL';
+`
 	// For some reason, using the iterator API here causes privilege_builtins
 	// logic test fail in 3node-tenant config with 'txn already encountered an
 	// error' (because of the context cancellation), so we buffer all roles
@@ -2599,17 +2528,19 @@ func forEachRole(
 		if !ok {
 			return errors.Errorf("isRole should be a boolean value, found %s instead", row[1].ResolvedType())
 		}
-
-		defaultSettings := row[2]
-		roleOptionsJSON, ok := row[3].(*tree.DJSON)
+		noLogin, ok := row[2].(*tree.DBool)
 		if !ok {
-			return errors.Errorf("roleOptionJson should be a JSON value, found %s instead", row[3].ResolvedType())
+			return errors.Errorf("noLogin should be a boolean value, found %s instead", row[2].ResolvedType())
 		}
-		options := roleOptions{roleOptionsJSON}
-
+		var rolValidUntil *time.Time
+		if rolValidUntilDatum, ok := row[3].(*tree.DTimestampTZ); ok {
+			rolValidUntil = &rolValidUntilDatum.Time
+		} else if row[3] != tree.DNull {
+			return errors.Errorf("rolValidUntil should be a timestamp or null value, found %s instead", row[3].ResolvedType())
+		}
 		// system tables already contain normalized usernames.
 		username := security.MakeSQLUsernameFromPreNormalizedString(string(usernameS))
-		if err := fn(username, bool(*isRole), options, defaultSettings); err != nil {
+		if err := fn(username, bool(*isRole), bool(*noLogin), rolValidUntil); err != nil {
 			return err
 		}
 	}

@@ -76,7 +76,7 @@ func (ex *connExecutor) execPrepare(
 		// OID to Datum is not a 1-1 mapping (for example, int4 and int8
 		// both map to TypeInt), so we need to maintain the types sent by
 		// the client.
-		if inferredTypes[i] == 0 || inferredTypes[i] == oid.T_unknown {
+		if inferredTypes[i] == 0 {
 			t, _ := ps.ValueType(tree.PlaceholderIdx(i))
 			inferredTypes[i] = t.Oid()
 		}
@@ -161,7 +161,7 @@ func (ex *connExecutor) prepare(
 
 	var flags planFlags
 	prepare := func(ctx context.Context, txn *kv.Txn) (err error) {
-		ex.statsCollector.Reset(ex.applicationStats, ex.phaseTimes)
+		ex.statsCollector.Reset(ex.statsWriter, ex.phaseTimes)
 		p := &ex.planner
 		if origin != PreparedStatementOriginSQL {
 			// If the PREPARE command was issued as a SQL statement, then we
@@ -205,7 +205,6 @@ func (ex *connExecutor) prepare(
 		}
 		prepared.Statement = stmt.Statement
 		prepared.StatementNoConstants = stmt.StmtNoConstants
-		prepared.StatementSummary = stmt.StmtSummary
 
 		// Point to the prepared state, which can be further populated during query
 		// preparation.
@@ -372,63 +371,33 @@ func (ex *connExecutor) execBind(
 					"expected %d arguments, got %d", numQArgs, len(bindCmd.Args)))
 		}
 
-		// We need to make sure type resolution happens within a transaction.
-		// Otherwise, for user-defined types we won't take the correct leases and
-		// will get back out of date type information.
-		// This code path is only used by the wire-level Bind command. The
-		// SQL EXECUTE command (which also needs to bind and resolve types) is
-		// handled separately in conn_executor_exec.
-		resolve := func(ctx context.Context, txn *kv.Txn) (err error) {
-			ex.statsCollector.Reset(ex.applicationStats, ex.phaseTimes)
-			p := &ex.planner
-			ex.resetPlanner(ctx, p, txn, ex.server.cfg.Clock.PhysicalTime() /* stmtTS */)
-
-			for i, arg := range bindCmd.Args {
-				k := tree.PlaceholderIdx(i)
-				t := ps.InferredTypes[i]
-				if arg == nil {
-					// nil indicates a NULL argument value.
-					qargs[k] = tree.DNull
-				} else {
-					typ, ok := types.OidToType[t]
-					if !ok {
-						var err error
-						typ, err = ex.planner.ResolveTypeByOID(ctx, t)
-						if err != nil {
-							return err
-						}
-					}
-					d, err := pgwirebase.DecodeDatum(
-						ex.planner.EvalContext(),
-						typ,
-						qArgFormatCodes[i],
-						arg,
-					)
+		for i, arg := range bindCmd.Args {
+			k := tree.PlaceholderIdx(i)
+			t := ps.InferredTypes[i]
+			if arg == nil {
+				// nil indicates a NULL argument value.
+				qargs[k] = tree.DNull
+			} else {
+				typ, ok := types.OidToType[t]
+				if !ok {
+					var err error
+					typ, err = ex.planner.ResolveTypeByOID(ctx, t)
 					if err != nil {
-						return pgerror.Wrapf(err, pgcode.ProtocolViolation, "error in argument for %s", k)
+						return nil, err
 					}
-					qargs[k] = d
 				}
+				d, err := pgwirebase.DecodeDatum(
+					ex.planner.EvalContext(),
+					typ,
+					qArgFormatCodes[i],
+					arg,
+				)
+				if err != nil {
+					return retErr(pgerror.Wrapf(err, pgcode.ProtocolViolation,
+						"error in argument for %s", k))
+				}
+				qargs[k] = d
 			}
-			return nil
-		}
-
-		if txn := ex.state.mu.txn; txn != nil && txn.IsOpen() {
-			// Use the existing transaction.
-			if err := resolve(ctx, txn); err != nil {
-				return retErr(err)
-			}
-		} else {
-			// Use a new transaction. This will handle retriable errors here rather
-			// than bubbling them up to the connExecutor state machine.
-			if err := ex.server.cfg.DB.Txn(ctx, resolve); err != nil {
-				return retErr(err)
-			}
-			// Bind with an implicit transaction will end up creating
-			// a new transaction. Once this transaction is complete,
-			// we can safely release the leases, otherwise we will
-			// incorrectly hold leases for later operations.
-			ex.extraTxnState.descCollection.ReleaseAll(ctx)
 		}
 	}
 
@@ -519,7 +488,7 @@ func (ex *connExecutor) deletePortal(ctx context.Context, name string) {
 	if !ok {
 		return
 	}
-	portal.close(ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc, name)
+	portal.decRef(ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc, name)
 	delete(ex.extraTxnState.prepStmtsNamespace.portals, name)
 }
 

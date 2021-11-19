@@ -59,7 +59,7 @@ func TestKVNemesisSingleNode(t *testing.T) {
 
 	config := NewDefaultConfig()
 	config.NumNodes, config.NumReplicas = 1, 1
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	env := &Env{sqlDBs: []*gosql.DB{sqlDB}}
 	failures, err := RunNemesis(ctx, rng, env, config, numSteps, db)
 	require.NoError(t, err, `%+v`, err)
@@ -102,7 +102,7 @@ func TestKVNemesisMultiNode(t *testing.T) {
 
 	config := NewDefaultConfig()
 	config.NumNodes, config.NumReplicas = numNodes, 3
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	env := &Env{sqlDBs: sqlDBs}
 	failures, err := RunNemesis(ctx, rng, env, config, numSteps, dbs...)
 	require.NoError(t, err, `%+v`, err)

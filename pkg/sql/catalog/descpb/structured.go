@@ -222,12 +222,12 @@ func (desc *TableDescriptor) Public() bool {
 	return desc.State == DescriptorState_PUBLIC
 }
 
-// Offline implements the Descriptor interface.
+// Offline returns true if the table is importing.
 func (desc *TableDescriptor) Offline() bool {
 	return desc.State == DescriptorState_OFFLINE
 }
 
-// Dropped implements the Descriptor interface.
+// Dropped returns true if the table is being dropped.
 func (desc *TableDescriptor) Dropped() bool {
 	return desc.State == DescriptorState_DROP
 }
@@ -237,37 +237,49 @@ func (desc *TableDescriptor) Adding() bool {
 	return desc.State == DescriptorState_ADD
 }
 
-// IsTable implements the TableDescriptor interface.
+// IsTable returns true if the TableDescriptor actually describes a
+// Table resource, as opposed to a different resource (like a View).
 func (desc *TableDescriptor) IsTable() bool {
 	return !desc.IsView() && !desc.IsSequence()
 }
 
-// IsView implements the TableDescriptor interface.
+// IsView returns true if the TableDescriptor actually describes a
+// View resource rather than a Table.
 func (desc *TableDescriptor) IsView() bool {
 	return desc.ViewQuery != ""
 }
 
-// MaterializedView implements the TableDescriptor interface.
+// MaterializedView returns whether or not this TableDescriptor is a
+// MaterializedView.
 func (desc *TableDescriptor) MaterializedView() bool {
 	return desc.IsMaterializedView
 }
 
-// IsPhysicalTable implements the TableDescriptor interface.
+// IsPhysicalTable returns true if the TableDescriptor actually describes a
+// physical Table that needs to be stored in the kv layer, as opposed to a
+// different resource like a view or a virtual table. Physical tables have
+// primary keys, column families, and indexes (unlike virtual tables).
+// Sequences count as physical tables because their values are stored in
+// the KV layer.
 func (desc *TableDescriptor) IsPhysicalTable() bool {
 	return desc.IsSequence() || (desc.IsTable() && !desc.IsVirtualTable()) || desc.MaterializedView()
 }
 
-// IsAs implements the TableDescriptor interface.
+// IsAs returns true if the TableDescriptor actually describes
+// a Table resource with an As source.
 func (desc *TableDescriptor) IsAs() bool {
 	return desc.CreateQuery != ""
 }
 
-// IsSequence implements the TableDescriptor interface.
+// IsSequence returns true if the TableDescriptor actually describes a
+// Sequence resource rather than a Table.
 func (desc *TableDescriptor) IsSequence() bool {
 	return desc.SequenceOpts != nil
 }
 
-// IsVirtualTable implements the TableDescriptor interface.
+// IsVirtualTable returns true if the TableDescriptor describes a
+// virtual Table (like the information_schema tables) and thus doesn't
+// need to be physically stored.
 func (desc *TableDescriptor) IsVirtualTable() bool {
 	return IsVirtualTable(desc.ID)
 }

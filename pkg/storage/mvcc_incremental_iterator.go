@@ -99,7 +99,7 @@ type MVCCIncrementalIterator struct {
 var _ SimpleMVCCIterator = &MVCCIncrementalIterator{}
 
 // MVCCIncrementalIterIntentPolicy controls how the
-// MVCCIncrementalIterator will handle intents that it encounters
+// MVCCIncrementalInterator will handle intents that it encounters
 // when iterating.
 type MVCCIncrementalIterIntentPolicy int
 
@@ -217,7 +217,9 @@ func (i *MVCCIncrementalIterator) SeekGE(startKey MVCCKey) {
 		}
 	}
 	i.iter.SeekGE(startKey)
-	if !i.checkValidAndSaveErr() {
+	if ok, err := i.iter.Valid(); !ok {
+		i.err = err
+		i.valid = false
 		return
 	}
 	i.err = nil
@@ -461,7 +463,10 @@ func (i *MVCCIncrementalIterator) advance() {
 			// done.
 			break
 		}
-		if !i.checkValidAndSaveErr() {
+
+		if ok, err := i.iter.Valid(); !ok {
+			i.err = err
+			i.valid = false
 			return
 		}
 	}
@@ -506,7 +511,9 @@ func (i *MVCCIncrementalIterator) UnsafeValue() []byte {
 func (i *MVCCIncrementalIterator) NextIgnoringTime() {
 	for {
 		i.iter.Next()
-		if !i.checkValidAndSaveErr() {
+		if ok, err := i.iter.Valid(); !ok {
+			i.err = err
+			i.valid = false
 			return
 		}
 

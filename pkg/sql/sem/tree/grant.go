@@ -30,7 +30,7 @@ import (
 type Grant struct {
 	Privileges privilege.List
 	Targets    TargetList
-	Grantees   RoleSpecList
+	Grantees   NameList
 }
 
 // TargetList represents a list of targets.
@@ -48,7 +48,7 @@ type TargetList struct {
 	// in the AST. Therefore they do not participate in pretty-printing,
 	// etc.
 	ForRoles bool
-	Roles    RoleSpecList
+	Roles    NameList
 }
 
 // Format implements the NodeFormatter interface.
@@ -91,7 +91,7 @@ func (node *Grant) Format(ctx *FmtCtx) {
 // GrantRole represents a GRANT <role> statement.
 type GrantRole struct {
 	Roles       NameList
-	Members     RoleSpecList
+	Members     NameList
 	AdminOption bool
 }
 

@@ -249,7 +249,7 @@ func (n *insertFastPathNode) startExec(params runParams) error {
 		}
 	}
 
-	return n.run.ti.init(params.ctx, params.p.txn, params.EvalContext(), &params.EvalContext().Settings.SV)
+	return n.run.ti.init(params.ctx, params.p.txn, params.EvalContext())
 }
 
 // Next is required because batchedPlanNode inherits from planNode, but
@@ -325,12 +325,6 @@ func (n *insertFastPathNode) BatchedValues(rowIdx int) tree.Datums { return n.ru
 
 func (n *insertFastPathNode) Close(ctx context.Context) {
 	n.run.ti.close(ctx)
-	for i := range n.run.fkChecks {
-		builder := n.run.fkChecks[i].spanBuilder
-		if builder != nil {
-			builder.Release()
-		}
-	}
 	*n = insertFastPathNode{}
 	insertFastPathNodePool.Put(n)
 }

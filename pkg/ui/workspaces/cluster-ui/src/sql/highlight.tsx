@@ -82,7 +82,7 @@ export class Highlight extends React.Component<SqlBoxProps> {
         </span>
         {zone && (
           <>
-            <div className={cx("highlight-divider")} />
+            <div className={cx("higlight-divider")} />
             {this.renderZone()}
           </>
         )}

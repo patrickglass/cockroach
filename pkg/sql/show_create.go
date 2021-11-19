@@ -18,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catformat"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -59,9 +58,10 @@ type ShowCreateDisplayOptions struct {
 // ShowCreateTable returns a valid SQL representation of the CREATE
 // TABLE statement used to create the given table.
 //
-// The names of the tables referenced by foreign keys are prefixed by their own
-// database name unless it is equal to the given dbPrefix. This allows us to
-// elide the prefix when the given table references other tables in the
+// The names of the tables references by foreign keys, and the
+// interleaved parent if any, are prefixed by their own database name
+// unless it is equal to the given dbPrefix. This allows us to elide
+// the prefix when the given table references other tables in the
 // current database.
 func ShowCreateTable(
 	ctx context.Context,
@@ -88,9 +88,7 @@ func ShowCreateTable(
 			f.WriteString(",")
 		}
 		f.WriteString("\n\t")
-		colstr, err := schemaexpr.FormatColumnForDisplay(
-			ctx, desc, col, &p.RunParams(ctx).p.semaCtx, p.RunParams(ctx).p.SessionData(),
-		)
+		colstr, err := schemaexpr.FormatColumnForDisplay(ctx, desc, col, &p.RunParams(ctx).p.semaCtx)
 		if err != nil {
 			return "", err
 		}
@@ -101,7 +99,7 @@ func ShowCreateTable(
 		f.WriteString(",\n\tCONSTRAINT ")
 		formatQuoteNames(&f.Buffer, desc.GetPrimaryIndex().GetName())
 		f.WriteString(" ")
-		f.WriteString(tabledesc.PrimaryKeyString(desc))
+		f.WriteString(desc.PrimaryKeyString())
 	}
 
 	// TODO (lucy): Possibly include FKs in the mutations list here, or else
@@ -135,39 +133,72 @@ func ShowCreateTable(
 			return "", err
 		}
 	}
-	for _, idx := range desc.PublicNonPrimaryIndexes() {
-		// Showing the primary index is handled above.
-
-		// Build the PARTITION BY clause.
-		var partitionBuf bytes.Buffer
-		if err := ShowCreatePartitioning(
-			a, p.ExecCfg().Codec, desc, idx, idx.GetPartitioning(), &partitionBuf, 1 /* indent */, 0, /* colOffset */
-		); err != nil {
-			return "", err
+	allIdx := append(
+		append([]catalog.Index{}, desc.PublicNonPrimaryIndexes()...),
+		desc.GetPrimaryIndex())
+	for _, idx := range allIdx {
+		// Only add indexes to the create_statement column, and not to the
+		// create_nofks column if they are not associated with an INTERLEAVE
+		// statement.
+		// Initialize to false if Interleave has no ancestors, indicating that the
+		// index is not interleaved at all.
+		includeInterleaveClause := idx.NumInterleaveAncestors() == 0
+		if displayOptions.FKDisplayMode != OmitFKClausesFromCreate {
+			// The caller is instructing us to not omit FK clauses from inside the CREATE.
+			// (i.e. the caller does not want them as separate DDL.)
+			// Since we're including FK clauses, we need to also include the PARTITION and INTERLEAVE
+			// clauses as well.
+			includeInterleaveClause = true
 		}
+		if !idx.Primary() && includeInterleaveClause {
+			// Showing the primary index is handled above.
 
-		f.WriteString(",\n\t")
-		idxStr, err := catformat.IndexForDisplay(
-			ctx,
-			desc,
-			&descpb.AnonymousTable,
-			idx,
-			partitionBuf.String(),
-			p.RunParams(ctx).p.SemaCtx(),
-			p.RunParams(ctx).p.SessionData(),
-		)
-		if err != nil {
-			return "", err
+			// Build the PARTITION BY clause.
+			var partitionBuf bytes.Buffer
+			if err := ShowCreatePartitioning(
+				a, p.ExecCfg().Codec, desc, idx, idx.GetPartitioning(), &partitionBuf, 1 /* indent */, 0, /* colOffset */
+			); err != nil {
+				return "", err
+			}
+
+			// Add interleave or Foreign Key indexes only to the create_table columns,
+			// and not the create_nofks column.
+			var interleaveBuf bytes.Buffer
+			if includeInterleaveClause {
+				// TODO(mgartner): The logic in showCreateInterleave can be
+				// moved to catformat.IndexForDisplay.
+				if err := showCreateInterleave(idx, &interleaveBuf, dbPrefix, lCtx); err != nil {
+					return "", err
+				}
+			}
+
+			f.WriteString(",\n\t")
+			idxStr, err := catformat.IndexForDisplay(
+				ctx,
+				desc,
+				&descpb.AnonymousTable,
+				idx,
+				partitionBuf.String(),
+				interleaveBuf.String(),
+				p.RunParams(ctx).p.SemaCtx(),
+			)
+			if err != nil {
+				return "", err
+			}
+			f.WriteString(idxStr)
+
 		}
-		f.WriteString(idxStr)
 	}
 
 	// Create the FAMILY and CONSTRAINTs of the CREATE statement
 	showFamilyClause(desc, f)
-	if err := showConstraintClause(ctx, desc, &p.RunParams(ctx).p.semaCtx, p.RunParams(ctx).p.SessionData(), f); err != nil {
+	if err := showConstraintClause(ctx, desc, &p.RunParams(ctx).p.semaCtx, f); err != nil {
 		return "", err
 	}
 
+	if err := showCreateInterleave(desc.GetPrimaryIndex(), &f.Buffer, dbPrefix, lCtx); err != nil {
+		return "", err
+	}
 	if err := ShowCreatePartitioning(
 		a, p.ExecCfg().Codec, desc, desc.GetPrimaryIndex(), desc.GetPrimaryIndex().GetPartitioning(), &f.Buffer, 0 /* indent */, 0, /* colOffset */
 	); err != nil {
@@ -202,10 +233,11 @@ func formatQuoteNames(buf *bytes.Buffer, names ...string) {
 // ShowCreate returns a valid SQL representation of the CREATE
 // statement used to create the descriptor passed in.
 //
-// The names of the tables references by foreign keys are prefixed by their own
-// database name unless it is equal to the given dbPrefix. This allows us to
-// elide the prefix when the given table references other tables in the current
-// database.
+// The names of the tables references by foreign keys, and the
+// interleaved parent if any, are prefixed by their own database name
+// unless it is equal to the given dbPrefix. This allows us to elide
+// the prefix when the given table references other tables in the
+// current database.
 func (p *planner) ShowCreate(
 	ctx context.Context,
 	dbPrefix string,
@@ -217,7 +249,7 @@ func (p *planner) ShowCreate(
 	var err error
 	tn := tree.MakeUnqualifiedTableName(tree.Name(desc.GetName()))
 	if desc.IsView() {
-		stmt, err = ShowCreateView(ctx, &p.RunParams(ctx).p.semaCtx, p.RunParams(ctx).p.SessionData(), &tn, desc)
+		stmt, err = ShowCreateView(ctx, &p.RunParams(ctx).p.semaCtx, &tn, desc)
 	} else if desc.IsSequence() {
 		stmt, err = ShowCreateSequence(ctx, &tn, desc)
 	} else {

@@ -24,8 +24,7 @@ import (
 	"github.com/prometheus/common/model"
 )
 
-// PromClient is an interface allowing queries against Prometheus.
-type PromClient interface {
+type promClient interface {
 	Query(ctx context.Context, query string, ts time.Time) (model.Value, promv1.Warnings, error)
 }
 
@@ -34,7 +33,7 @@ type tpccChaosEventProcessor struct {
 	workloadNodeIP    string
 	ops               []string
 	ch                chan ChaosEvent
-	promClient        PromClient
+	promClient        promClient
 	errs              []error
 
 	// allowZeroSuccessDuringUptime allows 0 successes during an uptime event.

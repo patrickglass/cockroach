@@ -22,11 +22,9 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/logger"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
-	"github.com/cockroachdb/errors"
 )
 
 // This file contains common elements for all 3rd party test suite roachtests.
@@ -132,7 +130,7 @@ func repeatRunE(
 		}
 		return nil
 	}
-	return errors.Wrapf(lastError, "all attempts failed for %s", operation)
+	return fmt.Errorf("all attempts failed for %s due to error: %s", operation, lastError)
 }
 
 // repeatRunWithBuffer is the same function as c.RunWithBuffer but with an
@@ -165,7 +163,7 @@ func repeatRunWithBuffer(
 		}
 		return lastResult, nil
 	}
-	return nil, errors.Wrapf(lastError, "all attempts failed for %s\n%s", operation, lastResult)
+	return nil, fmt.Errorf("all attempts failed for %s, with error: %s\n%s", operation, lastError, lastResult)
 }
 
 // repeatGitCloneE is the same function as c.GitCloneE but with an automatic
@@ -194,7 +192,7 @@ func repeatGitCloneE(
 		}
 		return nil
 	}
-	return errors.Wrapf(lastError, "could not clone %s", src)
+	return fmt.Errorf("could not clone %s due to error: %s", src, lastError)
 }
 
 // repeatGetLatestTag fetches the latest (sorted) tag from a github repo.
@@ -291,29 +289,5 @@ func repeatGetLatestTag(
 
 		return releaseTags[len(releaseTags)-1].tag, nil
 	}
-	return "", errors.Wrapf(lastError, "could not get tags from %s", url)
-}
-
-// gitCloneWithRecurseSubmodules clones a git repo from src into dest and checks out origin's
-// version of the given branch, but with a --recurse-submodules flag.
-// The src, dest, and branch arguments must not contain shell special characters.
-func gitCloneWithRecurseSubmodules(
-	ctx context.Context,
-	c cluster.Cluster,
-	l *logger.Logger,
-	src, dest, branch string,
-	node option.NodeListOption,
-) error {
-	return c.RunL(ctx, l, node, "bash", "-e", "-c", fmt.Sprintf(`'
-if ! test -d %[1]s; then
-  git clone --recurse-submodules -b %[2]s --depth 1 %[3]s %[1]s
-else
-  cd %[1]s
-  git fetch origin
-  git checkout origin/%[2]s
-fi
-'`, dest,
-		branch,
-		src,
-	))
+	return "", fmt.Errorf("could not get tags from %s, due to error: %s", url, lastError)
 }

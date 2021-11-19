@@ -18,30 +18,26 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 )
 
 // NewColSpanAssembler returns a ColSpanAssembler operator that is able to
 // generate lookup spans from input batches.
-// - neededColOrdsInWholeTable is a set containing the ordinals of all columns
-// that need to be fetched. These ordinals are based on the schema of the whole
-// table rather than only among the needed columns.
 func NewColSpanAssembler(
 	codec keys.SQLCodec,
 	allocator *colmem.Allocator,
 	table catalog.TableDescriptor,
 	index catalog.Index,
 	inputTypes []*types.T,
-	neededColOrdsInWholeTable util.FastIntSet,
+	neededCols util.FastIntSet,
 ) ColSpanAssembler {
 	base := spanAssemblerPool.Get().(*spanAssemblerBase)
-	base.colFamStartKeys, base.colFamEndKeys = getColFamilyEncodings(neededColOrdsInWholeTable, table, index)
+	base.colFamStartKeys, base.colFamEndKeys = getColFamilyEncodings(neededCols, table, index)
 	keyPrefix := rowenc.MakeIndexKeyPrefix(codec, table, index.GetID())
 	base.scratchKey = append(base.scratchKey[:0], keyPrefix...)
 	base.prefixLength = len(keyPrefix)
@@ -60,8 +56,8 @@ func NewColSpanAssembler(
 	}
 
 	// Account for the memory currently in use.
-	base.spansBytes = int64(cap(base.spans)) * spanSize
-	base.allocator.AdjustMemoryUsage(base.spansBytes)
+	usedMem := int64(cap(base.spans) * int(spanSize))
+	base.allocator.AdjustMemoryUsage(usedMem)
 
 	if len(base.colFamStartKeys) == 0 {
 		return &spanAssemblerNoColFamily{spanAssemblerBase: *base}
@@ -82,27 +78,17 @@ type ColSpanAssembler interface {
 
 	// ConsumeBatch generates lookup spans from input batches and stores them to
 	// later be returned by GetSpans. Spans are generated only for rows in the
-	// range [startIdx, endIdx). If startIdx >= endIdx, ConsumeBatch will
-	// perform no work. The memory of the newly accumulated spans is accounted
-	// for.
-	// Note: ConsumeBatch may invalidate the spans returned by the last call to
-	// GetSpans.
+	// range [startIdx, endIdx). If startIdx >= endIdx, ConsumeBatch will perform
+	// no work.
 	ConsumeBatch(batch coldata.Batch, startIdx, endIdx int)
 
 	// GetSpans returns the set of spans that have been generated so far. The
-	// subsequent calls to GetSpans will invalidate the spans returned by the
-	// previous calls. A caller that wishes to hold on to spans over the course
-	// of multiple calls should perform a shallow copy of the Spans. GetSpans
-	// will return an empty slice if it is called before ConsumeBatch.
-	// The memory of the returned object is no longer accounted for by the
-	// ColSpanAssembler, so it is the caller's responsibility to do so.
+	// returned Spans object is still owned by the SpanAssembler, so subsequent
+	// calls to GetSpans will invalidate the spans returned by previous calls. A
+	// caller that wishes to hold on to spans over the course of multiple calls
+	// should perform a shallow copy of the Spans. GetSpans will return an empty
+	// slice if it is called before ConsumeBatch.
 	GetSpans() roachpb.Spans
-
-	// AccountForSpans notifies the ColSpanAssembler that it is now responsible
-	// for accounting for the memory used by already allocated spans slice. This
-	// should be called after the result of the last call to GetSpans() is no
-	// longer accounted for by the caller.
-	AccountForSpans()
 
 	// Close closes the ColSpanAssembler operator.
 	Close()
@@ -116,10 +102,6 @@ type spanAssemblerBase struct {
 	// keys since the last call to GetSpans. It is reset each time GetSpans is
 	// called, since the SpanAssembler operator no longer owns the memory.
 	keyBytes int
-
-	// spansBytes tracks the number of bytes used by spans slice that we have
-	// accounted for so far. It doesn't include any of the keys in the spans.
-	spansBytes int64
 
 	// spans is the list of spans that have been assembled so far. spans is owned
 	// and reset upon each call to GetSpans by the SpanAssembler operator.
@@ -165,7 +147,7 @@ func (op *spanAssemblerNoColFamily) ConsumeBatch(batch coldata.Batch, startIdx, 
 	}
 
 	oldKeyBytes := op.keyBytes
-	oldSpansBytes := op.spansBytes
+	oldSpansCap := cap(op.spans)
 	for i := 0; i < (endIdx - startIdx); i++ {
 		op.scratchKey = op.scratchKey[:op.prefixLength]
 		for j := range op.spanCols {
@@ -182,16 +164,20 @@ func (op *spanAssemblerNoColFamily) ConsumeBatch(batch coldata.Batch, startIdx, 
 			op.keyBytes += len(span.Key)
 			span.EndKey = make(roachpb.Key, 0, len(op.scratchKey)+1)
 			span.EndKey = append(span.EndKey, op.scratchKey...)
-			span.EndKey = span.EndKey.PrefixEnd()
+			// TODO(drewk): change this to use PrefixEnd() when interleaved indexes are
+			// permanently removed. Keep it this way for now to allow testing
+			// against the row engine, even though the vectorized index joiner doesn't
+			// allow interleaved indexes.
+			span.EndKey = encoding.EncodeInterleavedSentinel(span.EndKey)
 			op.keyBytes += len(span.EndKey)
 			op.spans = append(op.spans, span)
 		}
 	}
 
 	// Account for the memory allocated for the span slice and keys.
-	keyBytesMem := int64(op.keyBytes - oldKeyBytes)
-	op.spansBytes = int64(cap(op.spans)) * spanSize
-	op.allocator.AdjustMemoryUsage((op.spansBytes - oldSpansBytes) + keyBytesMem)
+	keyBytesMem := op.keyBytes - oldKeyBytes
+	spanSliceMem := (cap(op.spans) - oldSpansCap) * int(spanSize)
+	op.allocator.AdjustMemoryUsage(int64(spanSliceMem + keyBytesMem))
 }
 
 type spanAssemblerWithColFamily struct {
@@ -211,7 +197,7 @@ func (op *spanAssemblerWithColFamily) ConsumeBatch(batch coldata.Batch, startIdx
 	}
 
 	oldKeyBytes := op.keyBytes
-	oldSpansBytes := op.spansBytes
+	oldSpansCap := cap(op.spans)
 	for i := 0; i < (endIdx - startIdx); i++ {
 		op.scratchKey = op.scratchKey[:op.prefixLength]
 		for j := range op.spanCols {
@@ -243,34 +229,22 @@ func (op *spanAssemblerWithColFamily) ConsumeBatch(batch coldata.Batch, startIdx
 	}
 
 	// Account for the memory allocated for the span slice and keys.
-	keyBytesMem := int64(op.keyBytes - oldKeyBytes)
-	op.spansBytes = int64(cap(op.spans)) * spanSize
-	op.allocator.AdjustMemoryUsage((op.spansBytes - oldSpansBytes) + keyBytesMem)
+	keyBytesMem := op.keyBytes - oldKeyBytes
+	spanSliceMem := (cap(op.spans) - oldSpansCap) * int(spanSize)
+	op.allocator.AdjustMemoryUsage(int64(spanSliceMem + keyBytesMem))
 }
 
-const spanSize = int64(unsafe.Sizeof(roachpb.Span{}))
+const spanSize = unsafe.Sizeof(roachpb.Span{})
 
 // GetSpans implements the ColSpanAssembler interface.
 func (b *spanAssemblerBase) GetSpans() roachpb.Spans {
-	// The caller takes ownership of the returned spans, so we release all the
-	// memory.
-	b.allocator.ReleaseMemory(int64(b.keyBytes) + b.spansBytes)
+	// Even though the memory allocated for the span keys probably can't be GC'd
+	// yet, we release now because the memory will be owned by the caller.
+	b.allocator.ReleaseMemory(int64(b.keyBytes))
 	b.keyBytes = 0
-	b.spansBytes = 0
 	spans := b.spans
 	b.spans = b.spans[:0]
 	return spans
-}
-
-// AccountForSpans implements the ColSpanAssembler interface.
-func (b *spanAssemblerBase) AccountForSpans() {
-	if b.spansBytes != 0 {
-		colexecerror.InternalError(errors.AssertionFailedf(
-			"unexpectedly non-zero spans bytes in AccountForSpans",
-		))
-	}
-	b.spansBytes = int64(cap(b.spans)) * spanSize
-	b.allocator.AdjustMemoryUsage(b.spansBytes)
 }
 
 // Close implements the ColSpanAssembler interface.
@@ -281,9 +255,13 @@ func (b *spanAssemblerBase) Close() {
 }
 
 // Release implements the ColSpanAssembler interface.
-// TODO(yuzefovich): once we put the spanAssembler into the pool, we no longer
-// account for the spans slice. Figure out how we can improve the accounting
-// here.
+// TODO(drewk): we account for the memory that is owned by the SpanAssembler
+// operator, but release it once the SpanAssembler loses its references even
+// though it can still be referenced elsewhere. The two cases are the spans
+// slice (it is put into a pool) and the underlying bytes for the keys (they are
+// referenced by the kv fetcher code). Ideally we would hand off memory
+// accounting to whoever ends up owning the memory, instead of just no longer
+// tracking it.
 func (b *spanAssemblerBase) Release() {
 	for i := range b.spanCols {
 		// Release references to input columns.

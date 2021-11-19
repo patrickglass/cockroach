@@ -43,14 +43,8 @@ CREATE USER UsEr1
 statement ok
 CREATE USER Ομηρος
 
-statement error pgcode 42939 role name "node" is reserved
+statement error username "node" reserved
 CREATE USER node
-
-statement error pgcode 42939 role name "public" is reserved
-CREATE USER public
-
-statement error pgcode 42939 role name "none" is reserved
-CREATE USER "none"
 
 statement error empty passwords are not permitted
 CREATE USER test WITH PASSWORD ''
@@ -74,19 +68,18 @@ statement ok
 CREATE USER "foo-bar"
 
 statement ok
-PREPARE pcu AS CREATE USER foo WITH PASSWORD $1;
-  EXECUTE pcu('bar')
+PREPARE pcu AS CREATE USER $1 WITH PASSWORD $2;
+  EXECUTE pcu('foo','bar')
 
 statement ok
 ALTER USER foo WITH PASSWORD somepass
 
 statement ok
-PREPARE chpw AS ALTER USER foo WITH PASSWORD $1;
-  EXECUTE chpw('bar')
+PREPARE chpw AS ALTER USER $1 WITH PASSWORD $2;
+  EXECUTE chpw('foo', 'bar')
 
 statement error user blix does not exist
-PREPARE chpw2 AS ALTER USER blix WITH PASSWORD $1;
-  EXECUTE chpw2('baz')
+EXECUTE chpw('blix', 'blah')
 
 query TTT colnames
 SHOW USERS
@@ -102,7 +95,7 @@ user2     ·        {}
 user3     ·        {}
 ομηρος    ·        {}
 
-statement error "": username is empty
+statement error no username specified
 CREATE USER ""
 
 query TTTTT

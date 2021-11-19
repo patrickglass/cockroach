@@ -28,7 +28,7 @@ func TestPostgresMutator(t *testing.T) {
 		SET CLUSTER SETTING "sql.stats.automatic_collection.enabled" = false;
 	`
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	{
 		mutated, changed := ApplyString(rng, q, PostgresMutator)
 		if !changed {

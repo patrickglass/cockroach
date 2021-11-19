@@ -18,8 +18,10 @@ import (
 
 // KeyRange is a helper struct for the ReplicaMVCCDataIterator and
 // ReplicaEngineDataIterator.
+// TODO(sumeer): change these to roachpb.Key since the timestamp is
+// always empty and the code below assumes that fact.
 type KeyRange struct {
-	Start, End roachpb.Key
+	Start, End storage.MVCCKey
 }
 
 // ReplicaMVCCDataIterator provides a complete iteration over MVCC or unversioned
@@ -141,8 +143,8 @@ func MakeRangeIDLocalKeyRange(rangeID roachpb.RangeID, replicatedOnly bool) KeyR
 	}
 	sysRangeIDKey := prefixFn(rangeID)
 	return KeyRange{
-		Start: sysRangeIDKey,
-		End:   sysRangeIDKey.PrefixEnd(),
+		Start: storage.MakeMVCCMetadataKey(sysRangeIDKey),
+		End:   storage.MakeMVCCMetadataKey(sysRangeIDKey.PrefixEnd()),
 	}
 }
 
@@ -152,8 +154,8 @@ func MakeRangeIDLocalKeyRange(rangeID roachpb.RangeID, replicatedOnly bool) KeyR
 // /System), but it actually belongs to [/Table/1, /Table/2).
 func makeRangeLocalKeyRange(d *roachpb.RangeDescriptor) KeyRange {
 	return KeyRange{
-		Start: keys.MakeRangeKeyPrefix(d.StartKey),
-		End:   keys.MakeRangeKeyPrefix(d.EndKey),
+		Start: storage.MakeMVCCMetadataKey(keys.MakeRangeKeyPrefix(d.StartKey)),
+		End:   storage.MakeMVCCMetadataKey(keys.MakeRangeKeyPrefix(d.EndKey)),
 	}
 }
 
@@ -175,12 +177,12 @@ func makeRangeLockTableKeyRanges(d *roachpb.RangeDescriptor) [2]KeyRange {
 	endGlobal, _ := keys.LockTableSingleKey(roachpb.Key(d.EndKey), nil)
 	return [2]KeyRange{
 		{
-			Start: startRangeLocal,
-			End:   endRangeLocal,
+			Start: storage.MakeMVCCMetadataKey(startRangeLocal),
+			End:   storage.MakeMVCCMetadataKey(endRangeLocal),
 		},
 		{
-			Start: startGlobal,
-			End:   endGlobal,
+			Start: storage.MakeMVCCMetadataKey(startGlobal),
+			End:   storage.MakeMVCCMetadataKey(endGlobal),
 		},
 	}
 }
@@ -189,8 +191,8 @@ func makeRangeLockTableKeyRanges(d *roachpb.RangeDescriptor) [2]KeyRange {
 func MakeUserKeyRange(d *roachpb.RangeDescriptor) KeyRange {
 	userKeys := d.KeySpan()
 	return KeyRange{
-		Start: userKeys.Key.AsRawKey(),
-		End:   userKeys.EndKey.AsRawKey(),
+		Start: storage.MakeMVCCMetadataKey(userKeys.Key.AsRawKey()),
+		End:   storage.MakeMVCCMetadataKey(userKeys.EndKey.AsRawKey()),
 	}
 }
 
@@ -238,13 +240,13 @@ func (ri *ReplicaMVCCDataIterator) tryCloseAndCreateIter() {
 		ri.it = ri.reader.NewMVCCIterator(
 			storage.MVCCKeyAndIntentsIterKind,
 			storage.IterOptions{
-				LowerBound: ri.ranges[ri.curIndex].Start,
-				UpperBound: ri.ranges[ri.curIndex].End,
+				LowerBound: ri.ranges[ri.curIndex].Start.Key,
+				UpperBound: ri.ranges[ri.curIndex].End.Key,
 			})
 		if ri.reverse {
-			ri.it.SeekLT(storage.MakeMVCCMetadataKey(ri.ranges[ri.curIndex].End))
+			ri.it.SeekLT(ri.ranges[ri.curIndex].End)
 		} else {
-			ri.it.SeekGE(storage.MakeMVCCMetadataKey(ri.ranges[ri.curIndex].Start))
+			ri.it.SeekGE(ri.ranges[ri.curIndex].Start)
 		}
 		if valid, err := ri.it.Valid(); valid || err != nil {
 			ri.err = err
@@ -354,7 +356,7 @@ func NewReplicaEngineDataIterator(
 // seekStart seeks the iterator to the start of its data range.
 func (ri *ReplicaEngineDataIterator) seekStart() {
 	ri.curIndex = 0
-	ri.valid, ri.err = ri.it.SeekEngineKeyGE(storage.EngineKey{Key: ri.ranges[ri.curIndex].Start})
+	ri.valid, ri.err = ri.it.SeekEngineKeyGE(storage.EngineKey{Key: ri.ranges[ri.curIndex].Start.Key})
 	ri.advance()
 }
 
@@ -381,13 +383,13 @@ func (ri *ReplicaEngineDataIterator) advance() {
 			ri.valid = false
 			return
 		}
-		if k.Key.Compare(ri.ranges[ri.curIndex].End) < 0 {
+		if k.Key.Compare(ri.ranges[ri.curIndex].End.Key) < 0 {
 			return
 		}
 		ri.curIndex++
 		if ri.curIndex < len(ri.ranges) {
 			ri.valid, ri.err = ri.it.SeekEngineKeyGE(
-				storage.EngineKey{Key: ri.ranges[ri.curIndex].Start})
+				storage.EngineKey{Key: ri.ranges[ri.curIndex].Start.Key})
 		} else {
 			ri.valid = false
 			return

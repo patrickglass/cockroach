@@ -29,21 +29,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestDataDriven makes use of datadriven to play back all operations executed
+func init() {
+	isTesting = true
+}
+
+// TestDatadriven makes use of datadriven to play back all operations executed
 // by individual `dev` invocations. The testcases are defined under testdata/*,
 // where each test files corresponds to a recording capture found in
 // testdata/recording/*.
 //
-// DataDriven divvies up these files as subtests, so individual "files" are
+// Datadriven divvies up these files as subtests, so individual "files" are
 // runnable through:
 //
-// 		go test -run TestDataDriven/<fname>
+// 		go test -run TestDatadriven/<fname>
 //
 // Recordings are used to mock out "system" behavior. During these test runs
 // (unless -record is specified), attempts to shell out to `bazel` or perform
 // other OS operations are intercepted and responses are constructed using
 // recorded data.
-func TestDataDriven(t *testing.T) {
+func TestDatadriven(t *testing.T) {
 	verbose := testing.Verbose()
 	testdata := testutils.TestDataPath(t)
 	datadriven.Walk(t, testdata, func(t *testing.T, path string) {
@@ -84,6 +88,7 @@ func TestDataDriven(t *testing.T) {
 			dev := makeDevCmd()
 			dev.exec = devExec
 			dev.os = devOS
+			require.NoError(t, setupPath(dev))
 
 			if !verbose {
 				dev.cli.SetErr(ioutil.Discard)
@@ -105,7 +110,7 @@ func TestDataDriven(t *testing.T) {
 				logs, err := ioutil.ReadAll(logger)
 				require.NoError(t, err)
 
-				return string(logs)
+				return fmt.Sprintf("%s", logs)
 			default:
 				return fmt.Sprintf("unknown command: %s", d.Cmd)
 			}

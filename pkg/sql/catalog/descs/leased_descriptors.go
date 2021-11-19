@@ -64,7 +64,8 @@ func (m maxTimestampBoundDeadlineHolder) UpdateDeadline(
 
 func makeLeasedDescriptors(lm leaseManager) leasedDescriptors {
 	return leasedDescriptors{
-		lm: lm,
+		lm:    lm,
+		cache: nstree.MakeMap(),
 	}
 }
 
@@ -196,16 +197,7 @@ func (ld *leasedDescriptors) maybeUpdateDeadline(
 	// SQL pods.
 	var deadline hlc.Timestamp
 	if session != nil {
-		if expiration, txnTS := session.Expiration(), txn.ReadTimestamp(); txnTS.Less(expiration) {
-			deadline = expiration
-		} else {
-			// If the session has expired relative to this transaction, propagate
-			// a clear error that that's what is going on.
-			return errors.Errorf(
-				"liveness session expired %s before transaction",
-				txnTS.GoTime().Sub(expiration.GoTime()),
-			)
-		}
+		deadline = session.Expiration()
 	}
 	if leaseDeadline, ok := ld.getDeadline(); ok && (deadline.IsEmpty() || leaseDeadline.Less(deadline)) {
 		// Set the deadline to the lease deadline if session expiration is empty

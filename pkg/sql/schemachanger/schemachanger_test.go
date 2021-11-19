@@ -28,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -67,6 +68,9 @@ func TestSchemaChangeWaitsForOtherSchemaChanges(t *testing.T) {
 		var kvDB *kv.DB
 		params, _ := tests.CreateTestServerParams()
 		params.Knobs = base.TestingKnobs{
+			SQLExecutor: &sql.ExecutorTestingKnobs{
+				AllowDeclarativeSchemaChanger: true,
+			},
 			SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
 				RunBeforeResume: func(jobID jobspb.JobID) error {
 					// Only block in job 2.
@@ -91,7 +95,7 @@ func TestSchemaChangeWaitsForOtherSchemaChanges(t *testing.T) {
 				BeforeStage: func(_ scop.Ops, m scexec.TestingKnobMetadata) error {
 					// Assert that when job 3 is running, there are no mutations other
 					// than the ones associated with this schema change.
-					if m.Phase != scop.PostCommitPhase {
+					if m.Phase != scplan.PostCommitPhase {
 						return nil
 					}
 					table := catalogkv.TestingGetTableDescriptorFromSchema(
@@ -196,11 +200,14 @@ func TestSchemaChangeWaitsForOtherSchemaChanges(t *testing.T) {
 		var kvDB *kv.DB
 		params, _ := tests.CreateTestServerParams()
 		params.Knobs = base.TestingKnobs{
+			SQLExecutor: &sql.ExecutorTestingKnobs{
+				AllowDeclarativeSchemaChanger: true,
+			},
 			SQLNewSchemaChanger: &scexec.NewSchemaChangerTestingKnobs{
 				BeforeStage: func(ops scop.Ops, m scexec.TestingKnobMetadata) error {
 					// Verify that we never queue mutations for job 2 before finishing job
 					// 1.
-					if m.Phase != scop.PostCommitPhase {
+					if m.Phase != scplan.PostCommitPhase {
 						return nil
 					}
 					table := catalogkv.TestingGetTableDescriptorFromSchema(
@@ -322,6 +329,9 @@ func TestConcurrentOldSchemaChangesCannotStart(t *testing.T) {
 	var kvDB *kv.DB
 	params, _ := tests.CreateTestServerParams()
 	params.Knobs = base.TestingKnobs{
+		SQLExecutor: &sql.ExecutorTestingKnobs{
+			AllowDeclarativeSchemaChanger: true,
+		},
 		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
 			RunBeforeResume: func(jobID jobspb.JobID) error {
 				// Assert that old schema change jobs never run in this test.
@@ -333,7 +343,7 @@ func TestConcurrentOldSchemaChangesCannotStart(t *testing.T) {
 			BeforeStage: func(ops scop.Ops, m scexec.TestingKnobMetadata) error {
 				// Verify that we never get a mutation ID not associated with the schema
 				// change that is running.
-				if m.Phase != scop.PostCommitPhase {
+				if m.Phase != scplan.PostCommitPhase {
 					return nil
 				}
 				table := catalogkv.TestingGetTableDescriptorFromSchema(
@@ -403,9 +413,8 @@ func TestConcurrentOldSchemaChangesCannotStart(t *testing.T) {
 		} {
 			_, err = conn.ExecContext(ctx, stmt)
 			assert.Truef(t,
-				testutils.IsError(err, `cannot perform a schema change on table "t"`) ||
-					testutils.IsError(err, `cannot perform TRUNCATE on "t" which has indexes being dropped`),
-				"statement: %s, error: %s", stmt, err,
+				testutils.IsError(err, `cannot perform a schema change on table "t"`),
+				"statemnt: %s, error: %s", stmt, err,
 			)
 		}
 	}
@@ -428,6 +437,9 @@ func TestInsertDuringAddColumnNotWritingToCurrentPrimaryIndex(t *testing.T) {
 	var kvDB *kv.DB
 	params, _ := tests.CreateTestServerParams()
 	params.Knobs = base.TestingKnobs{
+		SQLExecutor: &sql.ExecutorTestingKnobs{
+			AllowDeclarativeSchemaChanger: true,
+		},
 		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
 			RunBeforeResume: func(jobID jobspb.JobID) error {
 				// Assert that old schema change jobs never run in this test.
@@ -439,7 +451,7 @@ func TestInsertDuringAddColumnNotWritingToCurrentPrimaryIndex(t *testing.T) {
 			BeforeStage: func(ops scop.Ops, m scexec.TestingKnobMetadata) error {
 				// Verify that we never get a mutation ID not associated with the schema
 				// change that is running.
-				if m.Phase != scop.PostCommitPhase {
+				if m.Phase != scplan.PostCommitPhase {
 					return nil
 				}
 				table := catalogkv.TestingGetTableDescriptorFromSchema(
@@ -569,6 +581,9 @@ func TestDropJobCancelable(t *testing.T) {
 					}
 					return nil
 				},
+			}
+			params.Knobs.SQLExecutor = &sql.ExecutorTestingKnobs{
+				AllowDeclarativeSchemaChanger: true,
 			}
 
 			s, sqlDB, _ := serverutils.StartServer(t, params)

@@ -123,7 +123,7 @@ func (r *insertRun) initRowContainer(params runParams, columns colinfo.ResultCol
 // processSourceRow processes one row from the source for insertion and, if
 // result rows are needed, saves it in the result row container.
 func (r *insertRun) processSourceRow(params runParams, rowVals tree.Datums) error {
-	if err := enforceLocalColumnConstraints(rowVals, r.insertCols, false /* isUpdate */); err != nil {
+	if err := enforceLocalColumnConstraints(rowVals, r.insertCols); err != nil {
 		return err
 	}
 
@@ -149,7 +149,7 @@ func (r *insertRun) processSourceRow(params runParams, rowVals tree.Datums) erro
 	if !r.checkOrds.Empty() {
 		checkVals := rowVals[len(r.insertCols):]
 		if err := checkMutationInput(
-			params.ctx, &params.p.semaCtx, params.p.SessionData(), r.ti.tableDesc(), r.checkOrds, checkVals,
+			params.ctx, &params.p.semaCtx, r.ti.tableDesc(), r.checkOrds, checkVals,
 		); err != nil {
 			return err
 		}
@@ -188,7 +188,7 @@ func (n *insertNode) startExec(params runParams) error {
 
 	n.run.initRowContainer(params, n.columns)
 
-	return n.run.ti.init(params.ctx, params.p.txn, params.EvalContext(), &params.EvalContext().Settings.SV)
+	return n.run.ti.init(params.ctx, params.p.txn, params.EvalContext())
 }
 
 // Next is required because batchedPlanNode inherits from planNode, but

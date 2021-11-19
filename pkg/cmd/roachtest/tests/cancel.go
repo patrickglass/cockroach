@@ -105,7 +105,7 @@ func registerCancel(r registry.Registry) {
 						t.Fatal(err)
 					}
 					// If errCh is closed, then the cancellation was successful.
-					timeToCancel := timeutil.Since(cancelStartTime)
+					timeToCancel := timeutil.Now().Sub(cancelStartTime)
 					fmt.Printf("canceling q%d took %s\n", queryNum, timeToCancel)
 
 				case <-time.After(5 * time.Second):

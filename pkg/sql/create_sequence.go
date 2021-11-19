@@ -201,7 +201,7 @@ func NewSequenceTableDesc(
 	}
 	desc.SetPrimaryIndex(descpb.IndexDescriptor{
 		ID:                  keys.SequenceIndexID,
-		Name:                tabledesc.LegacyPrimaryKeyIndexName,
+		Name:                tabledesc.PrimaryKeyIndexName,
 		KeyColumnIDs:        []descpb.ColumnID{tabledesc.SequenceColumnID},
 		KeyColumnNames:      []string{tabledesc.SequenceColumnName},
 		KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
@@ -222,15 +222,8 @@ func NewSequenceTableDesc(
 	opts := &descpb.TableDescriptor_SequenceOpts{
 		Increment: 1,
 	}
-	if err := assignSequenceOptions(
-		opts,
-		sequenceOptions,
-		true, /* setDefaults */
-		params,
-		id,
-		parentID,
-		nil, /* existingType */
-	); err != nil {
+	err := assignSequenceOptions(opts, sequenceOptions, true /* setDefaults */, params, id, parentID)
+	if err != nil {
 		return nil, err
 	}
 	desc.SequenceOpts = opts

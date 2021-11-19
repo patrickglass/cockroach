@@ -12,7 +12,6 @@ package row
 
 import (
 	"context"
-	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -23,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
 )
 
@@ -37,19 +37,14 @@ type KVFetcher struct {
 	newSpan       bool
 
 	// Observability fields.
-	// Note: these need to be read via an atomic op.
-	atomics struct {
+	mu struct {
+		syncutil.Mutex
 		bytesRead int64
 	}
 }
 
 // NewKVFetcher creates a new KVFetcher.
-// If acc is non-nil, this fetcher will track its fetches and must be Closed.
-//
-// The fetcher takes ownership of the spans slice - it can modify the slice and
-// will perform the memory accounting accordingly (if acc is non-nil). The
-// caller can only reuse the spans slice after the fetcher has been closed, and
-// if the caller does, it becomes responsible for the memory accounting.
+// If mon is non-nil, this fetcher will track its fetches and must be Closed.
 func NewKVFetcher(
 	ctx context.Context,
 	txn *kv.Txn,
@@ -61,7 +56,7 @@ func NewKVFetcher(
 	lockStrength descpb.ScanLockingStrength,
 	lockWaitPolicy descpb.ScanLockingWaitPolicy,
 	lockTimeout time.Duration,
-	acc *mon.BoundAccount,
+	mon *mon.BytesMonitor,
 	forceProductionKVBatchSize bool,
 ) (*KVFetcher, error) {
 	var sendFn sendFunc
@@ -100,7 +95,7 @@ func NewKVFetcher(
 		lockStrength,
 		lockWaitPolicy,
 		lockTimeout,
-		acc,
+		mon,
 		forceProductionKVBatchSize,
 		txn.AdmissionHeader(),
 		txn.DB().SQLKVResponseAdmissionQ,
@@ -121,7 +116,9 @@ func (f *KVFetcher) GetBytesRead() int64 {
 	if f == nil {
 		return 0
 	}
-	return atomic.LoadInt64(&f.atomics.bytesRead)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mu.bytesRead
 }
 
 // MVCCDecodingStrategy controls if and how the fetcher should decode MVCC
@@ -197,12 +194,9 @@ func (f *KVFetcher) NextKV(
 			return false, kv, false, nil
 		}
 		f.newSpan = true
-		nBytes := len(f.batchResponse)
-		for i := range f.kvs {
-			nBytes += len(f.kvs[i].Key)
-			nBytes += len(f.kvs[i].Value.RawBytes)
-		}
-		atomic.AddInt64(&f.atomics.bytesRead, int64(nBytes))
+		f.mu.Lock()
+		f.mu.bytesRead += int64(len(f.batchResponse))
+		f.mu.Unlock()
 	}
 }
 

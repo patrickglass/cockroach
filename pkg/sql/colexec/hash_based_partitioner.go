@@ -227,7 +227,8 @@ func newHashBasedPartitioner(
 	// operators. The cache mode is chosen to automatically close the cache
 	// belonging to partitions at a parent level when repartitioning.
 	diskQueueCfg := args.DiskQueueCfg
-	diskQueueCfg.SetCacheMode(colcontainer.DiskQueueCacheModeClearAndReuseCache)
+	diskQueueCfg.CacheMode = colcontainer.DiskQueueCacheModeClearAndReuseCache
+	diskQueueCfg.SetDefaultBufferSizeBytesForCacheMode()
 	partitionedDiskQueueSemaphore := args.FDSemaphore
 	if !args.TestingKnobs.DelegateFDAcquisitions {
 		// To avoid deadlocks with other disk queues, we manually attempt to
@@ -536,7 +537,7 @@ StateChanged:
 				if partitionInfo.memSize <= op.maxPartitionSizeToProcessUsingMain {
 					log.VEventf(op.Ctx, 2,
 						`%s processes partition with idx %d of size %s using the "main" strategy`,
-						op.name, partitionIdx, humanizeutil.IBytes(partitionInfo.memSize),
+						op.name, partitionIdx, redact.SafeString(humanizeutil.IBytes(partitionInfo.memSize)),
 					)
 					for i := range op.partitionedInputs {
 						op.partitionedInputs[i].partitionIdx = partitionIdx

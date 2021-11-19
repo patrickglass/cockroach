@@ -17,8 +17,9 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
-	"github.com/maruel/panicparse/v2/stack"
+	"github.com/maruel/panicparse/stack"
 )
 
 // stacks is a wrapper for runtime.Stack that attempts to recover the data for all goroutines.
@@ -37,33 +38,32 @@ func stacks() []byte {
 
 // A Dump wraps a goroutine dump with functionality to output through panicparse.
 type Dump struct {
-	agg *stack.Aggregated
 	err error
+
+	now     time.Time
+	buckets []*stack.Bucket
 }
 
-// NewDump grabs a goroutine dump.
-func NewDump() Dump {
-	return newDumpFromBytes(stacks(), stack.DefaultOpts())
+// NewDump grabs a goroutine dump and associates it with the supplied time.
+func NewDump(now time.Time) Dump {
+	return NewDumpFromBytes(now, stacks())
 }
 
-// newDumpFromBytes is like NewDump, but treats the supplied bytes as a goroutine
-// dump. The function accepts the options to pass to panicparse/stack.ScanSnapshot.
-func newDumpFromBytes(b []byte, opts *stack.Opts) Dump {
-	s, _, err := stack.ScanSnapshot(bytes.NewBuffer(b), ioutil.Discard, opts)
-	if err != io.EOF {
+// NewDumpFromBytes is like NewDump, but treats the supplied bytes as a goroutine
+// dump.
+func NewDumpFromBytes(now time.Time, b []byte) Dump {
+	c, err := stack.ParseDump(bytes.NewReader(b), ioutil.Discard, true /* guesspaths */)
+	if err != nil {
 		return Dump{err: err}
 	}
-	return Dump{agg: s.Aggregate(stack.AnyValue)}
+	return Dump{now: now, buckets: stack.Aggregate(c.Goroutines, stack.AnyValue)}
 }
 
 // SortCountDesc rearranges the goroutine buckets such that higher multiplicities
 // appear earlier.
 func (d Dump) SortCountDesc() {
-	if d.err != nil {
-		return
-	}
-	sort.Slice(d.agg.Buckets, func(i, j int) bool {
-		a, b := d.agg.Buckets[i], d.agg.Buckets[j]
+	sort.Slice(d.buckets, func(i, j int) bool {
+		a, b := d.buckets[i], d.buckets[j]
 		return len(a.IDs) > len(b.IDs)
 	})
 }
@@ -71,11 +71,8 @@ func (d Dump) SortCountDesc() {
 // SortWaitDesc rearranges the goroutine buckets such that goroutines that have
 // longer wait times appear earlier.
 func (d Dump) SortWaitDesc() {
-	if d.err != nil {
-		return
-	}
-	sort.Slice(d.agg.Buckets, func(i, j int) bool {
-		a, b := d.agg.Buckets[i], d.agg.Buckets[j]
+	sort.Slice(d.buckets, func(i, j int) bool {
+		a, b := d.buckets[i], d.buckets[j]
 		return a.SleepMax > b.SleepMax
 	})
 }
@@ -85,7 +82,7 @@ func (d Dump) HTML(w io.Writer) error {
 	if d.err != nil {
 		return d.err
 	}
-	return d.agg.ToHTML(w, "" /* footer */)
+	return writeToHTML(w, d.buckets, d.now)
 }
 
 // HTMLString is like HTML, but returns a string. If an error occurs, its string

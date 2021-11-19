@@ -20,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 )
 
@@ -37,6 +38,7 @@ type Settings struct {
 	// overwriting the default of a single setting.
 	Manual atomic.Value // bool
 
+	Tracer        *tracing.Tracer
 	ExternalIODir string
 
 	// Tracks whether a CPU profile is going on and if so, which kind. See
@@ -122,6 +124,10 @@ func MakeClusterSettings() *Settings {
 	sv := &s.SV
 	s.Version = clusterversion.MakeVersionHandle(&s.SV)
 	sv.Init(context.TODO(), s.Version)
+
+	s.Tracer = tracing.NewTracer()
+	s.Tracer.Configure(context.TODO(), sv)
+
 	return s
 }
 
@@ -152,6 +158,9 @@ func MakeTestingClusterSettingsWithVersions(
 	s.Version = clusterversion.MakeVersionHandleWithOverride(
 		&s.SV, binaryVersion, binaryMinSupportedVersion)
 	sv.Init(context.TODO(), s.Version)
+
+	s.Tracer = tracing.NewTracer()
+	s.Tracer.Configure(context.TODO(), sv)
 
 	if initializeVersion {
 		// Initialize cluster version to specified binaryVersion.

@@ -152,15 +152,9 @@ func getPlanColumns(plan planNode, mut bool) colinfo.ResultColumns {
 		return getPlanColumns(n.buffer, mut)
 	case *sortNode:
 		return getPlanColumns(n.plan, mut)
-	case *topKNode:
-		return getPlanColumns(n.plan, mut)
 	case *recursiveCTENode:
 		return getPlanColumns(n.initial, mut)
 
-	case *showVarNode:
-		return colinfo.ResultColumns{
-			{Name: n.name, Typ: types.String},
-		}
 	case *rowSourceToPlanNode:
 		return n.planCols
 	}

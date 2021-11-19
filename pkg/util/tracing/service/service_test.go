@@ -18,7 +18,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingservicepb"
 	"github.com/stretchr/testify/require"
 )
@@ -27,9 +26,10 @@ func TestTracingServiceGetSpanRecordings(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	tracer1 := tracing.NewTracer()
-	setupTraces := func() (tracingpb.TraceID, func()) {
+	setupTraces := func() (uint64, func()) {
 		// Start a root span.
-		root1 := tracer1.StartSpan("root1", tracing.WithRecording(tracing.RecordingVerbose))
+		root1 := tracer1.StartSpan("root1", tracing.WithForceRealSpan())
+		root1.SetVerbose(true)
 
 		child1 := tracer1.StartSpan("root1.child", tracing.WithParentAndAutoCollection(root1))
 
@@ -40,7 +40,8 @@ func TestTracingServiceGetSpanRecordings(t *testing.T) {
 		fork1 := tracer1.StartSpan("fork1", tracing.WithParentAndManualCollection(root1.Meta()))
 
 		// Start span with different trace ID.
-		root2 := tracer1.StartSpan("root2", tracing.WithRecording(tracing.RecordingVerbose))
+		root2 := tracer1.StartSpan("root2", tracing.WithForceRealSpan())
+		root2.SetVerbose(true)
 		root2.Record("root2")
 
 		return root1.TraceID(), func() {
@@ -66,13 +67,13 @@ func TestTracingServiceGetSpanRecordings(t *testing.T) {
 	sort.SliceStable(resp.Recordings, func(i, j int) bool {
 		return resp.Recordings[i].RecordedSpans[0].StartTime.Before(resp.Recordings[j].RecordedSpans[0].StartTime)
 	})
-	require.NoError(t, tracing.CheckRecordedSpans(resp.Recordings[0].RecordedSpans, `
+	require.NoError(t, tracing.TestingCheckRecordedSpans(resp.Recordings[0].RecordedSpans, `
 			span: root1
 				tags: _unfinished=1 _verbose=1
 				span: root1.child
 					tags: _unfinished=1 _verbose=1
 `))
-	require.NoError(t, tracing.CheckRecordedSpans(resp.Recordings[1].RecordedSpans, `
+	require.NoError(t, tracing.TestingCheckRecordedSpans(resp.Recordings[1].RecordedSpans, `
 			span: fork1
 				tags: _unfinished=1 _verbose=1
 `))

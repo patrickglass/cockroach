@@ -15,7 +15,6 @@ import (
 	"math/rand"
 	"os"
 
-	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 )
@@ -84,10 +83,10 @@ var rng *rand.Rand
 const DisableMetamorphicEnvVar = "COCKROACH_INTERNAL_DISABLE_METAMORPHIC_TESTING"
 
 func init() {
-	if buildutil.CrdbTestBuild {
+	if CrdbTestBuild {
 		disabled := envutil.EnvOrDefaultBool(DisableMetamorphicEnvVar, false)
 		if !disabled {
-			rng, _ = randutil.NewTestRand()
+			rng, _ = randutil.NewPseudoRand()
 			metamorphicBuild = rng.Float64() < metamorphicBuildProbability
 		}
 	}

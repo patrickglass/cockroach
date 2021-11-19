@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//go:build linux
 // +build linux
 
 package util
@@ -20,7 +19,7 @@ import (
 )
 
 func init() {
-	r, _ := randutil.NewTestRand()
+	r, _ := randutil.NewPseudoRand()
 	// 127.255.255.255 is special (broadcast), so choose values less
 	// than 255.
 	a := r.Intn(255)

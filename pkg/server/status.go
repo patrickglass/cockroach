@@ -65,7 +65,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/errors"
 	gwruntime "github.com/grpc-ecosystem/grpc-gateway/runtime"
@@ -611,25 +610,27 @@ func (s *statusServer) Allocator(
 	err = s.stores.VisitStores(func(store *kvserver.Store) error {
 		// All ranges requested:
 		if len(req.RangeIDs) == 0 {
-			var err error
-			store.VisitReplicas(
-				func(rep *kvserver.Replica) bool {
-					if !rep.OwnsValidLease(ctx, store.Clock().NowAsClockTimestamp()) {
-						return true // continue.
+			// Use IterateRangeDescriptors to read from the engine only
+			// because it's already exported.
+			err := kvserver.IterateRangeDescriptors(ctx, store.Engine(),
+				func(desc roachpb.RangeDescriptor) error {
+					rep := store.GetReplicaIfExists(desc.RangeID)
+					if rep == nil {
+						return nil // continue
 					}
-					var allocatorSpans tracing.Recording
-					allocatorSpans, err = store.AllocatorDryRun(ctx, rep)
+					if !rep.OwnsValidLease(ctx, store.Clock().NowAsClockTimestamp()) {
+						return nil
+					}
+					allocatorSpans, err := store.AllocatorDryRun(ctx, rep)
 					if err != nil {
-						return false // break and bubble up the error.
+						return err
 					}
 					output.DryRuns = append(output.DryRuns, &serverpb.AllocatorDryRun{
-						RangeID: rep.RangeID,
+						RangeID: desc.RangeID,
 						Events:  recordedSpansToTraceEvents(allocatorSpans),
 					})
-					return true // continue.
-				},
-				kvserver.WithReplicasInOrder(),
-			)
+					return nil
+				})
 			return err
 		}
 
@@ -662,11 +663,23 @@ func (s *statusServer) Allocator(
 
 func recordedSpansToTraceEvents(spans []tracingpb.RecordedSpan) []*serverpb.TraceEvent {
 	var output []*serverpb.TraceEvent
+	var buf bytes.Buffer
 	for _, sp := range spans {
 		for _, entry := range sp.Logs {
 			event := &serverpb.TraceEvent{
-				Time:    entry.Time,
-				Message: entry.Msg().StripMarkers(),
+				Time: entry.Time,
+			}
+			if len(entry.Fields) == 1 {
+				event.Message = entry.Fields[0].Value
+			} else {
+				buf.Reset()
+				for i, f := range entry.Fields {
+					if i != 0 {
+						buf.WriteByte(' ')
+					}
+					fmt.Fprintf(&buf, "%s:%v", f.Key, f.Value)
+				}
+				event.Message = buf.String()
 			}
 			output = append(output, event)
 		}
@@ -947,7 +960,7 @@ func (s *statusServer) GetFiles(
 	var dir string
 	switch req.Type {
 	//TODO(ridwanmsharif): Serve logfiles so debug-zip can fetch them
-	// instead of reading individual entries.
+	// intead of reading indididual entries.
 	case serverpb.FileType_HEAP: // Requesting for saved Heap Profiles.
 		dir = s.admin.server.cfg.HeapProfileDirName
 	case serverpb.FileType_GOROUTINES: // Requesting for saved Goroutine dumps.
@@ -1249,8 +1262,7 @@ func (s *statusServer) Stacks(
 // TODO(tschottdorf): significant overlap with /debug/pprof/heap, except that
 // this one allows querying by NodeID.
 //
-// Profile returns a heap profile. This endpoint is used by the
-// `pprofui` package to satisfy local and remote pprof requests.
+// Profile returns a heap profile.
 func (s *statusServer) Profile(
 	ctx context.Context, req *serverpb.ProfileRequest,
 ) (*serverpb.JSONResponse, error) {
@@ -1274,20 +1286,20 @@ func (s *statusServer) Profile(
 		return status.Profile(ctx, req)
 	}
 
-	return profileLocal(ctx, req, s.st)
-}
-
-func profileLocal(
-	ctx context.Context, req *serverpb.ProfileRequest, st *cluster.Settings,
-) (*serverpb.JSONResponse, error) {
 	switch req.Type {
+	case serverpb.ProfileRequest_HEAP:
+		p := pprof.Lookup("heap")
+		if p == nil {
+			return nil, status.Errorf(codes.InvalidArgument, "unable to find profile: heap")
+		}
+		var buf bytes.Buffer
+		if err := p.WriteTo(&buf, 0); err != nil {
+			return nil, status.Errorf(codes.Internal, err.Error())
+		}
+		return &serverpb.JSONResponse{Data: buf.Bytes()}, nil
 	case serverpb.ProfileRequest_CPU:
 		var buf bytes.Buffer
-		profileType := cluster.CPUProfileDefault
-		if req.Labels {
-			profileType = cluster.CPUProfileWithLabels
-		}
-		if err := debug.CPUProfileDo(st, profileType, func() error {
+		if err := debug.CPUProfileDo(s.st, cluster.CPUProfileWithLabels, func() error {
 			duration := 30 * time.Second
 			if req.Seconds != 0 {
 				duration = time.Duration(req.Seconds) * time.Second
@@ -1307,20 +1319,7 @@ func profileLocal(
 		}
 		return &serverpb.JSONResponse{Data: buf.Bytes()}, nil
 	default:
-		name, ok := serverpb.ProfileRequest_Type_name[int32(req.Type)]
-		if !ok {
-			return nil, status.Errorf(codes.InvalidArgument, "unknown profile: %d", req.Type)
-		}
-		name = strings.ToLower(name)
-		p := pprof.Lookup(name)
-		if p == nil {
-			return nil, status.Errorf(codes.InvalidArgument, "unable to find profile: %s", name)
-		}
-		var buf bytes.Buffer
-		if err := p.WriteTo(&buf, 0); err != nil {
-			return nil, status.Errorf(codes.Internal, err.Error())
-		}
-		return &serverpb.JSONResponse{Data: buf.Bytes()}, nil
+		return nil, status.Errorf(codes.InvalidArgument, "unknown profile: %s", req.Type)
 	}
 }
 
@@ -1470,25 +1469,8 @@ func nodeStatusToResp(n *statuspb.NodeStatus, isAdmin bool) serverpb.NodeRespons
 				Attrs:    ss.Desc.Attrs,
 				Node:     nodeDescriptor,
 				Capacity: ss.Desc.Capacity,
-
-				Properties: roachpb.StoreProperties{
-					ReadOnly:  ss.Desc.Properties.ReadOnly,
-					Encrypted: ss.Desc.Properties.Encrypted,
-				},
 			},
 			Metrics: ss.Metrics,
-		}
-		if fsprops := ss.Desc.Properties.FileStoreProperties; fsprops != nil {
-			sfsprops := &roachpb.FileStoreProperties{
-				FsType: fsprops.FsType,
-			}
-			if isAdmin {
-				sfsprops.Path = fsprops.Path
-				sfsprops.BlockDevice = fsprops.BlockDevice
-				sfsprops.MountPoint = fsprops.MountPoint
-				sfsprops.MountOptions = fsprops.MountOptions
-			}
-			statuses[i].Desc.Properties.FileStoreProperties = sfsprops
 		}
 	}
 
@@ -1898,13 +1880,12 @@ func (s *statusServer) rangesHelper(
 	}
 
 	constructRangeInfo := func(
-		rep *kvserver.Replica, storeID roachpb.StoreID, metrics kvserver.ReplicaMetrics,
+		desc roachpb.RangeDescriptor, rep *kvserver.Replica, storeID roachpb.StoreID, metrics kvserver.ReplicaMetrics,
 	) serverpb.RangeInfo {
 		raftStatus := rep.RaftStatus()
 		raftState := convertRaftStatus(raftStatus)
 		leaseHistory := rep.GetLeaseHistory()
 		var span serverpb.PrettySpan
-		desc := rep.Desc()
 		span.StartKey = desc.StartKey.String()
 		span.EndKey = desc.EndKey.String()
 		state := rep.State(ctx)
@@ -1961,10 +1942,10 @@ func (s *statusServer) rangesHelper(
 
 	// There are two possibilities for ordering of ranges in the results:
 	// it could either be determined by the RangeIDs in the request (if specified),
-	// or be in RangeID order if not (as we pass in the
-	// VisitReplicasInSortedOrder option to store.VisitReplicas below). The latter
-	// is already sorted in a stable fashion, as far as pagination is concerned.
-	// The former case requires sorting.
+	// or be in RangeID order if not (as that's the ordering that
+	// IterateRangeDescriptors works on). The latter is already sorted in a
+	// stable fashion, as far as pagination is concerned. The former case requires
+	// sorting.
 	if len(req.RangeIDs) > 0 {
 		sort.Slice(req.RangeIDs, func(i, j int) bool {
 			return req.RangeIDs[i] < req.RangeIDs[j]
@@ -1975,19 +1956,25 @@ func (s *statusServer) rangesHelper(
 		now := store.Clock().NowAsClockTimestamp()
 		if len(req.RangeIDs) == 0 {
 			// All ranges requested.
-			store.VisitReplicas(
-				func(rep *kvserver.Replica) bool {
+
+			// Use IterateRangeDescriptors to read from the engine only
+			// because it's already exported.
+			err := kvserver.IterateRangeDescriptors(ctx, store.Engine(),
+				func(desc roachpb.RangeDescriptor) error {
+					rep := store.GetReplicaIfExists(desc.RangeID)
+					if rep == nil {
+						return nil // continue
+					}
 					output.Ranges = append(output.Ranges,
 						constructRangeInfo(
+							desc,
 							rep,
 							store.Ident.StoreID,
 							rep.Metrics(ctx, now, isLiveMap, clusterNodes),
 						))
-					return true // continue.
-				},
-				kvserver.WithReplicasInOrder(),
-			)
-			return nil
+					return nil
+				})
+			return err
 		}
 
 		// Specific ranges requested:
@@ -1997,8 +1984,10 @@ func (s *statusServer) rangesHelper(
 				// Not found: continue.
 				continue
 			}
+			desc := rep.Desc()
 			output.Ranges = append(output.Ranges,
 				constructRangeInfo(
+					*desc,
 					rep,
 					store.Ident.StoreID,
 					rep.Metrics(ctx, now, isLiveMap, clusterNodes),

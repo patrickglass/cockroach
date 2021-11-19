@@ -593,29 +593,16 @@ func makeCookieWithValue(value string, forHTTPSOnly bool) *http.Cookie {
 func (am *authenticationMux) getSession(
 	w http.ResponseWriter, req *http.Request,
 ) (string, *serverpb.SessionCookie, error) {
-	ctx := req.Context()
 	// Validate the returned cookie.
-	cookies := req.Cookies()
-	found := false
-	var cookie *serverpb.SessionCookie
-	var err error
-	for _, c := range cookies {
-		if c.Name != SessionCookieName {
-			continue
-		}
-		found = true
-		cookie, err = decodeSessionCookie(c)
-		if err != nil {
-			// Multiple cookies with the same name may be included in the
-			// header. We continue searching even if we find a matching
-			// name with an invalid value
-			log.Infof(ctx, "found a matching cookie that failed decoding: %v", err)
-			continue
-		}
-		break
+	rawCookie, err := req.Cookie(SessionCookieName)
+	if err != nil {
+		return "", nil, err
 	}
-	if err != nil || !found {
-		return "", nil, http.ErrNoCookie
+
+	cookie, err := decodeSessionCookie(rawCookie)
+	if err != nil {
+		err = errors.Wrap(err, "a valid authentication cookie is required")
+		return "", nil, err
 	}
 
 	valid, username, err := am.server.verifySession(req.Context(), cookie)

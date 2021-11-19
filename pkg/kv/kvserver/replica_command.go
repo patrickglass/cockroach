@@ -794,11 +794,6 @@ func waitForApplication(
 	replicas []roachpb.ReplicaDescriptor,
 	leaseIndex uint64,
 ) error {
-	if dialer == nil && len(replicas) == 1 {
-		// This early return supports unit tests (testContext{}) that also
-		// want to perform merges.
-		return nil
-	}
 	return contextutil.RunWithTimeout(ctx, "wait for application", 5*time.Second, func(ctx context.Context) error {
 		g := ctxgroup.WithContext(ctx)
 		for _, repl := range replicas {
@@ -830,11 +825,6 @@ func waitForReplicasInit(
 	rangeID roachpb.RangeID,
 	replicas []roachpb.ReplicaDescriptor,
 ) error {
-	if dialer == nil && len(replicas) == 1 {
-		// This early return supports unit tests (testContext{}) that also
-		// want to perform merges.
-		return nil
-	}
 	return contextutil.RunWithTimeout(ctx, "wait for replicas init", 5*time.Second, func(ctx context.Context) error {
 		g := ctxgroup.WithContext(ctx)
 		for _, repl := range replicas {
@@ -1808,10 +1798,7 @@ func (r *Replica) tryRollbackRaftLearner(
 			})
 		return err
 	}
-	rollbackCtx := r.AnnotateCtx(context.Background())
-	// AddTags and not WithTags, so that we combine the tags with those
-	// filled by AnnotateCtx.
-	rollbackCtx = logtags.AddTags(rollbackCtx, logtags.FromContext(ctx))
+	rollbackCtx := logtags.WithTags(context.Background(), logtags.FromContext(ctx))
 	if err := contextutil.RunWithTimeout(
 		rollbackCtx, "learner rollback", rollbackTimeout, rollbackFn,
 	); err != nil {
@@ -2453,24 +2440,42 @@ func (r *Replica) sendSnapshot(
 		return &benignError{errors.Wrap(errMarkSnapshotError, "raft status not initialized")}
 	}
 
-	// We avoid shipping over the past Raft log in the snapshot by changing
-	// the truncated state (we're allowed to -- it's an unreplicated key and not
-	// subject to mapping across replicas). The actual sending happens here:
-	_ = (*kvBatchSnapshotStrategy)(nil).Send
-	// and results in no log entries being sent at all. Note that
-	// Metadata.Index is really the applied index of the replica.
-	snap.State.TruncatedState = &roachpb.RaftTruncatedState{
-		Index: snap.RaftSnap.Metadata.Index,
-		Term:  snap.RaftSnap.Metadata.Term,
+	usesReplicatedTruncatedState, err := storage.MVCCGetProto(
+		ctx, snap.EngineSnap, keys.RaftTruncatedStateLegacyKey(r.RangeID), hlc.Timestamp{}, nil, storage.MVCCGetOptions{},
+	)
+	if err != nil {
+		return errors.Wrap(err, "loading legacy truncated state")
 	}
 
-	// See comment on DeprecatedUsingAppliedStateKey for why we need to set this
-	// explicitly for snapshots going out to followers.
-	snap.State.DeprecatedUsingAppliedStateKey = true
+	canAvoidSendingLog := !usesReplicatedTruncatedState &&
+		snap.State.TruncatedState.Index < snap.State.RaftAppliedIndex
+
+	if canAvoidSendingLog {
+		// If we're not using a legacy (replicated) truncated state, we avoid
+		// sending the (past) Raft log in the snapshot in the first place and
+		// send only those entries that are actually useful to the follower.
+		// This is done by changing the truncated state, which we're allowed
+		// to do since it is not a replicated key (and thus not subject to
+		// matching across replicas). The actual sending happens here:
+		_ = (*kvBatchSnapshotStrategy)(nil).Send
+		// and results in no log entries being sent at all. Note that
+		// Metadata.Index is really the applied index of the replica.
+		snap.State.TruncatedState = &roachpb.RaftTruncatedState{
+			Index: snap.RaftSnap.Metadata.Index,
+			Term:  snap.RaftSnap.Metadata.Term,
+		}
+	}
 
 	req := SnapshotRequest_Header{
-		State:                                snap.State,
-		DeprecatedUnreplicatedTruncatedState: true,
+		State: snap.State,
+		// Tell the recipient whether it needs to synthesize the new
+		// unreplicated TruncatedState. It could tell by itself by peeking into
+		// the data, but it uses a write only batch for performance which
+		// doesn't support that; this is easier. Notably, this is true if the
+		// snap index itself is the one at which the migration happens.
+		//
+		// See VersionUnreplicatedRaftTruncatedState.
+		UnreplicatedTruncatedState: !usesReplicatedTruncatedState,
 		RaftMessageRequest: RaftMessageRequest{
 			RangeID:     r.RangeID,
 			FromReplica: sender,
@@ -2484,9 +2489,14 @@ func (r *Replica) sendSnapshot(
 			},
 		},
 		RangeSize: r.GetMVCCStats().Total(),
-		Priority:  priority,
-		Strategy:  SnapshotRequest_KV_BATCH,
-		Type:      snapType,
+		// Recipients currently cannot choose to decline any snapshots.
+		// In 19.2 and earlier versions pre-emptive snapshots could be declined.
+		//
+		// TODO(ajwerner): Consider removing the CanDecline flag.
+		CanDecline: false,
+		Priority:   priority,
+		Strategy:   SnapshotRequest_KV_BATCH,
+		Type:       snapType,
 	}
 	newBatchFn := func() storage.Batch {
 		return r.store.Engine().NewUnindexedBatch(true /* writeOnly */)
@@ -2960,13 +2970,8 @@ func (s *Store) relocateOne(
 		// overreplicated. If we asked it instead to remove s3 from (s1,s2,s3) it
 		// may not want to do that due to constraints.
 		targetStore, _, err := s.allocator.removeTarget(
-			ctx,
-			conf,
-			args.targetsToRemove(),
-			existingVoters,
-			existingNonVoters,
-			args.targetType,
-			s.allocator.scorerOptions(),
+			ctx, conf, args.targetsToRemove(), existingVoters,
+			existingNonVoters, args.targetType,
 		)
 		if err != nil {
 			return nil, nil, errors.Wrapf(

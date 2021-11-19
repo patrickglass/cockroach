@@ -163,7 +163,7 @@ func TestFlowScheduler(t *testing.T) {
 			atomic.AddInt32(&numCompletedFlows, 1)
 		}
 
-		rng, _ := randutil.NewTestRand()
+		rng, _ := randutil.NewPseudoRand()
 		maxNumActiveFlows := rng.Intn(5) + 1
 		scheduler.atomics.maxRunningFlows = int32(maxNumActiveFlows)
 		numFlows := maxNumActiveFlows*(rng.Intn(3)+1) + rng.Intn(2)

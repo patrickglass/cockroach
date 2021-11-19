@@ -361,53 +361,6 @@ const (
 	MVCCKeyIterKind
 )
 
-// ExportOptions contains options provided to export operation.
-type ExportOptions struct {
-	// StartKey determines start of the exported interval (inclusive).
-	// StartKey.Timestamp is either empty which represent starting from a potential
-	// intent and continuing to versions or non-empty, which represents starting
-	// from a particular version.
-	StartKey MVCCKey
-	// EndKey determines the end of exported interval (exclusive).
-	EndKey roachpb.Key
-	// StartTS and EndTS determine exported time range as (startTS, endTS].
-	StartTS, EndTS hlc.Timestamp
-	// If ExportAllRevisions is true export every revision of a key for the interval,
-	// otherwise only the latest value within the interval is exported.
-	ExportAllRevisions bool
-	// If TargetSize is positive, it indicates that the export should produce SSTs
-	// which are roughly target size. Specifically, it will return an SST such that
-	// the last key is responsible for meeting or exceeding the targetSize. If the
-	// resumeKey is non-nil then the data size of the returned sst will be greater
-	// than or equal to the targetSize.
-	TargetSize uint64
-	// If MaxSize is positive, it is an absolute maximum on byte size for the
-	// returned sst. If it is the case that the versions of the last key will lead
-	// to an SST that exceeds maxSize, an error will be returned. This parameter
-	// exists to prevent creating SSTs which are too large to be used.
-	MaxSize uint64
-	// MaxIntents specifies the number of intents to collect and return in a
-	// WriteIntentError. The caller will likely resolve the returned intents and
-	// retry the call, which would be quadratic, so this significantly reduces the
-	// overall number of scans. 0 disables batching and returns the first intent,
-	// pass math.MaxUint64 to collect all.
-	MaxIntents uint64
-	// If StopMidKey is false, once function reaches targetSize it would continue
-	// adding all versions until it reaches next key or end of range. If true, it
-	// would stop immediately when targetSize is reached and return the next versions
-	// timestamp in resumeTs so that subsequent operation can pass it to firstKeyTs.
-	StopMidKey bool
-	// ResourceLimiter limits how long iterator could run until it exhausts allocated
-	// resources. Export queries limiter in its iteration loop to break out once
-	// resources are exhausted.
-	ResourceLimiter ResourceLimiter
-	// If UseTBI is true, the backing MVCCIncrementalIterator will initialize a
-	// time-bound iterator along with its regular iterator. The TBI will be used
-	// as an optimization to skip over swaths of uninteresting keys i.e. keys
-	// outside our time bounds, while locating the KVs to export.
-	UseTBI bool
-}
-
 // Reader is the read interface to an engine's data. Certain implementations
 // of Reader guarantee consistency of the underlying engine state across the
 // different iterators created by NewMVCCIterator, NewEngineIterator:
@@ -433,14 +386,39 @@ type Reader interface {
 	// that they are not using a closed engine. Intended for use within package
 	// engine; exported to enable wrappers to exist in other packages.
 	Closed() bool
-	// ExportMVCCToSst exports changes to the keyrange [StartKey, EndKey) over the
-	// interval (StartTS, EndTS].
-	// Deletions are included if all revisions are requested or if the StartTS
-	// is non-zero.
+	// ExportMVCCToSst exports changes to the keyrange [startKey, endKey) over the
+	// interval (startTS, endTS]. Passing exportAllRevisions exports
+	// every revision of a key for the interval, otherwise only the latest value
+	// within the interval is exported. Deletions are included if all revisions are
+	// requested or if the start.Timestamp is non-zero.
+	//
+	// firstKeyTS is either empty which represent starting from potential intent
+	// and continuing to versions or non-empty, which represents starting from
+	// particular version. firstKeyTS will always be empty when !stopMidKey
+	//
+	// If targetSize is positive, it indicates that the export should produce SSTs
+	// which are roughly target size. Specifically, it will return an SST such that
+	// the last key is responsible for meeting or exceeding the targetSize. If the
+	// resumeKey is non-nil then the data size of the returned sst will be greater
+	// than or equal to the targetSize.
+	//
+	// If maxSize is positive, it is an absolute maximum on byte size for the
+	// returned sst. If it is the case that the versions of the last key will lead
+	// to an SST that exceeds maxSize, an error will be returned. This parameter
+	// exists to prevent creating SSTs which are too large to be used.
+	//
+	// If stopMidKey is false, once function reaches targetSize it would continue
+	// adding all versions until it reaches next key or end of range. If true, it
+	// would stop immediately when targetSize is reached and return a next versions
+	// timestamp in resumeTs so that subsequent operation can pass it to firstKeyTs.
+	//
+	// If useTBI is true, the backing MVCCIncrementalIterator will initialize a
+	// time-bound iterator along with its regular iterator. The TBI will be used
+	// as an optimization to skip over swaths of uninteresting keys i.e. keys
+	// outside our time bounds, while locating the KVs to export.
+	//
 	// This function looks at MVCC versions and intents, and returns an error if an
 	// intent is found.
-	// exportOptions determine ranges as well as additional export options. See
-	// struct definition for details.
 	//
 	// Data is written to dest as it is collected. If error is returned content of
 	// dest is undefined.
@@ -449,7 +427,9 @@ type Reader interface {
 	// that allow resuming export if it was cut short because it reached limits or
 	// an error if export failed for some reason.
 	ExportMVCCToSst(
-		ctx context.Context, exportOptions ExportOptions, dest io.Writer,
+		ctx context.Context, startKey, endKey roachpb.Key, startTS, endTS, firstKeyTS hlc.Timestamp,
+		exportAllRevisions bool, targetSize uint64, maxSize uint64, stopMidKey bool, useTBI bool,
+		dest io.Writer,
 	) (_ roachpb.BulkOpSummary, resumeKey roachpb.Key, resumeTS hlc.Timestamp, _ error)
 	// MVCCGet returns the value for the given key, nil otherwise. Semantically, it
 	// behaves as if an iterator with MVCCKeyAndIntentsIterKind was used.
@@ -743,8 +723,6 @@ type Engine interface {
 	Attrs() roachpb.Attributes
 	// Capacity returns capacity details for the engine's available storage.
 	Capacity() (roachpb.StoreCapacity, error)
-	// Properties returns the low-level properties for the engine's underlying storage.
-	Properties() roachpb.StoreProperties
 	// Compact forces compaction over the entire database.
 	Compact() error
 	// Flush causes the engine to write all in-memory data to disk
@@ -866,8 +844,6 @@ type Batch interface {
 	Commit(sync bool) error
 	// Empty returns whether the batch has been written to or not.
 	Empty() bool
-	// Count returns the number of memtable-modifying operations in the batch.
-	Count() uint32
 	// Len returns the size of the underlying representation of the batch.
 	// Because of the batch header, the size of the batch is never 0 and should
 	// not be used interchangeably with Empty. The method avoids the memory copy
@@ -953,6 +929,25 @@ type EncryptionRegistries struct {
 	// KeyRegistry is the list of keys, scrubbed of actual key data.
 	// serialized ccl/storageccl/engineccl/enginepbccl/key_registry.proto::DataKeysRegistry
 	KeyRegistry []byte
+}
+
+// PutProto sets the given key to the protobuf-serialized byte string
+// of msg. Returns the length in bytes of key and the value.
+//
+// Deprecated: use MVCCPutProto instead.
+func PutProto(
+	writer Writer, key roachpb.Key, msg protoutil.Message,
+) (keyBytes, valBytes int64, err error) {
+	bytes, err := protoutil.Marshal(msg)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	if err := writer.PutUnversioned(key, bytes); err != nil {
+		return 0, 0, err
+	}
+
+	return int64(MVCCKey{Key: key}.EncodedSize()), int64(len(bytes)), nil
 }
 
 // Scan returns up to max key/value objects starting from start (inclusive)
@@ -1104,7 +1099,7 @@ var ingestDelayTime = settings.RegisterDurationSetting(
 // number of files in it or if PendingCompactionBytesEstimate is elevated. This
 // it is intended to be called before ingesting a new SST, since we'd rather
 // backpressure the bulk operation adding SSTs than slow down the whole RocksDB
-// instance and impact all foreground traffic by adding too many files to it.
+// instance and impact all forground traffic by adding too many files to it.
 // After the number of L0 files exceeds the configured limit, it gradually
 // begins delaying more for each additional file in L0 over the limit until
 // hitting its configured (via settings) maximum delay. If the pending

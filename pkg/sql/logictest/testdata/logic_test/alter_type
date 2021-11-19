@@ -25,6 +25,10 @@ SELECT 'hi'::renameagain
 ----
 hi
 
+# newname is draining, so it should not be available for use.
+statement error pq: type \"newname\" already exists
+ALTER TYPE renameagain RENAME TO newname
+
 statement ok
 ROLLBACK
 
@@ -49,6 +53,7 @@ hi
 statement ok
 COMMIT
 
+# newname should be available for use after draining.
 statement ok
 ALTER TYPE new__name RENAME TO newname
 
@@ -263,6 +268,12 @@ SELECT 'lru'::store
 
 statement ok
 CREATE TYPE greetings AS ENUM('hi', 'hello', 'howdy', 'yo')
+
+statement error pq: ALTER TYPE ... DROP VALUE ... is only supported as an alpha feature
+ALTER TYPE greetings DROP VALUE 'hi'
+
+statement ok
+SET enable_drop_enum_value = true;
 
 statement ok
 ALTER TYPE greetings DROP VALUE 'hi'

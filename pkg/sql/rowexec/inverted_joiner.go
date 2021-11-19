@@ -40,7 +40,7 @@ import (
 // scanned rows to disk. The spilling cost will probably be dominated by
 // the de-duping cost, since it incurs a read.
 var invertedJoinerBatchSize = util.ConstantWithMetamorphicTestValue(
-	"inverted-joiner-batch-size",
+	"invered-joiner-batch-size",
 	100, /* defaultValue */
 	1,   /* metamorphicValue */
 )
@@ -147,13 +147,6 @@ type invertedJoiner struct {
 	// columns are functionally dependent on the PK.
 	indexRows *rowcontainer.DiskBackedNumberedRowContainer
 
-	// indexSpans are the roachpb.Spans generated based on the inverted spans.
-	// The slice is reused between different input batches.
-	// NB: the row fetcher takes ownership of the slice and deeply resets each
-	// element of the slice once the fetcher is done with it, so we don't need
-	// to do ourselves.
-	indexSpans roachpb.Spans
-
 	// emitCursor contains information about where the next row to emit is within
 	// joinedRowIdx.
 	emitCursor struct {
@@ -167,8 +160,6 @@ type invertedJoiner struct {
 
 	spanBuilder           *span.Builder
 	outputContinuationCol bool
-
-	scanStats execinfra.ScanStats
 }
 
 var _ execinfra.Processor = &invertedJoiner{}
@@ -457,6 +448,7 @@ func (ij *invertedJoiner) readInput() (invertedJoinerState, *execinfrapb.Produce
 					ij.indexRow[:len(ij.prefixEqualityCols)],
 					ij.indexRowTypes[:len(ij.prefixEqualityCols)],
 					ij.index.IndexDesc().KeyColumnDirections,
+					ij.desc,
 					ij.index,
 					&ij.alloc,
 					nil, /* keyPrefix */
@@ -493,16 +485,16 @@ func (ij *invertedJoiner) readInput() (invertedJoinerState, *execinfrapb.Produce
 		return ijEmittingRows, nil
 	}
 	// NB: spans is already sorted, and that sorting is preserved when
-	// generating ij.indexSpans.
-	ij.indexSpans, err = ij.spanBuilder.SpansFromInvertedSpans(spans, nil /* constraint */, ij.indexSpans)
+	// generating indexSpans.
+	indexSpans, err := ij.spanBuilder.SpansFromInvertedSpans(spans, nil /* constraint */)
 	if err != nil {
 		ij.MoveToDraining(err)
 		return ijStateUnknown, ij.DrainHelper()
 	}
 
-	log.VEventf(ij.Ctx, 1, "scanning %d spans", len(ij.indexSpans))
+	log.VEventf(ij.Ctx, 1, "scanning %d spans", len(indexSpans))
 	if err = ij.fetcher.StartScan(
-		ij.Ctx, ij.FlowCtx.Txn, ij.indexSpans, rowinfra.NoBytesLimit, rowinfra.NoRowLimit,
+		ij.Ctx, ij.FlowCtx.Txn, indexSpans, rowinfra.NoBytesLimit, rowinfra.NoRowLimit,
 		ij.FlowCtx.TraceKV, ij.EvalCtx.TestingKnobs.ForceProductionBatchSizes,
 	); err != nil {
 		ij.MoveToDraining(err)
@@ -550,6 +542,7 @@ func (ij *invertedJoiner) performScan() (invertedJoinerState, *execinfrapb.Produ
 				ij.indexRow[:len(ij.prefixEqualityCols)],
 				ij.indexRowTypes[:len(ij.prefixEqualityCols)],
 				ij.index.IndexDesc().KeyColumnDirections,
+				ij.desc,
 				ij.index,
 				&ij.alloc,
 				nil, /* keyPrefix */
@@ -765,9 +758,6 @@ func (ij *invertedJoiner) close() {
 		if ij.diskMonitor != nil {
 			ij.diskMonitor.Stop(ij.Ctx)
 		}
-		if ij.spanBuilder != nil {
-			ij.spanBuilder.Release()
-		}
 	}
 }
 
@@ -781,8 +771,7 @@ func (ij *invertedJoiner) execStatsForTrace() *execinfrapb.ComponentStats {
 	if !ok {
 		return nil
 	}
-	ij.scanStats = execinfra.GetScanStats(ij.Ctx)
-	ret := execinfrapb.ComponentStats{
+	return &execinfrapb.ComponentStats{
 		Inputs: []execinfrapb.InputStats{is},
 		KV: execinfrapb.KVStats{
 			BytesRead:      optional.MakeUint(uint64(ij.fetcher.GetBytesRead())),
@@ -796,8 +785,6 @@ func (ij *invertedJoiner) execStatsForTrace() *execinfrapb.ComponentStats {
 		},
 		Output: ij.OutputHelper.Stats(),
 	}
-	execinfra.PopulateKVMVCCStats(&ret.KV, &ij.scanStats)
-	return &ret
 }
 
 func (ij *invertedJoiner) generateMeta() []execinfrapb.ProducerMetadata {

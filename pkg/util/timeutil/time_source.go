@@ -16,7 +16,6 @@ import "time"
 // testing.
 type TimeSource interface {
 	Now() time.Time
-	Since(t time.Time) time.Duration
 	NewTimer() TimerI
 	NewTicker(duration time.Duration) TickerI
 }
@@ -62,11 +61,6 @@ var _ TimeSource = DefaultTimeSource{}
 // Now returns timeutil.Now().
 func (DefaultTimeSource) Now() time.Time {
 	return Now()
-}
-
-// Since implements TimeSource interface
-func (DefaultTimeSource) Since(t time.Time) time.Duration {
-	return Since(t)
 }
 
 // NewTimer returns a TimerI wrapping *Timer.

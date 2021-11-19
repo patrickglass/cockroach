@@ -381,7 +381,6 @@ var parseFuncs = map[*types.T]func(*testing.T, string) tree.Datum{
 	types.Geometry:         mustParseDGeometry,
 	types.INet:             mustParseDINet,
 	types.VarBit:           mustParseDVarBit,
-	types.BytesArray:       mustParseDArrayOfType(types.Bytes),
 	types.DecimalArray:     mustParseDArrayOfType(types.Decimal),
 	types.FloatArray:       mustParseDArrayOfType(types.Float),
 	types.IntArray:         mustParseDArrayOfType(types.Int),
@@ -495,7 +494,6 @@ func TestStringConstantResolveAvailableTypes(t *testing.T) {
 			parseOptions: typeSet(
 				types.String,
 				types.Bytes,
-				types.BytesArray,
 				types.StringArray,
 				types.IntArray,
 				types.FloatArray,
@@ -507,7 +505,6 @@ func TestStringConstantResolveAvailableTypes(t *testing.T) {
 			parseOptions: typeSet(
 				types.String,
 				types.Bytes,
-				types.BytesArray,
 				types.StringArray,
 				types.FloatArray,
 				types.DecimalArray,
@@ -515,7 +512,7 @@ func TestStringConstantResolveAvailableTypes(t *testing.T) {
 		},
 		{
 			c:            tree.NewStrVal(`{a,b}`),
-			parseOptions: typeSet(types.String, types.Bytes, types.BytesArray, types.StringArray),
+			parseOptions: typeSet(types.String, types.Bytes, types.StringArray),
 		},
 		{
 			c:            tree.NewBytesStrVal(string([]byte{0xff, 0xfe, 0xfd})),
@@ -527,22 +524,21 @@ func TestStringConstantResolveAvailableTypes(t *testing.T) {
 		},
 		{
 			c:            tree.NewStrVal(`{18e7b17e-4ead-4e27-bfd5-bb6d11261bb6, 18e7b17e-4ead-4e27-bfd5-bb6d11261bb7}`),
-			parseOptions: typeSet(types.String, types.Bytes, types.BytesArray, types.StringArray, types.UUIDArray),
+			parseOptions: typeSet(types.String, types.Bytes, types.StringArray, types.UUIDArray),
 		},
 		{
 			c:            tree.NewStrVal("{true, false}"),
-			parseOptions: typeSet(types.String, types.Bytes, types.BytesArray, types.StringArray, types.BoolArray),
+			parseOptions: typeSet(types.String, types.Bytes, types.StringArray, types.BoolArray),
 		},
 		{
 			c:            tree.NewStrVal("{2010-09-28, 2010-09-29}"),
-			parseOptions: typeSet(types.String, types.Bytes, types.BytesArray, types.StringArray, types.DateArray, types.TimestampArray, types.TimestampTZArray),
+			parseOptions: typeSet(types.String, types.Bytes, types.StringArray, types.DateArray, types.TimestampArray, types.TimestampTZArray),
 		},
 		{
 			c: tree.NewStrVal("{2010-09-28 12:00:00.1, 2010-09-29 12:00:00.1}"),
 			parseOptions: typeSet(
 				types.String,
 				types.Bytes,
-				types.BytesArray,
 				types.StringArray,
 				types.TimeArray,
 				types.TimeTZArray,
@@ -555,7 +551,6 @@ func TestStringConstantResolveAvailableTypes(t *testing.T) {
 			parseOptions: typeSet(
 				types.String,
 				types.Bytes,
-				types.BytesArray,
 				types.StringArray,
 				types.TimeArray,
 				types.TimeTZArray,
@@ -565,18 +560,17 @@ func TestStringConstantResolveAvailableTypes(t *testing.T) {
 		},
 		{
 			c:            tree.NewStrVal("{PT12H2M, -23:00:00}"),
-			parseOptions: typeSet(types.String, types.Bytes, types.BytesArray, types.StringArray, types.IntervalArray),
+			parseOptions: typeSet(types.String, types.Bytes, types.StringArray, types.IntervalArray),
 		},
 		{
 			c:            tree.NewStrVal("{192.168.100.128, ::ffff:10.4.3.2}"),
-			parseOptions: typeSet(types.String, types.Bytes, types.BytesArray, types.StringArray, types.INetArray),
+			parseOptions: typeSet(types.String, types.Bytes, types.StringArray, types.INetArray),
 		},
 		{
 			c: tree.NewStrVal("{0101, 11}"),
 			parseOptions: typeSet(
 				types.String,
 				types.Bytes,
-				types.BytesArray,
 				types.StringArray,
 				types.IntArray,
 				types.FloatArray,

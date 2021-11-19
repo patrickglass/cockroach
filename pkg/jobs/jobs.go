@@ -114,7 +114,7 @@ func (r *Record) AppendDescription(description string) {
 		r.Description = description
 		return
 	}
-	r.Description = r.Description + "; " + description
+	r.Description = r.Description + ";" + description
 }
 
 // SetNonCancelable sets NonCancelable of this Record to the value returned from
@@ -212,7 +212,7 @@ var (
 )
 
 // HasErrJobCanceled returns true if the error contains the error set as the
-// job's FinalResumeError when it has been canceled.
+// job's FinalResumError when it has been canceled.
 func HasErrJobCanceled(err error) bool {
 	return errors.Is(err, errJobCanceled)
 }
@@ -452,8 +452,8 @@ func (j *Job) cancelRequested(
 		}
 		if md.Status == StatusPaused && md.Payload.FinalResumeError != nil {
 			decodedErr := errors.DecodeError(ctx, *md.Payload.FinalResumeError)
-			return errors.Wrapf(decodedErr, "job %d is paused and has non-nil FinalResumeError "+
-				"hence cannot be canceled and should be reverted", j.ID())
+			return fmt.Errorf("job %d is paused and has non-nil FinalResumeError "+
+				"%s hence cannot be canceled and should be reverted", j.ID(), decodedErr.Error())
 		}
 		if fn != nil {
 			if err := fn(ctx, txn); err != nil {

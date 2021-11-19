@@ -12,13 +12,11 @@ package tracing
 
 import (
 	"fmt"
-	"strings"
 	"sync/atomic"
 
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
-	"go.opentelemetry.io/otel/attribute"
-	oteltrace "go.opentelemetry.io/otel/trace"
+	opentracing "github.com/opentracing/opentracing-go"
 )
 
 const (
@@ -30,7 +28,7 @@ const (
 // configuration, it can hold anywhere between zero and three destinations for
 // trace information:
 //
-// 1. external OpenTelemetry-compatible trace collector (Jaeger, Zipkin, Lightstep),
+// 1. external OpenTracing-compatible trace collector (Jaeger, Zipkin, Lightstep),
 // 2. /debug/requests endpoint (net/trace package); mostly useful for local debugging
 // 3. CRDB-internal trace span (powers SQL session tracing).
 //
@@ -53,13 +51,6 @@ type Span struct {
 	// to guard spanInner against use-after-Finish.
 	i               spanInner
 	numFinishCalled int32 // atomic
-}
-
-// IsNoop returns true if this span is a black hole - it doesn't correspond to a
-// CRDB span and it doesn't output either to an OpenTelemetry tracer, or to
-// net.Trace.
-func (sp *Span) IsNoop() bool {
-	return sp.i.isNoop()
 }
 
 func (sp *Span) done() bool {
@@ -85,35 +76,18 @@ func (sp *Span) SetOperationName(operationName string) {
 // Finish idempotently marks the Span as completed (at which point it will
 // silently drop any new data added to it). Finishing a nil *Span is a noop.
 func (sp *Span) Finish() {
-	if sp == nil || sp.IsNoop() || atomic.AddInt32(&sp.numFinishCalled, 1) != 1 {
+	if sp == nil || sp.i.isNoop() || atomic.AddInt32(&sp.numFinishCalled, 1) != 1 {
 		return
 	}
 	sp.i.Finish()
-}
-
-// FinishAndGetRecording finishes the span and gets a recording at the same
-// time. This is offered as a combined operation because, otherwise, the caller
-// would be forced to collect the recording before finishing and so the span
-// would appear to be unfinished in the recording (it's illegal to collect the
-// recording after the span finishes, except by using this method).
-func (sp *Span) FinishAndGetRecording(recType RecordingType) Recording {
-	sp.Finish()
-	// Reach directly into sp.i to avoide the done() check in sp.GetRecording().
-	return sp.i.GetRecording(recType)
 }
 
 // GetRecording retrieves the current recording, if the Span has recording
 // enabled. This can be called while spans that are part of the recording are
 // still open; it can run concurrently with operations on those spans.
 //
-// recType indicates the type of information to be returned: structured info or
-// structured + verbose info. The caller can ask for either regardless of the
-// current recording mode (and also regardless of past recording modes) but, of
-// course, GetRecording(RecordingVerbose) will not return verbose info if it was
-// never collected.
-//
-// As a performance optimization, GetRecording does not return tags when
-// recType == RecordingStructured. Returning tags requires expensive
+// As a performance optimization, GetRecording does not return tags when the
+// underlying Span is not verbose. Returning tags requires expensive
 // stringification.
 //
 // A few internal tags are added to denote span properties:
@@ -121,11 +95,9 @@ func (sp *Span) FinishAndGetRecording(recType RecordingType) Recording {
 //    "_unfinished"	The span was never Finish()ed
 //    "_verbose"	The span is a verbose one
 //    "_dropped"	The span dropped recordings due to sizing constraints
-//
-// If recType is RecordingStructured, the return value will be nil if the span
-// doesn't have any structured events.
-func (sp *Span) GetRecording(recType RecordingType) Recording {
-	return sp.i.GetRecording(recType)
+func (sp *Span) GetRecording() Recording {
+	// It's always valid to get the recording, even for a finished span.
+	return sp.i.GetRecording()
 }
 
 // ImportRemoteSpans adds RecordedSpan data to the recording of the given Span;
@@ -166,20 +138,31 @@ func (sp *Span) SetVerbose(to bool) {
 	sp.i.SetVerbose(to)
 }
 
-// RecordingType returns the range's current recording mode.
-func (sp *Span) RecordingType() RecordingType {
-	return sp.i.RecordingType()
+// SetVerboseRecursively is like SetVerbose, except it does so for all
+// descendant spans as well.
+func (sp *Span) SetVerboseRecursively(to bool) {
+	sp.i.SetVerboseRecursively(to)
+}
+
+// ResetRecording clears any previously recorded information. This doesn't
+// affect any auxiliary trace sinks such as net/trace or zipkin.
+//
+// TODO(irfansharif): Remove this, it's no longer used.
+func (sp *Span) ResetRecording() {
+	sp.i.ResetRecording()
 }
 
 // IsVerbose returns true if the Span is verbose. See SetVerbose for details.
 func (sp *Span) IsVerbose() bool {
-	return sp.RecordingType() == RecordingVerbose
+	return sp.i.IsVerbose()
 }
 
 // Record provides a way to record free-form text into verbose spans. Recordings
 // may be dropped due to sizing constraints.
 //
-// TODO(tbg): make sure `msg` is lint-forced to be const.
+// TODO(irfansharif): We don't currently have redactability with trace
+// recordings (both here, and using RecordStructured above). We'll want to do this
+// soon.
 func (sp *Span) Record(msg string) {
 	if sp.done() {
 		return
@@ -210,23 +193,27 @@ func (sp *Span) RecordStructured(item Structured) {
 
 // SetTag adds a tag to the span. If there is a pre-existing tag set for the
 // key, it is overwritten.
-func (sp *Span) SetTag(key string, value attribute.Value) {
+func (sp *Span) SetTag(key string, value interface{}) {
 	if sp.done() {
 		return
 	}
 	sp.i.SetTag(key, value)
 }
 
-// TraceID retrieves a span's trace ID.
-func (sp *Span) TraceID() tracingpb.TraceID {
-	return sp.i.TraceID()
+// SetBaggageItem attaches "baggage" to this span, a key:value pair that's
+// propagated to all future descendants of this Span. Any attached baggage
+// crosses RPC boundaries, and is copied transitively for every remote
+// descendant.
+func (sp *Span) SetBaggageItem(restrictedKey, value string) {
+	if sp.done() {
+		return
+	}
+	sp.i.SetBaggageItem(restrictedKey, value)
 }
 
-// IsSterile returns true if this span does not want to have children spans. In
-// that case, trying to create a child span will result in the would-be child
-// being a root span.
-func (sp *Span) IsSterile() bool {
-	return sp.i.sterile
+// TraceID retrieves a span's trace ID.
+func (sp *Span) TraceID() uint64 {
+	return sp.i.TraceID()
 }
 
 // SpanMeta is information about a Span that is not local to this
@@ -242,28 +229,25 @@ func (sp *Span) IsSterile() bool {
 // child finishes, so that the caller can inductively construct the
 // entire trace.
 type SpanMeta struct {
-	traceID tracingpb.TraceID
-	spanID  tracingpb.SpanID
+	traceID uint64
+	spanID  uint64
 
-	// otelCtx is the OpenTelemetry span context. This is only populated when the
-	// remote Span is reporting to an external OpenTelemetry tracer. Setting this
-	// will cause child spans to also get an OpenTelemetry span.
-	otelCtx oteltrace.SpanContext
+	// Underlying shadow tracer info and span context (optional). This
+	// will only be populated when the remote Span is reporting to an
+	// external opentracing tracer. We hold on to the type of tracer to
+	// avoid mixing spans when the tracer is reconfigured, as impls are
+	// not typically robust to being shown spans they did not create.
+	shadowTracerType string
+	shadowCtx        opentracing.SpanContext
 
 	// If set, all spans derived from this context are being recorded.
+	//
+	// NB: at the time of writing, this is only ever set to RecordingVerbose
+	// and only if Baggage[verboseTracingBaggageKey] is set.
 	recordingType RecordingType
 
-	// sterile is set if this span does not want to have children spans. In that
-	// case, trying to create a child span will result in the would-be child being
-	// a root span. This is useful for span corresponding to long-running
-	// operations that don't want to be associated with derived operations.
-	//
-	// Note that this field is unlike all the others in that it doesn't make it
-	// across the wire through a carrier. As can be seen in
-	// Tracer.InjectMetaInto(carrier), if sterile is set, then we don't propagate
-	// any info about the span in order to not have a child be created on the
-	// other side. Similarly, ExtractMetaFrom does not deserialize this field.
-	sterile bool
+	// The Span's associated baggage.
+	Baggage map[string]string
 }
 
 // Empty returns whether or not the SpanMeta is a zero value.
@@ -271,16 +255,8 @@ func (sm SpanMeta) Empty() bool {
 	return sm.spanID == 0 && sm.traceID == 0
 }
 
-func (sm SpanMeta) String() string {
-	var s strings.Builder
-	s.WriteString(fmt.Sprintf("[spanID: %d, traceID: %d", sm.spanID, sm.traceID))
-	hasOtelSpan := sm.otelCtx.IsValid()
-	if hasOtelSpan {
-		s.WriteString(" hasOtel")
-		s.WriteString(fmt.Sprintf(" trace: %d span: %d", sm.otelCtx.TraceID(), sm.otelCtx.SpanID()))
-	}
-	s.WriteRune(']')
-	return s.String()
+func (sm *SpanMeta) String() string {
+	return fmt.Sprintf("[spanID: %d, traceID: %d]", sm.spanID, sm.traceID)
 }
 
 // Structured is an opaque protobuf that can be attached to a trace via

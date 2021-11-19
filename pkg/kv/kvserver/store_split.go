@@ -42,6 +42,9 @@ func splitPreApply(
 	//
 	// The exception to that is if the DisableEagerReplicaRemoval testing flag is
 	// enabled.
+	//
+	// TODO(ajwerner): rethink DisableEagerReplicaRemoval and remove this in
+	// 20.1 after there are no more preemptive snapshots.
 	_, hasRightDesc := split.RightDesc.GetReplicaDescriptor(r.StoreID())
 	_, hasLeftDesc := split.LeftDesc.GetReplicaDescriptor(r.StoreID())
 	if !hasRightDesc || !hasLeftDesc {
@@ -153,10 +156,8 @@ func splitPostApply(
 
 	// Update store stats with difference in stats before and after split.
 	if rightReplOrNil != nil {
-		if _, ok := rightReplOrNil.TenantID(); ok {
-			// TODO(tbg): why this check to get here? Is this really checking if the RHS
-			// is already initialized? But isn't it always, at this point?
-			rightReplOrNil.store.metrics.addMVCCStats(ctx, rightReplOrNil.tenantMetricsRef, deltaMS)
+		if tenantID, ok := rightReplOrNil.TenantID(); ok {
+			rightReplOrNil.store.metrics.addMVCCStats(ctx, tenantID, deltaMS)
 		} else {
 			log.Fatalf(ctx, "%s: found replica which is RHS of a split "+
 				"without a valid tenant ID", rightReplOrNil)

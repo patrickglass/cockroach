@@ -143,15 +143,15 @@ RETURNING id;`).Scan(&secondID))
 	require.Regexp(t, "found multiple non-terminal jobs for version", err)
 
 	// Let the fake, erroneous job finish with an error.
-	fakeJobBlockChan <- jobs.MarkAsPermanentJobError(errors.New("boom"))
+	fakeJobBlockChan <- errors.New("boom")
 	require.Regexp(t, "boom", <-runErr)
 
 	// Launch a second migration which later we'll ensure does not kick off
 	// another job. We'll make sure this happens by polling the trace to see
 	// the log line indicating what we want.
-	tr := tc.Server(0).TracerI().(*tracing.Tracer)
-	recCtx, sp := tr.StartSpanCtx(ctx, "test", tracing.WithRecording(tracing.RecordingVerbose))
-	defer sp.Finish()
+	tr := tc.Server(0).Tracer().(*tracing.Tracer)
+	recCtx, getRecording, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test")
+	defer cancel()
 	upgrade2Err := make(chan error, 1)
 	go func() {
 		// Use an internal executor to get access to the trace as it happens.
@@ -175,11 +175,10 @@ RETURNING id;`).Scan(&secondID))
 		// no processors actually create their own spans). Instead, a different
 		// way to observe the status of the migration manager should be
 		// introduced and should be used here.
-		rec := sp.GetRecording(tracing.RecordingVerbose)
-		if tracing.FindMsgInRecording(rec, "found existing migration job") > 0 {
+		if tracing.FindMsgInRecording(getRecording(), "found existing migration job") > 0 {
 			return nil
 		}
-		return errors.Errorf("waiting for job to be discovered: %v", rec)
+		return errors.Errorf("waiting for job to be discovered: %v", getRecording())
 	})
 	close(unblock)
 	require.NoError(t, <-upgrade1Err)
@@ -490,8 +489,6 @@ SELECT id
 
 // Test that the precondition prevents migrations from being run.
 func TestPrecondition(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	// Start by running v0. We want the precondition of v1 to prevent
 	// us from reaching v1 (or v2). We want the precondition to not be
@@ -514,7 +511,7 @@ func TestPrecondition(t *testing.T) {
 		) error {
 			atomic.AddInt64(run, 1)
 			if err.Load().(bool) {
-				return jobs.MarkAsPermanentJobError(errors.New("boom"))
+				return errors.New("boom")
 			}
 			return nil
 		}

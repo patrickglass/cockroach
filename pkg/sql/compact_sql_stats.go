@@ -81,7 +81,7 @@ func (r *sqlStatsCompactionResumer) Resume(ctx context.Context, execCtx interfac
 		r.st,
 		ie,
 		db,
-		ie.s.ServerMetrics.StatsMetrics.SQLStatsRemovedRows,
+		ie.s.Metrics.StatsMetrics.SQLStatsRemovedRows,
 		p.ExecCfg().SQLStatsTestingKnobs)
 	if err = statsCompactor.DeleteOldestEntries(ctx); err != nil {
 		return err
@@ -244,11 +244,11 @@ func (e *scheduledSQLStatsCompactionExecutor) Metrics() metric.Struct {
 
 // GetCreateScheduleStatement implements the jobs.ScheduledJobExecutor interface.
 func (e *scheduledSQLStatsCompactionExecutor) GetCreateScheduleStatement(
-	ctx context.Context,
-	env scheduledjobs.JobSchedulerEnv,
-	txn *kv.Txn,
-	sj *jobs.ScheduledJob,
-	ex sqlutil.InternalExecutor,
+	_ context.Context,
+	_ scheduledjobs.JobSchedulerEnv,
+	_ *kv.Txn,
+	_ *jobs.ScheduledJob,
+	_ sqlutil.InternalExecutor,
 ) (string, error) {
 	return "SELECT crdb_internal.schedule_sql_stats_compact()", nil
 }

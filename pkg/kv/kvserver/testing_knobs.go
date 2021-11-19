@@ -15,10 +15,10 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/tenantrate"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnwait"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -37,7 +37,6 @@ type StoreTestingKnobs struct {
 	ConsistencyTestingKnobs ConsistencyTestingKnobs
 	TenantRateKnobs         tenantrate.TestingKnobs
 	StorageKnobs            storage.TestingKnobs
-	AllocatorKnobs          *AllocatorTestingKnobs
 
 	// TestingRequestFilter is called before evaluating each request on a
 	// replica. The filter is run before the request acquires latches, so
@@ -328,9 +327,9 @@ type StoreTestingKnobs struct {
 	// PurgeOutdatedReplicasInterceptor intercepts attempts to purge outdated
 	// replicas in the store.
 	PurgeOutdatedReplicasInterceptor func()
-	// SpanConfigUpdateInterceptor is called after the store hears about a span
-	// config update.
-	SpanConfigUpdateInterceptor func(spanconfig.Update)
+	// If set, use the given truncated state type when bootstrapping ranges.
+	// This is used for testing the truncated state migration.
+	TruncatedStateTypeOverride *stateloader.TruncatedStateType
 	// If set, use the given version as the initial replica version when
 	// bootstrapping ranges. This is used for testing the migration
 	// infrastructure.
@@ -382,14 +381,6 @@ var _ base.ModuleTestingKnobs = NodeLivenessTestingKnobs{}
 
 // ModuleTestingKnobs implements the base.ModuleTestingKnobs interface.
 func (NodeLivenessTestingKnobs) ModuleTestingKnobs() {}
-
-// AllocatorTestingKnobs allows tests to override the behavior of `Allocator`.
-type AllocatorTestingKnobs struct {
-	// AllowLeaseTransfersToReplicasNeedingSnapshots permits lease transfer
-	// targets produced by the Allocator to include replicas that may be waiting
-	// for snapshots.
-	AllowLeaseTransfersToReplicasNeedingSnapshots bool
-}
 
 // PinnedLeasesKnob is a testing know for controlling what store can acquire a
 // lease for specific ranges.

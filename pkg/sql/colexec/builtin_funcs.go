@@ -20,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/errors"
 )
 
 type defaultBuiltinFuncOperator struct {
@@ -119,11 +118,7 @@ func NewBuiltinFunctionOperator(
 	outputIdx int,
 	input colexecop.Operator,
 ) (colexecop.Operator, error) {
-	overload := funcExpr.ResolvedOverload()
-	if overload.FnWithExprs != nil {
-		return nil, errors.New("builtins with FnWithExprs are not supported in the vectorized engine")
-	}
-	switch overload.SpecializedVecBuiltin {
+	switch funcExpr.ResolvedOverload().SpecializedVecBuiltin {
 	case tree.SubstringStringIntInt:
 		input = colexecutils.NewVectorTypeEnforcer(allocator, input, types.String, outputIdx)
 		return newSubstringOperator(

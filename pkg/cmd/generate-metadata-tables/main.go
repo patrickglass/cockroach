@@ -15,15 +15,11 @@
 //
 // This accepts the following arguments:
 //
-// --user:    to change default pg username of `postgres`
-// --addr:    to change default pg address of `localhost:5432`
-// --catalog: can be pg_catalog or information_schema. Default is pg_catalog
-// --rdbms:   can be postgres or mysql. Default is postgres
-// --stdout:  for testing purposes, use this flag to send the output to the
-//            console
+// -user: to change default pg username of `postgres`
+// -addr: to change default pg address of `localhost:5432`
 //
-// Output of this file should generate (If not using --stout):
-// pkg/sql/testdata/<catalog>_tables_from_<rdbms>.json
+// Output of this file should generate:
+// pkg/sql/testdata/pg_catalog_tables
 package main
 
 import (
@@ -63,7 +59,7 @@ func main() {
 		panic(err)
 	}
 	pgCatalogFile := &sql.PGMetadataFile{
-		Version:    dbVersion,
+		PGVersion:  dbVersion,
 		PGMetadata: sql.PGMetadataTables{},
 	}
 
@@ -74,13 +70,16 @@ func main() {
 
 	rows.ForEachRow(func(tableName, columnName, dataTypeName string, dataTypeOid uint32) {
 		pgCatalogFile.PGMetadata.AddColumnMetadata(tableName, columnName, dataTypeName, dataTypeOid)
+		columnType := pgCatalogFile.PGMetadata[tableName][columnName]
+		if dataTypeOid != 0 && !columnType.IsImplemented() {
+			pgCatalogFile.AddUnimplementedType(columnType)
+		}
 	})
 
-	writer, closeFn, err := getWriter()
+	writer, err := getWriter()
 	if err != nil {
 		panic(err)
 	}
-	defer closeFn()
 	pgCatalogFile.Save(writer)
 }
 
@@ -103,12 +102,11 @@ func testdata() string {
 	return testdataDir
 }
 
-func getWriter() (io.Writer, func(), error) {
+func getWriter() (io.Writer, error) {
 	if *flagStdout {
-		return os.Stdout, func() {}, nil
+		return os.Stdout, nil
 	}
 
 	filename := sql.TablesMetadataFilename(testdata(), *flagRDBMS, *flagSchema)
-	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	return file, func() { file.Close() }, err
+	return os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 }

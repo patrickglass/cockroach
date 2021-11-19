@@ -55,7 +55,7 @@ import (
 //
 // To see how this query would be executed, consider the equivalent query:
 //
-// SELECT t1.* FROM abcd@c_idx AS t1 JOIN abcd@d_idx AS t2 ON t1.a = t2.a AND
+// SELECT t1.* FROM abcd@c_idx AS t1 JOIN abcd@d_idx ON t1.a = t2.a AND
 // t1.b = t2.b WHERE t1.c = 2 AND t2.d = 3;
 //
 // A zigzag joiner takes 2 sides as input. In the example above, the join would
@@ -229,7 +229,7 @@ import (
 type zigzagJoiner struct {
 	joinerBase
 
-	cancelChecker cancelchecker.CancelChecker
+	cancelChecker *cancelchecker.CancelChecker
 
 	// numTables stores the number of tables involved in the join.
 	numTables int
@@ -247,8 +247,6 @@ type zigzagJoiner struct {
 
 	rowAlloc           rowenc.EncDatumRowAlloc
 	fetchedInititalRow bool
-
-	scanStats execinfra.ScanStats
 }
 
 // zigzagJoinerBatchSize is a parameter which determines how many rows should
@@ -373,7 +371,7 @@ func valuesSpecToEncDatum(
 // Start is part of the RowSource interface.
 func (z *zigzagJoiner) Start(ctx context.Context) {
 	ctx = z.StartInternal(ctx, zigzagJoinerProcName)
-	z.cancelChecker.Reset(ctx)
+	z.cancelChecker = cancelchecker.NewCancelChecker(ctx)
 	log.VEventf(ctx, 2, "starting zigzag joiner run")
 }
 
@@ -519,9 +517,6 @@ func (z *zigzagJoiner) close() {
 	if z.InternalClose() {
 		for i := range z.infos {
 			z.infos[i].fetcher.Close(z.Ctx)
-			if sb := z.infos[i].spanBuilder; sb != nil {
-				sb.Release()
-			}
 		}
 		log.VEventf(z.Ctx, 2, "exiting zigzag joiner run")
 	}
@@ -998,13 +993,10 @@ func (z *zigzagJoiner) ConsumerClosed() {
 
 // execStatsForTrace implements ProcessorBase.ExecStatsForTrace.
 func (z *zigzagJoiner) execStatsForTrace() *execinfrapb.ComponentStats {
-	z.scanStats = execinfra.GetScanStats(z.Ctx)
-
 	kvStats := execinfrapb.KVStats{
 		BytesRead:      optional.MakeUint(uint64(z.getBytesRead())),
 		ContentionTime: optional.MakeTimeValue(execinfra.GetCumulativeContentionTime(z.Ctx)),
 	}
-	execinfra.PopulateKVMVCCStats(&kvStats, &z.scanStats)
 	for i := range z.infos {
 		fis, ok := getFetcherInputStats(z.infos[i].fetcher)
 		if !ok {

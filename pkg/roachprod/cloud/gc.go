@@ -29,7 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
-	"github.com/slack-go/slack"
+	"github.com/nlopes/slack"
 )
 
 var errNoSlackClient = fmt.Errorf("no Slack client")
@@ -89,11 +89,9 @@ func makeSlackClient() *slack.Client {
 	return client
 }
 
-func findChannel(client *slack.Client, name string, nextCursor string) (string, error) {
+func findChannel(client *slack.Client, name string) (string, error) {
 	if client != nil {
-		channels, cursor, err := client.GetConversationsForUser(
-			&slack.GetConversationsForUserParameters{Cursor: nextCursor},
-		)
+		channels, err := client.GetChannels(true)
 		if err != nil {
 			return "", err
 		}
@@ -101,9 +99,6 @@ func findChannel(client *slack.Client, name string, nextCursor string) (string, 
 			if channel.Name == name {
 				return channel.ID, nil
 			}
-		}
-		if cursor != "" {
-			return findChannel(client, name, cursor)
 		}
 	}
 	return "", fmt.Errorf("not found")
@@ -117,7 +112,8 @@ func findUserChannel(client *slack.Client, email string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return u.ID, nil
+	_, _, channelID, err := client.OpenIMChannel(u.ID)
+	return channelID, err
 }
 
 func postStatus(client *slack.Client, channel string, dryrun bool, s *status, badVMs vm.List) {
@@ -181,11 +177,13 @@ func postStatus(client *slack.Client, channel string, dryrun bool, s *status, ba
 		}
 	}
 
-	var attachments []slack.Attachment
+	params := slack.PostMessageParameters{
+		Username: "roachprod",
+	}
 	fallback := fmt.Sprintf("clusters: %d live, %d expired, %d destroyed",
 		len(s.good), len(s.warn), len(s.destroy))
 	if len(s.good) > 0 {
-		attachments = append(attachments,
+		params.Attachments = append(params.Attachments,
 			slack.Attachment{
 				Color:    "good",
 				Title:    "Live Clusters",
@@ -194,7 +192,7 @@ func postStatus(client *slack.Client, channel string, dryrun bool, s *status, ba
 			})
 	}
 	if len(s.warn) > 0 {
-		attachments = append(attachments,
+		params.Attachments = append(params.Attachments,
 			slack.Attachment{
 				Color:    "warning",
 				Title:    "Expiring Clusters",
@@ -203,7 +201,7 @@ func postStatus(client *slack.Client, channel string, dryrun bool, s *status, ba
 			})
 	}
 	if len(s.destroy) > 0 {
-		attachments = append(attachments,
+		params.Attachments = append(params.Attachments,
 			slack.Attachment{
 				Color:    "danger",
 				Title:    "Destroyed Clusters",
@@ -217,18 +215,15 @@ func postStatus(client *slack.Client, channel string, dryrun bool, s *status, ba
 			names = append(names, vm.Name)
 		}
 		sort.Strings(names)
-		attachments = append(attachments,
+		params.Attachments = append(params.Attachments,
 			slack.Attachment{
 				Color: "danger",
 				Title: "Bad VMs",
 				Text:  strings.Join(names, "\n"),
 			})
 	}
-	_, _, err := client.PostMessage(
-		channel,
-		slack.MsgOptionUsername("roachprod"),
-		slack.MsgOptionAttachments(attachments...),
-	)
+
+	_, _, err := client.PostMessage(channel, "", params)
 	if err != nil {
 		log.Infof(context.Background(), "%v", err)
 	}
@@ -240,11 +235,12 @@ func postError(client *slack.Client, channel string, err error) {
 		return
 	}
 
-	_, _, err = client.PostMessage(
-		channel,
-		slack.MsgOptionUsername("roachprod"),
-		slack.MsgOptionText(fmt.Sprintf("`%s`", err), false),
-	)
+	params := slack.PostMessageParameters{
+		Username:   "roachprod",
+		Markdown:   true,
+		EscapeText: false,
+	}
+	_, _, err = client.PostMessage(channel, fmt.Sprintf("`%s`", err), params)
 	if err != nil {
 		log.Infof(context.Background(), "%v", err)
 	}
@@ -274,7 +270,7 @@ func shouldSend(channel string, status *status) (bool, error) {
 }
 
 // GCClusters checks all cluster to see if they should be deleted. It only
-// fails on failure to perform cloud actions. All other actions (load/save
+// fails on failure to perform cloud actions. All others actions (load/save
 // file, email) do not abort.
 func GCClusters(cloud *Cloud, dryrun bool) error {
 	now := timeutil.Now()
@@ -311,7 +307,7 @@ func GCClusters(cloud *Cloud, dryrun bool) error {
 
 	// Send out notification to #roachprod-status.
 	client := makeSlackClient()
-	channel, _ := findChannel(client, "roachprod-status", "")
+	channel, _ := findChannel(client, "roachprod-status")
 	postStatus(client, channel, dryrun, &s, badVMs)
 
 	// Send out user notifications if any of the user's clusters are expired or

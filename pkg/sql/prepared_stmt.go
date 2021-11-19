@@ -64,8 +64,7 @@ type PreparedStatement struct {
 	createdAt time.Time
 	// origin is the protocol in which this prepare statement was created.
 	// Used for reporting on `pg_prepared_statements`.
-	origin           PreparedStatementOrigin
-	StatementSummary string
+	origin PreparedStatementOrigin
 }
 
 // MemoryEstimate returns a rough estimate of the PreparedStatement's memory
@@ -116,14 +115,23 @@ type preparedStatementsAccessor interface {
 	DeleteAll(ctx context.Context)
 }
 
-// PreparedPortal is a PreparedStatement that has been bound with query
-// arguments.
+// PreparedPortal is a PreparedStatement that has been bound with query arguments.
+//
+// Note that PreparedPortals maintain a reference counter internally.
+// References need to be registered with incRef() and de-registered with
+// decRef().
 type PreparedPortal struct {
 	Stmt  *PreparedStatement
 	Qargs tree.QueryArguments
 
 	// OutFormats contains the requested formats for the output columns.
 	OutFormats []pgwirebase.FormatCode
+
+	// refCount keeps track of the number of references to this PreparedStatement.
+	// New references are registered through incRef().
+	// Most references are being held by portals created from this prepared
+	// statement.
+	refCount int
 
 	// exhausted tracks whether this portal has already been fully exhausted,
 	// meaning that any additional attempts to execute it should return no
@@ -133,7 +141,8 @@ type PreparedPortal struct {
 
 // makePreparedPortal creates a new PreparedPortal.
 //
-// accountForCopy() doesn't need to be called on the prepared statement.
+// incRef() doesn't need to be called on the result.
+// When no longer in use, the PreparedPortal needs to be decRef()d.
 func (ex *connExecutor) makePreparedPortal(
 	ctx context.Context,
 	name string,
@@ -145,25 +154,37 @@ func (ex *connExecutor) makePreparedPortal(
 		Stmt:       stmt,
 		Qargs:      qargs,
 		OutFormats: outFormats,
+		refCount:   1,
 	}
-	return portal, portal.accountForCopy(ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc, name)
+	if err := ex.extraTxnState.prepStmtsNamespaceMemAcc.Grow(ctx, portal.size(name)); err != nil {
+		return PreparedPortal{}, err
+	}
+	// The portal keeps a reference to the PreparedStatement, so register it.
+	stmt.incRef(ctx)
+	return portal, nil
 }
 
-// accountForCopy updates the state to account for the copy of the
-// PreparedPortal (p is the copy).
-func (p PreparedPortal) accountForCopy(
-	ctx context.Context, prepStmtsNamespaceMemAcc *mon.BoundAccount, portalName string,
-) error {
-	p.Stmt.incRef(ctx)
-	return prepStmtsNamespaceMemAcc.Grow(ctx, p.size(portalName))
+func (p *PreparedPortal) incRef(ctx context.Context) {
+	if p.refCount <= 0 {
+		log.Fatal(ctx, "corrupt PreparedPortal refcount")
+	}
+	p.refCount++
 }
 
-// close closes this portal.
-func (p PreparedPortal) close(
+// decRef decrements the number of references to this portal. If the refCount
+// reaches 0, then the memory account is shrunk accordingly.
+func (p *PreparedPortal) decRef(
 	ctx context.Context, prepStmtsNamespaceMemAcc *mon.BoundAccount, portalName string,
 ) {
-	prepStmtsNamespaceMemAcc.Shrink(ctx, p.size(portalName))
-	p.Stmt.decRef(ctx)
+	if p.refCount <= 0 {
+		log.Fatal(ctx, "corrupt PreparedPortal refcount")
+	}
+	p.refCount--
+
+	if p.refCount == 0 {
+		prepStmtsNamespaceMemAcc.Shrink(ctx, p.size(portalName))
+		p.Stmt.decRef(ctx)
+	}
 }
 
 func (p PreparedPortal) size(portalName string) int64 {

@@ -160,11 +160,13 @@ var (
 		{name: "RangeTombstone", suffix: LocalRangeTombstoneSuffix},
 		{name: "RaftHardState", suffix: LocalRaftHardStateSuffix},
 		{name: "RangeAppliedState", suffix: LocalRangeAppliedStateSuffix},
+		{name: "RaftAppliedIndex", suffix: LocalRaftAppliedIndexLegacySuffix},
+		{name: "LeaseAppliedIndex", suffix: LocalLeaseAppliedIndexLegacySuffix},
 		{name: "RaftLog", suffix: LocalRaftLogSuffix,
 			ppFunc: raftLogKeyPrint,
 			psFunc: raftLogKeyParse,
 		},
-		{name: "RaftTruncatedState", suffix: LocalRaftTruncatedStateSuffix},
+		{name: "RaftTruncatedState", suffix: LocalRaftTruncatedStateLegacySuffix},
 		{name: "RangeLastReplicaGCTimestamp", suffix: LocalRangeLastReplicaGCTimestampSuffix},
 		{name: "RangeLease", suffix: LocalRangeLeaseSuffix},
 		{name: "RangePriorReadSummary", suffix: LocalRangePriorReadSummarySuffix},
@@ -193,6 +195,7 @@ var constSubKeyDict = []struct {
 	{"/gossipBootstrap", localStoreGossipSuffix},
 	{"/clusterVersion", localStoreClusterVersionSuffix},
 	{"/nodeTombstone", localStoreNodeTombstoneSuffix},
+	{"/suggestedCompaction", localStoreSuggestedCompactionSuffix},
 	{"/cachedSettings", localStoreCachedSettingsSuffix},
 }
 
@@ -236,6 +239,7 @@ func localStoreKeyParse(input string) (remainder string, output roachpb.Key) {
 		if strings.HasPrefix(input, s.name) {
 			switch {
 			case
+				s.key.Equal(localStoreSuggestedCompactionSuffix),
 				s.key.Equal(localStoreNodeTombstoneSuffix),
 				s.key.Equal(localStoreCachedSettingsSuffix):
 				panic(&ErrUglifyUnsupported{errors.Errorf("cannot parse local store key with suffix %s", s.key)})
@@ -662,7 +666,7 @@ func prettyPrintInternal(valDirs []encoding.Direction, key roachpb.Key, quoteRaw
 		if quoteRawKeys {
 			return fmt.Sprintf("%q", []byte(key)), false
 		}
-		return string(key), false
+		return fmt.Sprintf("%s", []byte(key)), false
 	}
 
 	for _, k := range keyOfKeyDict {

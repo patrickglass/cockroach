@@ -48,7 +48,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
@@ -64,8 +63,6 @@ var (
 	// ErrFloatOutOfRange is reported when float arithmetic overflows.
 	ErrFloatOutOfRange = pgerror.New(pgcode.NumericValueOutOfRange, "float out of range")
 	errDecOutOfRange   = pgerror.New(pgcode.NumericValueOutOfRange, "decimal out of range")
-	// errCharOutOfRange is reported when int cast to ASCII byte overflows.
-	errCharOutOfRange = pgerror.New(pgcode.NumericValueOutOfRange, "\"char\" out of range")
 
 	// ErrDivByZero is reported on a division by zero.
 	ErrDivByZero       = pgerror.New(pgcode.DivisionByZero, "division by zero")
@@ -287,13 +284,12 @@ type TwoArgFn func(*EvalContext, Datum, Datum) (Datum, error)
 
 // BinOp is a binary operator.
 type BinOp struct {
-	LeftType          *types.T
-	RightType         *types.T
-	ReturnType        *types.T
-	NullableArgs      bool
-	Fn                TwoArgFn
-	Volatility        Volatility
-	PreferredOverload bool
+	LeftType     *types.T
+	RightType    *types.T
+	ReturnType   *types.T
+	NullableArgs bool
+	Fn           TwoArgFn
+	Volatility   Volatility
 
 	types   TypeList
 	retType ReturnTyper
@@ -315,8 +311,8 @@ func (op *BinOp) returnType() ReturnTyper {
 	return op.retType
 }
 
-func (op *BinOp) preferred() bool {
-	return op.PreferredOverload
+func (*BinOp) preferred() bool {
+	return false
 }
 
 // AppendToMaybeNullArray appends an element to an array. If the first
@@ -1895,8 +1891,7 @@ var BinOps = map[BinaryOperatorSymbol]binOpOverload{
 				}
 				return &DJSON{j}, nil
 			},
-			PreferredOverload: true,
-			Volatility:        VolatilityImmutable,
+			Volatility: VolatilityImmutable,
 		},
 		&BinOp{
 			LeftType:   types.Jsonb,
@@ -1957,8 +1952,7 @@ var BinOps = map[BinaryOperatorSymbol]binOpOverload{
 				}
 				return NewDString(*text), nil
 			},
-			PreferredOverload: true,
-			Volatility:        VolatilityImmutable,
+			Volatility: VolatilityImmutable,
 		},
 		&BinOp{
 			LeftType:   types.Jsonb,
@@ -2032,7 +2026,7 @@ type CmpOp struct {
 
 	Volatility Volatility
 
-	PreferredOverload bool
+	isPreferred bool
 }
 
 func (op *CmpOp) params() TypeList {
@@ -2050,7 +2044,7 @@ func (op *CmpOp) returnType() ReturnTyper {
 }
 
 func (op *CmpOp) preferred() bool {
-	return op.PreferredOverload
+	return op.isPreferred
 }
 
 func cmpOpFixups(
@@ -2067,7 +2061,7 @@ func cmpOpFixups(
 	}
 
 	// Array equality comparisons.
-	for _, t := range append(types.Scalar, types.AnyEnum) {
+	for _, t := range types.Scalar {
 		cmpOps[EQ] = append(cmpOps[EQ], &CmpOp{
 			LeftType:   types.MakeArray(t),
 			RightType:  types.MakeArray(t),
@@ -2325,9 +2319,9 @@ var CmpOps = cmpOpFixups(map[ComparisonOperatorSymbol]cmpOpOverload{
 			RightType:    types.Unknown,
 			Fn:           cmpOpScalarIsFn,
 			NullableArgs: true,
-			// Avoids ambiguous comparison error for NULL IS NOT DISTINCT FROM NULL.
-			PreferredOverload: true,
-			Volatility:        VolatilityLeakProof,
+			// Avoids ambiguous comparison error for NULL IS NOT DISTINCT FROM NULL>
+			isPreferred: true,
+			Volatility:  VolatilityLeakProof,
 		},
 		&CmpOp{
 			LeftType:     types.AnyArray,
@@ -2983,8 +2977,8 @@ func MatchLikeEscape(
 
 	like, err := optimizedLikeFunc(pattern, caseInsensitive, escapeRune)
 	if err != nil {
-		return DBoolFalse, pgerror.Wrap(
-			err, pgcode.InvalidRegularExpression, "LIKE regexp compilation failed")
+		return DBoolFalse, pgerror.Newf(
+			pgcode.InvalidRegularExpression, "LIKE regexp compilation failed: %v", err)
 	}
 
 	if like == nil {
@@ -3008,8 +3002,8 @@ func ConvertLikeToRegexp(
 	key := likeKey{s: pattern, caseInsensitive: caseInsensitive, escape: escape}
 	re, err := ctx.ReCache.GetRegexp(key)
 	if err != nil {
-		return nil, pgerror.Wrap(
-			err, pgcode.InvalidRegularExpression, "LIKE regexp compilation failed")
+		return nil, pgerror.Newf(
+			pgcode.InvalidRegularExpression, "LIKE regexp compilation failed: %v", err)
 	}
 	return re, nil
 }
@@ -3033,8 +3027,8 @@ func matchLike(ctx *EvalContext, left, right Datum, caseInsensitive bool) (Datum
 
 	like, err := optimizedLikeFunc(pattern, caseInsensitive, '\\')
 	if err != nil {
-		return DBoolFalse, pgerror.Wrap(
-			err, pgcode.InvalidRegularExpression, "LIKE regexp compilation failed")
+		return DBoolFalse, pgerror.Newf(
+			pgcode.InvalidRegularExpression, "LIKE regexp compilation failed: %v", err)
 	}
 
 	if like == nil {
@@ -3114,6 +3108,7 @@ type EvalDatabase interface {
 		specifier HasPrivilegeSpecifier,
 		user security.SQLUsername,
 		kind privilege.Kind,
+		withGrantOpt bool,
 	) (bool, error)
 }
 
@@ -3205,13 +3200,6 @@ type EvalPlanner interface {
 		force bool,
 	) error
 
-	// UserHasAdminRole returns tuple of bool and error:
-	// (true, nil) means that the user has an admin role (i.e. root or node)
-	// (false, nil) means that the user has NO admin role
-	// (false, err) means that there was an error running the query on
-	// the `system.users` table
-	UserHasAdminRole(ctx context.Context, user security.SQLUsername) (bool, error)
-
 	// MemberOfWithAdminOption is used to collect a list of roles (direct and
 	// indirect) that the member is part of. See the comment on the planner
 	// implementation in authorization.go
@@ -3225,9 +3213,6 @@ type EvalPlanner interface {
 
 	// ExternalWriteFile writes the content to an external file URI.
 	ExternalWriteFile(ctx context.Context, uri string, content []byte) error
-
-	// DecodeGist exposes gist functionality to the builtin functions.
-	DecodeGist(gist string) ([]string, error)
 }
 
 // CompactEngineSpanFunc is used to compact an engine key span at the given
@@ -3295,14 +3280,6 @@ type InternalExecutor interface {
 	) (Datums, error)
 }
 
-// ExecConfigAccessor is a limited interface to access ExecutorConfig's states.
-// It is defined independently to prevent a circular dependency on sql, tree and sqlbase.
-type ExecConfigAccessor interface {
-
-	// JobRegistry returns jobs.Registry from ExecutorConfig
-	JobRegistry() interface{}
-}
-
 // PrivilegedAccessor gives access to certain queries that would otherwise
 // require someone with RootUser access to query a given data source.
 // It is defined independently to prevent a circular dependency on sql, tree and sqlbase.
@@ -3315,7 +3292,7 @@ type PrivilegedAccessor interface {
 		ctx context.Context, parentID int64, name string,
 	) (DInt, bool, error)
 
-	// LookupZoneConfigByNamespaceID returns the zone config given a namespace id.
+	// LookupZoneConfig returns the zone config given a namespace id.
 	// It is meant as a replacement for looking up system.zones directly.
 	// Returns the config byte array, a bool representing whether the namespace exists,
 	// and an error if there is one.
@@ -3354,6 +3331,21 @@ type SequenceOperators interface {
 	// Returns an empty string if the sequence name does not exist.
 	GetSerialSequenceNameFromColumn(ctx context.Context, tableName *TableName, columnName Name) (*TableName, error)
 
+	// IncrementSequence increments the given sequence and returns the result.
+	// It returns an error if the given name is not a sequence.
+	// The caller must ensure that seqName is fully qualified already.
+	IncrementSequence(ctx context.Context, seqName *TableName) (int64, error)
+
+	// GetLatestValueInSessionForSequence returns the value most recently obtained by
+	// nextval() for the given sequence in this session.
+	GetLatestValueInSessionForSequence(ctx context.Context, seqName *TableName) (int64, error)
+
+	// SetSequenceValue sets the sequence's value.
+	// If isCalled is false, the sequence is set such that the next time nextval() is called,
+	// `newVal` is returned. Otherwise, the next call to nextval will return
+	// `newVal + seqOpts.Increment`.
+	SetSequenceValue(ctx context.Context, seqName *TableName, newVal int64, isCalled bool) error
+
 	// IncrementSequenceByID increments the given sequence and returns the result.
 	// It returns an error if the given ID is not a sequence.
 	// Takes in a sequence ID rather than a name, unlike IncrementSequence.
@@ -3369,7 +3361,7 @@ type SequenceOperators interface {
 	// `newVal` is returned. Otherwise, the next call to nextval will return
 	// `newVal + seqOpts.Increment`.
 	// Takes in a sequence ID rather than a name, unlike SetSequenceValue.
-	SetSequenceValueByID(ctx context.Context, seqID uint32, newVal int64, isCalled bool) error
+	SetSequenceValueByID(ctx context.Context, seqID int64, newVal int64, isCalled bool) error
 }
 
 // TenantOperator is capable of interacting with tenant state, allowing SQL
@@ -3501,8 +3493,6 @@ type EvalContext struct {
 	//
 	Locality roachpb.Locality
 
-	Tracer *tracing.Tracer
-
 	// The statement timestamp. May be different for every statement.
 	// Used for statement_timestamp().
 	StmtTimestamp time.Time
@@ -3548,8 +3538,6 @@ type EvalContext struct {
 	// Note that the executor will be "session-bound" - it will inherit session
 	// variables from a parent session.
 	InternalExecutor InternalExecutor
-
-	ExecConfigAccessor ExecConfigAccessor
 
 	Planner EvalPlanner
 
@@ -3687,12 +3675,7 @@ func NewTestingEvalContext(st *cluster.Settings) *EvalContext {
 
 // Stop closes out the EvalContext and must be called once it is no longer in use.
 func (ctx *EvalContext) Stop(c context.Context) {
-	if r := recover(); r != nil {
-		ctx.Mon.EmergencyStop(c)
-		panic(r)
-	} else {
-		ctx.Mon.Stop(c)
-	}
+	ctx.Mon.Stop(c)
 }
 
 // FmtCtx creates a FmtCtx with the given options as well as the EvalContext's session data.
@@ -4174,9 +4157,6 @@ func (expr *FuncExpr) EvalArgsAndGetGenerator(ctx *EvalContext) (ValueGenerator,
 	if expr.fn == nil || expr.fnProps.Class != GeneratorClass {
 		return nil, errors.AssertionFailedf("cannot call EvalArgsAndGetGenerator() on non-aggregate function: %q", ErrString(expr))
 	}
-	if expr.fn.GeneratorWithExprs != nil {
-		return expr.fn.GeneratorWithExprs(ctx, expr.Exprs)
-	}
 	nullArg, args, err := expr.evalArgs(ctx)
 	if err != nil || nullArg {
 		return nil, err
@@ -4221,10 +4201,6 @@ func (expr *FuncExpr) MaybeWrapError(err error) error {
 
 // Eval implements the TypedExpr interface.
 func (expr *FuncExpr) Eval(ctx *EvalContext) (Datum, error) {
-	if expr.fn.FnWithExprs != nil {
-		return expr.fn.FnWithExprs(ctx, expr.Exprs)
-	}
-
 	nullResult, args, err := expr.evalArgs(ctx)
 	if err != nil {
 		return nil, err
@@ -4710,8 +4686,7 @@ func (t *Placeholder) Eval(ctx *EvalContext) (Datum, error) {
 		// checking, since the placeholder's type hint didn't match the desired
 		// type for the placeholder. In this case, we cast the expression to
 		// the desired type.
-		// TODO(jordan,mgartner): Introduce a restriction on what casts are
-		// allowed here. Most likely, only implicit casts should be allowed.
+		// TODO(jordan): introduce a restriction on what casts are allowed here.
 		cast := NewTypedCastExpr(e, typ)
 		return cast.Eval(ctx)
 	}

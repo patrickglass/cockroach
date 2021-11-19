@@ -230,7 +230,7 @@ INSERT INTO t.test VALUES (1), (2), (3);
 		`CREATE TABLE public.test (
 	x INT8 NULL,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT test_pkey PRIMARY KEY (rowid ASC),
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	FAMILY "primary" (x, rowid)
 )`}}
 
@@ -244,7 +244,7 @@ INSERT INTO t.test VALUES (1), (2), (3);
 		`CREATE TABLE public.test (
 	x STRING NULL,
 	rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-	CONSTRAINT test_pkey PRIMARY KEY (rowid ASC),
+	CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
 	FAMILY "primary" (x, rowid)
 )`}}
 
@@ -332,7 +332,7 @@ func TestSchemaChangeBeforeAlterColumnType(t *testing.T) {
 			},
 		},
 	}
-	defer close(waitBeforeContinuing)
+
 	s, db, _ := serverutils.StartServer(t, params)
 	sqlDB := sqlutils.MakeSQLRunner(db)
 	defer s.Stopper().Stop(ctx)
@@ -353,8 +353,7 @@ ALTER TABLE t.test ALTER PRIMARY KEY USING COLUMNS (x);
 
 	<-swapNotification
 
-	expected := "pq: unimplemented: ALTER COLUMN TYPE requiring rewrite of on-disk data is currently not " +
-		"supported for columns that are part of an index"
+	expected := "pq: unimplemented: table test is currently undergoing a schema change"
 	sqlDB.ExpectErr(t, expected, `
 SET enable_experimental_alter_column_type_general = true;
 ALTER TABLE t.test ALTER COLUMN y TYPE STRING;`)

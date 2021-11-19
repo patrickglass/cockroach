@@ -30,7 +30,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
@@ -67,7 +66,6 @@ func (r *traceSpanResumer) OnFailOrCancel(ctx context.Context, execCtx interface
 
 func TestDebugJobTrace(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
 	argsFn := func(args *base.TestServerArgs) {
@@ -117,9 +115,8 @@ func TestDebugJobTrace(t *testing.T) {
 	<-recordedSpanCh
 
 	args := []string{strconv.Itoa(int(id))}
-	pgURL, cleanup := sqlutils.PGUrl(t, c.TestServer.ServingSQLAddr(),
+	pgURL, _ := sqlutils.PGUrl(t, c.TestServer.ServingSQLAddr(),
 		"TestDebugJobTrace", url.User(security.RootUser))
-	defer cleanup()
 
 	_, err := c.RunWithCaptureArgs([]string{`debug`, `job-trace`, args[0], fmt.Sprintf(`--url=%s`, pgURL.String()), `--format=csv`})
 	require.NoError(t, err)

@@ -109,7 +109,7 @@ func BuildChildPhysicalProps(
 		childProps.LimitHint = parentProps.LimitHint
 
 	case opt.DistinctOnOp:
-		distinctCount := parent.Relational().Stats.RowCount
+		distinctCount := parent.(memo.RelExpr).Relational().Stats.RowCount
 		if parentProps.LimitHint > 0 {
 			// TODO(mgartner): If the expression is a streaming DistinctOn, this
 			// estimated limit hint is much lower than it should be.
@@ -127,15 +127,14 @@ func BuildChildPhysicalProps(
 			break
 		}
 
-		outputRows := parent.Relational().Stats.RowCount
+		outputRows := parent.(memo.RelExpr).Relational().Stats.RowCount
 		if outputRows == 0 || outputRows < parentProps.LimitHint {
 			break
 		}
 
 		// For streaming GroupBy expressions we can estimate the number of input
 		// rows needed to produce LimitHint output rows.
-		streamingType := private.GroupingOrderType(&parentProps.Ordering)
-		if streamingType != memo.NoStreaming {
+		if isStreamingAggregation(private, parentProps) {
 			if input, ok := parent.Child(nth).(memo.RelExpr); ok {
 				inputRows := input.Relational().Stats.RowCount
 				childProps.LimitHint = streamingGroupByInputLimitHint(inputRows, outputRows, parentProps.LimitHint)
@@ -145,7 +144,7 @@ func BuildChildPhysicalProps(
 	case opt.SelectOp, opt.LookupJoinOp:
 		// These operations are assumed to produce a constant number of output rows
 		// for each input row, independent of already-processed rows.
-		outputRows := parent.Relational().Stats.RowCount
+		outputRows := parent.(memo.RelExpr).Relational().Stats.RowCount
 		if outputRows == 0 || outputRows < parentProps.LimitHint {
 			break
 		}

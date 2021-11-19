@@ -1,16 +1,4 @@
-load("@bazel_gomock//:gomock.bzl", "gomock")
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
-
-go_library(
-    name = "with-mocks",
-    srcs = [":mocks_drt"],
-    embed = [":tests"],
-    importpath = "github.com/cockroachdb/cockroach/pkg/cmd/roachtest/tests",
-    visibility = ["//visibility:public"],
-    deps = [
-        "@com_github_golang_mock//gomock",
-    ],
-)
 
 go_library(
     name = "tests",
@@ -20,8 +8,6 @@ go_library(
         "activerecord_blocklist.go",
         "allocator.go",
         "alterpk.go",
-        "asyncpg.go",
-        "asyncpg_blocklist.go",
         "autoupgrade.go",
         "backup.go",
         "build_info.go",
@@ -45,6 +31,7 @@ go_library(
         "django_blocklist.go",
         "drop.go",
         "drt.go",
+        "drt_generated.go",
         "encryption.go",
         "engine_switch.go",
         "event_log.go",
@@ -84,8 +71,7 @@ go_library(
         "nodejs_postgres.go",
         "orm_helpers.go",
         "overload_tpcc_olap.go",
-        "pebble_write_throughput.go",
-        "pebble_ycsb.go",
+        "pebble.go",
         "pgjdbc.go",
         "pgjdbc_blocklist.go",
         "pgx.go",
@@ -120,7 +106,6 @@ go_library(
         "sqlalchemy.go",
         "sqlalchemy_blocklist.go",
         "sqlsmith.go",
-        "sstable_corruption.go",
         "status_server.go",
         "synctest.go",
         "sysbench.go",
@@ -130,7 +115,6 @@ go_library(
         "tpcc.go",
         "tpcdsvec.go",
         "tpce.go",
-        "tpch_concurrency.go",
         "tpchbench.go",
         "tpchvec.go",
         "ts_util.go",
@@ -144,7 +128,7 @@ go_library(
         "ycsb.go",
     ],
     importpath = "github.com/cockroachdb/cockroach/pkg/cmd/roachtest/tests",
-    visibility = ["//visibility:private"],
+    visibility = ["//visibility:public"],
     deps = [
         "//pkg/base",
         "//pkg/ccl/changefeedccl/cdctest",
@@ -156,7 +140,7 @@ go_library(
         "//pkg/cmd/roachtest/cluster",
         "//pkg/cmd/roachtest/logger",
         "//pkg/cmd/roachtest/option",
-        "//pkg/cmd/roachtest/prometheus:with-mocks",
+        "//pkg/cmd/roachtest/prometheus",
         "//pkg/cmd/roachtest/registry",
         "//pkg/cmd/roachtest/spec",
         "//pkg/cmd/roachtest/test",
@@ -186,6 +170,7 @@ go_library(
         "//pkg/util/randutil",
         "//pkg/util/retry",
         "//pkg/util/search",
+        "//pkg/util/sysutil",
         "//pkg/util/timeutil",
         "//pkg/util/version",
         "//pkg/workload/histogram",
@@ -198,7 +183,7 @@ go_library(
         "@com_github_cockroachdb_ttycolor//:ttycolor",
         "@com_github_codahale_hdrhistogram//:hdrhistogram",
         "@com_github_dustin_go_humanize//:go-humanize",
-        "@com_github_google_go_cmp//cmp",
+        "@com_github_golang_mock//gomock",
         "@com_github_jackc_pgtype//:pgtype",
         "@com_github_kr_pretty//:pretty",
         "@com_github_lib_pq//:pq",
@@ -221,11 +206,11 @@ go_test(
         "tpcc_test.go",
         "util_load_group_test.go",
     ],
-    embed = [":with-mocks"],  # keep
+    embed = [":tests"],
     deps = [
         "//pkg/cmd/roachtest/logger",
         "//pkg/cmd/roachtest/option",
-        "//pkg/cmd/roachtest/prometheus:with-mocks",
+        "//pkg/cmd/roachtest/prometheus",
         "//pkg/cmd/roachtest/spec",
         "//pkg/testutils/skip",
         "//pkg/util/version",
@@ -235,12 +220,4 @@ go_test(
         "@com_github_stretchr_testify//require",
         "@org_golang_x_oauth2//:oauth2",
     ],
-)
-
-gomock(
-    name = "mocks_drt",
-    out = "drt_generated.go",
-    interfaces = ["PromClient"],
-    library = ":tests",
-    package = "tests",
 )

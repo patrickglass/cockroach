@@ -34,9 +34,7 @@ func OutputOfBinaryRule(target string) string {
 	var head string
 	if strings.HasPrefix(target, "@") {
 		doubleSlash := strings.Index(target, "//")
-		joinArgs := []string{"external", target[1:doubleSlash]}
-		joinArgs = append(joinArgs, strings.Split(target[doubleSlash+2:colon], "/")...)
-		head = filepath.Join(joinArgs...)
+		head = filepath.Join("external", target[1:doubleSlash])
 	} else if colon >= 0 {
 		head = strings.TrimPrefix(target[:colon], "//")
 	} else {

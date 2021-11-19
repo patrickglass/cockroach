@@ -91,7 +91,7 @@ func (ex *connExecutor) execStmt(
 	// Run observer statements in a separate code path; their execution does not
 	// depend on the current transaction state.
 	if _, ok := ast.(tree.ObserverStatement); ok {
-		ex.statsCollector.Reset(ex.applicationStats, ex.phaseTimes)
+		ex.statsCollector.Reset(ex.statsWriter, ex.phaseTimes)
 		err := ex.runObserverStatement(ctx, ast, res)
 		// Note that regardless of res.Err(), these observer statements don't
 		// generate error events; transactions are always allowed to continue.
@@ -261,8 +261,7 @@ func (ex *connExecutor) execStmtInOpenState(
 	// Update the deadline on the transaction based on the collections.
 	err := ex.extraTxnState.descCollection.MaybeUpdateDeadline(ctx, ex.state.mu.txn)
 	if err != nil {
-		ev, pl := ex.makeErrEvent(err, ast)
-		return ev, pl, nil
+		return nil, nil, err
 	}
 
 	if prepared != nil {
@@ -286,8 +285,7 @@ func (ex *connExecutor) execStmtInOpenState(
 
 	var timeoutTicker *time.Timer
 	queryTimedOut := false
-	// doneAfterFunc will be allocated only when timeoutTicker is non-nil.
-	var doneAfterFunc chan struct{}
+	doneAfterFunc := make(chan struct{}, 1)
 
 	// Early-associate placeholder info with the eval context,
 	// so that we can fill in placeholder values in our call to addActiveQuery, below.
@@ -295,12 +293,14 @@ func (ex *connExecutor) execStmtInOpenState(
 		ex.planner.EvalContext().Placeholders = pinfo
 	}
 
-	ex.addActiveQuery(ast, formatWithPlaceholders(ast, ex.planner.EvalContext()), queryID, ex.state.cancel)
+	// Canceling a query cancels its transaction's context so we take a reference
+	// to the cancelation function here.
+	unregisterFn := ex.addActiveQuery(ast, formatWithPlaceholders(ast, ex.planner.EvalContext()), queryID, ex.state.cancel)
 
-	// Make sure that we always unregister the query. It also deals with
-	// overwriting res.Error to a more user-friendly message in case of query
-	// cancellation.
-	defer func(ctx context.Context, res RestrictedCommandResult) {
+	// queryDone is a cleanup function dealing with unregistering a query.
+	// It also deals with overwriting res.Error to a more user-friendly message in
+	// case of query cancelation. res can be nil to opt out of this.
+	queryDone := func(ctx context.Context, res RestrictedCommandResult) {
 		if timeoutTicker != nil {
 			if !timeoutTicker.Stop() {
 				// Wait for the timer callback to complete to avoid a data race on
@@ -308,7 +308,7 @@ func (ex *connExecutor) execStmtInOpenState(
 				<-doneAfterFunc
 			}
 		}
-		ex.removeActiveQuery(queryID, ast)
+		unregisterFn()
 
 		// Detect context cancelation and overwrite whatever error might have been
 		// set on the result before. The idea is that once the query's context is
@@ -346,7 +346,15 @@ func (ex *connExecutor) execStmtInOpenState(
 			res.SetError(sqlerrors.QueryTimeoutError)
 			retPayload = eventNonRetriableErrPayload{err: sqlerrors.QueryTimeoutError}
 		}
-	}(ctx, res)
+	}
+	// Generally we want to unregister after the auto-commit below. However, in
+	// case we'll execute the statement through the parallel execution queue,
+	// we'll pass the responsibility for unregistering to the queue.
+	defer func() {
+		if queryDone != nil {
+			queryDone(ctx, res)
+		}
+	}()
 
 	makeErrEvent := func(err error) (fsm.Event, fsm.EventPayload, error) {
 		ev, payload := ex.makeErrEvent(err, ast)
@@ -355,7 +363,7 @@ func (ex *connExecutor) execStmtInOpenState(
 
 	p := &ex.planner
 	stmtTS := ex.server.cfg.Clock.PhysicalTime()
-	ex.statsCollector.Reset(ex.applicationStats, ex.phaseTimes)
+	ex.statsCollector.Reset(ex.statsWriter, ex.phaseTimes)
 	ex.resetPlanner(ctx, p, ex.state.mu.txn, stmtTS)
 	p.sessionDataMutatorIterator.paramStatusUpdater = res
 	p.noticeSender = res
@@ -415,7 +423,7 @@ func (ex *connExecutor) execStmtInOpenState(
 			return makeErrEvent(err)
 		}
 		var err error
-		pinfo, err = ex.planner.fillInPlaceholders(ctx, ps, name, e.Params)
+		pinfo, err = fillInPlaceholders(ctx, ps, name, e.Params, ex.sessionData().SearchPath)
 		if err != nil {
 			return makeErrEvent(err)
 		}
@@ -467,7 +475,6 @@ func (ex *connExecutor) execStmtInOpenState(
 			queryTimedOut = true
 			return makeErrEvent(sqlerrors.QueryTimeoutError)
 		}
-		doneAfterFunc = make(chan struct{}, 1)
 		timeoutTicker = time.AfterFunc(
 			timerDuration,
 			func() {
@@ -687,14 +694,15 @@ func (ex *connExecutor) execStmtInOpenState(
 	p.extendedEvalCtx.Placeholders = &p.semaCtx.Placeholders
 	p.extendedEvalCtx.Annotations = &p.semaCtx.Annotations
 	p.stmt = stmt
-	p.cancelChecker.Reset(ctx)
+	p.cancelChecker = cancelchecker.NewCancelChecker(ctx)
 	p.autoCommit = os.ImplicitTxn.Get() && !ex.server.cfg.TestingKnobs.DisableAutoCommit
 
 	var stmtThresholdSpan *tracing.Span
 	alreadyRecording := ex.transitionCtx.sessionTracing.Enabled()
 	stmtTraceThreshold := traceStmtThreshold.Get(&ex.planner.execCfg.Settings.SV)
 	if !alreadyRecording && stmtTraceThreshold > 0 {
-		ctx, stmtThresholdSpan = createRootOrChildSpan(ctx, "trace-stmt-threshold", ex.transitionCtx.tracer, tracing.WithRecording(tracing.RecordingVerbose))
+		ctx, stmtThresholdSpan = createRootOrChildSpan(ctx, "trace-stmt-threshold", ex.transitionCtx.tracer, tracing.WithForceRealSpan())
+		stmtThresholdSpan.SetVerbose(true)
 	}
 
 	if err := ex.dispatchToExecutionEngine(ctx, p, res); err != nil {
@@ -706,7 +714,7 @@ func (ex *connExecutor) execStmtInOpenState(
 		stmtThresholdSpan.Finish()
 		logTraceAboveThreshold(
 			ctx,
-			stmtThresholdSpan.GetRecording(tracing.RecordingVerbose),
+			stmtThresholdSpan.GetRecording(),
 			fmt.Sprintf("SQL stmt %s", stmt.AST.String()),
 			stmtTraceThreshold,
 			timeutil.Since(ex.phaseTimes.GetSessionPhaseTime(sessionphase.SessionQueryReceived)),
@@ -1062,20 +1070,6 @@ func (ex *connExecutor) dispatchToExecutionEngine(
 	stats, err := ex.execWithDistSQLEngine(
 		ctx, planner, stmt.AST.StatementReturnType(), res, distributePlan.WillDistribute(), progAtomic,
 	)
-	if res.Err() == nil {
-		// numTxnRetryErrors is the number of times an error will be injected if
-		// the transaction is retried using SAVEPOINTs.
-		const numTxnRetryErrors = 3
-		if ex.sessionData().InjectRetryErrorsEnabled && stmt.AST.StatementTag() != "SET" {
-			if planner.Txn().Epoch() < ex.state.lastEpoch+numTxnRetryErrors {
-				retryErr := planner.Txn().GenerateForcedRetryableError(
-					ctx, "injected by `inject_retry_errors_enabled` session variable")
-				res.SetError(retryErr)
-			} else {
-				ex.state.lastEpoch = planner.Txn().Epoch()
-			}
-		}
-	}
 	ex.sessionTracing.TraceExecEnd(ctx, res.Err(), res.RowsAffected())
 	ex.statsCollector.PhaseTimes().SetSessionPhaseTime(sessionphase.PlannerEndExecStmt, timeutil.Now())
 
@@ -1430,7 +1424,7 @@ func (ex *connExecutor) beginTransactionTimestampsAndReadMode(
 		rwMode = ex.readWriteModeWithSessionDefault(modes.ReadWriteMode)
 		return rwMode, now, nil, nil
 	}
-	ex.statsCollector.Reset(ex.applicationStats, ex.phaseTimes)
+	ex.statsCollector.Reset(ex.statsWriter, ex.phaseTimes)
 	p := &ex.planner
 
 	// NB: this use of p.txn is totally bogus. The planner's txn should
@@ -1458,9 +1452,6 @@ func (ex *connExecutor) beginTransactionTimestampsAndReadMode(
 	return tree.ReadOnly, asOf.Timestamp.GoTime(), &asOf.Timestamp, nil
 }
 
-var eventStartImplicitTxn fsm.Event = eventTxnStart{ImplicitTxn: fsm.True}
-var eventStartExplicitTxn fsm.Event = eventTxnStart{ImplicitTxn: fsm.False}
-
 // execStmtInNoTxnState "executes" a statement when no transaction is in scope.
 // For anything but BEGIN, this method doesn't actually execute the statement;
 // it just returns an Event that will generate a transaction. The statement will
@@ -1486,7 +1477,7 @@ func (ex *connExecutor) execStmtInNoTxnState(
 			return ex.makeErrEvent(err, s)
 		}
 		ex.sessionDataStack.PushTopClone()
-		return eventStartExplicitTxn,
+		return eventTxnStart{ImplicitTxn: fsm.False},
 			makeEventTxnStartPayload(
 				ex.txnPriorityWithSessionDefault(s.Modes.UserPriority),
 				mode,
@@ -1506,7 +1497,7 @@ func (ex *connExecutor) execStmtInNoTxnState(
 		if err != nil {
 			return ex.makeErrEvent(err, s)
 		}
-		return eventStartImplicitTxn,
+		return eventTxnStart{ImplicitTxn: fsm.True},
 			makeEventTxnStartPayload(
 				ex.txnPriorityWithSessionDefault(tree.UnspecifiedUserPriority),
 				mode,
@@ -1780,9 +1771,13 @@ func (ex *connExecutor) enableTracing(modes []string) error {
 }
 
 // addActiveQuery adds a running query to the list of running queries.
+//
+// It returns a cleanup function that needs to be run when the query is no
+// longer executing. NOTE(andrei): As of Feb 2018, "executing" does not imply
+// that the results have been delivered to the client.
 func (ex *connExecutor) addActiveQuery(
 	ast tree.Statement, rawStmt string, queryID ClusterWideID, cancelFun context.CancelFunc,
-) {
+) func() {
 	_, hidden := ast.(tree.HiddenFromShowQueries)
 	qm := &queryMeta{
 		txnID:         ex.state.mu.txn.ID(),
@@ -1796,18 +1791,18 @@ func (ex *connExecutor) addActiveQuery(
 	ex.mu.Lock()
 	ex.mu.ActiveQueries[queryID] = qm
 	ex.mu.Unlock()
-}
+	return func() {
+		ex.mu.Lock()
+		_, ok := ex.mu.ActiveQueries[queryID]
+		if !ok {
+			ex.mu.Unlock()
+			panic(errors.AssertionFailedf("query %d missing from ActiveQueries", queryID))
+		}
+		delete(ex.mu.ActiveQueries, queryID)
+		ex.mu.LastActiveQuery = ast
 
-func (ex *connExecutor) removeActiveQuery(queryID ClusterWideID, ast tree.Statement) {
-	ex.mu.Lock()
-	_, ok := ex.mu.ActiveQueries[queryID]
-	if !ok {
 		ex.mu.Unlock()
-		panic(errors.AssertionFailedf("query %d missing from ActiveQueries", queryID))
 	}
-	delete(ex.mu.ActiveQueries, queryID)
-	ex.mu.LastActiveQuery = ast
-	ex.mu.Unlock()
 }
 
 // handleAutoCommit commits the KV transaction if it hasn't been committed
@@ -1837,12 +1832,8 @@ func (ex *connExecutor) handleAutoCommit(
 		}
 	}
 
-	// Attempt to refresh the deadline before the autocommit.
-	err := ex.extraTxnState.descCollection.MaybeUpdateDeadline(ctx, ex.state.mu.txn)
-	if err != nil {
-		return ex.makeErrEvent(err, stmt)
-	}
 	ev, payload := ex.commitSQLTransaction(ctx, stmt, ex.commitSQLTransactionInternal)
+	var err error
 	if perr, ok := payload.(payloadWithError); ok {
 		err = perr.errorCause()
 	}
@@ -1869,8 +1860,13 @@ func payloadHasError(payload fsm.EventPayload) bool {
 	return hasErr
 }
 
-// recordTransactionStart records the start of the transaction.
-func (ex *connExecutor) recordTransactionStart() {
+// recordTransactionStart records the start of the transaction and returns
+// closures to be called once the transaction finishes or if the transaction
+// restarts.
+func (ex *connExecutor) recordTransactionStart() (
+	onTxnFinish func(context.Context, txnEvent),
+	onTxnRestart func(),
+) {
 	ex.state.mu.RLock()
 	txnStart := ex.state.mu.txnStart
 	ex.state.mu.RUnlock()
@@ -1899,42 +1895,17 @@ func (ex *connExecutor) recordTransactionStart() {
 
 	ex.metrics.EngineMetrics.SQLTxnsOpen.Inc(1)
 
-	ex.extraTxnState.shouldExecuteOnTxnFinish = true
-	ex.extraTxnState.txnFinishClosure.txnStartTime = txnStart
-	ex.extraTxnState.txnFinishClosure.implicit = implicit
-	ex.extraTxnState.shouldExecuteOnTxnRestart = true
-
-	if !implicit {
-		ex.statsCollector.StartExplicitTransaction()
-	}
-}
-
-func (ex *connExecutor) onTxnFinish(ctx context.Context, ev txnEvent) {
-	if ex.extraTxnState.shouldExecuteOnTxnFinish {
-		ex.extraTxnState.shouldExecuteOnTxnFinish = false
-		txnStart := ex.extraTxnState.txnFinishClosure.txnStartTime
-		implicit := ex.extraTxnState.txnFinishClosure.implicit
+	onTxnFinish = func(ctx context.Context, ev txnEvent) {
 		ex.phaseTimes.SetSessionPhaseTime(sessionphase.SessionEndExecTransaction, timeutil.Now())
-		transactionFingerprintID :=
-			roachpb.TransactionFingerprintID(ex.extraTxnState.transactionStatementsHash.Sum())
-		if !implicit {
-			ex.statsCollector.EndExplicitTransaction(
-				ctx,
-				transactionFingerprintID,
-			)
-		}
-		err := ex.recordTransaction(ctx, transactionFingerprintID, ev, implicit, txnStart)
+		err := ex.recordTransaction(ctx, ev, implicit, txnStart)
 		if err != nil {
 			if log.V(1) {
 				log.Warningf(ctx, "failed to record transaction stats: %s", err)
 			}
-			ex.server.ServerMetrics.StatsMetrics.DiscardedStatsCount.Inc(1)
+			ex.metrics.StatsMetrics.DiscardedStatsCount.Inc(1)
 		}
 	}
-}
-
-func (ex *connExecutor) onTxnRestart() {
-	if ex.extraTxnState.shouldExecuteOnTxnRestart {
+	onTxnRestart = func() {
 		ex.phaseTimes.SetSessionPhaseTime(sessionphase.SessionMostRecentStartExecTransaction, timeutil.Now())
 		ex.extraTxnState.transactionStatementFingerprintIDs = nil
 		ex.extraTxnState.transactionStatementsHash = util.MakeFNV64()
@@ -1950,14 +1921,11 @@ func (ex *connExecutor) onTxnRestart() {
 			ex.server.cfg.TestingKnobs.BeforeRestart(ex.Ctx(), ex.extraTxnState.autoRetryReason)
 		}
 	}
+	return onTxnFinish, onTxnRestart
 }
 
 func (ex *connExecutor) recordTransaction(
-	ctx context.Context,
-	transactionFingerprintID roachpb.TransactionFingerprintID,
-	ev txnEvent,
-	implicit bool,
-	txnStart time.Time,
+	ctx context.Context, ev txnEvent, implicit bool, txnStart time.Time,
 ) error {
 	txnEnd := timeutil.Now()
 	txnTime := txnEnd.Sub(txnStart)
@@ -1987,7 +1955,7 @@ func (ex *connExecutor) recordTransaction(
 
 	return ex.statsCollector.RecordTransaction(
 		ctx,
-		transactionFingerprintID,
+		roachpb.TransactionFingerprintID(ex.extraTxnState.transactionStatementsHash.Sum()),
 		recordedTxnStats,
 	)
 }

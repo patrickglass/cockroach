@@ -32,6 +32,9 @@ func GetRandomizedCollectedStatementStatisticsForTest(
 	data := genRandomData()
 	fillObject(t, reflect.ValueOf(&result), &data)
 
+	// TODO(azhng): Gone after https://github.com/cockroachdb/cockroach/issues/68077.
+	result.Key.Opt = true
+
 	return result
 }
 
@@ -110,7 +113,6 @@ var fieldBlacklist = map[string]struct{}{
 	"LegacyLastErrRedacted":   {},
 	"StatementFingerprintIDs": {},
 	"AggregatedTs":            {},
-	"AggregationInterval":     {},
 }
 
 func fillObject(t *testing.T, val reflect.Value, data *randomData) {

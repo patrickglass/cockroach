@@ -11,12 +11,9 @@
 package spanset
 
 import (
-	"bytes"
 	"context"
-	"fmt"
 	"io"
 
-	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
@@ -421,9 +418,16 @@ func (s spanSetReader) Closed() bool {
 
 // ExportMVCCToSst is part of the storage.Reader interface.
 func (s spanSetReader) ExportMVCCToSst(
-	ctx context.Context, exportOptions storage.ExportOptions, dest io.Writer,
+	ctx context.Context,
+	startKey, endKey roachpb.Key,
+	startTS, endTS, firstKeyTS hlc.Timestamp,
+	exportAllRevisions bool,
+	targetSize, maxSize uint64,
+	stopMidKey, useTBI bool,
+	dest io.Writer,
 ) (roachpb.BulkOpSummary, roachpb.Key, hlc.Timestamp, error) {
-	return s.r.ExportMVCCToSst(ctx, exportOptions, dest)
+	return s.r.ExportMVCCToSst(ctx, startKey, endKey, startTS, endTS, firstKeyTS, exportAllRevisions, targetSize,
+		maxSize, stopMidKey, useTBI, dest)
 }
 
 func (s spanSetReader) MVCCGet(key storage.MVCCKey) ([]byte, error) {
@@ -685,7 +689,6 @@ type ReadWriter struct {
 var _ storage.ReadWriter = ReadWriter{}
 
 func makeSpanSetReadWriter(rw storage.ReadWriter, spans *SpanSet) ReadWriter {
-	spans = addLockTableSpans(spans)
 	return ReadWriter{
 		spanSetReader: spanSetReader{r: rw, spans: spans, spansOnly: true},
 		spanSetWriter: spanSetWriter{w: rw, spans: spans, spansOnly: true},
@@ -693,7 +696,6 @@ func makeSpanSetReadWriter(rw storage.ReadWriter, spans *SpanSet) ReadWriter {
 }
 
 func makeSpanSetReadWriterAt(rw storage.ReadWriter, spans *SpanSet, ts hlc.Timestamp) ReadWriter {
-	spans = addLockTableSpans(spans)
 	return ReadWriter{
 		spanSetReader: spanSetReader{r: rw, spans: spans, ts: ts},
 		spanSetWriter: spanSetWriter{w: rw, spans: spans, ts: ts},
@@ -724,10 +726,6 @@ func (s spanSetBatch) Commit(sync bool) error {
 
 func (s spanSetBatch) Empty() bool {
 	return s.b.Empty()
-}
-
-func (s spanSetBatch) Count() uint32 {
-	return s.b.Count()
 }
 
 func (s spanSetBatch) Len() int {
@@ -773,32 +771,4 @@ func DisableReaderAssertions(reader storage.Reader) storage.Reader {
 	default:
 		return reader
 	}
-}
-
-// addLockTableSpans adds corresponding lock table spans for the declared
-// spans. This is to implicitly allow raw access to separated intents in the
-// lock table for any declared keys. Explicitly declaring lock table spans is
-// therefore illegal and will panic, as the implicit access would give
-// insufficient isolation from concurrent requests that only declare lock table
-// keys.
-func addLockTableSpans(spans *SpanSet) *SpanSet {
-	withLocks := spans.Copy()
-	spans.Iterate(func(sa SpanAccess, _ SpanScope, span Span) {
-		// We don't check for spans that contain the entire lock table within them,
-		// because some commands (e.g. TransferLease) declare access to the entire
-		// key space or very large chunks of it. Even though this could be unsafe,
-		// we assume these callers know what they are doing.
-		if bytes.HasPrefix(span.Key, keys.LocalRangeLockTablePrefix) ||
-			bytes.HasPrefix(span.EndKey, keys.LocalRangeLockTablePrefix) {
-			panic(fmt.Sprintf(
-				"declaring raw lock table spans is illegal, use main key spans instead (found %s)", span))
-		}
-		ltKey, _ := keys.LockTableSingleKey(span.Key, nil)
-		var ltEndKey roachpb.Key
-		if span.EndKey != nil {
-			ltEndKey, _ = keys.LockTableSingleKey(span.EndKey, nil)
-		}
-		withLocks.AddNonMVCC(sa, roachpb.Span{Key: ltKey, EndKey: ltEndKey})
-	})
-	return withLocks
 }

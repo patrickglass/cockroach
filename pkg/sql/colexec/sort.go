@@ -34,7 +34,7 @@ func NewSorter(
 	inputTypes []*types.T,
 	orderingCols []execinfrapb.Ordering_Column,
 	maxOutputBatchMemSize int64,
-) colexecop.Operator {
+) (colexecop.Operator, error) {
 	return newSorter(
 		allocator, newAllSpooler(allocator, input, inputTypes),
 		inputTypes, orderingCols, maxOutputBatchMemSize,
@@ -47,11 +47,22 @@ func newSorter(
 	inputTypes []*types.T,
 	orderingCols []execinfrapb.Ordering_Column,
 	maxOutputBatchMemSize int64,
-) colexecop.ResettableOperator {
+) (colexecop.ResettableOperator, error) {
 	partitioners := make([]partitioner, len(orderingCols)-1)
-	for i, ord := range orderingCols[:len(orderingCols)-1] {
-		partitioners[i] = newPartitioner(inputTypes[ord.ColIdx], false /* nullsAreDistinct */)
+
+	var err error
+	for i, ord := range orderingCols {
+		if !isSorterSupported(inputTypes[ord.ColIdx], ord.Direction) {
+			return nil, errors.Errorf("sorter for type: %s and direction: %s not supported", inputTypes[ord.ColIdx], ord.Direction)
+		}
+		if i < len(orderingCols)-1 {
+			partitioners[i], err = newPartitioner(inputTypes[ord.ColIdx], false /* nullsAreDistinct */)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
+
 	return &sortOp{
 		allocator:             allocator,
 		input:                 input,
@@ -61,7 +72,7 @@ func newSorter(
 		orderingCols:          orderingCols,
 		state:                 sortSpooling,
 		maxOutputBatchMemSize: maxOutputBatchMemSize,
-	}
+	}, nil
 }
 
 // spooler is a column vector operator that spools the data from its input.
@@ -192,13 +203,6 @@ type sortOp struct {
 	// of the sortOp so that we can correctly choose a sorter based on
 	// whether the input has nulls or not.
 	sorters []colSorter
-	// sortersWithNulls and sortersWithoutNulls are lazily instantiated in
-	// sort() when the corresponding colSorter is needed for the first time. The
-	// references to these are kept so that these sorters can be reused when
-	// sort() is called multiple times (which is the case for the external sort
-	// and for sort chunks).
-	sortersWithNulls    []colSorter
-	sortersWithoutNulls []colSorter
 	// partitioners contains one partitioner per sort column except for the last,
 	// which doesn't need to be partitioned.
 	partitioners []partitioner
@@ -336,35 +340,22 @@ func (p *sortOp) sort() {
 		p.allocator.AdjustMemoryUsage(sizeAfter - sizeBefore)
 		p.order = make([]int, spooledTuples)
 	}
-	order := p.order[:spooledTuples]
+	p.order = p.order[:spooledTuples]
 
 	// Initialize the order vector to the ordinal positions within the input set.
-	copy(order, colexecutils.DefaultSelectionVector)
-	for i := len(colexecutils.DefaultSelectionVector); i < len(order); i++ {
-		//gcassert:bce
-		order[i] = i
+	for i := 0; i < len(p.order); i++ {
+		p.order[i] = i
 	}
 
+	// TODO(mgartner): Avoid creating new sorters for ever invocation of this
+	// function. Instead, create two slices of sorters, one to use when the
+	// vector does not have nulls, and one to use when it maybe has nulls. The
+	// sorter reset function can be used to clean up the sorters for the next
+	// invocation.
 	for i := range p.orderingCols {
 		inputVec := p.input.getValues(int(p.orderingCols[i].ColIdx))
-		if inputVec.MaybeHasNulls() {
-			if p.sortersWithNulls == nil {
-				p.sortersWithNulls = make([]colSorter, len(p.sorters))
-			}
-			if p.sortersWithNulls[i] == nil {
-				p.sortersWithNulls[i] = newSingleSorterWithNulls(p.inputTypes[p.orderingCols[i].ColIdx], p.orderingCols[i].Direction)
-			}
-			p.sorters[i] = p.sortersWithNulls[i]
-		} else {
-			if p.sortersWithoutNulls == nil {
-				p.sortersWithoutNulls = make([]colSorter, len(p.sorters))
-			}
-			if p.sortersWithoutNulls[i] == nil {
-				p.sortersWithoutNulls[i] = newSingleSorterWithoutNulls(p.inputTypes[p.orderingCols[i].ColIdx], p.orderingCols[i].Direction)
-			}
-			p.sorters[i] = p.sortersWithoutNulls[i]
-		}
-		p.sorters[i].init(p.Ctx, p.allocator, inputVec, order)
+		p.sorters[i] = newSingleSorter(p.inputTypes[p.orderingCols[i].ColIdx], p.orderingCols[i].Direction, inputVec.MaybeHasNulls())
+		p.sorters[i].init(p.Ctx, p.allocator, inputVec, p.order)
 	}
 
 	// Now, sort each column in turn.
@@ -430,7 +421,7 @@ func (p *sortOp) sort() {
 			// on it, ORing the results together with each subsequent column. This
 			// produces a distinct vector (a boolean vector that has true in each
 			// position that is different from the last position).
-			p.partitioners[i-offset].partitionWithOrder(p.input.getValues(int(p.orderingCols[i-offset].ColIdx)), order,
+			p.partitioners[i-offset].partitionWithOrder(p.input.getValues(int(p.orderingCols[i-offset].ColIdx)), p.order,
 				partitionsCol, spooledTuples)
 		} else {
 			omitNextPartitioning = false

@@ -880,60 +880,6 @@ func (m *CommentOnColumn) AppendJSONFields(printComma bool, b redact.RedactableB
 }
 
 // AppendJSONFields implements the EventPayload interface.
-func (m *CommentOnConstraint) AppendJSONFields(printComma bool, b redact.RedactableBytes) (bool, redact.RedactableBytes) {
-
-	printComma, b = m.CommonEventDetails.AppendJSONFields(printComma, b)
-
-	printComma, b = m.CommonSQLEventDetails.AppendJSONFields(printComma, b)
-
-	if m.TableName != "" {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"TableName\":\""...)
-		b = append(b, redact.StartMarker()...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(redact.EscapeMarkers([]byte(m.TableName)))))
-		b = append(b, redact.EndMarker()...)
-		b = append(b, '"')
-	}
-
-	if m.ConstraintName != "" {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"ConstraintName\":\""...)
-		b = append(b, redact.StartMarker()...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(redact.EscapeMarkers([]byte(m.ConstraintName)))))
-		b = append(b, redact.EndMarker()...)
-		b = append(b, '"')
-	}
-
-	if m.Comment != "" {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"Comment\":\""...)
-		b = append(b, redact.StartMarker()...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(redact.EscapeMarkers([]byte(m.Comment)))))
-		b = append(b, redact.EndMarker()...)
-		b = append(b, '"')
-	}
-
-	if m.NullComment {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"NullComment\":true"...)
-	}
-
-	return printComma, b
-}
-
-// AppendJSONFields implements the EventPayload interface.
 func (m *CommentOnDatabase) AppendJSONFields(printComma bool, b redact.RedactableBytes) (bool, redact.RedactableBytes) {
 
 	printComma, b = m.CommonEventDetails.AppendJSONFields(printComma, b)
@@ -1593,18 +1539,6 @@ func (m *CommonSessionDetails) AppendJSONFields(printComma bool, b redact.Redact
 		b = append(b, "\"User\":\""...)
 		b = append(b, redact.StartMarker()...)
 		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(redact.EscapeMarkers([]byte(m.User)))))
-		b = append(b, redact.EndMarker()...)
-		b = append(b, '"')
-	}
-
-	if m.SystemIdentity != "" {
-		if printComma {
-			b = append(b, ',')
-		}
-		printComma = true
-		b = append(b, "\"SystemIdentity\":\""...)
-		b = append(b, redact.StartMarker()...)
-		b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(redact.EscapeMarkers([]byte(m.SystemIdentity)))))
 		b = append(b, redact.EndMarker()...)
 		b = append(b, '"')
 	}

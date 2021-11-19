@@ -25,7 +25,7 @@ import (
 func makeIntTableKVs(numKeys, valueSize, maxRevisions int) []storage.MVCCKeyValue {
 	prefix := encoding.EncodeUvarintAscending(keys.SystemSQLCodec.TablePrefix(uint32(100)), uint64(1))
 	kvs := make([]storage.MVCCKeyValue, numKeys)
-	r, _ := randutil.NewTestRand()
+	r, _ := randutil.NewPseudoRand()
 
 	var k int
 	for i := 0; i < numKeys; {

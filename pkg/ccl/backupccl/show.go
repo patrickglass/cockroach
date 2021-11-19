@@ -48,9 +48,6 @@ func checkShowBackupURIPrivileges(ctx context.Context, p sql.PlanHookState, uri 
 	if conf.AccessIsWithExplicitAuth() {
 		return nil
 	}
-	if p.ExecCfg().ExternalIODirConfig.EnableNonAdminImplicitAndArbitraryOutbound {
-		return nil
-	}
 	hasAdmin, err := p.HasAdminRole(ctx)
 	if err != nil {
 		return err
@@ -217,41 +214,29 @@ func showBackupPlanHook(
 		ctx, span := tracing.ChildSpan(ctx, stmt.StatementTag())
 		defer span.Finish()
 
-		dest, err := toFn()
+		str, err := toFn()
 		if err != nil {
 			return err
 		}
 
-		var subdir string
-
 		if inColFn != nil {
-			subdir = dest
-			dest, err = inColFn()
+			collection, err := inColFn()
 			if err != nil {
 				return err
 			}
+			parsed, err := url.Parse(collection)
+			if err != nil {
+				return err
+			}
+			parsed.Path = path.Join(parsed.Path, str)
+			str = parsed.String()
 		}
 
-		if err := checkShowBackupURIPrivileges(ctx, p, dest); err != nil {
+		if err := checkShowBackupURIPrivileges(ctx, p, str); err != nil {
 			return err
 		}
 
-		if subdir != "" {
-			parsed, err := url.Parse(dest)
-			if err != nil {
-				return err
-			}
-			if strings.EqualFold(subdir, "LATEST") {
-				subdir, err = readLatestFile(ctx, dest, p.ExecCfg().DistSQLSrv.ExternalStorageFromURI, p.User())
-				if err != nil {
-					return errors.Wrap(err, "read LATEST path")
-				}
-			}
-			parsed.Path = path.Join(parsed.Path, subdir)
-			dest = parsed.String()
-		}
-
-		store, err := p.ExecCfg().DistSQLSrv.ExternalStorageFromURI(ctx, dest, p.User())
+		store, err := p.ExecCfg().DistSQLSrv.ExternalStorageFromURI(ctx, str, p.User())
 		if err != nil {
 			return errors.Wrapf(err, "make storage")
 		}
@@ -374,10 +359,10 @@ func backupShowerDefault(
 				}
 				descSizes := make(map[descpb.ID]RowCount)
 				for _, file := range manifest.Files {
-					// TODO(dan): This assumes each file in the backup only
-					// contains data from a single table, which is usually but
-					// not always correct. It does not account for a BACKUP that
-					// happened to catch a newly created table that hadn't yet
+					// TODO(dan): This assumes each file in the backup only contains
+					// data from a single table, which is usually but not always
+					// correct. It does not account for interleaved tables or if a
+					// BACKUP happened to catch a newly created table that hadn't yet
 					// been split into its own range.
 					_, tableID, err := encoding.DecodeUvarintAscending(file.Span.Key)
 					if err != nil {
@@ -657,8 +642,7 @@ var jsonShower = backupShower{
 	fn: func(manifests []BackupManifest) ([]tree.Datums, error) {
 		rows := make([]tree.Datums, len(manifests))
 		for i, manifest := range manifests {
-			j, err := protoreflect.MessageToJSON(
-				&manifest, protoreflect.FmtFlags{EmitDefaults: true, EmitRedacted: true})
+			j, err := protoreflect.MessageToJSON(&manifest, true)
 			if err != nil {
 				return nil, err
 			}

@@ -37,7 +37,7 @@ func TestSpillingBuffer(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	for _, memoryLimit := range []int64{
 		10 << 10,                        /* 10 KiB */
@@ -107,7 +107,8 @@ func TestSpillingBuffer(t *testing.T) {
 		})
 		op.Init(ctx)
 
-		queueCfg.SetCacheMode(colcontainer.DiskQueueCacheModeClearAndReuseCache)
+		queueCfg.CacheMode = colcontainer.DiskQueueCacheModeClearAndReuseCache
+		queueCfg.SetDefaultBufferSizeBytesForCacheMode()
 		queueCfg.TestingKnobs.AlwaysCompress = alwaysCompress
 
 		// We need to create a separate unlimited allocator for the spilling

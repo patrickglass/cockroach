@@ -74,7 +74,7 @@ func TestRepeatableBatchSourceWithFixedSel(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	typs := []*types.T{types.Int}
 	batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	batchSize := 10
 	if batchSize > coldata.BatchSize() {
 		batchSize = coldata.BatchSize()

@@ -13,6 +13,7 @@ package sql
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
@@ -127,7 +128,10 @@ func (n *reparentDatabaseNode) startExec(params runParams) error {
 	if n.newParent.Schemas == nil {
 		n.newParent.Schemas = make(map[string]descpb.DatabaseDescriptor_SchemaInfo)
 	}
-	n.newParent.Schemas[n.db.Name] = descpb.DatabaseDescriptor_SchemaInfo{ID: schema.GetID()}
+	n.newParent.Schemas[n.db.Name] = descpb.DatabaseDescriptor_SchemaInfo{
+		ID:      schema.GetID(),
+		Dropped: false,
+	}
 
 	if err := p.createDescriptorWithID(
 		ctx,
@@ -172,11 +176,6 @@ func (n *reparentDatabaseNode) startExec(params runParams) error {
 			return err
 		}
 		if found {
-			oldNameKey := descpb.NameInfo{
-				ParentID:       desc.GetParentID(),
-				ParentSchemaID: desc.GetParentSchemaID(),
-				Name:           desc.GetName(),
-			}
 			// Remap the ID's on the table.
 			tbl, ok := desc.(*tabledesc.Mutable)
 			if !ok {
@@ -211,9 +210,15 @@ func (n *reparentDatabaseNode) startExec(params runParams) error {
 				)
 			}
 
+			tbl.AddDrainingName(descpb.NameInfo{
+				ParentID:       tbl.ParentID,
+				ParentSchemaID: tbl.GetParentSchemaID(),
+				Name:           tbl.Name,
+			})
 			tbl.ParentID = n.newParent.ID
 			tbl.UnexposedParentSchemaID = schema.GetID()
-			p.renameNamespaceEntry(ctx, b, oldNameKey, tbl)
+			objKey := catalogkeys.EncodeNameKey(codec, tbl)
+			b.CPut(objKey, tbl.GetID(), nil /* expected */)
 			if err := p.writeSchemaChange(ctx, tbl, descpb.InvalidMutationID, tree.AsStringWithFQNames(n.n, params.Ann())); err != nil {
 				return err
 			}
@@ -240,19 +245,20 @@ func (n *reparentDatabaseNode) startExec(params runParams) error {
 			if !found {
 				continue
 			}
-			oldNameKey := descpb.NameInfo{
-				ParentID:       desc.GetParentID(),
-				ParentSchemaID: desc.GetParentSchemaID(),
-				Name:           desc.GetName(),
-			}
 			// Remap the ID's on the type.
 			typ, ok := desc.(*typedesc.Mutable)
 			if !ok {
 				return errors.AssertionFailedf("%q was not a Mutable", objName.Object())
 			}
+			typ.AddDrainingName(descpb.NameInfo{
+				ParentID:       typ.ParentID,
+				ParentSchemaID: typ.ParentSchemaID,
+				Name:           typ.Name,
+			})
 			typ.ParentID = n.newParent.ID
 			typ.ParentSchemaID = schema.GetID()
-			p.renameNamespaceEntry(ctx, b, oldNameKey, typ)
+			objKey := catalogkeys.EncodeNameKey(codec, typ)
+			b.CPut(objKey, typ.ID, nil /* expected */)
 			if err := p.writeTypeSchemaChange(ctx, typ, tree.AsStringWithFQNames(n.n, params.Ann())); err != nil {
 				return err
 			}
@@ -265,9 +271,12 @@ func (n *reparentDatabaseNode) startExec(params runParams) error {
 
 	// This command can only be run when database leasing is supported, so we don't
 	// have to handle the case where it isn't.
-	p.dropNamespaceEntry(ctx, b, n.db)
-
-	n.db.SetDropped()
+	n.db.AddDrainingName(descpb.NameInfo{
+		ParentID:       keys.RootNamespaceID,
+		ParentSchemaID: keys.RootNamespaceID,
+		Name:           n.db.Name,
+	})
+	n.db.State = descpb.DescriptorState_DROP
 	if err := p.writeDatabaseChangeToBatch(ctx, n.db, b); err != nil {
 		return err
 	}

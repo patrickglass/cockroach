@@ -35,6 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
@@ -63,6 +64,24 @@ func (t *truncateNode) startExec(params runParams) error {
 	// while constructing the list of tables that should be truncated.
 	toTraverse := make([]tabledesc.Mutable, 0, len(n.Tables))
 
+	// Collect copies of each interleaved descriptor being truncated before any
+	// modification has been done to them. We need this in order to truncate
+	// the interleaved indexes in the GC job. We have to collect these descriptors
+	// before the truncate modifications to know what are the correct index spans
+	// to delete. Once changes have been made, the index spans where k/v data for
+	// the table reside are no longer accessible from the table.
+	interleaveCopies := make(map[descpb.ID]*descpb.TableDescriptor)
+	maybeAddInterleave := func(desc catalog.TableDescriptor) {
+		if !desc.IsInterleaved() {
+			return
+		}
+		_, ok := interleaveCopies[desc.GetID()]
+		if ok {
+			return
+		}
+		interleaveCopies[desc.GetID()] = protoutil.Clone(desc.TableDesc()).(*descpb.TableDescriptor)
+	}
+
 	for i := range n.Tables {
 		tn := &n.Tables[i]
 		_, tableDesc, err := p.ResolveMutableTableDescriptor(
@@ -77,6 +96,7 @@ func (t *truncateNode) startExec(params runParams) error {
 
 		toTruncate[tableDesc.ID] = tn.FQString()
 		toTraverse = append(toTraverse, *tableDesc)
+		maybeAddInterleave(tableDesc)
 	}
 
 	// Check that any referencing tables are contained in the set, or, if CASCADE
@@ -109,6 +129,7 @@ func (t *truncateNode) startExec(params runParams) error {
 			}
 			toTruncate[other.ID] = otherName.FQString()
 			toTraverse = append(toTraverse, *other)
+			maybeAddInterleave(other)
 			return nil
 		}
 
@@ -116,6 +137,14 @@ func (t *truncateNode) startExec(params runParams) error {
 			fk := &tableDesc.InboundFKs[i]
 			if err := maybeEnqueue(fk.OriginTableID, "referenced by foreign key from"); err != nil {
 				return err
+			}
+		}
+		for _, idx := range tableDesc.NonDropIndexes() {
+			for i := 0; i < idx.NumInterleavedBy(); i++ {
+				ref := idx.GetInterleavedBy(i)
+				if err := maybeEnqueue(ref.Table, "interleaved by"); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -126,7 +155,7 @@ func (t *truncateNode) startExec(params runParams) error {
 	}
 
 	for id, name := range toTruncate {
-		if err := p.truncateTable(ctx, id, tree.AsStringWithFQNames(t.n, params.Ann())); err != nil {
+		if err := p.truncateTable(ctx, id, interleaveCopies, tree.AsStringWithFQNames(t.n, params.Ann())); err != nil {
 			return err
 		}
 
@@ -161,11 +190,24 @@ var PreservedSplitCountMultiple = settings.RegisterIntSetting(
 // truncateTable truncates the data of a table in a single transaction. It does
 // so by dropping all existing indexes on the table and creating new ones without
 // backfilling any data into the new indexes. The old indexes are cleaned up
-// asynchronously by the SchemaChangeGCJob.
-func (p *planner) truncateTable(ctx context.Context, id descpb.ID, jobDesc string) error {
+// asynchronously by the SchemaChangeGCJob. interleaveDescs is a set of
+// interleaved TableDescriptors being truncated before any of the truncate
+// mutations have been applied.
+func (p *planner) truncateTable(
+	ctx context.Context,
+	id descpb.ID,
+	interleaveDescs map[descpb.ID]*descpb.TableDescriptor,
+	jobDesc string,
+) error {
 	// Read the table descriptor because it might have changed
 	// while another table in the truncation list was truncated.
 	tableDesc, err := p.Descriptors().GetMutableTableVersionByID(ctx, id, p.txn)
+	if err != nil {
+		return err
+	}
+
+	// Get all tables that might reference this one.
+	allRefs, err := p.findAllReferencingInterleaves(ctx, tableDesc)
 	if err != nil {
 		return err
 	}
@@ -221,17 +263,27 @@ func (p *planner) truncateTable(ctx context.Context, id descpb.ID, jobDesc strin
 	// Create schema change GC jobs for all of the indexes.
 	dropTime := timeutil.Now().UnixNano()
 	droppedIndexes := make([]jobspb.SchemaChangeGCDetails_DroppedIndex, 0, len(oldIndexes))
+	var droppedInterleaves []descpb.IndexDescriptor
 	for i := range oldIndexes {
 		idx := oldIndexes[i]
-		droppedIndexes = append(droppedIndexes, jobspb.SchemaChangeGCDetails_DroppedIndex{
-			IndexID:  idx.ID,
-			DropTime: dropTime,
-		})
+		if idx.IsInterleaved() {
+			droppedInterleaves = append(droppedInterleaves, idx)
+		} else {
+			droppedIndexes = append(droppedIndexes, jobspb.SchemaChangeGCDetails_DroppedIndex{
+				IndexID:  idx.ID,
+				DropTime: dropTime,
+			})
+		}
 	}
 
 	details := jobspb.SchemaChangeGCDetails{
 		Indexes:  droppedIndexes,
 		ParentID: tableDesc.ID,
+	}
+	// If we have any interleaved indexes, add that information to the job record.
+	if len(droppedInterleaves) > 0 {
+		details.InterleavedTable = interleaveDescs[tableDesc.ID]
+		details.InterleavedIndexes = droppedInterleaves
 	}
 	record := CreateGCJobRecord(jobDesc, p.User(), details)
 	if _, err := p.ExecCfg().JobRegistry.CreateAdoptableJobWithTxn(
@@ -260,6 +312,20 @@ func (p *planner) truncateTable(ctx context.Context, id descpb.ID, jobDesc strin
 	// any existing traffic on the table will slam into a single range after the
 	// truncate is completed.
 	if err := p.copySplitPointsToNewIndexes(ctx, id, oldIndexIDs, newIndexIDs); err != nil {
+		return err
+	}
+
+	// Reassign any referenced index ID's from other tables.
+	if err := p.reassignInterleaveIndexReferences(ctx, allRefs, tableDesc.ID, indexIDMapping); err != nil {
+		return err
+	}
+	// Reassign any self references.
+	if err := p.reassignInterleaveIndexReferences(
+		ctx,
+		[]*tabledesc.Mutable{tableDesc},
+		tableDesc.ID,
+		indexIDMapping,
+	); err != nil {
 		return err
 	}
 
@@ -385,7 +451,7 @@ func ClearTableDataInChunks(
 		if err := db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 			rd := row.MakeDeleter(codec, tableDesc, nil /* requestedCols */, sv, true /* internal */, nil /* metrics */)
 			td := tableDeleter{rd: rd, alloc: alloc}
-			if err := td.init(ctx, txn, nil /* *tree.EvalContext */, sv); err != nil {
+			if err := td.init(ctx, txn, nil /* *tree.EvalContext */); err != nil {
 				return err
 			}
 			var err error
@@ -397,6 +463,30 @@ func ClearTableDataInChunks(
 		done = resume.Key == nil
 	}
 	return nil
+}
+
+// findAllReferencingInterleaves finds all tables that might interleave or
+// be interleaved by the input table.
+func (p *planner) findAllReferencingInterleaves(
+	ctx context.Context, table *tabledesc.Mutable,
+) ([]*tabledesc.Mutable, error) {
+	refs, err := table.FindAllReferences()
+	if err != nil {
+		return nil, err
+	}
+	tables := make([]*tabledesc.Mutable, 0, len(refs))
+	for id := range refs {
+		if id == table.ID {
+			continue
+		}
+		t, err := p.Descriptors().GetMutableTableVersionByID(ctx, id, p.txn)
+		if err != nil {
+			return nil, err
+		}
+		tables = append(tables, t)
+	}
+
+	return tables, nil
 }
 
 // copySplitPointsToNewIndexes copies any range split points from the indexes
@@ -548,6 +638,43 @@ func (p *planner) copySplitPointsToNewIndexes(
 	return p.txn.DB().Run(ctx, &b)
 }
 
+// reassignInterleaveIndexReferences reassigns all index ID's present in
+// interleave descriptor references according to indexIDMapping.
+func (p *planner) reassignInterleaveIndexReferences(
+	ctx context.Context,
+	tables []*tabledesc.Mutable,
+	truncatedID descpb.ID,
+	indexIDMapping map[descpb.IndexID]descpb.IndexID,
+) error {
+	for _, table := range tables {
+		changed := false
+		if err := catalog.ForEachNonDropIndex(table, func(indexI catalog.Index) error {
+			index := indexI.IndexDesc()
+			for j, a := range index.Interleave.Ancestors {
+				if a.TableID == truncatedID {
+					index.Interleave.Ancestors[j].IndexID = indexIDMapping[index.Interleave.Ancestors[j].IndexID]
+					changed = true
+				}
+			}
+			for j, c := range index.InterleavedBy {
+				if c.Table == truncatedID {
+					index.InterleavedBy[j].Index = indexIDMapping[index.InterleavedBy[j].Index]
+					changed = true
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if changed {
+			if err := p.writeSchemaChange(ctx, table, descpb.InvalidMutationID, "updating reference for truncated table"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (p *planner) reassignIndexComments(
 	ctx context.Context, table *tabledesc.Mutable, indexIDMapping map[descpb.IndexID]descpb.IndexID,
 ) error {
@@ -585,4 +712,12 @@ func (p *planner) reassignIndexComments(
 		}
 	}
 	return nil
+}
+
+// canClearRangeForDrop returns if an index can be deleted by deleting every
+// key from a single span.
+// This determines whether an index is dropped during a schema change, or if
+// it is only deleted upon GC.
+func canClearRangeForDrop(index catalog.Index) bool {
+	return !index.IsInterleaved()
 }

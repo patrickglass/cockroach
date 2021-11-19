@@ -41,14 +41,9 @@ func Get(
 		// This mirrors the logic in MVCCScan, though the logic in MVCCScan is
 		// slightly lower in the stack.
 		reply.ResumeSpan = &roachpb.Span{Key: args.Key}
-		if h.MaxSpanRequestKeys < 0 {
-			reply.ResumeReason = roachpb.RESUME_KEY_LIMIT
-		} else if h.TargetBytes < 0 {
-			reply.ResumeReason = roachpb.RESUME_BYTE_LIMIT
-		}
+		reply.ResumeReason = roachpb.RESUME_KEY_LIMIT
 		return result.Result{}, nil
 	}
-
 	var val *roachpb.Value
 	var intent *roachpb.Intent
 	var err error
@@ -63,17 +58,8 @@ func Get(
 		return result.Result{}, err
 	}
 	if val != nil {
-		// NB: This calculation is different from Scan, since Scan responses include
-		// the key/value pair while Get only includes the value.
-		numBytes := int64(len(val.RawBytes))
-		if h.TargetBytes > 0 && h.TargetBytesAllowEmpty && numBytes > h.TargetBytes {
-			reply.ResumeSpan = &roachpb.Span{Key: args.Key}
-			reply.ResumeReason = roachpb.RESUME_BYTE_LIMIT
-			reply.ResumeNextBytes = numBytes
-			return result.Result{}, nil
-		}
 		reply.NumKeys = 1
-		reply.NumBytes = numBytes
+		reply.NumBytes = int64(len(val.RawBytes))
 	}
 	var intents []roachpb.Intent
 	if intent != nil {

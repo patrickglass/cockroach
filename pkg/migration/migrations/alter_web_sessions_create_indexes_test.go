@@ -144,7 +144,7 @@ func getDeprecatedWebSessionsDescriptor() *descpb.TableDescriptor {
 		},
 		NextFamilyID: 1,
 		PrimaryIndex: descpb.IndexDescriptor{
-			Name:                tabledesc.PrimaryKeyIndexName("web_sessions"),
+			Name:                tabledesc.PrimaryKeyIndexName,
 			ID:                  1,
 			Unique:              true,
 			KeyColumnNames:      []string{"id"},

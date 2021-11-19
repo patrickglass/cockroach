@@ -77,7 +77,7 @@ WHERE
 	return nil
 }
 
-func check3322(db *gosql.DB, asOfSystemTime string) (retErr error) {
+func check3322(db *gosql.DB, asOfSystemTime string) (err error) {
 	// Entries in the DISTRICT, ORDER, and NEW-ORDER tables must satisfy the relationship:
 	// D_NEXT_O_ID - 1 = max(O_ID) = max(NO_O_ID)
 	txn, err := beginAsOfSystemTime(db, asOfSystemTime)
@@ -100,7 +100,6 @@ ORDER BY
 	if err != nil {
 		return err
 	}
-	defer func() { retErr = errors.CombineErrors(retErr, districtRows.Close()) }()
 	newOrderQuery := `
 SELECT
     max(no_o_id)
@@ -114,7 +113,6 @@ ORDER BY
 	if err != nil {
 		return err
 	}
-	defer func() { retErr = errors.CombineErrors(retErr, newOrderRows.Close()) }()
 	orderRowsQuery := `
 SELECT
     max(o_id)
@@ -128,7 +126,7 @@ ORDER BY
 	if err != nil {
 		return err
 	}
-	defer func() { retErr = errors.CombineErrors(retErr, orderRows.Close()) }()
+
 	var district, newOrder, order float64
 	var i int
 	for ; districtRows.Next() && newOrderRows.Next() && orderRows.Next(); i++ {
@@ -150,12 +148,21 @@ ORDER BY
 	if districtRows.Next() || newOrderRows.Next() || orderRows.Next() {
 		return errors.New("length mismatch between rows")
 	}
+	if err := districtRows.Close(); err != nil {
+		return err
+	}
+	if err := newOrderRows.Close(); err != nil {
+		return err
+	}
+	if err := orderRows.Close(); err != nil {
+		return err
+	}
+
 	if i == 0 {
 		return errors.Errorf("zero rows")
 	}
-	retErr = errors.CombineErrors(retErr, districtRows.Err())
-	retErr = errors.CombineErrors(retErr, newOrderRows.Err())
-	return errors.CombineErrors(retErr, orderRows.Err())
+
+	return nil
 }
 
 func check3323(db *gosql.DB, asOfSystemTime string) error {
@@ -192,7 +199,7 @@ WHERE
 	return nil
 }
 
-func check3324(db *gosql.DB, asOfSystemTime string) (retErr error) {
+func check3324(db *gosql.DB, asOfSystemTime string) (err error) {
 	// sum(O_OL_CNT) = [number of rows in the ORDER-LINE table for this district]
 	txn, err := beginAsOfSystemTime(db, asOfSystemTime)
 	if err != nil {
@@ -216,7 +223,6 @@ ORDER BY
 	if err != nil {
 		return err
 	}
-	defer func() { retErr = errors.CombineErrors(retErr, leftRows.Close()) }()
 	rightRows, err := db.Query(`
 SELECT
     count(*)
@@ -229,7 +235,6 @@ ORDER BY
 	if err != nil {
 		return err
 	}
-	defer func() { retErr = errors.CombineErrors(retErr, rightRows.Close()) }()
 	var i int
 	var left, right int64
 	for ; leftRows.Next() && rightRows.Next(); i++ {
@@ -243,22 +248,26 @@ ORDER BY
 			return errors.Errorf("order.sum(o_ol_cnt): %d != order_line.count(*): %d", left, right)
 		}
 	}
-	if leftRows.Next() || rightRows.Next() {
-		return errors.Errorf("at %s: length of order.sum(o_ol_cnt) != order_line.count(*)", ts)
-	}
-	if i == 0 {
-		return errors.Errorf("0 rows returned")
-	}
 	if err := leftRows.Err(); err != nil {
 		return errors.Wrap(err, "on `order`")
 	}
 	if err := rightRows.Err(); err != nil {
 		return errors.Wrap(err, "on `order_line`")
 	}
-	return nil
+	if i == 0 {
+		return errors.Errorf("0 rows returned")
+	}
+	if leftRows.Next() || rightRows.Next() {
+		return errors.Errorf("at %s: length of order.sum(o_ol_cnt) != order_line.count(*)", ts)
+	}
+
+	if err := leftRows.Close(); err != nil {
+		return err
+	}
+	return rightRows.Close()
 }
 
-func check3325(db *gosql.DB, asOfSystemTime string) (retErr error) {
+func check3325(db *gosql.DB, asOfSystemTime string) error {
 	// We want the symmetric difference between the sets:
 	// (SELECT no_w_id, no_d_id, no_o_id FROM new_order)
 	// (SELECT o_w_id, o_d_id, o_id FROM order@primary WHERE o_carrier_id IS NULL)
@@ -268,24 +277,33 @@ func check3325(db *gosql.DB, asOfSystemTime string) (retErr error) {
 		return err
 	}
 	defer func() { _ = txn.Rollback() }()
-	firstQuery := txn.QueryRow(`
+	firstQuery, err := txn.Query(`
 (SELECT no_w_id, no_d_id, no_o_id FROM new_order)
 EXCEPT ALL
-(SELECT o_w_id, o_d_id, o_id FROM "order" WHERE o_carrier_id IS NULL)`)
-	if err := firstQuery.Scan(); !errors.Is(err, gosql.ErrNoRows) {
+(SELECT o_w_id, o_d_id, o_id FROM "order"@primary WHERE o_carrier_id IS NULL)`)
+	if err != nil {
+		return err
+	}
+	if firstQuery.Next() {
 		return errors.Errorf("left EXCEPT right returned nonzero results.")
 	}
-	secondQuery := txn.QueryRow(`
-(SELECT o_w_id, o_d_id, o_id FROM "order" WHERE o_carrier_id IS NULL)
+	if err := firstQuery.Close(); err != nil {
+		return err
+	}
+	secondQuery, err := txn.Query(`
+(SELECT o_w_id, o_d_id, o_id FROM "order"@primary WHERE o_carrier_id IS NULL)
 EXCEPT ALL
 (SELECT no_w_id, no_d_id, no_o_id FROM new_order)`)
-	if err := secondQuery.Scan(); !errors.Is(err, gosql.ErrNoRows) {
+	if err != nil {
+		return err
+	}
+	if secondQuery.Next() {
 		return errors.Errorf("right EXCEPT left returned nonzero results.")
 	}
-	return nil
+	return secondQuery.Close()
 }
 
-func check3326(db *gosql.DB, asOfSystemTime string) (retErr error) {
+func check3326(db *gosql.DB, asOfSystemTime string) (err error) {
 	// For any row in the ORDER table, O_OL_CNT must equal the number of rows
 	// in the ORDER-LINE table for the corresponding order defined by
 	// (O_W_ID, O_D_ID, O_ID) = (OL_W_ID, OL_D_ID, OL_O_ID).
@@ -295,26 +313,36 @@ func check3326(db *gosql.DB, asOfSystemTime string) (retErr error) {
 	}
 	defer func() { _ = txn.Rollback() }()
 
-	firstQuery := txn.QueryRow(`
+	firstQuery, err := txn.Query(`
 (SELECT o_w_id, o_d_id, o_id, o_ol_cnt FROM "order"
   ORDER BY o_w_id, o_d_id, o_id DESC)
 EXCEPT ALL
 (SELECT ol_w_id, ol_d_id, ol_o_id, count(*) FROM order_line
   GROUP BY (ol_w_id, ol_d_id, ol_o_id)
   ORDER BY ol_w_id, ol_d_id, ol_o_id DESC)`)
-	if err := firstQuery.Scan(); !errors.Is(err, gosql.ErrNoRows) {
+	if err != nil {
+		return err
+	}
+	if firstQuery.Next() {
 		return errors.Errorf("left EXCEPT right returned nonzero results")
 	}
-	secondQuery := txn.QueryRow(`
+	if err := firstQuery.Close(); err != nil {
+		return err
+	}
+	secondQuery, err := txn.Query(`
 (SELECT ol_w_id, ol_d_id, ol_o_id, count(*) FROM order_line
   GROUP BY (ol_w_id, ol_d_id, ol_o_id) ORDER BY ol_w_id, ol_d_id, ol_o_id DESC)
 EXCEPT ALL
 (SELECT o_w_id, o_d_id, o_id, o_ol_cnt FROM "order"
   ORDER BY o_w_id, o_d_id, o_id DESC)`)
-	if err := secondQuery.Scan(); !errors.Is(err, gosql.ErrNoRows) {
+	if err != nil {
+		return err
+	}
+
+	if secondQuery.Next() {
 		return errors.Errorf("right EXCEPT left returned nonzero results")
 	}
-	return nil
+	return secondQuery.Close()
 }
 
 func check3327(db *gosql.DB, asOfSystemTime string) error {
@@ -427,7 +455,7 @@ func beginAsOfSystemTime(db *gosql.DB, asOfSystemTime string) (txn *gosql.Tx, er
 	return txn, nil
 }
 
-// selectTimestamp retrieves an unquoted string literal of a decimal value
+// selectTimestamp retreives an unqouted string literal of a decimal value
 // representing the hlc timestamp of the provided txn.
 func selectTimestamp(txn *gosql.Tx) (ts string, err error) {
 	err = txn.QueryRow("SELECT cluster_logical_timestamp()::string").Scan(&ts)

@@ -53,7 +53,7 @@ func descForTable(
 		name := parsed[0].AST.(*tree.CreateSequence).Name.String()
 
 		ts := hlc.Timestamp{WallTime: nanos}
-		priv := descpb.NewBasePrivilegeDescriptor(security.AdminRoleName())
+		priv := descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName())
 		desc, err := sql.NewSequenceTableDesc(
 			ctx,
 			name,

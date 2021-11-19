@@ -119,7 +119,6 @@ var charts = []sectionDescription{
 				Metrics: []string{
 					"sys.cpu.sys.ns",
 					"sys.cpu.user.ns",
-					"sys.cpu.now.ns",
 				},
 			},
 		},
@@ -1778,6 +1777,26 @@ var charts = []sectionDescription{
 				Metrics: []string{"sql.stats.discarded.current"},
 			},
 			{
+				Title:   "Memory usage for internal fingerprint storage",
+				Metrics: []string{"sql.stats.mem.max.internal"},
+			},
+			{
+				Title:   "Current memory usage for internal fingerprint storage",
+				Metrics: []string{"sql.stats.mem.current.internal"},
+			},
+			{
+				Title:   "Memory usage for internal reported fingerprint storage",
+				Metrics: []string{"sql.stats.reported.mem.max.internal"},
+			},
+			{
+				Title:   "Current memory usage for internal reported fingerprint storage",
+				Metrics: []string{"sql.stats.reported.mem.current.internal"},
+			},
+			{
+				Title:   "Number of internal fingerprint statistics being discarded",
+				Metrics: []string{"sql.stats.discarded.current.internal"},
+			},
+			{
 				Title:   "Number of times SQL Stats are flushed to persistent storage",
 				Metrics: []string{"sql.stats.flush.count"},
 			},
@@ -1790,8 +1809,24 @@ var charts = []sectionDescription{
 				Metrics: []string{"sql.stats.flush.duration"},
 			},
 			{
+				Title:   "Number of times internal SQL Stats are flushed to persistent storage",
+				Metrics: []string{"sql.stats.flush.count.internal"},
+			},
+			{
+				Title:   "Number of errors encountered when flushing internal SQL Stats",
+				Metrics: []string{"sql.stats.flush.error.internal"},
+			},
+			{
+				Title:   "Time took to complete internal SQL Stats flush",
+				Metrics: []string{"sql.stats.flush.duration.internal"},
+			},
+			{
 				Title:   "Number of stale statement/transaction roles removed by cleanup job",
 				Metrics: []string{"sql.stats.cleanup.rows_removed"},
+			},
+			{
+				Title:   "Number of internal stale statement/transaction roles removed by cleanup job",
+				Metrics: []string{"sql.stats.cleanup.rows_removed.internal"},
 			},
 		},
 	},
@@ -2558,7 +2593,6 @@ var charts = []sectionDescription{
 					"jobs.migration.currently_running",
 					"jobs.auto_span_config_reconciliation.currently_running",
 					"jobs.auto_sql_stats_compaction.currently_running",
-					"jobs.stream_replication.currently_running",
 				},
 			},
 			{
@@ -2690,17 +2724,6 @@ var charts = []sectionDescription{
 					"jobs.stream_ingestion.resume_completed",
 					"jobs.stream_ingestion.resume_failed",
 					"jobs.stream_ingestion.resume_retry_error",
-				},
-			},
-			{
-				Title: "Stream Replication",
-				Metrics: []string{
-					"jobs.stream_replication.fail_or_cancel_completed",
-					"jobs.stream_replication.fail_or_cancel_failed",
-					"jobs.stream_replication.fail_or_cancel_retry_error",
-					"jobs.stream_replication.resume_completed",
-					"jobs.stream_replication.resume_failed",
-					"jobs.stream_replication.resume_retry_error",
 				},
 			},
 			{

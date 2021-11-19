@@ -52,7 +52,7 @@ func TestFactory(t *testing.T) {
 		Cost:     1500.0,
 	})
 
-	plan, err := f.ConstructPlan(n, nil /* subqueries */, nil /* cascades */, nil /* checks */, -1 /* rootRowCount */)
+	plan, err := f.ConstructPlan(n, nil /* subqueries */, nil /* cascades */, nil /* checks */)
 	require.NoError(t, err)
 	p := plan.(*Plan)
 

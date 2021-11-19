@@ -28,23 +28,17 @@ import {
   transactionsRetryBarChart,
 } from "./transactionsBarCharts";
 import {
-  formatAggregationIntervalColumn,
+  formatStartIntervalColumn,
   statisticsTableTitles,
 } from "../statsTableUtil/statsTableUtil";
 import { tableClasses } from "./transactionsTableClasses";
 import { textCell } from "./transactionsCells";
-import {
-  FixLong,
-  longToInt,
-  TimestampToNumber,
-  DurationToNumber,
-} from "src/util";
+import { FixLong, longToInt, TimestampToNumber } from "src/util";
 import { SortSetting } from "../sortedtable";
 import {
   getStatementsByFingerprintIdAndTime,
   collectStatementsText,
   statementFingerprintIdsToText,
-  statementFingerprintIdsToSummarizedText,
 } from "../transactionsPage/utils";
 import classNames from "classnames/bind";
 import statsTablePageStyles from "src/statementsTable/statementsTableContent.module.scss";
@@ -131,10 +125,6 @@ export function makeTransactionsColumns(
             item.stats_data.statement_fingerprint_ids,
             statements,
           ),
-          transactionSummary: statementFingerprintIdsToSummarizedText(
-            item.stats_data.statement_fingerprint_ids,
-            statements,
-          ),
           onClick: () => handleDetails(item),
           search,
         }),
@@ -149,12 +139,11 @@ export function makeTransactionsColumns(
       alwaysShow: true,
     },
     {
-      name: "aggregationInterval",
-      title: statisticsTableTitles.aggregationInterval("transaction"),
+      name: "intervalStartTime",
+      title: statisticsTableTitles.intervalStartTime("transaction"),
       cell: (item: TransactionInfo) =>
-        formatAggregationIntervalColumn(
+        formatStartIntervalColumn(
           TimestampToNumber(item.stats_data?.aggregated_ts),
-          DurationToNumber(item.stats_data?.aggregation_interval),
         ),
       sort: (item: TransactionInfo) =>
         TimestampToNumber(item.stats_data?.aggregated_ts),

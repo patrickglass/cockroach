@@ -2330,8 +2330,9 @@ func (t *lockTableImpl) AddDiscoveredLock(
 	}
 	if seq < t.enabledSeq {
 		// If the lease sequence is too low, this discovered lock may no longer
-		// be accurate, so we ignore it.
-		return false, nil
+		// be accurate, so we ignore it. However, we still return true so that
+		// the request immediately retries, this time under a newer lease.
+		return true, nil
 	} else if seq > t.enabledSeq {
 		// The enableSeq is set synchronously with the application of a new
 		// lease, so it should not be possible for a request to evaluate at a

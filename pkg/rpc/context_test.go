@@ -173,8 +173,7 @@ func TestPingInterceptors(t *testing.T) {
 	)
 
 	errBoomSend := errors.Handled(errors.New("boom due to onSendPing"))
-	recvMsg := "boom due to onHandlePing"
-	errBoomRecv := status.Error(codes.FailedPrecondition, recvMsg)
+	errBoomRecv := status.Error(codes.FailedPrecondition, "boom due to onHandlePing")
 	opts := ContextOptions{
 		TenantID:   roachpb.SystemTenantID,
 		AmbientCtx: log.AmbientContext{Tracer: tracing.NewTracer()},
@@ -213,11 +212,7 @@ func TestPingInterceptors(t *testing.T) {
 	remoteAddr := ln.Addr().String()
 	{
 		_, err := rpcCtx.GRPCDialNode(remoteAddr, blockedOriginNodeID, SystemClass).Connect(ctx)
-		require.True(t, errors.HasType(err, errBoomRecv))
-		status, ok := status.FromError(errors.UnwrapAll(err))
-		require.True(t, ok)
-		require.Equal(t, codes.FailedPrecondition, status.Code())
-		require.Equal(t, recvMsg, status.Message())
+		require.Equal(t, errBoomRecv, errors.Cause(err))
 	}
 }
 
@@ -1017,7 +1012,7 @@ func TestRemoteOffsetUnhealthy(t *testing.T) {
 // that's what we're testing here. Likewise, serverside keepalive ensures that
 // if a ping is not seen within a timeout, the transport will also be closed.
 //
-// In this test we use a TestingHeartbeatStreamService as opposed to a standard
+// In this test we use a TestingHeartbeatStreamService as oppposed to a standard
 // HeartbeatService. This is important to test scenarios where the
 // client->server connection is partitioned but the server->client connection is
 // healthy, because a TestingHeartbeatStreamService will continue to respond on
@@ -1307,13 +1302,13 @@ func grpcRunKeepaliveTestCase(testCtx context.Context, c grpcKeepaliveTestCase) 
 	}
 	if c.expClose {
 		if sendErr == nil || !grpcutil.IsClosedConnection(sendErr) {
-			newErr := errors.Newf("expected closed connection, found %v", sendErr)
+			newErr := fmt.Errorf("expected closed connection, found %v", sendErr)
 			log.Infof(ctx, "%+v", newErr)
 			return newErr
 		}
 	} else {
 		if sendErr != nil {
-			newErr := errors.Newf("expected unclosed connection, found %v", sendErr)
+			newErr := fmt.Errorf("expected unclosed connection, found %v", sendErr)
 			log.Infof(ctx, "%+v", newErr)
 			return newErr
 		}

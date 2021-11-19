@@ -192,7 +192,7 @@ func TestSynchronization(t *testing.T) {
 	wg.Add(goroutines)
 	for i := 0; i < goroutines; i++ {
 		go func() {
-			rng, _ := randutil.NewTestRand()
+			rng, _ := randutil.NewPseudoRand()
 			var s Session
 			s.Init()
 			for j := 0; j < 5000; j++ {

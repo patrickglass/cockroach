@@ -78,7 +78,7 @@ func MakeExpression(
 
 	if indexVarMap != nil {
 		// Remap our indexed vars.
-		expr = RemapIVarsInTypedExpr(expr, indexVarMap)
+		expr = remapIVarsInTypedExpr(expr, indexVarMap)
 	}
 	expression := execinfrapb.Expression{LocalExpr: expr}
 	if ctx.IsLocal() {
@@ -123,9 +123,9 @@ func (e *evalAndReplaceSubqueryVisitor) VisitPre(expr tree.Expr) (bool, tree.Exp
 
 func (evalAndReplaceSubqueryVisitor) VisitPost(expr tree.Expr) tree.Expr { return expr }
 
-// RemapIVarsInTypedExpr remaps tree.IndexedVars in expr using indexVarMap.
+// remapIVarsInTypedExpr remaps tree.IndexedVars in expr using indexVarMap.
 // Note that a new expression is returned.
-func RemapIVarsInTypedExpr(expr tree.TypedExpr, indexVarMap []int) tree.TypedExpr {
+func remapIVarsInTypedExpr(expr tree.TypedExpr, indexVarMap []int) tree.TypedExpr {
 	v := &ivarRemapper{indexVarMap: indexVarMap}
 	newExpr, _ := tree.WalkExpr(v, expr)
 	return newExpr.(tree.TypedExpr)

@@ -13,14 +13,17 @@ package sql
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 //
@@ -35,13 +38,9 @@ import (
 func (p *planner) renameDatabase(
 	ctx context.Context, desc *dbdesc.Mutable, newName string, stmt string,
 ) error {
-	oldNameKey := descpb.NameInfo{
-		ParentID:       desc.GetParentID(),
-		ParentSchemaID: desc.GetParentSchemaID(),
-		Name:           desc.GetName(),
-	}
+	oldName := desc.GetName()
+	desc.SetName(newName)
 
-	// Check that the new name is available.
 	if exists, _, err := catalogkv.LookupDatabaseID(ctx, p.txn, p.ExecCfg().Codec, newName); err == nil && exists {
 		return pgerror.Newf(pgcode.DuplicateDatabase,
 			"the new database name %q already exists", newName)
@@ -49,19 +48,23 @@ func (p *planner) renameDatabase(
 		return err
 	}
 
-	// Update the descriptor with the new name.
-	desc.SetName(newName)
+	b := &kv.Batch{}
+	newKey := catalogkeys.MakeDatabaseNameKey(p.ExecCfg().Codec, newName)
+	descID := desc.GetID()
+	if p.ExtendedEvalContext().Tracing.KVTracingEnabled() {
+		log.VEventf(ctx, 2, "CPut %s -> %d", newKey, descID)
+	}
+	b.CPut(newKey, descID, nil)
 
-	// Populate the namespace update batch.
-	b := p.txn.NewBatch()
-	p.renameNamespaceEntry(ctx, b, oldNameKey, desc)
-
-	// Write the updated database descriptor.
+	desc.DrainingNames = append(desc.DrainingNames, descpb.NameInfo{
+		ParentID:       keys.RootNamespaceID,
+		ParentSchemaID: keys.RootNamespaceID,
+		Name:           oldName,
+	})
 	if err := p.writeNonDropDatabaseChange(ctx, desc, stmt); err != nil {
 		return err
 	}
 
-	// Run the namespace update batch.
 	return p.txn.Run(ctx, b)
 }
 

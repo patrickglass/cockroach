@@ -10,12 +10,7 @@
 
 import _ from "lodash";
 import * as protos from "@cockroachlabs/crdb-protobuf-client";
-import {
-  FixLong,
-  TimestampToNumber,
-  DurationToNumber,
-  uniqueLong,
-} from "src/util";
+import { FixLong, TimestampToNumber, uniqueLong } from "src/util";
 
 export type StatementStatistics = protos.cockroach.sql.IStatementStatistics;
 export type ExecStats = protos.cockroach.sql.IExecStats;
@@ -203,18 +198,16 @@ export function aggregateStatementStats(
 
 export interface ExecutionStatistics {
   statement: string;
-  statement_summary: string;
   aggregated_ts: number;
-  aggregation_interval: number;
   app: string;
   database: string;
   distSQL: boolean;
   vec: boolean;
+  opt: boolean;
   implicit_txn: boolean;
   full_scan: boolean;
   failed: boolean;
   node_id: number;
-  transaction_fingerprint_id: Long;
   stats: StatementStatistics;
 }
 
@@ -223,18 +216,16 @@ export function flattenStatementStats(
 ): ExecutionStatistics[] {
   return statementStats.map(stmt => ({
     statement: stmt.key.key_data.query,
-    statement_summary: stmt.key.key_data.query_summary,
     aggregated_ts: TimestampToNumber(stmt.key.aggregated_ts),
-    aggregation_interval: DurationToNumber(stmt.key.aggregation_interval),
     app: stmt.key.key_data.app,
     database: stmt.key.key_data.database,
     distSQL: stmt.key.key_data.distSQL,
     vec: stmt.key.key_data.vec,
+    opt: stmt.key.key_data.opt,
     implicit_txn: stmt.key.key_data.implicit_txn,
     full_scan: stmt.key.key_data.full_scan,
     failed: stmt.key.key_data.failed,
     node_id: stmt.key.node_id,
-    transaction_fingerprint_id: stmt.key.key_data.transaction_fingerprint_id,
     stats: stmt.stats,
   }));
 }
@@ -253,22 +244,9 @@ export const getSearchParams = (searchParams: string) => {
 
 // This function returns a key based on all parameters
 // that should be used to group statements.
-// Parameters being used: query, implicit_txn, database,
-// aggregated_ts and aggregation_interval.
+// Parameters being used: query, implicit_txn, database, and aggregated_ts.
 export function statementKey(stmt: ExecutionStatistics): string {
   return (
-    stmt.statement +
-    stmt.implicit_txn +
-    stmt.database +
-    stmt.aggregated_ts +
-    stmt.aggregation_interval
+    stmt.statement + stmt.implicit_txn + stmt.database + stmt.aggregated_ts
   );
-}
-
-// transactionScopedStatementKey is similar to statementKey, except that
-// it appends the transactionFingerprintID to the string key it generated.
-export function transactionScopedStatementKey(
-  stmt: ExecutionStatistics,
-): string {
-  return statementKey(stmt) + stmt.transaction_fingerprint_id.toString();
 }

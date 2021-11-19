@@ -87,14 +87,7 @@ func (tc *Collection) GetMutableTypeByID(
 	if err != nil {
 		return nil, err
 	}
-	switch t := desc.(type) {
-	case *typedesc.Mutable:
-		return t, nil
-	case *typedesc.TableImplicitRecordType:
-		return nil, pgerror.Newf(pgcode.DependentObjectsStillExist, "cannot modify table record type %q", desc.GetName())
-	}
-	return nil,
-		errors.AssertionFailedf("unhandled type descriptor type %T during GetMutableTypeByID", desc)
+	return desc.(*typedesc.Mutable), nil
 }
 
 // GetImmutableTypeByID returns an immutable type descriptor with
@@ -119,18 +112,10 @@ func (tc *Collection) getTypeByID(
 		}
 		return nil, err
 	}
-	switch t := desc.(type) {
-	case catalog.TypeDescriptor:
-		// User-defined type.
-		return t, nil
-	case catalog.TableDescriptor:
-		// Table record type.
-		t, err = tc.hydrateTypesInTableDesc(ctx, txn, t)
-		if err != nil {
-			return nil, err
-		}
-		return typedesc.CreateImplicitRecordTypeFromTableDesc(t)
+	typ, ok := desc.(catalog.TypeDescriptor)
+	if !ok {
+		return nil, pgerror.Newf(
+			pgcode.UndefinedObject, "type with ID %d does not exist", typeID)
 	}
-	return nil, pgerror.Newf(
-		pgcode.UndefinedObject, "type with ID %d does not exist", typeID)
+	return typ, nil
 }

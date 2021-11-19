@@ -20,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/errors"
 )
@@ -36,9 +35,6 @@ func (c *Config) Validate(defaultLogDir *string) (resErr error) {
 	}()
 
 	bt, bf := true, false
-	zeroDuration := time.Duration(0)
-	zeroByteSize := ByteSize(0)
-	zeroInt := int(0)
 
 	baseCommonSinkConfig := CommonSinkConfig{
 		Filter:      logpb.Severity_INFO,
@@ -46,19 +42,12 @@ func (c *Config) Validate(defaultLogDir *string) (resErr error) {
 		Redactable:  &bt,
 		Redact:      &bf,
 		Criticality: &bf,
-		Buffering: CommonBufferSinkConfigWrapper{
-			CommonBufferSinkConfig: CommonBufferSinkConfig{
-				MaxStaleness:     &zeroDuration,
-				FlushTriggerSize: &zeroByteSize,
-				MaxInFlight:      &zeroInt,
-			},
-		},
 	}
 	baseFileDefaults := FileDefaults{
 		Dir:             defaultLogDir,
 		BufferedWrites:  &bt,
-		MaxFileSize:     &zeroByteSize,
-		MaxGroupSize:    &zeroByteSize,
+		MaxFileSize:     func() *ByteSize { s := ByteSize(0); return &s }(),
+		MaxGroupSize:    func() *ByteSize { s := ByteSize(0); return &s }(),
 		FilePermissions: func() *FilePermissions { s := FilePermissions(0o644); return &s }(),
 		CommonSinkConfig: CommonSinkConfig{
 			Format:      func() *string { s := DefaultFileFormat; return &s }(),
@@ -77,7 +66,7 @@ func (c *Config) Validate(defaultLogDir *string) (resErr error) {
 		UnsafeTLS:         &bf,
 		DisableKeepAlives: &bf,
 		Method:            func() *HTTPSinkMethod { m := HTTPSinkMethod(http.MethodPost); return &m }(),
-		Timeout:           &zeroDuration,
+		Timeout:           func() *time.Duration { d := time.Duration(0); return &d }(),
 	}
 
 	propagateCommonDefaults(&baseFileDefaults.CommonSinkConfig, baseCommonSinkConfig)
@@ -324,16 +313,6 @@ func (c *Config) newFileSinkConfig(groupName string) *FileSinkConfig {
 
 func (c *Config) validateFileSinkConfig(fc *FileSinkConfig, defaultLogDir *string) error {
 	propagateFileDefaults(&fc.FileDefaults, c.FileDefaults)
-	if !fc.Buffering.IsNone() {
-		// We cannot use unimplemented.WithIssue() here because of a
-		// circular dependency.
-		err := errors.UnimplementedError(
-			errors.IssueLink{IssueURL: build.MakeIssueURL(72452)},
-			`unimplemented: "buffering" not yet supported for file-groups`)
-		err = errors.WithHint(err, `Use "buffered-writes".`)
-		err = errors.WithTelemetry(err, "#72452")
-		return err
-	}
 	if fc.Dir != c.FileDefaults.Dir {
 		// A directory was specified explicitly. Normalize it.
 		if err := normalizeDir(&fc.Dir); err != nil {

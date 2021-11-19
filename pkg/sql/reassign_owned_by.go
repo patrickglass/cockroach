@@ -43,14 +43,14 @@ func (p *planner) ReassignOwnedBy(ctx context.Context, n *tree.ReassignOwnedBy) 
 		return nil, err
 	}
 
-	normalizedOldRoles, err := n.OldRoles.ToSQLUsernames(p.SessionData(), security.UsernameValidation)
+	normalizedOldRole, err := n.OldRoles.ToSQLUsernames()
 	if err != nil {
 		return nil, err
 	}
 	// Check all roles in old roles exist. Checks in authorization.go will confirm that current user
 	// is a member of old roles and new roles and has CREATE privilege.
 	// Postgres first checks if the role exists before checking privileges.
-	for _, oldRole := range normalizedOldRoles {
+	for _, oldRole := range normalizedOldRole {
 		roleExists, err := RoleExists(ctx, p.ExecCfg(), p.Txn(), oldRole)
 		if err != nil {
 			return nil, err
@@ -59,13 +59,9 @@ func (p *planner) ReassignOwnedBy(ctx context.Context, n *tree.ReassignOwnedBy) 
 			return nil, pgerror.Newf(pgcode.UndefinedObject, "role/user %q does not exist", oldRole)
 		}
 	}
-	newRole, err := n.NewRole.ToSQLUsername(p.SessionData(), security.UsernameValidation)
-	if err != nil {
-		return nil, err
-	}
-	roleExists, err := RoleExists(ctx, p.ExecCfg(), p.Txn(), newRole)
+	roleExists, err := RoleExists(ctx, p.ExecCfg(), p.Txn(), n.NewRole)
 	if !roleExists {
-		return nil, pgerror.Newf(pgcode.UndefinedObject, "role/user %q does not exist", newRole)
+		return nil, pgerror.Newf(pgcode.UndefinedObject, "role/user %q does not exist", n.NewRole)
 	}
 	if err != nil {
 		return nil, err
@@ -84,15 +80,15 @@ func (p *planner) ReassignOwnedBy(ctx context.Context, n *tree.ReassignOwnedBy) 
 		if err != nil {
 			return nil, err
 		}
-		if p.User() != newRole {
-			if _, ok := memberOf[newRole]; !ok {
+		if p.User() != n.NewRole {
+			if _, ok := memberOf[n.NewRole]; !ok {
 				return nil, errors.WithHint(
 					pgerror.Newf(pgcode.InsufficientPrivilege,
 						"permission denied to reassign objects"),
 					"user must be a member of the new role")
 			}
 		}
-		for _, oldRole := range normalizedOldRoles {
+		for _, oldRole := range normalizedOldRole {
 			if p.User() != oldRole {
 				if _, ok := memberOf[oldRole]; !ok {
 					return nil, errors.WithHint(
@@ -103,7 +99,7 @@ func (p *planner) ReassignOwnedBy(ctx context.Context, n *tree.ReassignOwnedBy) 
 			}
 		}
 	}
-	return &reassignOwnedByNode{n: n, normalizedOldRoles: normalizedOldRoles}, nil
+	return &reassignOwnedByNode{n: n, normalizedOldRoles: normalizedOldRole}, nil
 }
 
 func (n *reassignOwnedByNode) startExec(params runParams) error {
@@ -167,11 +163,7 @@ func (n *reassignOwnedByNode) reassignDatabaseOwner(
 	if err != nil {
 		return err
 	}
-	owner, err := n.n.NewRole.ToSQLUsername(params.p.SessionData(), security.UsernameValidation)
-	if err != nil {
-		return err
-	}
-	if err := params.p.setNewDatabaseOwner(params.ctx, mutableDbDesc, owner); err != nil {
+	if err := params.p.setNewDatabaseOwner(params.ctx, mutableDbDesc, n.n.NewRole); err != nil {
 		return err
 	}
 	if err := params.p.writeNonDropDatabaseChange(
@@ -192,12 +184,8 @@ func (n *reassignOwnedByNode) reassignSchemaOwner(
 	if err != nil {
 		return err
 	}
-	owner, err := n.n.NewRole.ToSQLUsername(params.p.SessionData(), security.UsernameValidation)
-	if err != nil {
-		return err
-	}
 	if err := params.p.setNewSchemaOwner(
-		params.ctx, dbDesc, mutableSchemaDesc.(*schemadesc.Mutable), owner); err != nil {
+		params.ctx, dbDesc, mutableSchemaDesc.(*schemadesc.Mutable), n.n.NewRole); err != nil {
 		return err
 	}
 	if err := params.p.writeSchemaDescChange(params.ctx,
@@ -223,12 +211,8 @@ func (n *reassignOwnedByNode) reassignTableOwner(
 		return err
 	}
 
-	owner, err := n.n.NewRole.ToSQLUsername(params.p.SessionData(), security.UsernameValidation)
-	if err != nil {
-		return err
-	}
 	if err := params.p.setNewTableOwner(
-		params.ctx, mutableTbDesc.(*tabledesc.Mutable), *tableName, owner); err != nil {
+		params.ctx, mutableTbDesc.(*tabledesc.Mutable), *tableName, n.n.NewRole); err != nil {
 		return err
 	}
 	if err := params.p.writeSchemaChange(
@@ -262,13 +246,9 @@ func (n *reassignOwnedByNode) reassignTypeOwner(
 		return err
 	}
 
-	owner, err := n.n.NewRole.ToSQLUsername(params.p.SessionData(), security.UsernameValidation)
-	if err != nil {
-		return err
-	}
 	if err := params.p.setNewTypeOwner(
 		params.ctx, mutableTypDesc.(*typedesc.Mutable), arrayDesc, *typeName,
-		*arrayTypeName, owner); err != nil {
+		*arrayTypeName, n.n.NewRole); err != nil {
 		return err
 	}
 	if err := params.p.writeTypeSchemaChange(

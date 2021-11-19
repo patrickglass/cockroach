@@ -51,12 +51,20 @@ func (desc *wrapper) GetReferencedDescIDs() (catalog.DescriptorIDSet, error) {
 	if desc.GetParentSchemaID() != keys.PublicSchemaID {
 		ids.Add(desc.GetParentSchemaID())
 	}
-	// Collect referenced table IDs in foreign keys.
+	// Collect referenced table IDs in foreign keys and interleaves.
 	for _, fk := range desc.OutboundFKs {
 		ids.Add(fk.ReferencedTableID)
 	}
 	for _, fk := range desc.InboundFKs {
 		ids.Add(fk.OriginTableID)
+	}
+	for _, idx := range desc.NonDropIndexes() {
+		for i := 0; i < idx.NumInterleaveAncestors(); i++ {
+			ids.Add(idx.GetInterleaveAncestor(i).TableID)
+		}
+		for i := 0; i < idx.NumInterleavedBy(); i++ {
+			ids.Add(idx.GetInterleavedBy(i).Table)
+		}
 	}
 	// Collect user defined type Oids and sequence references in columns.
 	for _, col := range desc.DeletableColumns() {
@@ -169,6 +177,82 @@ func (desc *wrapper) ValidateCrossReferences(
 			}
 		}
 	}
+
+	// Check interleaves.
+	for _, indexI := range desc.NonDropIndexes() {
+		vea.Report(desc.validateIndexInterleave(indexI, vdg))
+	}
+	// TODO(dan): Also validate SharedPrefixLen in the interleaves.
+}
+
+func (desc *wrapper) validateIndexInterleave(
+	indexI catalog.Index, vdg catalog.ValidationDescGetter,
+) error {
+	// Check interleaves.
+	if indexI.NumInterleaveAncestors() > 0 {
+		// Only check the most recent ancestor, the rest of them don't point
+		// back.
+		ancestor := indexI.GetInterleaveAncestor(indexI.NumInterleaveAncestors() - 1)
+		targetTable, err := vdg.GetTableDescriptor(ancestor.TableID)
+		if err != nil {
+			return errors.Wrapf(err,
+				"invalid interleave: missing table=%d index=%d", ancestor.TableID, errors.Safe(ancestor.IndexID))
+		}
+		targetIndex, err := targetTable.FindIndexWithID(ancestor.IndexID)
+		if err != nil {
+			return errors.Wrapf(err,
+				"invalid interleave: missing table=%s index=%d", targetTable.GetName(), errors.Safe(ancestor.IndexID))
+		}
+
+		found := false
+		for j := 0; j < targetIndex.NumInterleavedBy(); j++ {
+			backref := targetIndex.GetInterleavedBy(j)
+			if backref.Table == desc.ID && backref.Index == indexI.GetID() {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.AssertionFailedf(
+				"missing interleave back reference to %q@%q from %q@%q",
+				desc.Name, indexI.GetName(), targetTable.GetName(), targetIndex.GetName())
+		}
+	}
+
+	interleaveBackrefs := make(map[descpb.ForeignKeyReference]struct{})
+	for j := 0; j < indexI.NumInterleavedBy(); j++ {
+		backref := indexI.GetInterleavedBy(j)
+		if _, ok := interleaveBackrefs[backref]; ok {
+			return errors.AssertionFailedf("duplicated interleave backreference %+v", backref)
+		}
+		interleaveBackrefs[backref] = struct{}{}
+		targetTable, err := vdg.GetTableDescriptor(backref.Table)
+		if err != nil {
+			return errors.Wrapf(err,
+				"invalid interleave backreference table=%d index=%d",
+				backref.Table, backref.Index)
+		}
+		targetIndex, err := targetTable.FindIndexWithID(backref.Index)
+		if err != nil {
+			return errors.Wrapf(err,
+				"invalid interleave backreference table=%s index=%d",
+				targetTable.GetName(), backref.Index)
+		}
+		if targetIndex.NumInterleaveAncestors() == 0 {
+			return errors.AssertionFailedf(
+				"broken interleave backward reference from %q@%q to %q@%q",
+				desc.Name, indexI.GetName(), targetTable.GetName(), targetIndex.GetName())
+		}
+		// The last ancestor is required to be a backreference.
+		ancestor := targetIndex.GetInterleaveAncestor(targetIndex.NumInterleaveAncestors() - 1)
+		if ancestor.TableID != desc.ID || ancestor.IndexID != indexI.GetID() {
+			return errors.AssertionFailedf(
+				"broken interleave backward reference from %q@%q to %q@%q",
+				desc.Name, indexI.GetName(), targetTable.GetName(), targetIndex.GetName())
+		}
+	}
+
+	return nil
 }
 
 func (desc *wrapper) validateOutboundFK(
@@ -188,6 +272,65 @@ func (desc *wrapper) validateOutboundFK(
 	})
 	if found {
 		return nil
+	}
+	// In 20.2 we introduced a bug where we fail to upgrade the FK references
+	// on the referenced descriptors from their pre-19.2 format when reading
+	// them during validation (#57032). So we account for the possibility of
+	// un-upgraded foreign key references on the other table. This logic
+	// somewhat parallels the logic in maybeUpgradeForeignKeyRepOnIndex.
+	unupgradedFKsPresent := false
+	if err := catalog.ForEachIndex(referencedTable, catalog.IndexOpts{}, func(referencedIdx catalog.Index) error {
+		if found {
+			// TODO (lucy): If we ever revisit the tabledesc.immutable methods, add
+			// a way to break out of the index loop.
+			return nil
+		}
+		if len(referencedIdx.IndexDesc().ReferencedBy) > 0 {
+			unupgradedFKsPresent = true
+		} else {
+			return nil
+		}
+		// Determine whether the index on the other table is a unique index that
+		// could support this FK constraint.
+		if !referencedIdx.IsValidReferencedUniqueConstraint(fk.ReferencedColumnIDs) {
+			return nil
+		}
+		// Now check the backreferences. Backreferences in ReferencedBy only had
+		// Index and Table populated.
+		for i := range referencedIdx.IndexDesc().ReferencedBy {
+			backref := &referencedIdx.IndexDesc().ReferencedBy[i]
+			if backref.Table != desc.ID {
+				continue
+			}
+			// Look up the index that the un-upgraded reference refers to and
+			// see if that index could support the foreign key reference. (Note
+			// that it shouldn't be possible for this index to not exist. See
+			// planner.MaybeUpgradeDependentOldForeignKeyVersionTables, which is
+			// called from the drop index implementation.)
+			originalOriginIndex, err := desc.FindIndexWithID(backref.Index)
+			if err != nil {
+				return errors.AssertionFailedf(
+					"missing index %d on %q from pre-19.2 foreign key "+
+						"backreference %q on %q",
+					backref.Index, desc.Name, fk.Name, referencedTable.GetName(),
+				)
+			}
+			if originalOriginIndex.IsValidOriginIndex(fk.OriginColumnIDs) {
+				found = true
+				break
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	if unupgradedFKsPresent {
+		return errors.AssertionFailedf("missing fk back reference %q to %q "+
+			"from %q (un-upgraded foreign key references present)",
+			fk.Name, desc.Name, referencedTable.GetName())
 	}
 	return errors.AssertionFailedf("missing fk back reference %q to %q from %q",
 		fk.Name, desc.Name, referencedTable.GetName())
@@ -210,6 +353,60 @@ func (desc *wrapper) validateInboundFK(
 	})
 	if found {
 		return nil
+	}
+	// In 20.2 we introduced a bug where we fail to upgrade the FK references
+	// on the referenced descriptors from their pre-19.2 format when reading
+	// them during validation (#57032). So we account for the possibility of
+	// un-upgraded foreign key references on the other table. This logic
+	// somewhat parallels the logic in maybeUpgradeForeignKeyRepOnIndex.
+	unupgradedFKsPresent := false
+	if err := catalog.ForEachIndex(originTable, catalog.IndexOpts{}, func(originIdx catalog.Index) error {
+		if found {
+			// TODO (lucy): If we ever revisit the tabledesc.immutable methods, add
+			// a way to break out of the index loop.
+			return nil
+		}
+		fk := originIdx.IndexDesc().ForeignKey
+		if fk.IsSet() {
+			unupgradedFKsPresent = true
+		} else {
+			return nil
+		}
+		// Determine whether the index on the other table is a index that could
+		// support this FK constraint on the referencing side. Such an index would
+		// have been required in earlier versions.
+		if !originIdx.IsValidOriginIndex(backref.OriginColumnIDs) {
+			return nil
+		}
+		if fk.Table != desc.ID {
+			return nil
+		}
+		// Look up the index that the un-upgraded reference refers to and
+		// see if that index could support the foreign key reference. (Note
+		// that it shouldn't be possible for this index to not exist. See
+		// planner.MaybeUpgradeDependentOldForeignKeyVersionTables, which is
+		// called from the drop index implementation.)
+		originalReferencedIndex, err := desc.FindIndexWithID(fk.Index)
+		if err != nil {
+			return errors.AssertionFailedf(
+				"missing index %d on %q from pre-19.2 foreign key forward reference %q on %q",
+				fk.Index, desc.Name, backref.Name, originTable.GetName(),
+			)
+		}
+		if originalReferencedIndex.IsValidReferencedUniqueConstraint(backref.ReferencedColumnIDs) {
+			found = true
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	if unupgradedFKsPresent {
+		return errors.AssertionFailedf("missing fk forward reference %q to %q from %q "+
+			"(un-upgraded foreign key references present)",
+			backref.Name, desc.Name, originTable.GetName())
 	}
 	return errors.AssertionFailedf("missing fk forward reference %q to %q from %q",
 		backref.Name, desc.Name, originTable.GetName())
@@ -447,12 +644,14 @@ func (desc *wrapper) ValidateSelf(vea catalog.ValidationErrorAccumulator) {
 	// Validate that there are no column with both a foreign key ON UPDATE and an
 	// ON UPDATE expression. This check is made to ensure that we know which ON
 	// UPDATE action to perform when a FK UPDATE happens.
-	ValidateOnUpdate(desc, vea.Report)
+	if err := ValidateOnUpdate(desc); err != nil {
+		vea.Report(err)
+	}
 }
 
 // ValidateOnUpdate returns an error if there is a column with both a foreign
 // key constraint and an ON UPDATE expression, nil otherwise.
-func ValidateOnUpdate(desc catalog.TableDescriptor, errReportFn func(err error)) {
+func ValidateOnUpdate(desc catalog.TableDescriptor) error {
 	var onUpdateCols catalog.TableColSet
 	for _, col := range desc.AllColumns() {
 		if col.HasOnUpdate() {
@@ -460,10 +659,11 @@ func ValidateOnUpdate(desc catalog.TableDescriptor, errReportFn func(err error))
 		}
 	}
 
-	_ = desc.ForeachOutboundFK(func(fk *descpb.ForeignKeyConstraint) error {
+	var foundErrors []error
+	for _, fk := range desc.GetOutboundFKs() {
 		if fk.OnUpdate == descpb.ForeignKeyReference_NO_ACTION ||
 			fk.OnUpdate == descpb.ForeignKeyReference_RESTRICT {
-			return nil
+			continue
 		}
 		for _, fkCol := range fk.OriginColumnIDs {
 			if onUpdateCols.Contains(fkCol) {
@@ -471,15 +671,21 @@ func ValidateOnUpdate(desc catalog.TableDescriptor, errReportFn func(err error))
 				if err != nil {
 					return err
 				}
-				errReportFn(pgerror.Newf(pgcode.InvalidTableDefinition,
+				foundErrors = append(foundErrors, pgerror.Newf(pgcode.InvalidTableDefinition,
 					"cannot specify both ON UPDATE expression and a foreign key"+
 						" ON UPDATE action for column %q",
 					col.ColName(),
 				))
 			}
 		}
-		return nil
-	})
+	}
+
+	var combinedError error
+	for i := 0; i < len(foundErrors); i++ {
+		combinedError = errors.CombineErrors(combinedError, foundErrors[i])
+	}
+
+	return combinedError
 }
 
 func (desc *wrapper) validateColumns(
@@ -767,14 +973,6 @@ func (desc *wrapper) validateTableIndexes(columnNames map[string]descpb.ColumnID
 			return errors.Newf("invalid index ID %d", idx.GetID())
 		}
 
-		if idx.IndexDesc().ForeignKey.IsSet() || len(idx.IndexDesc().ReferencedBy) > 0 {
-			return errors.AssertionFailedf("index %q contains deprecated foreign key representation", idx.GetName())
-		}
-
-		if len(idx.IndexDesc().Interleave.Ancestors) > 0 || len(idx.IndexDesc().InterleavedBy) > 0 {
-			return errors.Newf("index is interleaved")
-		}
-
 		if _, indexNameExists := indexNames[idx.GetName()]; indexNameExists {
 			for i := range desc.Indexes {
 				if desc.Indexes[i].Name == idx.GetName() {
@@ -972,6 +1170,16 @@ func (desc *wrapper) validatePartitioningDescriptor(
 	}
 	if part.NumColumns() == 0 {
 		return nil
+	}
+
+	// TODO(dan): The sqlccl.GenerateSubzoneSpans logic is easier if we disallow
+	// setting zone configs on indexes that are interleaved into another index.
+	// InterleavedBy is fine, so using the root of the interleave hierarchy will
+	// work. It is expected that this is sufficient for real-world use cases.
+	// Revisit this restriction if that expectation is wrong.
+	if idx.NumInterleaveAncestors() > 0 {
+		return errors.Errorf("cannot set a zone config for interleaved index %s; "+
+			"set it on the root of the interleaved hierarchy instead", idx.GetName())
 	}
 
 	// We don't need real prefixes in the DecodePartitionTuple calls because we're

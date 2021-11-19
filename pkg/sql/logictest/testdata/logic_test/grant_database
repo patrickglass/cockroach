@@ -6,7 +6,6 @@ SHOW GRANTS ON DATABASE a
 ----
 database_name  grantee  privilege_type
 a              admin    ALL
-a              public   CONNECT
 a              root     ALL
 
 statement error user root must have exactly ALL privileges on database "a"
@@ -37,7 +36,6 @@ query TTT
 SHOW GRANTS ON DATABASE a
 ----
 a  admin      ALL
-a  public     CONNECT
 a  readwrite  ALL
 a  root       ALL
 a  test-user  ALL
@@ -68,7 +66,6 @@ query TTT
 SHOW GRANTS ON DATABASE a
 ----
 a  admin      ALL
-a  public     CONNECT
 a  readwrite  CONNECT
 a  readwrite  CREATE
 a  readwrite  DELETE
@@ -110,7 +107,6 @@ query TTT
 SHOW GRANTS ON DATABASE a
 ----
 a  admin      ALL
-a  public     CONNECT
 a  readwrite  CONNECT
 a  readwrite  CREATE
 a  readwrite  DELETE
@@ -146,9 +142,8 @@ REVOKE ALL ON DATABASE a FROM readwrite,"test-user"
 query TTT
 SHOW GRANTS ON DATABASE a
 ----
-a  admin   ALL
-a  public  CONNECT
-a  root    ALL
+a  admin  ALL
+a  root   ALL
 
 query TTT
 SHOW GRANTS ON DATABASE a FOR readwrite, "test-user"
@@ -189,8 +184,3 @@ database_name  schema_name  table_name  grantee   privilege_type
 b              public       t           admin     ALL
 b              public       t           root      ALL
 b              public       t           testuser  ALL
-
-# Calling SHOW GRANTS on an invalid user should error out.
-
-statement error role/user "invaliduser" does not exist
-SHOW GRANTS FOR invaliduser

@@ -46,7 +46,6 @@ go_library(
         "//pkg/sql/types",
         "//pkg/util",
         "//pkg/util/arith",
-        "//pkg/util/buildutil",
         "//pkg/util/encoding",
         "//pkg/util/errorutil",
         "//pkg/util/json",

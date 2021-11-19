@@ -1,5 +1,5 @@
 {
-  "version": "8.0.25",
+  "pgVersion": "8.0.25",
   "diffSummary": {
     "TotalTables": 48,
     "TotalColumns": 476,
@@ -7,7 +7,7 @@
     "MissingColumns": 80,
     "DatatypeMismatches": 0
   },
-  "diffs": {
+  "pgMetadata": {
     "administrable_role_authorizations": {
       "grantee_host": null,
       "host": null,
@@ -125,7 +125,5 @@
       "security_type": null
     }
   },
-  "unimplementedTypes": {
-    "0": "varchar"
-  }
+  "unimplementedTypes": null
 }

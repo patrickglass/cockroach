@@ -106,7 +106,7 @@ func TestDistSQLRunningInAbortedTxn(t *testing.T) {
 
 	// Make a db with a short heartbeat interval, so that the aborted txn finds
 	// out quickly.
-	ambient := log.AmbientContext{Tracer: s.TracerI().(*tracing.Tracer)}
+	ambient := log.AmbientContext{Tracer: tracing.NewTracer()}
 	tsf := kvcoord.NewTxnCoordSenderFactory(
 		kvcoord.TxnCoordSenderFactoryConfig{
 			AmbientCtx: ambient,
@@ -122,9 +122,9 @@ func TestDistSQLRunningInAbortedTxn(t *testing.T) {
 
 	iter := 0
 	// We'll trace to make sure the test isn't fooling itself.
-	tr := s.TracerI().(*tracing.Tracer)
-	runningCtx, getRecAndFinish := tracing.ContextWithRecordingSpan(ctx, tr, "test")
-	defer getRecAndFinish()
+	tr := s.Tracer().(*tracing.Tracer)
+	runningCtx, getRec, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test")
+	defer cancel()
 	err = shortDB.Txn(runningCtx, func(ctx context.Context, txn *kv.Txn) error {
 		iter++
 		if iter == 1 {
@@ -148,7 +148,7 @@ func TestDistSQLRunningInAbortedTxn(t *testing.T) {
 		}
 
 		// Create and run a DistSQL plan.
-		rw := NewCallbackResultWriter(func(ctx context.Context, row tree.Datums) error {
+		rw := newCallbackResultWriter(func(ctx context.Context, row tree.Datums) error {
 			return nil
 		})
 		recv := MakeDistSQLReceiver(
@@ -189,7 +189,7 @@ func TestDistSQLRunningInAbortedTxn(t *testing.T) {
 	if iter != 2 {
 		t.Fatalf("expected two iterations, but txn took %d to succeed", iter)
 	}
-	if tracing.FindMsgInRecording(getRecAndFinish(), clientRejectedMsg) == -1 {
+	if tracing.FindMsgInRecording(getRec(), clientRejectedMsg) == -1 {
 		t.Fatalf("didn't find expected message in trace: %s", clientRejectedMsg)
 	}
 }
@@ -462,7 +462,7 @@ func TestCancelFlowsCoordinator(t *testing.T) {
 
 	var c cancelFlowsCoordinator
 
-	globalRng, _ := randutil.NewTestRand()
+	globalRng, _ := randutil.NewPseudoRand()
 	numNodes := globalRng.Intn(16) + 2
 	gatewayNodeID := roachpb.NodeID(1)
 
@@ -511,7 +511,7 @@ func TestCancelFlowsCoordinator(t *testing.T) {
 	for i := 0; i < numQueryRunners; i++ {
 		go func() {
 			defer wg.Done()
-			rng, _ := randutil.NewTestRand()
+			rng, _ := randutil.NewPseudoRand()
 			for i := 0; i < numRunsPerRunner; i++ {
 				c.addFlowsToCancel(makeFlowsToCancel(rng))
 				time.Sleep(time.Duration(rng.Int63n(int64(maxSleepTime))))
@@ -525,7 +525,7 @@ func TestCancelFlowsCoordinator(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		rng, _ := randutil.NewTestRand()
+		rng, _ := randutil.NewPseudoRand()
 		done := time.After(2 * time.Second)
 		for {
 			select {

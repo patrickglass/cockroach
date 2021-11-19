@@ -44,8 +44,5 @@ func SplitHostPort(v string, defaultPort string) (addr string, port string, err 
 			}
 		}
 	}
-	if err == nil && port == "" {
-		port = defaultPort
-	}
 	return addr, port, err
 }

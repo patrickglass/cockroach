@@ -88,11 +88,12 @@ func cdcClusterSettings(t test.Test, db *sqlutils.SQLRunner) {
 	// kv.rangefeed.enabled is required for changefeeds to run
 	db.Exec(t, "SET CLUSTER SETTING kv.rangefeed.enabled = true")
 	randomlyRun(t, db, "SET CLUSTER SETTING kv.rangefeed.catchup_scan_iterator_optimization.enabled = true")
+	randomlyRun(t, db, "SET CLUSTER SETTING kv.rangefeed.separated_intent_scan.enabled = true")
 }
 
 const randomSettingPercent = 0.50
 
-var rng, _ = randutil.NewTestRand()
+var rng, _ = randutil.NewTestPseudoRand()
 
 func randomlyRun(t test.Test, db *sqlutils.SQLRunner, query string) {
 	if rng.Float64() < randomSettingPercent {
@@ -1110,7 +1111,7 @@ fi
 `, confluentDownloadURL, confluentSHA256, confluentInstallBase, confluentCLIVersion, confluentCLIDownloadURLBase)
 
 const (
-	// kafkaJAASConfig is a JAAS configuration file that creates a
+	// kafkaJAASConfig is a JAAS configuration file that creats a
 	// user called "plain" with password "plain-secret" that can
 	// authenticate via SASL/PLAIN.
 	//

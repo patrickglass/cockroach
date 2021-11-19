@@ -111,7 +111,9 @@ func (i intItem) Less(o btree.Item) bool {
 }
 
 // TestEnumPlaceholderWithAsOfSystemTime is a regression test for an edge case
-// with bind where we would not properly deal with leases involving types.
+// with bind where we would not properly deal with leases involving types. At
+// the time of writing this test, we still don't deal with such leases properly
+// but we did fix any really dangerous hazards.
 func TestEnumPlaceholderWithAsOfSystemTime(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
@@ -130,13 +132,11 @@ func TestEnumPlaceholderWithAsOfSystemTime(t *testing.T) {
 	// Before the commit which introduced this test, the below statement would
 	// crash the server.
 	q := fmt.Sprintf("SELECT k FROM tab AS OF SYSTEM TIME %s WHERE v = $1", afterInsert)
-	require.Equal(t, [][]string{{"1"}}, db.QueryStr(t, q, "a"))
+	db.Exec(t, q, "a")
 	db.Exec(t, "ALTER TYPE typ RENAME VALUE 'a' TO 'd'")
 	db.Exec(t, "ALTER TYPE typ RENAME VALUE 'b' TO 'a'")
-	// The AOST does not apply to the transaction that binds 'a' to the
-	// placeholder.
-	require.Equal(t, [][]string{}, db.QueryStr(t, q, "a"))
-	require.Equal(t, [][]string{{"1"}}, db.QueryStr(t, q, "d"))
+	got := db.QueryStr(t, q, "a")
+	require.Equal(t, [][]string{{"1"}}, got)
 }
 
 // TestEnumDropValueCheckConstraint tests that check constraints containing
@@ -151,6 +151,7 @@ func TestEnumDropValueCheckConstraint(t *testing.T) {
 
 	db := sqlutils.MakeSQLRunner(tc.ServerConn(0))
 	db.Exec(t, "CREATE TYPE typ AS ENUM ('a', 'b', 'c')")
+	db.Exec(t, "SET enable_drop_enum_value = true")
 
 	// Check that an enum value cannot be dropped if it is referenced in a table's
 	// check constraint.

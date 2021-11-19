@@ -202,7 +202,7 @@ func TestInboxShutdown(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	var (
-		rng, _ = randutil.NewTestRand()
+		rng, _ = randutil.NewPseudoRand()
 		// infiniteBatches will influence whether or not we're likely to test a
 		// graceful shutdown (since other shutdown mechanisms might happen before
 		// we reach the end of the data stream). If infiniteBatches is true,

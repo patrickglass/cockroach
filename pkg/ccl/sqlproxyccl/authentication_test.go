@@ -19,7 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var nilThrottleHook = func(state throttler.AttemptStatus) error {
+var nilThrottleHook = func(state throttler.AttemptStatus) *pgproto3.ErrorResponse {
 	return nil
 }
 
@@ -105,12 +105,7 @@ func TestAuthenticateThrottled(t *testing.T) {
 
 		msg, err = fe.Receive()
 		require.NoError(t, err)
-		require.Equal(t, msg, &pgproto3.ErrorResponse{
-			Severity: "FATAL",
-			Code:     "08004",
-			Message:  "codeProxyRefusedConnection: connection attempt throttled",
-			Hint:     throttledErrorHint,
-		})
+		require.Equal(t, msg, &pgproto3.ErrorResponse{Message: "throttled"})
 
 		// Try reading from the connection. This check ensures authorize
 		// swallowed the OK/Error response from the sql server.
@@ -144,9 +139,9 @@ func TestAuthenticateThrottled(t *testing.T) {
 			go server(t, sqlServer, &pgproto3.AuthenticationOk{})
 			go client(t, sqlClient)
 
-			err := authenticate(proxyToClient, proxyToServer, func(status throttler.AttemptStatus) error {
+			err := authenticate(proxyToClient, proxyToServer, func(status throttler.AttemptStatus) *pgproto3.ErrorResponse {
 				require.Equal(t, throttler.AttemptOK, status)
-				return throttledError
+				return &pgproto3.ErrorResponse{Message: "throttled"}
 			})
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "connection attempt throttled")

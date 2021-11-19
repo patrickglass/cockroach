@@ -33,8 +33,7 @@ import {
   TimeWindow,
   TimeScale,
   findClosestTimeScale,
-  defaultTimeScaleOptions,
-} from "@cockroachlabs/cluster-ui";
+} from "src/redux/timewindow";
 import { History } from "history";
 import { refreshSettings } from "src/redux/apiReducers";
 
@@ -261,10 +260,7 @@ const timeInfoSelector = createSelector(
     const { currentWindow } = tw;
     const start = currentWindow.start.valueOf();
     const end = currentWindow.end.valueOf();
-    const syncedScale = findClosestTimeScale(
-      defaultTimeScaleOptions,
-      MilliToSeconds(end - start),
-    );
+    const syncedScale = findClosestTimeScale(MilliToSeconds(end - start));
 
     return {
       start: Long.fromNumber(MilliToNano(start)),

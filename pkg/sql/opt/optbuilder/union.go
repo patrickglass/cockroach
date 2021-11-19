@@ -81,8 +81,8 @@ func (b *Builder) buildSetOp(
 	rightCols := colsToColList(rightScope.cols)
 	newCols := colsToColList(outScope.cols)
 
-	left := leftScope.expr
-	right := rightScope.expr
+	left := leftScope.expr.(memo.RelExpr)
+	right := rightScope.expr.(memo.RelExpr)
 	private := memo.SetPrivate{LeftCols: leftCols, RightCols: rightCols, OutCols: newCols}
 
 	if all {
@@ -200,7 +200,7 @@ func determineUnionType(left, right *types.T, clauseTag string) *types.T {
 // addCasts adds a projection to a scope, adding casts as necessary so that the
 // resulting columns have the given types.
 func (b *Builder) addCasts(dst *scope, outTypes []*types.T) *scope {
-	expr := dst.expr
+	expr := dst.expr.(memo.RelExpr)
 	dstCols := dst.cols
 
 	dst = dst.push()

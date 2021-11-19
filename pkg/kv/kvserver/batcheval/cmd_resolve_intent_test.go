@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/abortspan"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/spanset"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -100,6 +101,9 @@ func TestDeclareKeysResolveIntent(t *testing.T) {
 				as := abortspan.New(desc.RangeID)
 
 				var latchSpans, lockSpans spanset.SpanSet
+				batch := engine.NewBatch()
+				batch = spanset.NewBatch(batch, &latchSpans)
+				defer batch.Close()
 
 				var h roachpb.Header
 				h.RangeID = desc.RangeID
@@ -110,16 +114,13 @@ func TestDeclareKeysResolveIntent(t *testing.T) {
 				if !ranged {
 					cArgs.Args = &ri
 					declareKeysResolveIntent(&desc, h, &ri, &latchSpans, &lockSpans)
-					batch := spanset.NewBatch(engine.NewBatch(), &latchSpans)
-					defer batch.Close()
 					if _, err := ResolveIntent(ctx, batch, cArgs, &roachpb.ResolveIntentResponse{}); err != nil {
 						t.Fatal(err)
 					}
 				} else {
 					cArgs.Args = &rir
 					declareKeysResolveIntentRange(&desc, h, &rir, &latchSpans, &lockSpans)
-					batch := spanset.NewBatch(engine.NewBatch(), &latchSpans)
-					defer batch.Close()
+					addLockTableSpansForRangedIntentResolution(rir, &latchSpans)
 					if _, err := ResolveIntentRange(ctx, batch, cArgs, &roachpb.ResolveIntentRangeResponse{}); err != nil {
 						t.Fatal(err)
 					}
@@ -188,11 +189,13 @@ func TestResolveIntentAfterPartialRollback(t *testing.T) {
 			Timestamp: ts,
 		}
 
+		var spans spanset.SpanSet
+		rbatch := db.NewBatch()
 		// The spans will be used for validating that reads and writes are
 		// consistent with the declared spans. We initialize spans below, before
 		// performing reads and writes.
-		var spans spanset.SpanSet
-		var rbatch storage.Batch
+		rbatch = spanset.NewBatch(rbatch, &spans)
+		defer rbatch.Close()
 
 		if !ranged {
 			// Resolve a point intent.
@@ -204,8 +207,6 @@ func TestResolveIntentAfterPartialRollback(t *testing.T) {
 			ri.Key = k
 
 			declareKeysResolveIntent(&desc, h, &ri, &spans, nil)
-			rbatch = spanset.NewBatch(db.NewBatch(), &spans)
-			defer rbatch.Close()
 
 			if _, err := ResolveIntent(ctx, rbatch,
 				CommandArgs{
@@ -228,8 +229,7 @@ func TestResolveIntentAfterPartialRollback(t *testing.T) {
 			rir.EndKey = endKey
 
 			declareKeysResolveIntentRange(&desc, h, &rir, &spans, nil)
-			rbatch = spanset.NewBatch(db.NewBatch(), &spans)
-			defer rbatch.Close()
+			addLockTableSpansForRangedIntentResolution(rir, &spans)
 
 			h.MaxSpanRequestKeys = 10
 			if _, err := ResolveIntentRange(ctx, rbatch,
@@ -280,4 +280,14 @@ func makeClusterSettingsUsingEngineIntentsSetting(engine storage.Engine) *cluste
 		version = clusterversion.ByKey(clusterversion.SeparatedIntentsMigration - 1)
 	}
 	return cluster.MakeTestingClusterSettingsWithVersions(version, version, true)
+}
+
+func addLockTableSpansForRangedIntentResolution(
+	rir roachpb.ResolveIntentRangeRequest, spans *spanset.SpanSet,
+) {
+	// This is similar to the span logic in Replica.newBatchedEngine.
+	start, _ := keys.LockTableSingleKey(rir.Key, nil)
+	end, _ := keys.LockTableSingleKey(rir.EndKey, nil)
+	spans.AddNonMVCC(spanset.SpanReadWrite, roachpb.Span{
+		Key: start, EndKey: end})
 }

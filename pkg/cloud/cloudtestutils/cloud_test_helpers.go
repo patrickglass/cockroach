@@ -154,7 +154,7 @@ func CheckExportStore(
 		t.Fatalf("conf does not roundtrip: started with %+v, got back %+v", conf, readConf)
 	}
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	t.Run("simple round trip", func(t *testing.T) {
 		sampleName := "somebytes"
@@ -509,7 +509,7 @@ func uploadData(
 func CheckAntagonisticRead(
 	t *testing.T, conf roachpb.ExternalStorage, testSettings *cluster.Settings,
 ) {
-	rnd, _ := randutil.NewTestRand()
+	rnd, _ := randutil.NewPseudoRand()
 
 	const basename = "test-antagonistic-read"
 	data, cleanup := uploadData(t, testSettings, rnd, conf, basename)

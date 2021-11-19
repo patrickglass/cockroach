@@ -303,9 +303,7 @@ func (l *Instance) Start(ctx context.Context) {
 // If the current one has expired then a new one is created.
 func (l *Instance) Session(ctx context.Context) (sqlliveness.Session, error) {
 	if l.testKnobs.SessionOverride != nil {
-		if s, err := l.testKnobs.SessionOverride(ctx); s != nil || err != nil {
-			return s, err
-		}
+		return l.testKnobs.SessionOverride(ctx)
 	}
 	l.mu.Lock()
 	if !l.mu.started {

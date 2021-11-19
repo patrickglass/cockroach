@@ -60,7 +60,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
@@ -152,13 +151,17 @@ func (d *datadrivenTestState) cleanup(ctx context.Context) {
 func (d *datadrivenTestState) addServer(
 	t *testing.T,
 	name, iodir, tempCleanupFrequency string,
-	ioConf base.ExternalIODirConfig,
+	allowImplicitAccess bool,
 	localities string,
 ) error {
 	var tc serverutils.TestClusterInterface
 	var cleanup func()
 	params := base.TestClusterArgs{}
-	params.ServerArgs.ExternalIODirConfig = ioConf
+	if allowImplicitAccess {
+		params.ServerArgs.Knobs.BackupRestore = &sql.BackupRestoreTestingKnobs{
+			AllowImplicitAccess: true,
+		}
+	}
 	if tempCleanupFrequency != "" {
 		duration, err := time.ParseDuration(tempCleanupFrequency)
 		if err != nil {
@@ -256,11 +259,6 @@ func TestBackupRestoreDataDriven(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	skip.UnderRace(t, "takes >1 min under race")
-	skip.UnderDeadlock(t, "assertion failure under deadlock")
-
-	// This test uses this mock HTTP server to pass the backup files between tenants.
-	httpAddr, httpServerCleanup := makeInsecureHTTPServer(t)
-	defer httpServerCleanup()
 
 	ctx := context.Background()
 	datadriven.Walk(t, "testdata/backup-restore/", func(t *testing.T, path string) {
@@ -284,7 +282,7 @@ func TestBackupRestoreDataDriven(t *testing.T) {
 				return ""
 			case "new-server":
 				var name, shareDirWith, iodir, tempCleanupFrequency, localities string
-				var io base.ExternalIODirConfig
+				var allowImplicitAccess bool
 				d.ScanArgs(t, "name", &name)
 				if d.HasArg("share-io-dir") {
 					d.ScanArgs(t, "share-io-dir", &shareDirWith)
@@ -293,10 +291,7 @@ func TestBackupRestoreDataDriven(t *testing.T) {
 					iodir = ds.getIODir(t, shareDirWith)
 				}
 				if d.HasArg("allow-implicit-access") {
-					io.EnableNonAdminImplicitAndArbitraryOutbound = true
-				}
-				if d.HasArg("disable-http") {
-					io.DisableHTTP = true
+					allowImplicitAccess = true
 				}
 				if d.HasArg("temp-cleanup-freq") {
 					d.ScanArgs(t, "temp-cleanup-freq", &tempCleanupFrequency)
@@ -305,7 +300,7 @@ func TestBackupRestoreDataDriven(t *testing.T) {
 					d.ScanArgs(t, "localities", &localities)
 				}
 				lastCreatedServer = name
-				err := ds.addServer(t, name, iodir, tempCleanupFrequency, io, localities)
+				err := ds.addServer(t, name, iodir, tempCleanupFrequency, allowImplicitAccess, localities)
 				if err != nil {
 					return err.Error()
 				}
@@ -320,7 +315,6 @@ func TestBackupRestoreDataDriven(t *testing.T) {
 					d.ScanArgs(t, "user", &user)
 				}
 				ds.noticeBuffer = nil
-				d.Input = strings.ReplaceAll(d.Input, "http://COCKROACH_TEST_HTTP_SERVER/", httpAddr)
 				_, err := ds.getSQLDB(t, server, user).Exec(d.Input)
 				ret := ds.noticeBuffer
 				if err != nil {
@@ -488,10 +482,6 @@ func TestBackupRestorePartitioned(t *testing.T) {
 		subDir := filepath.Join(locationToDir(location), "data")
 		files, err := ioutil.ReadDir(subDir)
 		if err != nil {
-			if oserror.IsNotExist(err) {
-				return false
-			}
-
 			t.Fatal(err)
 		}
 		found := false
@@ -548,27 +538,22 @@ func TestBackupRestorePartitioned(t *testing.T) {
 		sqlDB.Exec(t, restoreQuery, locationURIArgs...)
 	}
 
-	// Ensure that each node has at least one leaseholder. These are wrapped with
-	// SucceedsSoon() because EXPERIMENTAL_RELOCATE can fail if there are other
-	// replication changes happening.
-	ensureLeaseholder := func(t *testing.T, sqlDB *sqlutils.SQLRunner) {
-		for _, stmt := range []string{
-			`ALTER TABLE data.bank SPLIT AT VALUES (0)`,
-			`ALTER TABLE data.bank SPLIT AT VALUES (100)`,
-			`ALTER TABLE data.bank SPLIT AT VALUES (200)`,
-			`ALTER TABLE data.bank EXPERIMENTAL_RELOCATE VALUES (ARRAY[1], 0)`,
-			`ALTER TABLE data.bank EXPERIMENTAL_RELOCATE VALUES (ARRAY[2], 100)`,
-			`ALTER TABLE data.bank EXPERIMENTAL_RELOCATE VALUES (ARRAY[3], 200)`,
-		} {
-			testutils.SucceedsSoon(t, func() error {
-				_, err := sqlDB.DB.ExecContext(ctx, stmt)
-				return err
-			})
-		}
+	// Ensure that each node has at least one leaseholder. (These splits were
+	// made in BackupRestoreTestSetup.) These are wrapped with SucceedsSoon()
+	// because EXPERIMENTAL_RELOCATE can fail if there are other replication
+	// changes happening.
+	for _, stmt := range []string{
+		`ALTER TABLE data.bank EXPERIMENTAL_RELOCATE VALUES (ARRAY[1], 0)`,
+		`ALTER TABLE data.bank EXPERIMENTAL_RELOCATE VALUES (ARRAY[2], 100)`,
+		`ALTER TABLE data.bank EXPERIMENTAL_RELOCATE VALUES (ARRAY[3], 200)`,
+	} {
+		testutils.SucceedsSoon(t, func() error {
+			_, err := sqlDB.DB.ExecContext(ctx, stmt)
+			return err
+		})
 	}
 
 	t.Run("partition-by-unique-key", func(t *testing.T) {
-		ensureLeaseholder(t, sqlDB)
 		testSubDir := t.Name()
 		locations := []string{
 			LocalFoo + "/" + testSubDir + "/1",
@@ -593,7 +578,8 @@ func TestBackupRestorePartitioned(t *testing.T) {
 
 	// Test that we're selecting the most specific locality tier for a location.
 	t.Run("partition-by-different-tiers", func(t *testing.T) {
-		ensureLeaseholder(t, sqlDB)
+		skip.WithIssue(t, 64974, "flaky test")
+
 		testSubDir := t.Name()
 		locations := []string{
 			LocalFoo + "/" + testSubDir + "/1",
@@ -617,7 +603,6 @@ func TestBackupRestorePartitioned(t *testing.T) {
 	})
 
 	t.Run("partition-by-several-keys", func(t *testing.T) {
-		ensureLeaseholder(t, sqlDB)
 		testSubDir := t.Name()
 		locations := []string{
 			LocalFoo + "/" + testSubDir + "/1",
@@ -915,9 +900,6 @@ func TestBackupAndRestoreJobDescription(t *testing.T) {
 	sqlDB.Exec(t, "DROP DATABASE data CASCADE")
 	sqlDB.Exec(t, "RESTORE DATABASE data FROM $4 IN ($1, $2, $3)", append(collections, "subdir")...)
 
-	sqlDB.Exec(t, "DROP DATABASE data CASCADE")
-	sqlDB.Exec(t, "RESTORE DATABASE data FROM LATEST IN ($1, $2, $3)", collections...)
-
 	// The flavors of BACKUP and RESTORE which automatically resolve the right
 	// directory to read/write data to, have URIs with the resolved path written
 	// to the job description.
@@ -944,10 +926,6 @@ func TestBackupAndRestoreJobDescription(t *testing.T) {
 			{fmt.Sprintf("RESTORE DATABASE data FROM ('%s', '%s', '%s')",
 				resolvedCollectionURIs[0], resolvedCollectionURIs[1],
 				resolvedCollectionURIs[2])},
-			{fmt.Sprintf("RESTORE DATABASE data FROM ('%s', '%s', '%s')",
-				resolvedSubdirURIs[0], resolvedSubdirURIs[1],
-				resolvedSubdirURIs[2])},
-			// and again from LATEST IN...
 			{fmt.Sprintf("RESTORE DATABASE data FROM ('%s', '%s', '%s')",
 				resolvedSubdirURIs[0], resolvedSubdirURIs[1],
 				resolvedSubdirURIs[2])},
@@ -2246,17 +2224,8 @@ INSERT INTO d.tb VALUES ('hello'), ('hello');
 	defer cleanupRestore()
 	// We should get an error when restoring the table.
 	sqlDBRestore.ExpectErr(t, "sst: no such file", `RESTORE FROM $1`, LocalFoo)
-
-	// Make sure the temp system db is not present.
 	row := sqlDBRestore.QueryStr(t, fmt.Sprintf(`SELECT * FROM [SHOW DATABASES] WHERE database_name = '%s'`, restoreTempSystemDB))
 	require.Equal(t, 0, len(row))
-
-	// Make sure defaultdb and postgres are recreated.
-	sqlDBRestore.CheckQueryResults(t,
-		`SELECT * FROM system.namespace WHERE name = 'defaultdb' OR name ='postgres'`, [][]string{
-			{"0", "0", "defaultdb", "70"},
-			{"0", "0", "postgres", "71"},
-		})
 }
 
 func TestBackupRestoreUserDefinedSchemas(t *testing.T) {
@@ -2939,58 +2908,6 @@ INSERT INTO d.t2 VALUES (ARRAY['hello']);
 		}
 	})
 
-	// Test cases where we attempt to remap types in the backup to types that
-	// already exist in the cluster with user defined schema.
-	t.Run("backup-remap-uds", func(t *testing.T) {
-		_, _, sqlDB, _, cleanupFn := BackupRestoreTestSetup(t, singleNode, 0, InitManualReplication)
-		defer cleanupFn()
-		sqlDB.Exec(t, `
-CREATE DATABASE d;
-CREATE SCHEMA d.s;
-CREATE TYPE d.s.greeting AS ENUM ('hello', 'howdy', 'hi');
-CREATE TABLE d.s.t (x d.s.greeting);
-INSERT INTO d.s.t VALUES ('hello'), ('howdy');
-CREATE TYPE d.s.farewell AS ENUM ('bye', 'cya');
-CREATE TABLE d.s.t2 (x d.s.greeting[]);
-INSERT INTO d.s.t2 VALUES (ARRAY['hello']);
-`)
-		{
-			// Backup and restore t.
-			sqlDB.Exec(t, `BACKUP TABLE d.s.t TO $1`, LocalFoo+"/1")
-			sqlDB.Exec(t, `DROP TABLE d.s.t`)
-			sqlDB.Exec(t, `RESTORE TABLE d.s.t FROM $1`, LocalFoo+"/1")
-
-			// Check that the table data is restored correctly and the types aren't touched.
-			sqlDB.CheckQueryResults(t, `SELECT 'hello'::d.s.greeting, ARRAY['hello']::d.s.greeting[]`, [][]string{{"hello", "{hello}"}})
-			sqlDB.CheckQueryResults(t, `SELECT * FROM d.s.t ORDER BY x`, [][]string{{"hello"}, {"howdy"}})
-
-			// d.t should be added as a back reference to greeting.
-			sqlDB.ExpectErr(t, `pq: cannot drop type "greeting" because other objects \(.*\) still depend on it`, `DROP TYPE d.s.greeting`)
-		}
-
-		{
-			// Test that backing up and restoring a table with just the array type
-			// will remap types appropriately.
-			sqlDB.Exec(t, `BACKUP TABLE d.s.t2 TO $1`, LocalFoo+"/2")
-			sqlDB.Exec(t, `DROP TABLE d.s.t2`)
-			sqlDB.Exec(t, `RESTORE TABLE d.s.t2 FROM $1`, LocalFoo+"/2")
-			sqlDB.CheckQueryResults(t, `SELECT 'hello'::d.s.greeting, ARRAY['hello']::d.s.greeting[]`, [][]string{{"hello", "{hello}"}})
-			sqlDB.CheckQueryResults(t, `SELECT * FROM d.s.t2 ORDER BY x`, [][]string{{"{hello}"}})
-		}
-
-		{
-			// Create another database with compatible types.
-			sqlDB.Exec(t, `CREATE DATABASE d2`)
-			sqlDB.Exec(t, `CREATE SCHEMA d2.s`)
-			sqlDB.Exec(t, `CREATE TYPE d2.s.greeting AS ENUM ('hello', 'howdy', 'hi')`)
-
-			// Now restore t into this database. It should remap d.greeting to d2.greeting.
-			sqlDB.Exec(t, `RESTORE TABLE d.s.t FROM $1 WITH into_db = 'd2'`, LocalFoo+"/1")
-			// d.t should be added as a back reference to greeting.
-			sqlDB.ExpectErr(t, `pq: cannot drop type "greeting" because other objects \(.*\) still depend on it`, `DROP TYPE d2.s.greeting`)
-		}
-	})
-
 	t.Run("incremental", func(t *testing.T) {
 		_, _, sqlDB, _, cleanupFn := BackupRestoreTestSetup(t, singleNode, 0, InitManualReplication)
 		defer cleanupFn()
@@ -3131,6 +3048,8 @@ func TestBackupRestoreDuringUserDefinedTypeChange(t *testing.T) {
 
 			// Create a database with a type.
 			sqlDB.Exec(t, `
+SET CLUSTER SETTING sql.defaults.drop_enum_value.enabled = true;
+SET enable_drop_enum_value = true;
 CREATE DATABASE d;
 CREATE TYPE d.greeting AS ENUM ('hello', 'howdy', 'hi');
 `)
@@ -3184,7 +3103,7 @@ CREATE TYPE d.greeting AS ENUM ('hello', 'howdy', 'hi');
 						return errors.New("expected error, found none")
 					}
 					if !testutils.IsError(err, tc.expectedError[i]) {
-						return errors.Newf("expected error %q, found %v", tc.expectedError[i], pgerror.FullError(err))
+						return errors.Newf("expected error %v, found %v", tc.expectedError[i], err)
 					}
 					return nil
 				})
@@ -3289,25 +3208,25 @@ func TestBackupRestoreCrossTableReferences(t *testing.T) {
 
 		// FK validation on customers from receipts is preserved.
 		db.ExpectErr(
-			t, "update.*violates foreign key constraint \"receipts_dest_fkey\"",
+			t, "update.*violates foreign key constraint \"fk_dest_ref_customers\"",
 			`UPDATE store.customers SET email = concat(id::string, 'nope')`,
 		)
 
 		// FK validation on customers from orders is preserved.
 		db.ExpectErr(
-			t, "update.*violates foreign key constraint \"orders_customerid_fkey\"",
+			t, "update.*violates foreign key constraint \"fk_customerid_ref_customers\"",
 			`UPDATE store.customers SET id = id * 1000`,
 		)
 
 		// FK validation of customer id is preserved.
 		db.ExpectErr(
-			t, "insert.*violates foreign key constraint \"orders_customerid_fkey\"",
+			t, "insert.*violates foreign key constraint \"fk_customerid_ref_customers\"",
 			`INSERT INTO store.orders VALUES (999, NULL, 999)`,
 		)
 
 		// FK validation of self-FK is preserved.
 		db.ExpectErr(
-			t, "insert.*violates foreign key constraint \"receipts_reissue_fkey\"",
+			t, "insert.*violates foreign key constraint \"fk_reissue_ref_receipts\"",
 			`INSERT INTO store.receipts VALUES (1, 999, NULL, NULL)`,
 		)
 	})
@@ -3322,7 +3241,7 @@ func TestBackupRestoreCrossTableReferences(t *testing.T) {
 
 		// FK validation on customers from orders is preserved.
 		db.ExpectErr(
-			t, "update.*violates foreign key constraint \"orders_customerid_fkey\"",
+			t, "update.*violates foreign key constraint \"fk_customerid_ref_customers\"",
 			`UPDATE store.customers SET id = id*100`,
 		)
 
@@ -3363,7 +3282,7 @@ func TestBackupRestoreCrossTableReferences(t *testing.T) {
 
 		// FK validation of self-FK is preserved.
 		db.ExpectErr(
-			t, "insert.*violates foreign key constraint \"receipts_reissue_fkey\"",
+			t, "insert.*violates foreign key constraint \"fk_reissue_ref_receipts\"",
 			`INSERT INTO store.receipts VALUES (-1, 999, NULL, NULL)`,
 		)
 	})
@@ -3381,19 +3300,19 @@ func TestBackupRestoreCrossTableReferences(t *testing.T) {
 
 		// FK validation of customer email is preserved.
 		db.ExpectErr(
-			t, "nsert.*violates foreign key constraint \"receipts_dest_fkey\"",
+			t, "nsert.*violates foreign key constraint \"fk_dest_ref_customers\"",
 			`INSERT INTO store.receipts VALUES (-1, NULL, '999', 999)`,
 		)
 
 		// FK validation on customers from receipts is preserved.
 		db.ExpectErr(
-			t, "delete.*violates foreign key constraint \"receipts_dest_fkey\"",
+			t, "delete.*violates foreign key constraint \"fk_dest_ref_customers\"",
 			`DELETE FROM store.customers`,
 		)
 
 		// FK validation of self-FK is preserved.
 		db.ExpectErr(
-			t, "insert.*violates foreign key constraint \"receipts_reissue_fkey\"",
+			t, "insert.*violates foreign key constraint \"fk_reissue_ref_receipts\"",
 			`INSERT INTO store.receipts VALUES (-1, 999, NULL, NULL)`,
 		)
 	})
@@ -3450,7 +3369,7 @@ func TestBackupRestoreCrossTableReferences(t *testing.T) {
 		db.Exec(t, `RESTORE store.customers, storestats.ordercounts, store.orders FROM $1`, LocalFoo)
 
 		// we want to observe just the view-related errors, not fk errors below.
-		db.Exec(t, `ALTER TABLE store.orders DROP CONSTRAINT orders_customerid_fkey`)
+		db.Exec(t, `ALTER TABLE store.orders DROP CONSTRAINT fk_customerid_ref_customers`)
 
 		// customers is aware of the view that depends on it.
 		db.ExpectErr(
@@ -3473,7 +3392,7 @@ func TestBackupRestoreCrossTableReferences(t *testing.T) {
 		db.Exec(t, `CREATE DATABASE otherstore`)
 		db.Exec(t, `RESTORE store.* FROM $1 WITH into_db = 'otherstore'`, LocalFoo)
 		// we want to observe just the view-related errors, not fk errors below.
-		db.Exec(t, `ALTER TABLE otherstore.orders DROP CONSTRAINT orders_customerid_fkey`)
+		db.Exec(t, `ALTER TABLE otherstore.orders DROP CONSTRAINT fk_customerid_ref_customers`)
 		db.Exec(t, `DROP TABLE otherstore.receipts`)
 
 		db.ExpectErr(
@@ -3559,7 +3478,7 @@ func TestBackupRestoreIncremental(t *testing.T) {
 	_, tc, sqlDB, dir, cleanupFn := BackupRestoreTestSetup(t, singleNode, 0, InitManualReplication)
 	defer cleanupFn()
 	args := base.TestServerArgs{ExternalIODir: dir}
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	var backupDirs []string
 	var checksums []uint32
@@ -3651,7 +3570,7 @@ func TestBackupRestorePartitionedIncremental(t *testing.T) {
 	_, _, sqlDB, dir, cleanupFn := BackupRestoreTestSetup(t, MultiNode, 0, InitManualReplication)
 	defer cleanupFn()
 	args := base.TestServerArgs{ExternalIODir: dir}
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	// Each incremental backup is written to two different subdirectories in
 	// defaultDir and dc1Dir, respectively.
@@ -3734,7 +3653,7 @@ func TestBackupRestorePartitionedIncremental(t *testing.T) {
 func startBackgroundWrites(
 	stopper *stop.Stopper, sqlDB *gosql.DB, maxID int, wake chan<- struct{}, allowErrors *int32,
 ) error {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	for {
 		select {
@@ -6082,6 +6001,7 @@ func TestBackupRestoreCorruptedStatsIgnored(t *testing.T) {
 
 	var tableID int
 	sqlDB.QueryRow(t, `SELECT id FROM system.namespace WHERE name = 'bank'`).Scan(&tableID)
+	fmt.Println(tableID)
 	sqlDB.Exec(t, `BACKUP data.bank TO $1`, dest)
 
 	// Overwrite the stats file with some invalid data.
@@ -6223,7 +6143,7 @@ func TestProtectedTimestampsDuringBackup(t *testing.T) {
 		allowRequest = make(chan struct{})
 		runner.Exec(t, "SET CLUSTER SETTING kv.protectedts.poll_interval = '100ms';")
 		runner.Exec(t, "ALTER TABLE foo CONFIGURE ZONE USING gc.ttlseconds = 1;")
-		rRand, _ := randutil.NewTestRand()
+		rRand, _ := randutil.NewPseudoRand()
 		writeGarbage := func(from, to int) {
 			for i := from; i < to; i++ {
 				runner.Exec(t, "UPSERT INTO foo VALUES ($1, $2)", i, randutil.RandBytes(rRand, 1<<10))
@@ -6379,8 +6299,28 @@ func TestProtectedTimestampSpanSelectionDuringBackup(t *testing.T) {
 
 		runner.Exec(t, fmt.Sprintf(`BACKUP DATABASE test INTO '%s'`, baseBackupURI+t.Name()))
 		tableID := getTableID(db, "test", "foo")
-		require.Equal(t, []string{fmt.Sprintf("/Table/%d/{1-2}", tableID),
-			fmt.Sprintf("/Table/%d/{3-4}", tableID)}, actualResolvedSpans)
+		require.Equal(t, []string{fmt.Sprintf("/Table/%d/{1-4}", tableID)}, actualResolvedSpans)
+		runner.Exec(t, "DROP DATABASE test;")
+		actualResolvedSpans = nil
+	})
+
+	t.Run("interleaved-spans", func(t *testing.T) {
+		runner.Exec(t, "CREATE DATABASE test; USE test;")
+		runner.Exec(t, "CREATE TABLE grandparent (a INT PRIMARY KEY, v BYTES, INDEX gpindex (v))")
+		runner.Exec(t, "CREATE TABLE parent (a INT, b INT, v BYTES, "+
+			"PRIMARY KEY(a, b)) INTERLEAVE IN PARENT grandparent(a)")
+		runner.Exec(t, "CREATE TABLE child (a INT, b INT, c INT, v BYTES, "+
+			"PRIMARY KEY(a, b, c), INDEX childindex(c)) INTERLEAVE IN PARENT parent(a, b)")
+
+		runner.Exec(t, fmt.Sprintf(`BACKUP DATABASE test INTO '%s' WITH include_deprecated_interleaves`, baseBackupURI+t.Name()))
+		// /Table/59/{1-2} encompasses the pk of grandparent, and the interleaved
+		// tables parent and child.
+		// /Table/59/2 - /Table/59/3 is for the gpindex
+		// /Table/61/{2-3} is for the childindex
+		grandparentID := getTableID(db, "test", "grandparent")
+		childID := getTableID(db, "test", "child")
+		require.Equal(t, []string{fmt.Sprintf("/Table/%d/{1-3}", grandparentID),
+			fmt.Sprintf("/Table/%d/{2-3}", childID)}, actualResolvedSpans)
 		runner.Exec(t, "DROP DATABASE test;")
 		actualResolvedSpans = nil
 	})
@@ -6497,114 +6437,140 @@ func getMockTableDesc(
 	return tabledesc.NewBuilder(&mockTableDescriptor).BuildImmutableTable()
 }
 
-// Unit tests for the spansForAllTableIndexes and getPublicIndexTableSpans()
-// methods.
-func TestPublicIndexTableSpans(t *testing.T) {
+// Unit tests for the getLogicallyMergedTableSpans() method.
+// TODO(pbardea): Add ADDING and DROPPING indexes to these tests.
+func TestLogicallyMergedTableSpans(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	ctx := context.Background()
 	codec := keys.TODOSQLCodec
-	execCfg := &sql.ExecutorConfig{
-		Codec: codec,
-	}
 	unusedMap := make(map[tableAndIndex]bool)
 	testCases := []struct {
-		name                string
-		tableID             descpb.ID
-		pkIndex             descpb.IndexDescriptor
-		indexes             []descpb.IndexDescriptor
-		addingIndexes       []descpb.IndexDescriptor
-		droppingIndexes     []descpb.IndexDescriptor
-		expectedSpans       []string
-		expectedMergedSpans []string
+		name                       string
+		checkForKVInBoundsOverride func(start, end roachpb.Key, endTime hlc.Timestamp) (bool, error)
+		tableID                    descpb.ID
+		pkIndex                    descpb.IndexDescriptor
+		indexes                    []descpb.IndexDescriptor
+		addingIndexes              []descpb.IndexDescriptor
+		droppingIndexes            []descpb.IndexDescriptor
+		expectedSpans              []string
 	}{
 		{
-			name:                "contiguous-spans",
-			tableID:             55,
-			pkIndex:             getMockIndexDesc(1),
-			indexes:             []descpb.IndexDescriptor{getMockIndexDesc(1), getMockIndexDesc(2)},
-			expectedSpans:       []string{"/Table/55/{1-2}", "/Table/55/{2-3}"},
-			expectedMergedSpans: []string{"/Table/55/{1-3}"},
+			name: "contiguous-spans",
+			checkForKVInBoundsOverride: func(start, end roachpb.Key, endTime hlc.Timestamp) (bool, error) {
+				return false, nil
+			},
+			tableID:       55,
+			pkIndex:       getMockIndexDesc(1),
+			indexes:       []descpb.IndexDescriptor{getMockIndexDesc(1), getMockIndexDesc(2)},
+			expectedSpans: []string{"/Table/55/{1-3}"},
 		},
 		{
-			name:                "dropped-span-between-two-spans",
-			tableID:             56,
-			pkIndex:             getMockIndexDesc(1),
-			indexes:             []descpb.IndexDescriptor{getMockIndexDesc(1), getMockIndexDesc(3)},
-			droppingIndexes:     []descpb.IndexDescriptor{getMockIndexDesc(2)},
-			expectedSpans:       []string{"/Table/56/{1-2}", "/Table/56/{3-4}"},
-			expectedMergedSpans: []string{"/Table/56/{1-2}", "/Table/56/{3-4}"},
+			name: "dropped-span-between-two-spans",
+			checkForKVInBoundsOverride: func(start, end roachpb.Key, endTime hlc.Timestamp) (bool, error) {
+				if start.String() == "/Table/56/2" && end.String() == "/Table/56/3" {
+					return true, nil
+				}
+				return false, nil
+			},
+			tableID:         56,
+			pkIndex:         getMockIndexDesc(1),
+			indexes:         []descpb.IndexDescriptor{getMockIndexDesc(1), getMockIndexDesc(3)},
+			droppingIndexes: []descpb.IndexDescriptor{getMockIndexDesc(2)},
+			expectedSpans:   []string{"/Table/56/{1-2}", "/Table/56/{3-4}"},
 		},
 		{
-			name:                "gced-span-between-two-spans",
-			tableID:             57,
-			pkIndex:             getMockIndexDesc(1),
-			indexes:             []descpb.IndexDescriptor{getMockIndexDesc(1), getMockIndexDesc(3)},
-			expectedSpans:       []string{"/Table/57/{1-2}", "/Table/57/{3-4}"},
-			expectedMergedSpans: []string{"/Table/57/{1-2}", "/Table/57/{3-4}"},
+			name: "gced-span-between-two-spans",
+			checkForKVInBoundsOverride: func(start, end roachpb.Key, endTime hlc.Timestamp) (bool, error) {
+				return false, nil
+			},
+			tableID:       57,
+			pkIndex:       getMockIndexDesc(1),
+			indexes:       []descpb.IndexDescriptor{getMockIndexDesc(1), getMockIndexDesc(3)},
+			expectedSpans: []string{"/Table/57/{1-4}"},
 		},
 		{
-			name:    "alternate-spans-dropped",
+			name: "alternate-spans-dropped",
+			checkForKVInBoundsOverride: func(start, end roachpb.Key, endTime hlc.Timestamp) (bool, error) {
+				if (start.String() == "/Table/58/2" && end.String() == "/Table/58/3") ||
+					(start.String() == "/Table/58/4" && end.String() == "/Table/58/5") {
+					return true, nil
+				}
+				return false, nil
+			},
 			tableID: 58,
 			pkIndex: getMockIndexDesc(1),
 			indexes: []descpb.IndexDescriptor{getMockIndexDesc(1), getMockIndexDesc(3),
 				getMockIndexDesc(5)},
-			droppingIndexes:     []descpb.IndexDescriptor{getMockIndexDesc(2), getMockIndexDesc(4)},
-			expectedSpans:       []string{"/Table/58/{1-2}", "/Table/58/{3-4}", "/Table/58/{5-6}"},
-			expectedMergedSpans: []string{"/Table/58/{1-2}", "/Table/58/{3-4}", "/Table/58/{5-6}"},
+			droppingIndexes: []descpb.IndexDescriptor{getMockIndexDesc(2), getMockIndexDesc(4)},
+			expectedSpans:   []string{"/Table/58/{1-2}", "/Table/58/{3-4}", "/Table/58/{5-6}"},
 		},
 		{
-			name:    "alternate-spans-gced",
+			name: "alternate-spans-gced",
+			checkForKVInBoundsOverride: func(start, end roachpb.Key, endTime hlc.Timestamp) (bool, error) {
+				return false, nil
+			},
 			tableID: 59,
 			pkIndex: getMockIndexDesc(1),
 			indexes: []descpb.IndexDescriptor{getMockIndexDesc(1), getMockIndexDesc(3),
 				getMockIndexDesc(5)},
-			expectedSpans:       []string{"/Table/59/{1-2}", "/Table/59/{3-4}", "/Table/59/{5-6}"},
-			expectedMergedSpans: []string{"/Table/59/{1-2}", "/Table/59/{3-4}", "/Table/59/{5-6}"},
+			expectedSpans: []string{"/Table/59/{1-6}"},
 		},
 		{
-			name:    "one-drop-one-gc",
+			name: "one-drop-one-gc",
+			checkForKVInBoundsOverride: func(start, end roachpb.Key, endTime hlc.Timestamp) (bool, error) {
+				if start.String() == "/Table/60/2" && end.String() == "/Table/60/3" {
+					return true, nil
+				}
+				return false, nil
+			},
 			tableID: 60,
 			pkIndex: getMockIndexDesc(1),
 			indexes: []descpb.IndexDescriptor{getMockIndexDesc(1), getMockIndexDesc(3),
 				getMockIndexDesc(5)},
-			droppingIndexes:     []descpb.IndexDescriptor{getMockIndexDesc(2)},
-			expectedSpans:       []string{"/Table/60/{1-2}", "/Table/60/{3-4}", "/Table/60/{5-6}"},
-			expectedMergedSpans: []string{"/Table/60/{1-2}", "/Table/60/{3-4}", "/Table/60/{5-6}"},
+			droppingIndexes: []descpb.IndexDescriptor{getMockIndexDesc(2)},
+			expectedSpans:   []string{"/Table/60/{1-2}", "/Table/60/{3-6}"},
 		},
 		{
 			// Although there are no keys on index 2, we should not include its
 			// span since it holds an adding index.
-			name:    "empty-adding-index",
+			name: "empty-adding-index",
+			checkForKVInBoundsOverride: func(start, end roachpb.Key, endTime hlc.Timestamp) (bool, error) {
+				return false, nil
+			},
 			tableID: 61,
 			pkIndex: getMockIndexDesc(1),
 			indexes: []descpb.IndexDescriptor{getMockIndexDesc(1), getMockIndexDesc(3),
 				getMockIndexDesc(4)},
-			addingIndexes:       []descpb.IndexDescriptor{getMockIndexDesc(2)},
-			expectedSpans:       []string{"/Table/61/{1-2}", "/Table/61/{3-4}", "/Table/61/{4-5}"},
-			expectedMergedSpans: []string{"/Table/61/{1-2}", "/Table/61/{3-5}"},
+			addingIndexes: []descpb.IndexDescriptor{getMockIndexDesc(2)},
+			expectedSpans: []string{"/Table/61/{1-2}", "/Table/61/{3-5}"},
+		},
+		{
+			// It is safe to include empty dropped indexes.
+			name: "empty-dropping-index",
+			checkForKVInBoundsOverride: func(start, end roachpb.Key, endTime hlc.Timestamp) (bool, error) {
+				return false, nil
+			},
+			tableID: 62,
+			pkIndex: getMockIndexDesc(1),
+			indexes: []descpb.IndexDescriptor{getMockIndexDesc(1), getMockIndexDesc(3),
+				getMockIndexDesc(4)},
+			droppingIndexes: []descpb.IndexDescriptor{getMockIndexDesc(2)},
+			expectedSpans:   []string{"/Table/62/{1-5}"},
 		},
 	}
 
 	for _, test := range testCases {
-		tableDesc := getMockTableDesc(test.tableID, test.pkIndex,
-			test.indexes, test.addingIndexes, test.droppingIndexes)
-		t.Run(fmt.Sprintf("%s:%s", "getPublicIndexTableSpans", test.name), func(t *testing.T) {
-			spans, err := getPublicIndexTableSpans(tableDesc, unusedMap, codec)
-			require.NoError(t, err)
-			var unmergedSpans []string
+		t.Run(test.name, func(t *testing.T) {
+			tableDesc := getMockTableDesc(test.tableID, test.pkIndex,
+				test.indexes, test.addingIndexes, test.droppingIndexes)
+			spans, err := getLogicallyMergedTableSpans(ctx, tableDesc, unusedMap, codec,
+				hlc.Timestamp{}, test.checkForKVInBoundsOverride)
+			var mergedSpans []string
 			for _, span := range spans {
-				unmergedSpans = append(unmergedSpans, span.String())
+				mergedSpans = append(mergedSpans, span.String())
 			}
-			require.Equal(t, test.expectedSpans, unmergedSpans)
-		})
-
-		t.Run(fmt.Sprintf("%s:%s", "spansForAllTableIndexes", test.name), func(t *testing.T) {
-			mergedSpans, err := spansForAllTableIndexes(execCfg, []catalog.TableDescriptor{tableDesc}, nil /* revs */)
 			require.NoError(t, err)
-			var mergedSpanStrings []string
-			for _, mSpan := range mergedSpans {
-				mergedSpanStrings = append(mergedSpanStrings, mSpan.String())
-			}
-			require.Equal(t, test.expectedMergedSpans, mergedSpanStrings)
+			require.Equal(t, test.expectedSpans, mergedSpans)
 		})
 	}
 }
@@ -6728,19 +6694,12 @@ func TestPaginatedBackupTenant(t *testing.T) {
 		return fmt.Sprintf("%v%s", span.String(), spanStr)
 	}
 
-	// Check if export request is from a lease for a descriptor to avoid picking
-	// up on wrong export requests
-	isLeasingExportRequest := func(r *roachpb.ExportRequest) bool {
-		_, tenantID, _ := keys.DecodeTenantPrefix(r.Key)
-		codec := keys.MakeSQLCodec(tenantID)
-		return bytes.HasPrefix(r.Key, codec.DescMetadataPrefix()) &&
-			r.EndKey.Equal(r.Key.PrefixEnd())
-	}
 	params.ServerArgs.Knobs.Store = &kvserver.StoreTestingKnobs{
 		TestingRequestFilter: func(ctx context.Context, request roachpb.BatchRequest) *roachpb.Error {
 			for _, ru := range request.Requests {
-				if exportRequest, ok := ru.GetInner().(*roachpb.ExportRequest); ok &&
-					!isLeasingExportRequest(exportRequest) {
+				switch ru.GetInner().(type) {
+				case *roachpb.ExportRequest:
+					exportRequest := ru.GetInner().(*roachpb.ExportRequest)
 					exportRequestSpans = append(
 						exportRequestSpans,
 						requestSpanStr(roachpb.Span{Key: exportRequest.Key, EndKey: exportRequest.EndKey}, exportRequest.ResumeKeyTS),
@@ -6751,9 +6710,9 @@ func TestPaginatedBackupTenant(t *testing.T) {
 			return nil
 		},
 		TestingResponseFilter: func(ctx context.Context, ba roachpb.BatchRequest, br *roachpb.BatchResponse) *roachpb.Error {
-			for i, ru := range br.Responses {
-				if exportRequest, ok := ba.Requests[i].GetInner().(*roachpb.ExportRequest); ok &&
-					!isLeasingExportRequest(exportRequest) {
+			for _, ru := range br.Responses {
+				switch ru.GetInner().(type) {
+				case *roachpb.ExportResponse:
 					exportResponse := ru.GetInner().(*roachpb.ExportResponse)
 					// Every ExportResponse should have a single SST when running backup
 					// within a tenant.
@@ -7011,9 +6970,6 @@ func TestBackupRestoreTenant(t *testing.T) {
 		return nil
 	})
 
-	systemDB.Exec(t, `BACKUP system.users TO 'nodelocal://1/users'`)
-	systemDB.CheckQueryResults(t, `SELECT manifest->>'tenants' FROM [SHOW BACKUP 'nodelocal://1/users' WITH as_json]`, [][]string{{"[]"}})
-
 	// Prevent a logging assertion that the server ID is initialized multiple times.
 	log.TestingClearServerIdentifiers()
 
@@ -7107,9 +7063,11 @@ func TestBackupRestoreTenant(t *testing.T) {
 			[][]string{{`10`, `false`, `{"id": "10", "state": "DROP"}`}},
 		)
 
-		// Make GC job scheduled by destroy_tenant run in 1 second.
+		// Make GC jobs run in 1 second.
 		restoreDB.Exec(t, "SET CLUSTER SETTING kv.range_merge.queue_enabled = false")
 		restoreDB.Exec(t, "ALTER RANGE tenants CONFIGURE ZONE USING gc.ttlseconds = 1;")
+		// Now run the GC job to delete the tenant and its data.
+		restoreDB.Exec(t, `SELECT crdb_internal.gc_tenant(10)`)
 		// Wait for tenant GC job to complete.
 		restoreDB.CheckQueryResultsRetry(
 			t,
@@ -7141,6 +7099,7 @@ func TestBackupRestoreTenant(t *testing.T) {
 		restoreTenant10.CheckQueryResults(t, `select * from foo.bar2`, tenant10.QueryStr(t, `select * from foo.bar2`))
 
 		restoreDB.Exec(t, `SELECT crdb_internal.destroy_tenant(10)`)
+		restoreDB.Exec(t, `SELECT crdb_internal.gc_tenant(10)`)
 		// Wait for tenant GC job to complete.
 		restoreDB.CheckQueryResultsRetry(
 			t,
@@ -7434,7 +7393,8 @@ func TestBackupExportRequestTimeout(t *testing.T) {
 	// should hang. The timeout should save us in this case.
 	_, err := sqlSessions[1].DB.ExecContext(ctx, "BACKUP data.bank TO 'nodelocal://0/timeout'")
 	require.True(t, testutils.IsError(err,
-		"timeout: operation \"ExportRequest for span /Table/53/.*\" timed out after 3s"))
+		"timeout: operation \"ExportRequest for span /Table/53/.*\" timed out after 3s: context"+
+			" deadline exceeded"))
 }
 
 func TestBackupDoesNotHangOnIntent(t *testing.T) {
@@ -7500,23 +7460,9 @@ CREATE TABLE db.table (k INT PRIMARY KEY, v db.typ);
 `)
 
 	// Back up the database, drop it, and restore into it.
-	sqlDB.Exec(t, `BACKUP DATABASE db TO 'nodelocal://0/test/1'`)
+	sqlDB.Exec(t, `BACKUP DATABASE db TO 'nodelocal://0/test/'`)
 	sqlDB.Exec(t, `DROP DATABASE db`)
-	sqlDB.ExpectErr(t, "boom", `RESTORE DATABASE db FROM 'nodelocal://0/test/1'`)
-	sqlDB.CheckQueryResults(t, `SELECT count(*) FROM system.namespace WHERE name = 'typ'`, [][]string{{"0"}})
-
-	// Back up database with user defined schema.
-	sqlDB.Exec(t, `
-CREATE DATABASE db;
-CREATE SCHEMA db.s;
-CREATE TYPE db.s.typ AS ENUM();
-CREATE TABLE db.s.table (k INT PRIMARY KEY, v db.s.typ);
-`)
-
-	// Back up the database, drop it, and restore into it.
-	sqlDB.Exec(t, `BACKUP DATABASE db TO 'nodelocal://0/test/2'`)
-	sqlDB.Exec(t, `DROP DATABASE db`)
-	sqlDB.ExpectErr(t, "boom", `RESTORE DATABASE db FROM 'nodelocal://0/test/2'`)
+	sqlDB.ExpectErr(t, "boom", `RESTORE DATABASE db FROM 'nodelocal://0/test/'`)
 	sqlDB.CheckQueryResults(t, `SELECT count(*) FROM system.namespace WHERE name = 'typ'`, [][]string{{"0"}})
 }
 
@@ -8218,19 +8164,23 @@ func TestFullClusterTemporaryBackupAndRestore(t *testing.T) {
 	sqlDBRestore.Exec(t, `RESTORE FROM 'nodelocal://0/full_cluster_backup'`)
 
 	// Before the reconciliation job runs we should be able to see the following:
-	// - 2 synthesized pg_temp sessions in defaultdb and 1 each in db1 and db2.
-	// We synthesize a new temp schema for each unique backed-up schemaID
-	// of a temporary table descriptor.
+	// - 4 synthesized pg_temp sessions in defaultdb.
+	// We synthesize a new temp schema for each unique backed-up <dbID, schemaID>
+	// tuple of a temporary table descriptor.
 	// - All temp tables remapped to belong to the associated synthesized temp
-	// schema in the original db.
-	checkSchemasQuery := `SELECT count(*) FROM [SHOW SCHEMAS] WHERE schema_name LIKE 'pg_temp_%'`
-	sqlDBRestore.CheckQueryResults(t, checkSchemasQuery, [][]string{{"2"}})
+	// schema, and in the defaultdb.
+	checkSchemasQuery := `SELECT schema_name FROM [SHOW SCHEMAS] WHERE schema_name LIKE 'pg_temp_%' ORDER BY
+schema_name`
+	sqlDBRestore.CheckQueryResults(t, checkSchemasQuery,
+		[][]string{{"pg_temp_0_0"}, {"pg_temp_0_1"}, {"pg_temp_0_2"}, {"pg_temp_0_3"}})
 
-	checkTempTablesQuery := `SELECT table_name FROM [SHOW TABLES] ORDER BY table_name`
-	sqlDBRestore.CheckQueryResults(t, checkTempTablesQuery, [][]string{{"t"}, {"t"}})
+	checkTempTablesQuery := `SELECT schema_name,
+table_name FROM [SHOW TABLES] ORDER BY schema_name, table_name`
+	sqlDBRestore.CheckQueryResults(t, checkTempTablesQuery, [][]string{{"pg_temp_0_0", "t"},
+		{"pg_temp_0_1", "t"}, {"pg_temp_0_2", "t"}, {"pg_temp_0_3", "t"}})
 
 	// Sanity check that the databases the temporary tables originally belonged to
-	// are restored.
+	// are restored and empty because of the remapping.
 	sqlDBRestore.CheckQueryResults(t,
 		`SELECT database_name FROM [SHOW DATABASES] ORDER BY database_name`,
 		[][]string{{"d1"}, {"d2"}, {"defaultdb"}, {"postgres"}, {"system"}})
@@ -8243,36 +8193,26 @@ func TestFullClusterTemporaryBackupAndRestore(t *testing.T) {
 	sqlDBRestore.QueryRow(t, checkCommentQuery).Scan(&commentCount)
 	require.Equal(t, commentCount, 2)
 
-	// Check that show tables in one of the restored DBs returns the temporary
-	// table.
+	// Check that show tables in one of the restored DBs returns an empty result.
 	sqlDBRestore.Exec(t, "USE d1")
-	sqlDBRestore.CheckQueryResults(t, checkTempTablesQuery, [][]string{
-		{"t"},
-	})
-	sqlDBRestore.CheckQueryResults(t, checkSchemasQuery, [][]string{{"1"}})
+	sqlDBRestore.CheckQueryResults(t, "SHOW TABLES", [][]string{})
 
 	sqlDBRestore.Exec(t, "USE d2")
-	sqlDBRestore.CheckQueryResults(t, checkTempTablesQuery, [][]string{
-		{"t"},
-	})
-	sqlDBRestore.CheckQueryResults(t, checkSchemasQuery, [][]string{{"1"}})
+	sqlDBRestore.CheckQueryResults(t, "SHOW TABLES", [][]string{})
 
 	testutils.SucceedsSoon(t, func() error {
 		ch <- timeutil.Now()
 		<-finishedCh
 
-		for _, database := range []string{"defaultdb", "d1", "d2"} {
-			sqlDBRestore.Exec(t, fmt.Sprintf("USE %s", database))
-			// Check that all the synthesized temp schemas have been wiped.
-			sqlDBRestore.CheckQueryResults(t, checkSchemasQuery, [][]string{{"0"}})
+		// Check that all the synthesized temp schemas have been wiped.
+		sqlDBRestore.CheckQueryResults(t, checkSchemasQuery, [][]string{})
 
-			// Check that all the temp tables have been wiped.
-			sqlDBRestore.CheckQueryResults(t, checkTempTablesQuery, [][]string{})
+		// Check that all the temp tables have been wiped.
+		sqlDBRestore.CheckQueryResults(t, checkTempTablesQuery, [][]string{})
 
-			// Check that all the temp table comments have been wiped.
-			sqlDBRestore.QueryRow(t, checkCommentQuery).Scan(&commentCount)
-			require.Equal(t, commentCount, 0)
-		}
+		// Check that all the temp table comments have been wiped.
+		sqlDBRestore.QueryRow(t, checkCommentQuery).Scan(&commentCount)
+		require.Equal(t, commentCount, 0)
 		return nil
 	})
 }
@@ -8341,7 +8281,6 @@ func TestRestoreJobEventLogging(t *testing.T) {
 
 func TestBackupOnlyPublicIndexes(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
 
 	skip.UnderRace(t, "likely slow under race")
 
@@ -8821,60 +8760,6 @@ DROP TABLE foo;
 	sqlDBRestore.Exec(t, "RESTORE FROM $1 AS OF SYSTEM TIME "+aost, LocalFoo)
 }
 
-// TestRestoreNewDatabaseName tests the new_db_name optional feature for single database
-//restores, which allows the user to rename the database they intend to restore.
-func TestRestoreNewDatabaseName(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	const numAccounts = 1
-	_, _, sqlDB, _, cleanupFn := BackupRestoreTestSetup(t, singleNode, numAccounts, InitManualReplication)
-	defer cleanupFn()
-
-	sqlDB.Exec(t, `CREATE DATABASE fkdb`)
-	sqlDB.Exec(t, `CREATE TABLE fkdb.fk (ind INT)`)
-
-	for i := 0; i < 10; i++ {
-		sqlDB.Exec(t, `INSERT INTO fkdb.fk (ind) VALUES ($1)`, i)
-	}
-	sqlDB.Exec(t, `BACKUP TO $1`, LocalFoo)
-
-	// Ensure restore fails with new_db_name on cluster, table, and multiple database restores
-	t.Run("new_db_name syntax checks", func(t *testing.T) {
-
-		expectedErr := "new_db_name can only be used for RESTORE DATABASE with a single target database"
-
-		sqlDB.ExpectErr(t, expectedErr, "RESTORE FROM $1 with new_db_name = 'new_fkdb'", LocalFoo)
-
-		sqlDB.ExpectErr(t, expectedErr, "RESTORE DATABASE fkdb, "+
-			"data FROM $1 with new_db_name = 'new_fkdb'", LocalFoo)
-
-		sqlDB.ExpectErr(t, expectedErr, "RESTORE TABLE fkdb.fk FROM $1 with new_db_name = 'new_fkdb'",
-			LocalFoo)
-
-	})
-
-	// Should fail because 'fkbd' database is still in cluster
-	sqlDB.ExpectErr(t, `database "fkdb" already exists`,
-		"RESTORE DATABASE fkdb FROM $1", LocalFoo)
-
-	// Should pass because 'new_fkdb' is not in cluster
-	sqlDB.Exec(t, "RESTORE DATABASE fkdb FROM $1 WITH new_db_name = 'new_fkdb'", LocalFoo)
-
-	// Verify restored database is in cluster with new name
-	sqlDB.CheckQueryResults(t,
-		`SELECT database_name FROM [SHOW DATABASES] WHERE database_name = 'new_fkdb'`,
-		[][]string{{"new_fkdb"}})
-
-	// Verify table was properly restored
-	sqlDB.CheckQueryResults(t, `SELECT count(*) FROM new_fkdb.fk`,
-		[][]string{{"10"}})
-
-	// Should fail because we just restored new_fkbd into cluster
-	sqlDB.ExpectErr(t, `database "new_fkdb" already exists`,
-		"RESTORE DATABASE fkdb FROM $1 WITH new_db_name = 'new_fkdb'", LocalFoo)
-}
-
 // TestRestoreRemappingOfExistingUDTInColExpr is a regression test for a nil
 // pointer exception when restoring tables that point to existing types. When
 // updating the back references of the existing types we would index into a map
@@ -8896,58 +8781,4 @@ DROP TYPE status;
 CREATE TYPE status AS ENUM ('open', 'closed', 'inactive');
 RESTORE TABLE foo FROM 'nodelocal://0/foo';
 `)
-}
-
-// TestGCDropIndexSpanExpansion is a regression test for
-// https://github.com/cockroachdb/cockroach/issues/72263.
-func TestGCDropIndexSpanExpansion(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	aboutToGC := make(chan struct{})
-	allowGC := make(chan struct{})
-	var gcJobID jobspb.JobID
-	baseDir, cleanup := testutils.TempDir(t)
-	defer cleanup()
-	ctx := context.Background()
-	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{ServerArgs: base.TestServerArgs{
-		ExternalIODir: baseDir,
-		Knobs: base.TestingKnobs{
-			GCJob: &sql.GCJobTestingKnobs{RunBeforePerformGC: func(id jobspb.JobID) error {
-				gcJobID = id
-				aboutToGC <- struct{}{}
-				<-allowGC
-				return nil
-			}},
-		},
-	}})
-	defer tc.Stopper().Stop(ctx)
-	sqlRunner := sqlutils.MakeSQLRunner(tc.Conns[0])
-
-	sqlRunner.Exec(t, `
-CREATE DATABASE test; USE test;
-CREATE TABLE foo (id INT PRIMARY KEY, id2 INT, id3 INT, INDEX bar (id2), INDEX baz(id3));
-ALTER TABLE foo CONFIGURE ZONE USING gc.ttlseconds = '1';
-INSERT INTO foo VALUES (1, 2, 3);
-DROP INDEX foo@bar;
-`)
-
-	// Wait until the index is about to get gc'ed.
-	<-aboutToGC
-
-	// Take a full backup with revision history so it includes the PUBLIC version
-	// of index `bar` in the backed up spans.
-	sqlRunner.Exec(t, `BACKUP INTO 'nodelocal://0/foo' WITH revision_history`)
-
-	// Take an incremental backup with revision history. This backup will not
-	// include the dropped index span.
-	sqlRunner.Exec(t, `BACKUP INTO LATEST IN 'nodelocal://0/foo' WITH revision_history`)
-
-	// Allow the GC to complete.
-	close(allowGC)
-
-	// Wait for the GC to complete.
-	jobutils.WaitForJob(t, sqlRunner, gcJobID)
-
-	sqlRunner.Exec(t, `BACKUP INTO LATEST IN 'nodelocal://0/foo' WITH revision_history`)
 }

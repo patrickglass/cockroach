@@ -1,3 +1,0 @@
-show_create_schedules_stmt ::=
-	'SHOW' 'CREATE' 'ALL' 'SCHEDULES'
-	| 'SHOW' 'CREATE' 'SCHEDULE' a_expr

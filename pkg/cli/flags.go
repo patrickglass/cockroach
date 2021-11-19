@@ -486,7 +486,6 @@ func init() {
 		boolFlag(f, &serverCfg.ExternalIODirConfig.DisableHTTP, cliflags.ExternalIODisableHTTP)
 		boolFlag(f, &serverCfg.ExternalIODirConfig.DisableOutbound, cliflags.ExternalIODisabled)
 		boolFlag(f, &serverCfg.ExternalIODirConfig.DisableImplicitCredentials, cliflags.ExternalIODisableImplicitCredentials)
-		boolFlag(f, &serverCfg.ExternalIODirConfig.EnableNonAdminImplicitAndArbitraryOutbound, cliflags.ExternalIOEnableNonAdminImplicitAndArbitraryOutbound)
 
 		// Certificate principal map.
 		stringSliceFlag(f, &startCtx.serverCertPrincipalMap, cliflags.CertPrincipalMap)
@@ -696,7 +695,6 @@ func init() {
 		stringFlag(f, &sqlCtx.InputFile, cliflags.File)
 		durationFlag(f, &sqlCtx.ShellCtx.RepeatDelay, cliflags.Watch)
 		varFlag(f, &sqlCtx.SafeUpdates, cliflags.SafeUpdates)
-		boolFlag(f, &sqlCtx.ReadOnly, cliflags.ReadOnly)
 		// The "safe-updates" flag is tri-valued (true, false, not-specified).
 		// If the flag is specified on the command line, but is not given a value,
 		// then use the value "true".
@@ -813,7 +811,6 @@ func init() {
 
 		intFlag(f, &demoCtx.NumNodes, cliflags.DemoNodes)
 		boolFlag(f, &demoCtx.RunWorkload, cliflags.RunDemoWorkload)
-		intFlag(f, &demoCtx.WorkloadMaxQPS, cliflags.DemoWorkloadMaxQPS)
 		varFlag(f, &demoCtx.Localities, cliflags.DemoNodeLocality)
 		boolFlag(f, &demoCtx.GeoPartitionedReplicas, cliflags.DemoGeoPartitionedReplicas)
 		varFlag(f, demoNodeSQLMemSizeValue, cliflags.DemoNodeSQLMemSize)
@@ -825,7 +822,6 @@ func init() {
 				"For details, see: "+build.MakeIssueURL(53404))
 
 		boolFlag(f, &demoCtx.DisableLicenseAcquisition, cliflags.DemoNoLicense)
-		boolFlag(f, &demoCtx.Multitenant, cliflags.DemoMultitenant)
 		boolFlag(f, &demoCtx.SimulateLatency, cliflags.Global)
 		// The --empty flag is only valid for the top level demo command,
 		// so we use the regular flag set.

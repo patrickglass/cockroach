@@ -45,12 +45,9 @@ func VerifyTransaction(
 		}
 	}
 	if !statusPermitted {
-		reason := roachpb.TransactionStatusError_REASON_UNKNOWN
-		if h.Txn.Status == roachpb.COMMITTED {
-			reason = roachpb.TransactionStatusError_REASON_TXN_COMMITTED
-		}
-		return roachpb.NewTransactionStatusError(reason,
-			fmt.Sprintf("cannot perform %s with txn status %v", args.Method(), h.Txn.Status))
+		return roachpb.NewTransactionStatusError(
+			fmt.Sprintf("cannot perform %s with txn status %v", args.Method(), h.Txn.Status),
+		)
 	}
 	return nil
 }

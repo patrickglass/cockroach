@@ -9,37 +9,37 @@ CREATE TABLE uniontest (
 query T
 EXPLAIN SELECT v FROM uniontest UNION SELECT k FROM uniontest
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • union
 │
 ├── • scan
 │     missing stats
-│     table: uniontest@uniontest_pkey
+│     table: uniontest@primary
 │     spans: FULL SCAN
 │
 └── • scan
       missing stats
-      table: uniontest@uniontest_pkey
+      table: uniontest@primary
       spans: FULL SCAN
 
 query T
 EXPLAIN SELECT v FROM uniontest UNION ALL SELECT k FROM uniontest
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • union all
 │
 ├── • scan
 │     missing stats
-│     table: uniontest@uniontest_pkey
+│     table: uniontest@primary
 │     spans: FULL SCAN
 │
 └── • scan
       missing stats
-      table: uniontest@uniontest_pkey
+      table: uniontest@primary
       spans: FULL SCAN
 
 # Check that EXPLAIN properly releases memory for virtual tables.
@@ -63,7 +63,7 @@ CREATE TABLE abc (a INT, b INT, c INT)
 query T
 EXPLAIN (VERBOSE) (SELECT a FROM abc ORDER BY b) INTERSECT (SELECT a FROM abc ORDER BY c) ORDER BY a
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • sort
@@ -82,7 +82,7 @@ vectorized: true
     │   └── • scan
     │         columns: (a, b)
     │         estimated row count: 1,000 (missing stats)
-    │         table: abc@abc_pkey
+    │         table: abc@primary
     │         spans: FULL SCAN
     │
     └── • project
@@ -91,14 +91,14 @@ vectorized: true
         └── • scan
               columns: (a, c)
               estimated row count: 1,000 (missing stats)
-              table: abc@abc_pkey
+              table: abc@primary
               spans: FULL SCAN
 
 # Regression test for #32723.
 query T
 EXPLAIN (VERBOSE) SELECT a FROM ((SELECT '' AS a , '') EXCEPT ALL (SELECT '', ''))
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • project
@@ -129,7 +129,7 @@ query T
 EXPLAIN (VERBOSE) ((SELECT '', '', 'x' WHERE false))
 UNION ALL ((SELECT * FROM (VALUES ('', '', 'x'), ('', '', 'x'))) EXCEPT (VALUES ('', '', 'x')))
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • render

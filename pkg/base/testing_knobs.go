@@ -44,5 +44,4 @@ type TestingKnobs struct {
 	SpanConfig              ModuleTestingKnobs
 	SQLLivenessKnobs        ModuleTestingKnobs
 	TelemetryLoggingKnobs   ModuleTestingKnobs
-	DialerKnobs             ModuleTestingKnobs
 }

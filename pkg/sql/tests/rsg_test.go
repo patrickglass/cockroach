@@ -165,9 +165,7 @@ func (db *verifyFormatDB) execWithTimeout(
 					}
 				}
 			}
-			// TODO(yuzefovich): allow "no volatility for cast tuple" errors to
-			// fail once #70831 is resolved.
-			if es := err.Error(); (strings.Contains(es, "internal error") && !strings.Contains(es, "no volatility for cast tuple")) ||
+			if es := err.Error(); strings.Contains(es, "internal error") ||
 				strings.Contains(es, "driver: bad connection") ||
 				strings.Contains(es, "unexpected error inside CockroachDB") {
 				return &crasher{
@@ -300,7 +298,7 @@ func TestRandomSyntaxFunctions(t *testing.T) {
 					// Calculating the Frechet distance is slow and testing it here
 					// is not worth it.
 					continue
-				case "crdb_internal.reset_sql_stats", "crdb_internal.check_consistency":
+				case "crdb_internal.reset_sql_stats":
 					// Skipped due to long execution time.
 					continue
 				}
@@ -556,7 +554,7 @@ func TestRandomSyntaxSQLSmith(t *testing.T) {
 
 	tableStmts := make([]string, 0)
 	testRandomSyntax(t, true, "defaultdb", func(ctx context.Context, db *verifyFormatDB, r *rsg.RSG) error {
-		setups := []string{sqlsmith.RandTableSetupName, "seed"}
+		setups := []string{"rand-tables", "seed"}
 		for _, s := range setups {
 			randTables := sqlsmith.Setups[s](r.Rnd)
 			if err := db.exec(t, ctx, randTables); err != nil {

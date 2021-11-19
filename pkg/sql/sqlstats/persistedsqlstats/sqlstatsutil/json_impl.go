@@ -92,10 +92,10 @@ func (s *stmtStatsMetadata) jsonFields() jsonFields {
 	return jsonFields{
 		{"stmtTyp", (*jsonString)(&s.Stats.SQLType)},
 		{"query", (*jsonString)(&s.Key.Query)},
-		{"querySummary", (*jsonString)(&s.Key.QuerySummary)},
 		{"db", (*jsonString)(&s.Key.Database)},
 		{"distsql", (*jsonBool)(&s.Key.DistSQL)},
 		{"failed", (*jsonBool)(&s.Key.Failed)},
+		{"opt", (*jsonBool)(&s.Key.Opt)},
 		{"implicitTxn", (*jsonBool)(&s.Key.ImplicitTxn)},
 		{"vec", (*jsonBool)(&s.Key.Vec)},
 		{"fullScan", (*jsonBool)(&s.Key.FullScan)},

@@ -129,7 +129,7 @@ func TestTxnCoordSenderKeyRanges(t *testing.T) {
 
 	for _, rng := range ranges {
 		if rng.end != nil {
-			if _, err := txn.DelRange(ctx, rng.start, rng.end, false /* returnKeys */); err != nil {
+			if err := txn.DelRange(ctx, rng.start, rng.end); err != nil {
 				t.Fatal(err)
 			}
 		} else {
@@ -289,7 +289,7 @@ func verifyCleanup(key roachpb.Key, eng storage.Engine, t *testing.T, coords ...
 		//lint:ignore SA1019 historical usage of deprecated eng.MVCCGetProto is OK
 		ok, _, _, err := eng.MVCCGetProto(storage.MakeMVCCMetadataKey(key), meta)
 		if err != nil {
-			return errors.Wrap(err, "error getting MVCC metadata")
+			return fmt.Errorf("error getting MVCC metadata: %s", err)
 		}
 		if ok && meta.Txn != nil {
 			return fmt.Errorf("found unexpected write intent: %s", meta)
@@ -453,8 +453,8 @@ func TestTxnCoordSenderCommitCanceled(t *testing.T) {
 	_, pErr := txn.Send(ctx, ba)
 	require.NotNil(t, pErr)
 	require.IsType(t, &roachpb.TransactionStatusError{}, pErr.GetDetail())
-	txnErr := pErr.GetDetail().(*roachpb.TransactionStatusError)
-	require.Equal(t, roachpb.TransactionStatusError_REASON_TXN_COMMITTED, txnErr.Reason)
+	// TODO(erikgrinaker): This should really assert REASON_TXN_COMMITTED, but
+	// we return REASON_TXN_UNKNOWN to preserve existing EndTxn behavior.
 }
 
 // TestTxnCoordSenderAddLockOnError verifies that locks are tracked if the
@@ -935,7 +935,7 @@ func TestTxnCoordSenderNoDuplicateLockSpans(t *testing.T) {
 	if pErr != nil {
 		t.Fatal(pErr)
 	}
-	_, pErr = txn.DelRange(ctx, roachpb.Key("u"), roachpb.Key("w"), false /* returnKeys */)
+	pErr = txn.DelRange(ctx, roachpb.Key("u"), roachpb.Key("w"))
 	if pErr != nil {
 		t.Fatal(pErr)
 	}
@@ -1803,10 +1803,7 @@ func TestCommitMutatingTransaction(t *testing.T) {
 			pointWrite: true,
 		},
 		{
-			f: func(ctx context.Context, txn *kv.Txn) error {
-				_, err := txn.DelRange(ctx, "a", "b", false /* returnKeys */)
-				return err
-			},
+			f:          func(ctx context.Context, txn *kv.Txn) error { return txn.DelRange(ctx, "a", "b") },
 			expMethod:  roachpb.DeleteRange,
 			pointWrite: false,
 		},

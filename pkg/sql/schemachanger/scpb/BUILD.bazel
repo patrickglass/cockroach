@@ -1,18 +1,21 @@
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
-load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "scpb",
     srcs = [
-        "node.go",
-        "structured.go",
-        ":gen-elements-interface",  # keep
+        "attribute.go",
+        "attribute_value.go",
+        "elements.go",
+        ":gen-attribute-stringer",  # keep
     ],
     embed = [":scpb_go_proto"],
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/sql/catalog/descpb",
+        "//pkg/sql/lexbase",
         "//pkg/util/protoutil",
         "@com_github_cockroachdb_errors//:errors",
     ],
@@ -30,6 +33,17 @@ go_proto_library(
     ],
 )
 
+go_test(
+    name = "scpb_test",
+    size = "small",
+    srcs = [
+        "attribute_test.go",
+        "elements_test.go",
+    ],
+    embed = [":scpb"],
+    deps = ["@com_github_stretchr_testify//require"],
+)
+
 proto_library(
     name = "scpb_proto",
     srcs = ["scpb.proto"],
@@ -41,23 +55,26 @@ proto_library(
     ],
 )
 
-go_binary(
-    name = "element-generator",
-    srcs = ["element_generator.go"],
-    gotags = ["generator"],
-    deps = ["//pkg/cli/exit"],
-)
-
+# Keep this genrule and not using common string function due to extra flags eg: trimprefix
 genrule(
-    name = "gen-elements-interface",
+    name = "gen-attribute-stringer",
     srcs = [
-        "scpb.proto",
+        "attribute.go",
     ],
-    outs = ["elements_generated.go"],
+    outs = ["attribute_string.go"],
+    # golang.org/x/tools executes commands via
+    # golang.org/x/sys/execabs which requires all PATH lookups to
+    # result in absolute paths. To account for this, we resolve the
+    # relative path returned by location to an absolute path.
     cmd = """
-        $(location :element-generator) --in $< --out $(location elements_generated.go)
-       """,
+       GO_REL_PATH=`dirname $(location @go_sdk//:bin/go)`
+       GO_ABS_PATH=`cd $$GO_REL_PATH && pwd`
+       # Set GOPATH to something to workaround https://github.com/golang/go/issues/43938
+       env PATH=$$GO_ABS_PATH HOME=$(GENDIR) GOPATH=/nonexist-gopath \
+       $(location @org_golang_x_tools//cmd/stringer:stringer) -output=$@ -type=Attribute -trimprefix Attribute $<
+    """,
     exec_tools = [
-        ":element-generator",
+        "@go_sdk//:bin/go",
+        "@org_golang_x_tools//cmd/stringer",
     ],
 )

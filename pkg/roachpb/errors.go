@@ -574,8 +574,9 @@ func NewRangeKeyMismatchError(
 		}
 	}
 	e := &RangeKeyMismatchError{
-		RequestStartKey: start,
-		RequestEndKey:   end,
+		RequestStartKey:           start,
+		RequestEndKey:             end,
+		DeprecatedMismatchedRange: *desc,
 	}
 	// More ranges are sometimes added to rangesInternal later.
 	e.AppendRangeInfo(ctx, *desc, l)
@@ -587,12 +588,9 @@ func (e *RangeKeyMismatchError) Error() string {
 }
 
 func (e *RangeKeyMismatchError) message(_ *Error) string {
-	mr, err := e.MismatchedRange()
-	if err != nil {
-		return err.Error()
-	}
+	desc := &e.Ranges()[0].Desc
 	return fmt.Sprintf("key range %s-%s outside of bounds of range %s-%s; suggested ranges: %s",
-		e.RequestStartKey, e.RequestEndKey, mr.Desc.StartKey, mr.Desc.EndKey, e.Ranges)
+		e.RequestStartKey, e.RequestEndKey, desc.StartKey, desc.EndKey, e.Ranges())
 }
 
 // Type is part of the ErrorDetailInterface.
@@ -600,15 +598,21 @@ func (e *RangeKeyMismatchError) Type() ErrorDetailType {
 	return RangeKeyMismatchErrType
 }
 
-// MismatchedRange returns the range info for the range that the request was
-// erroneously routed to, or an error if the Ranges slice is empty.
-func (e *RangeKeyMismatchError) MismatchedRange() (RangeInfo, error) {
-	if len(e.Ranges) == 0 {
-		return RangeInfo{}, errors.AssertionFailedf(
-			"RangeKeyMismatchError (key range %s-%s) with empty RangeInfo slice", e.RequestStartKey, e.RequestEndKey,
-		)
+// Ranges returns the range info for the range that the request was erroneously
+// routed to. It deals with legacy errors coming from 20.1 nodes by returning
+// empty lease for the respective descriptors.
+//
+// At least one RangeInfo is returned.
+func (e *RangeKeyMismatchError) Ranges() []RangeInfo {
+	if len(e.rangesInternal) != 0 {
+		return e.rangesInternal
 	}
-	return e.Ranges[0], nil
+	// Fallback for 20.1 errors. Remove in 21.1.
+	ranges := []RangeInfo{{Desc: e.DeprecatedMismatchedRange}}
+	if e.DeprecatedSuggestedRange != nil {
+		ranges = append(ranges, RangeInfo{Desc: *e.DeprecatedSuggestedRange})
+	}
+	return ranges
 }
 
 // AppendRangeInfo appends info about one range to the set returned to the
@@ -624,7 +628,7 @@ func (e *RangeKeyMismatchError) AppendRangeInfo(
 			log.Fatalf(ctx, "lease names missing replica; lease: %s, desc: %s", l, desc)
 		}
 	}
-	e.Ranges = append(e.Ranges, RangeInfo{
+	e.rangesInternal = append(e.rangesInternal, RangeInfo{
 		Desc:  desc,
 		Lease: l,
 	})
@@ -801,14 +805,21 @@ func (*TransactionRetryError) canRestartTransaction() TransactionRestart {
 var _ ErrorDetailInterface = &TransactionRetryError{}
 var _ transactionRestartError = &TransactionRetryError{}
 
-// NewTransactionStatusError initializes a new TransactionStatusError with
-// the given message and reason.
-func NewTransactionStatusError(
-	reason TransactionStatusError_Reason, msg string,
-) *TransactionStatusError {
+// NewTransactionStatusError initializes a new TransactionStatusError from
+// the given message.
+func NewTransactionStatusError(msg string) *TransactionStatusError {
 	return &TransactionStatusError{
 		Msg:    msg,
-		Reason: reason,
+		Reason: TransactionStatusError_REASON_UNKNOWN,
+	}
+}
+
+// NewTransactionCommittedStatusError initializes a new TransactionStatusError
+// with a REASON_TXN_COMMITTED.
+func NewTransactionCommittedStatusError() *TransactionStatusError {
+	return &TransactionStatusError{
+		Msg:    "already committed",
+		Reason: TransactionStatusError_REASON_TXN_COMMITTED,
 	}
 }
 

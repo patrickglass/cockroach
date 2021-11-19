@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"reflect"
 	"regexp"
@@ -44,7 +43,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/datadriven"
 	"github.com/cockroachdb/errors"
-	"github.com/maruel/panicparse/v2/stack"
+	"github.com/maruel/panicparse/stack"
 	"github.com/petermattis/goid"
 )
 
@@ -943,7 +942,6 @@ func (c *cluster) waitAndCollect(t *testing.T, m *monitor) string {
 type monitor struct {
 	seq int
 	gs  map[*monitoredGoroutine]struct{}
-	tr  *tracing.Tracer
 	buf []byte // avoids allocations
 }
 
@@ -961,21 +959,19 @@ type monitoredGoroutine struct {
 
 func newMonitor() *monitor {
 	return &monitor{
-		tr: tracing.NewTracer(),
 		gs: make(map[*monitoredGoroutine]struct{}),
 	}
 }
 
 func (m *monitor) runSync(opName string, fn func(context.Context)) {
-	ctx, sp := m.tr.StartSpanCtx(context.Background(), opName, tracing.WithRecording(tracing.RecordingVerbose))
+	ctx, collect, cancel := tracing.ContextWithRecordingSpan(
+		context.Background(), tracing.NewTracer(), opName)
 	g := &monitoredGoroutine{
-		opSeq:  0, // synchronous
-		opName: opName,
-		ctx:    ctx,
-		collect: func() tracing.Recording {
-			return sp.GetRecording(tracing.RecordingVerbose)
-		},
-		cancel: sp.Finish,
+		opSeq:   0, // synchronous
+		opName:  opName,
+		ctx:     ctx,
+		collect: collect,
+		cancel:  cancel,
 	}
 	m.gs[g] = struct{}{}
 	fn(ctx)
@@ -984,15 +980,14 @@ func (m *monitor) runSync(opName string, fn func(context.Context)) {
 
 func (m *monitor) runAsync(opName string, fn func(context.Context)) (cancel func()) {
 	m.seq++
-	ctx, sp := m.tr.StartSpanCtx(context.Background(), opName, tracing.WithRecording(tracing.RecordingVerbose))
+	ctx, collect, cancel := tracing.ContextWithRecordingSpan(
+		context.Background(), tracing.NewTracer(), opName)
 	g := &monitoredGoroutine{
-		opSeq:  m.seq,
-		opName: opName,
-		ctx:    ctx,
-		collect: func() tracing.Recording {
-			return sp.GetRecording(tracing.RecordingVerbose)
-		},
-		cancel: sp.Finish,
+		opSeq:   m.seq,
+		opName:  opName,
+		ctx:     ctx,
+		collect: collect,
+		cancel:  cancel,
 	}
 	m.gs[g] = struct{}{}
 	go func() {
@@ -1023,14 +1018,16 @@ func (m *monitor) collectRecordings() string {
 		rec := g.collect()
 		for _, span := range rec {
 			for _, log := range span.Logs {
-				if prev > 0 {
-					prev--
-					continue
+				for _, field := range log.Fields {
+					if prev > 0 {
+						prev--
+						continue
+					}
+					logs = append(logs, logRecord{
+						g: g, value: field.Value,
+					})
+					g.prevEvents++
 				}
-				logs = append(logs, logRecord{
-					g: g, value: log.Msg().StripMarkers(),
-				})
-				g.prevEvents++
 			}
 		}
 		if atomic.LoadInt32(&g.finished) == 1 {
@@ -1071,7 +1068,11 @@ func (m *monitor) hasNewEvents(g *monitoredGoroutine) bool {
 	events := 0
 	rec := g.collect()
 	for _, span := range rec {
-		events += len(span.Logs)
+		for _, log := range span.Logs {
+			for range log.Fields {
+				events++
+			}
+		}
 	}
 	return events > g.prevEvents
 }
@@ -1147,8 +1148,7 @@ func (m *monitor) waitForAsyncGoroutinesToStall(t *testing.T) {
 			continue
 		}
 		stalledCall := firstNonStdlib(stat.Stack.Calls)
-		log.Eventf(g.ctx, "blocked on %s in %s.%s",
-			stat.State, stalledCall.Func.DirName, stalledCall.Func.Name)
+		log.Eventf(g.ctx, "blocked on %s in %s", stat.State, stalledCall.Func.PkgDotName())
 	}
 }
 
@@ -1211,28 +1211,6 @@ var goroutineStalledStates = map[string]bool{
 // matches the provided filter. It uses the provided buffer to avoid repeat
 // allocations.
 func goroutineStatus(t *testing.T, filter string, buf *[]byte) []*stack.Goroutine {
-	b := stacks(buf)
-	s, _, err := stack.ScanSnapshot(bytes.NewBuffer(b), ioutil.Discard, stack.DefaultOpts())
-	if err != io.EOF {
-		t.Fatalf("could not parse goroutine dump: %v", err)
-		return nil
-	}
-
-	matching := s.Goroutines[:0]
-	for _, g := range s.Goroutines {
-		for _, call := range g.Stack.Calls {
-			if strings.Contains(call.Func.Complete, filter) {
-				matching = append(matching, g)
-				break
-			}
-		}
-	}
-	return matching
-}
-
-// stacks is a wrapper for runtime.Stack that attempts to recover the data for
-// all goroutines. It uses the provided buffer to avoid repeat allocations.
-func stacks(buf *[]byte) []byte {
 	// We don't know how big the buffer needs to be to collect all the
 	// goroutines. Start with 64 KB and try a few times, doubling each time.
 	// NB: This is inspired by runtime/pprof/pprof.go:writeGoroutineStacks.
@@ -1248,12 +1226,30 @@ func stacks(buf *[]byte) []byte {
 		}
 		*buf = make([]byte, 2*len(*buf))
 	}
-	return truncBuf
+
+	// guesspaths=true is required for Call objects to have IsStdlib filled in.
+	guesspaths := true
+	ctx, err := stack.ParseDump(bytes.NewBuffer(truncBuf), ioutil.Discard, guesspaths)
+	if err != nil {
+		t.Fatalf("could not parse goroutine dump: %v", err)
+		return nil
+	}
+
+	matching := ctx.Goroutines[:0]
+	for _, g := range ctx.Goroutines {
+		for _, call := range g.Stack.Calls {
+			if strings.Contains(call.Func.Raw, filter) {
+				matching = append(matching, g)
+				break
+			}
+		}
+	}
+	return matching
 }
 
 func firstNonStdlib(calls []stack.Call) stack.Call {
 	for _, call := range calls {
-		if call.Location != stack.Stdlib {
+		if !call.IsStdlib {
 			return call
 		}
 	}

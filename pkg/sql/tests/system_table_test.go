@@ -63,7 +63,7 @@ func TestInitialKeys(t *testing.T) {
 			keys.SystemDatabaseID,
 			keys.MaxReservedDescID,
 			"CREATE TABLE system.x (val INTEGER PRIMARY KEY)",
-			descpb.NewBasePrivilegeDescriptor(security.NodeUserName()),
+			descpb.NewDefaultPrivilegeDescriptor(security.NodeUserName()),
 		)
 		if err != nil {
 			t.Fatal(err)

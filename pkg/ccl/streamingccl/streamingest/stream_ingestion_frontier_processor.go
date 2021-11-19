@@ -12,6 +12,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/ccl/streamingccl"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -225,9 +226,9 @@ func (sf *streamIngestionFrontier) maybeUpdatePartitionProgress() error {
 
 	f.SpanEntries(allSpans, func(span roachpb.Span, timestamp hlc.Timestamp) (done span.OpResult) {
 		partitionKey := span.Key
-		partition := string(partitionKey)
-		if curFrontier, ok := partitionFrontiers[partition]; !ok {
-			partitionFrontiers[partition] = jobspb.StreamIngestionProgress_PartitionProgress{
+		partition := streamingccl.PartitionAddress(partitionKey)
+		if curFrontier, ok := partitionFrontiers[partition.String()]; !ok {
+			partitionFrontiers[partition.String()] = jobspb.StreamIngestionProgress_PartitionProgress{
 				IngestedTimestamp: timestamp,
 			}
 		} else if curFrontier.IngestedTimestamp.Less(timestamp) {

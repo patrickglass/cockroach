@@ -53,7 +53,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -156,7 +155,7 @@ func TestPlanningDuringSplitsAndMerges(t *testing.T) {
 
 	// Start a worker that continuously performs splits in the background.
 	_ = tc.Stopper().RunAsyncTask(context.Background(), "splitter", func(ctx context.Context) {
-		rng, _ := randutil.NewTestRand()
+		rng, _ := randutil.NewPseudoRand()
 		cdb := tc.Server(0).DB()
 		for {
 			select {
@@ -265,10 +264,9 @@ func TestDistSQLReceiverUpdatesCaches(t *testing.T) {
 
 	size := func() int64 { return 2 << 10 }
 	st := cluster.MakeTestingClusterSettings()
-	tr := tracing.NewTracer()
 	stopper := stop.NewStopper()
 	defer stopper.Stop(ctx)
-	rangeCache := rangecache.NewRangeCache(st, nil /* db */, size, stopper, tr)
+	rangeCache := rangecache.NewRangeCache(st, nil /* db */, size, stopper, st.Tracer)
 	r := MakeDistSQLReceiver(
 		ctx,
 		&errOnlyResultWriter{}, /* resultWriter */
@@ -372,17 +370,12 @@ func TestDistSQLRangeCachesIntegrationTest(t *testing.T) {
 	// precisely control the contents of the range cache on node 4.
 	tc.Server(3).DistSenderI().(*kvcoord.DistSender).DisableFirstRangeUpdates()
 	db3 := tc.ServerConn(3)
-	// Force the DistSQL on this connection.
-	_, err := db3.Exec(`SET CLUSTER SETTING sql.defaults.distsql = always; SET distsql = always`)
-	if err != nil {
-		t.Fatal(err)
-	}
 	// Do a query on node 4 so that it populates the its cache with an initial
 	// descriptor containing all the SQL key space. If we don't do this, the state
 	// of the cache is left at the whim of gossiping the first descriptor done
 	// during cluster startup - it can happen that the cache remains empty, which
 	// is not what this test wants.
-	_, err = db3.Exec(`SELECT * FROM "left"`)
+	_, err := db3.Exec(`SELECT * FROM "left"`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,6 +402,9 @@ func TestDistSQLRangeCachesIntegrationTest(t *testing.T) {
 	// force DistSQL.
 	txn, err := db3.BeginTx(context.Background(), nil /* opts */)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := txn.Exec("SET DISTSQL = ALWAYS"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1316,10 +1312,19 @@ func TestCheckScanParallelizationIfLocal(t *testing.T) {
 
 	ctx := context.Background()
 
-	makeTableDesc := func() catalog.TableDescriptor {
-		tableDesc := descpb.TableDescriptor{
-			PrimaryIndex: descpb.IndexDescriptor{},
+	makeTableDesc := func(interleaved bool) catalog.TableDescriptor {
+		var interleave descpb.InterleaveDescriptor
+		if interleaved {
+			interleave = descpb.InterleaveDescriptor{
+				Ancestors: []descpb.InterleaveDescriptor_Ancestor{{}},
+			}
 		}
+		tableDesc := descpb.TableDescriptor{
+			PrimaryIndex: descpb.IndexDescriptor{
+				Interleave: interleave,
+			},
+		}
+
 		b := tabledesc.NewBuilder(&tableDesc)
 		err := b.RunPostDeserializationChanges(ctx, nil /* DescGetter */)
 		if err != nil {
@@ -1377,9 +1382,18 @@ func TestCheckScanParallelizationIfLocal(t *testing.T) {
 		{
 			plan: planComponents{main: planMaybePhysical{planNode: &indexJoinNode{
 				input: scanToParallelize,
-				table: &scanNode{desc: makeTableDesc()},
+				table: &scanNode{desc: makeTableDesc(false /* interleaved */)},
 			}}},
 			hasScanNodeToParallelize: true,
+		},
+		{
+			plan: planComponents{main: planMaybePhysical{planNode: &indexJoinNode{
+				input: scanToParallelize,
+				table: &scanNode{desc: makeTableDesc(true /* interleaved */)},
+			}}},
+			// Vectorized index join is only supported for non-interleaved
+			// tables.
+			prohibitParallelization: true,
 		},
 		{
 			plan:                     planComponents{main: planMaybePhysical{planNode: &limitNode{plan: scanToParallelize}}},

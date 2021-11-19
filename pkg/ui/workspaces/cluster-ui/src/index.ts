@@ -40,4 +40,3 @@ export * from "./transactionsPage";
 export * from "./text";
 export { util, api };
 export * from "./sessions";
-export * from "./timeScaleDropdown";

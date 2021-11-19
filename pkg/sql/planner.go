@@ -52,6 +52,8 @@ import (
 type extendedEvalContext struct {
 	tree.EvalContext
 
+	SessionMutatorIterator *sessionDataMutatorIterator
+
 	// SessionID for this connection.
 	SessionID ClusterWideID
 
@@ -184,7 +186,7 @@ type planner struct {
 
 	// cancelChecker is used by planNodes to check for cancellation of the associated
 	// query.
-	cancelChecker cancelchecker.CancelChecker
+	cancelChecker *cancelchecker.CancelChecker
 
 	// isPreparing is true if this planner is currently preparing.
 	isPreparing bool
@@ -324,7 +326,7 @@ func newInternalPlanner(
 
 	p.txn = txn
 	p.stmt = Statement{}
-	p.cancelChecker.Reset(ctx)
+	p.cancelChecker = cancelchecker.NewCancelChecker(ctx)
 	p.isInternalPlanner = true
 
 	p.semaCtx = tree.MakeSemaContext()
@@ -354,7 +356,17 @@ func newInternalPlanner(
 		sessionDataMutatorCallbacks: sessionDataMutatorCallbacks{},
 	}
 
-	p.extendedEvalCtx = internalExtendedEvalCtx(ctx, sds, params.collection, txn, ts, ts, execCfg, plannerMon)
+	p.extendedEvalCtx = internalExtendedEvalCtx(
+		ctx,
+		sds,
+		smi,
+		params.collection,
+		txn,
+		ts,
+		ts,
+		execCfg,
+		plannerMon,
+	)
 	p.extendedEvalCtx.Planner = p
 	p.extendedEvalCtx.PrivilegedAccessor = p
 	p.extendedEvalCtx.SessionAccessor = p
@@ -368,7 +380,7 @@ func newInternalPlanner(
 	p.extendedEvalCtx.NodeID = execCfg.NodeID
 	p.extendedEvalCtx.Locality = execCfg.Locality
 
-	p.sessionDataMutatorIterator = smi
+	p.sessionDataMutatorIterator = p.extendedEvalCtx.SessionMutatorIterator
 	p.autoCommit = false
 
 	p.extendedEvalCtx.MemMetrics = memMetrics
@@ -406,6 +418,7 @@ func newInternalPlanner(
 func internalExtendedEvalCtx(
 	ctx context.Context,
 	sds *sessiondata.Stack,
+	smi *sessionDataMutatorIterator,
 	tables *descs.Collection,
 	txn *kv.Txn,
 	txnTimestamp time.Time,
@@ -442,7 +455,6 @@ func internalExtendedEvalCtx(
 			TxnImplicit:               true,
 			Settings:                  execCfg.Settings,
 			Codec:                     execCfg.Codec,
-			Tracer:                    execCfg.AmbientCtx.Tracer,
 			Context:                   ctx,
 			Mon:                       plannerMon,
 			TestingKnobs:              evalContextTestingKnobs,
@@ -452,14 +464,15 @@ func internalExtendedEvalCtx(
 			SQLStatsController:        sqlStatsController,
 			IndexUsageStatsController: indexUsageStatsController,
 		},
-		VirtualSchemas:    execCfg.VirtualSchemas,
-		Tracing:           &SessionTracing{},
-		NodesStatusServer: execCfg.NodesStatusServer,
-		RegionsServer:     execCfg.RegionsServer,
-		Descs:             tables,
-		ExecCfg:           execCfg,
-		DistSQLPlanner:    execCfg.DistSQLPlanner,
-		indexUsageStats:   indexUsageStats,
+		SessionMutatorIterator: smi,
+		VirtualSchemas:         execCfg.VirtualSchemas,
+		Tracing:                &SessionTracing{},
+		NodesStatusServer:      execCfg.NodesStatusServer,
+		RegionsServer:          execCfg.RegionsServer,
+		Descs:                  tables,
+		ExecCfg:                execCfg,
+		DistSQLPlanner:         execCfg.DistSQLPlanner,
+		indexUsageStats:        indexUsageStats,
 	}
 }
 
@@ -506,12 +519,16 @@ func (p *planner) ExecCfg() *ExecutorConfig {
 	return p.extendedEvalCtx.ExecCfg
 }
 
+func (p *planner) applyOnEachMutatorError(applyFunc func(m sessionDataMutator) error) error {
+	return p.sessionDataMutatorIterator.applyOnEachMutatorError(applyFunc)
+}
+
 // GetOrInitSequenceCache returns the sequence cache for the session.
 // If the sequence cache has not been used yet, it initializes the cache
 // inside the session data.
 func (p *planner) GetOrInitSequenceCache() sessiondatapb.SequenceCache {
 	if p.SessionData().SequenceCache == nil {
-		p.sessionDataMutatorIterator.applyOnEachMutator(
+		p.ExtendedEvalContext().SessionMutatorIterator.applyForEachMutator(
 			func(m sessionDataMutator) {
 				m.initSequenceCache()
 			},
@@ -592,10 +609,6 @@ func (p *planner) LookupTableByID(
 		return nil, err
 	}
 	return table, nil
-}
-
-func (p *planner) JobRegistry() interface{} {
-	return p.ExecCfg().JobRegistry
 }
 
 // TypeAsString enforces (not hints) that the given expression typechecks as a
@@ -783,11 +796,6 @@ func (p *planner) TypeAsStringArray(
 // SessionData is part of the PlanHookState interface.
 func (p *planner) SessionData() *sessiondata.SessionData {
 	return p.EvalContext().SessionData()
-}
-
-// SessionDataMutatorIterator is part of the PlanHookState interface.
-func (p *planner) SessionDataMutatorIterator() *sessionDataMutatorIterator {
-	return p.sessionDataMutatorIterator
 }
 
 // Ann is a shortcut for the Annotations from the eval context.

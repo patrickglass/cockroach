@@ -171,16 +171,7 @@ func ResolveMutableType(
 	if err != nil || desc == nil {
 		return catalog.ResolvedObjectPrefix{}, nil, err
 	}
-	switch t := desc.(type) {
-	case *typedesc.Mutable:
-		return prefix, t, nil
-	case *typedesc.TableImplicitRecordType:
-		return catalog.ResolvedObjectPrefix{}, nil, pgerror.Newf(pgcode.DependentObjectsStillExist,
-			"cannot modify table record type %q", desc.GetName())
-	default:
-		return catalog.ResolvedObjectPrefix{}, nil,
-			errors.AssertionFailedf("unhandled type descriptor type %T during resolve mutable desc", t)
-	}
+	return prefix, desc.(*typedesc.Mutable), nil
 }
 
 // ResolveExistingObject resolves an object with the given flags.
@@ -215,22 +206,22 @@ func ResolveExistingObject(
 		}
 		return nil, prefix, nil
 	}
-	getResolvedTn := func() *tree.TableName {
-		tn := tree.MakeTableNameFromPrefix(prefix.NamePrefix(), tree.Name(un.Object()))
-		return &tn
-	}
+	resolvedTn := tree.MakeTableNameFromPrefix(prefix.NamePrefix(), tree.Name(un.Object()))
 
 	switch lookupFlags.DesiredObjectKind {
 	case tree.TypeObject:
 		typ, isType := obj.(catalog.TypeDescriptor)
 		if !isType {
-			return nil, prefix, sqlerrors.NewUndefinedTypeError(getResolvedTn())
+			return nil, prefix, sqlerrors.NewUndefinedTypeError(&resolvedTn)
+		}
+		if lookupFlags.RequireMutable {
+			return obj.(*typedesc.Mutable), prefix, nil
 		}
 		return typ, prefix, nil
 	case tree.TableObject:
 		table, ok := obj.(catalog.TableDescriptor)
 		if !ok {
-			return nil, prefix, sqlerrors.NewUndefinedRelationError(getResolvedTn())
+			return nil, prefix, sqlerrors.NewUndefinedRelationError(&resolvedTn)
 		}
 		goodType := true
 		switch lookupFlags.DesiredTableDescKind {
@@ -244,7 +235,7 @@ func ResolveExistingObject(
 			goodType = table.IsSequence()
 		}
 		if !goodType {
-			return nil, prefix, sqlerrors.NewWrongObjectTypeError(getResolvedTn(), lookupFlags.DesiredTableDescKind.String())
+			return nil, prefix, sqlerrors.NewWrongObjectTypeError(&resolvedTn, lookupFlags.DesiredTableDescKind.String())
 		}
 
 		// If the table does not have a primary key, return an error

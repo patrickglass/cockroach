@@ -41,12 +41,8 @@ import Visualization from "src/views/cluster/components/visualization";
 import { MilliToSeconds, NanoToMilli } from "src/util/convert";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
+import { findClosestTimeScale, TimeWindow } from "src/redux/timewindow";
 import Long from "long";
-import {
-  findClosestTimeScale,
-  defaultTimeScaleOptions,
-  TimeWindow,
-} from "@cockroachlabs/cluster-ui";
 
 type TSResponse = protos.cockroach.ts.tspb.TimeSeriesQueryResponse;
 
@@ -59,7 +55,6 @@ export interface LineGraphProps extends MetricsDataComponentProps {
   hoverOn?: typeof hoverOn;
   hoverOff?: typeof hoverOff;
   hoverState?: HoverState;
-  preCalcGraphSize?: boolean;
 }
 
 interface LineGraphStateOld {
@@ -458,11 +453,7 @@ export class LineGraph extends React.Component<LineGraphProps, {}> {
       start: moment.unix(start),
       end: moment.unix(end),
     };
-    let newTimeScale = findClosestTimeScale(
-      defaultTimeScaleOptions,
-      end - start,
-      start,
-    );
+    let newTimeScale = findClosestTimeScale(end - start);
     if (this.props.adjustTimeScaleOnChange) {
       newTimeScale = this.props.adjustTimeScaleOnChange(
         newTimeScale,
@@ -576,7 +567,7 @@ export class LineGraph extends React.Component<LineGraphProps, {}> {
   }
 
   render() {
-    const { title, subtitle, tooltip, data, preCalcGraphSize } = this.props;
+    const { title, subtitle, tooltip, data } = this.props;
 
     return (
       <Visualization
@@ -584,7 +575,6 @@ export class LineGraph extends React.Component<LineGraphProps, {}> {
         subtitle={subtitle}
         tooltip={tooltip}
         loading={!data}
-        preCalcGraphSize={preCalcGraphSize}
       >
         <div className="linegraph">
           <div ref={this.el} />

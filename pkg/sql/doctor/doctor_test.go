@@ -47,7 +47,7 @@ var validTableDesc = &descpb.Descriptor{
 			},
 			NextFamilyID: 1,
 			PrimaryIndex: descpb.IndexDescriptor{
-				Name:                tabledesc.PrimaryKeyIndexName("t"),
+				Name:                tabledesc.PrimaryKeyIndexName,
 				ID:                  1,
 				Unique:              true,
 				KeyColumnNames:      []string{"col"},
@@ -453,6 +453,10 @@ func TestExamineDescriptors(t *testing.T) {
 					desc := protoutil.Clone(validTableDesc).(*descpb.Descriptor)
 					tbl, _, _, _ := descpb.FromDescriptor(desc)
 					tbl.PrimaryIndex.Disabled = true
+					tbl.PrimaryIndex.InterleavedBy = make([]descpb.ForeignKeyReference, 1)
+					tbl.PrimaryIndex.InterleavedBy[0].Name = "bad_backref"
+					tbl.PrimaryIndex.InterleavedBy[0].Table = 500
+					tbl.PrimaryIndex.InterleavedBy[0].Index = 1
 					return desc
 				}())},
 				{
@@ -467,6 +471,7 @@ func TestExamineDescriptors(t *testing.T) {
 				{NameInfo: descpb.NameInfo{Name: "db"}, ID: 52},
 			},
 			expected: `Examining 2 descriptors and 2 namespace entries...
+  ParentID  52, ParentSchemaID 29: relation "t" (51): invalid interleave backreference table=500 index=1: referenced table ID 500: descriptor not found
   ParentID  52, ParentSchemaID 29: relation "t" (51): unimplemented: primary key dropped without subsequent addition of new primary key in same transaction
 `,
 		},
@@ -503,8 +508,8 @@ func TestExamineDescriptors(t *testing.T) {
 			expected: `Examining 6 descriptors and 6 namespace entries...
   ParentID  57, ParentSchemaID 29: relation "a" (58): failed to upgrade descriptor: index-id "2" does not exist
   ParentID  57, ParentSchemaID 29: relation "b" (59): failed to upgrade descriptor: referenced table ID 52: descriptor not found
-  ParentID  57, ParentSchemaID 29: relation "a" (58): index "primary" contains deprecated foreign key representation
-  ParentID  57, ParentSchemaID 29: relation "b" (59): index "primary" contains deprecated foreign key representation
+  ParentID  57, ParentSchemaID 29: relation "a" (58): primary index "primary" has invalid version 0, expected 4
+  ParentID  57, ParentSchemaID 29: relation "b" (59): primary index "primary" has invalid version 0, expected 4
   ParentID  57, ParentSchemaID 29: relation "c" (60): missing fk back reference "fk_i_ref_b" to "c" from "a"
 `,
 		},

@@ -20,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 )
 
 // TestServerArgs contains the parameters one can set when creating a test
@@ -131,12 +130,10 @@ type TestServerArgs struct {
 	// IF set, the demo login endpoint will be enabled.
 	EnableDemoLoginEndpoint bool
 
-	Tracer *tracing.Tracer
 	// If set, a TraceDir is initialized at the provided path.
 	TraceDir string
 
-	// If set, the span configs infrastructure will be enabled. This is
-	// equivalent to setting COCKROACH_EXPERIMENTAL_SPAN_CONFIGS.
+	// If set, the span configs infrastructure will be enabled.
 	EnableSpanConfigs bool
 }
 
@@ -285,8 +282,4 @@ type TestTenantArgs struct {
 	// Locality is used to initialize the same-named field on the server.Config
 	// struct.
 	Locality roachpb.Locality
-
-	// SSLCertsDir is a path to a custom certs dir. If empty, will use the default
-	// embedded certs.
-	SSLCertsDir string
 }

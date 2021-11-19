@@ -11,7 +11,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	gosql "database/sql"
 	"encoding/json"
@@ -106,14 +105,6 @@ func (v *encryptValue) Type() string {
 	return "string"
 }
 
-type errBinaryOrLibraryNotFound struct {
-	binary string
-}
-
-func (e errBinaryOrLibraryNotFound) Error() string {
-	return fmt.Sprintf("binary or library %q not found (or was not executable)", e.binary)
-}
-
 func filepathAbs(path string) (string, error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
@@ -187,7 +178,7 @@ func findBinaryOrLibrary(binOrLib string, name string) (string, error) {
 				return filepathAbs(path)
 			}
 		}
-		return "", errBinaryOrLibraryNotFound{name}
+		return "", fmt.Errorf("failed to find %q in $PATH or any of %s", name, dirs)
 	}
 	return filepathAbs(path)
 }
@@ -214,9 +205,7 @@ func initBinariesAndLibraries() {
 	}
 
 	workload, err = findBinary(workload, "workload")
-	if errors.As(err, &errBinaryOrLibraryNotFound{}) {
-		fmt.Fprintln(os.Stderr, "workload binary not provided, proceeding anyway")
-	} else if err != nil {
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "%+v\n", err)
 		os.Exit(1)
 	}
@@ -841,8 +830,7 @@ func (f *clusterFactory) newCluster(
 	// Attempt to create a cluster several times to be able to move past
 	// temporary flakiness in the cloud providers.
 	const maxAttempts = 3
-	// loop assumes maxAttempts is atleast (1).
-	for i := 1; ; i++ {
+	for i := 0; ; i++ {
 		c := &clusterImpl{
 			// NB: this intentionally avoids re-using the name across iterations in
 			// the loop. See:
@@ -883,7 +871,7 @@ func (f *clusterFactory) newCluster(
 			log.Fatalf(ctx, "%v", err)
 		}
 
-		l.PrintfCtx(ctx, "Attempting cluster creation (attempt #%d/%d)", i, maxAttempts)
+		l.PrintfCtx(ctx, "Attempting cluster creation (attempt #%d/%d)", i+1, maxAttempts)
 		err = execCmd(ctx, l, sargs...)
 		if err == nil {
 			if err := f.r.registerCluster(c); err != nil {
@@ -905,7 +893,7 @@ func (f *clusterFactory) newCluster(
 		// (when selecting the test) it's the best we can do for now.
 		c.destroyState.alloc = nil
 		c.Destroy(ctx, closeLogger, l)
-		if i >= maxAttempts {
+		if i > maxAttempts {
 			// Here we have to release the alloc, as we are giving up.
 			cfg.alloc.Release()
 			return nil, err
@@ -944,7 +932,7 @@ func attachToExistingCluster(
 		expiration:     exp,
 		encryptDefault: encrypt.asBool(),
 		destroyState: destroyState{
-			// If we're attaching to an existing cluster, we're not going to destroy it.
+			// If we're attaching to an existing cluster, we're not going to destoy it.
 			owned: false,
 		},
 		r: r,
@@ -1034,8 +1022,7 @@ func (c *clusterImpl) validate(
 ) error {
 	// Perform validation on the existing cluster.
 	c.status("checking that existing cluster matches spec")
-	pattern := "^" + regexp.QuoteMeta(c.name) + "$"
-	sargs := []string{roachprod, "list", "--pattern", pattern, "--json", "--quiet"}
+	sargs := []string{roachprod, "list", c.name, "--json", "--quiet"}
 	out, err := execCmdWithBuffer(ctx, l, sargs...)
 	if err != nil {
 		return err
@@ -1180,65 +1167,19 @@ func (c *clusterImpl) CopyRoachprodState(ctx context.Context) error {
 //
 // `COCKROACH_DEBUG_TS_IMPORT_FILE=tsdump.gob ./cockroach start-single-node --insecure --store=$(mktemp -d)`
 func (c *clusterImpl) FetchTimeseriesData(ctx context.Context, t test.Test) error {
-	return contextutil.RunWithTimeout(ctx, "fetch tsdata", 5*time.Minute, func(ctx context.Context) error {
-		node := 1
-		for ; node <= c.spec.NodeCount; node++ {
-			db, err := c.ConnE(ctx, node)
+	return contextutil.RunWithTimeout(ctx, "debug zip", 5*time.Minute, func(ctx context.Context) error {
+		var err error
+		for i := 1; i <= c.spec.NodeCount; i++ {
+			err = c.RunE(ctx, c.Node(i), "./cockroach debug tsdump --insecure --format=raw > tsdump.gob")
 			if err == nil {
-				err = db.Ping()
-				db.Close()
+				err = c.Get(ctx, c.l, "tsdump.gob", filepath.Join(c.t.ArtifactsDir(), "tsdump.gob"), c.Node(i))
 			}
-			if err != nil {
-				t.L().Printf("node %d not responding to SQL, trying next one", node)
-				continue
+			if err == nil {
+				return nil
 			}
-			break
+			t.L().Printf("while fetching timeseries: %s", err)
 		}
-		if node > c.spec.NodeCount {
-			return errors.New("no node responds to SQL, cannot fetch tsdata")
-		}
-		if err := c.RunE(
-			ctx, c.Node(node), "./cockroach debug tsdump --insecure --format=raw > tsdump.gob",
-		); err != nil {
-			return err
-		}
-		tsDumpGob := filepath.Join(c.t.ArtifactsDir(), "tsdump.gob")
-		if err := c.Get(
-			ctx, c.l, "tsdump.gob", tsDumpGob, c.Node(node),
-		); err != nil {
-			return err
-		}
-		db, err := c.ConnE(ctx, node)
-		if err != nil {
-			return err
-		}
-		defer db.Close()
-		rows, err := db.QueryContext(
-			ctx,
-			` SELECT store_id, node_id FROM crdb_internal.kv_store_status`,
-		)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		var buf bytes.Buffer
-		for rows.Next() {
-			var storeID, nodeID int
-			if err := rows.Scan(&storeID, &nodeID); err != nil {
-				return err
-			}
-			fmt.Fprintf(&buf, "%d: %d\n", storeID, nodeID)
-		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		if err := ioutil.WriteFile(tsDumpGob+".yaml", buf.Bytes(), 0644); err != nil {
-			return err
-		}
-		return ioutil.WriteFile(tsDumpGob+"-run.sh", []byte(`#!/usr/bin/env bash
-
-COCKROACH_DEBUG_TS_IMPORT_FILE=tsdump.gob cockroach start-single-node --insecure
-`), 0755)
+		return err
 	})
 }
 
@@ -1732,17 +1673,17 @@ func (c *clusterImpl) GitClone(
 	ctx context.Context, l *logger.Logger, src, dest, branch string, node option.NodeListOption,
 ) error {
 	return c.RunL(ctx, l, node, "bash", "-e", "-c", fmt.Sprintf(`'
-if ! test -d %[1]s; then
-  git clone -b %[2]s --depth 1 %[3]s %[1]s
+if ! test -d %s; then
+  git clone -b %s --depth 1 %s %s
 else
-  cd %[1]s
+  cd %s
   git fetch origin
-  git checkout origin/%[2]s
+  git checkout origin/%s
 fi
 '`, dest,
-		branch,
-		src,
-	))
+		branch, src, dest,
+		dest,
+		branch))
 }
 
 func roachprodArgs(opts []option.Option) []string {

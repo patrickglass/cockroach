@@ -299,11 +299,6 @@ func (h *hasher) HashInt(val int) {
 	h.hash *= prime64
 }
 
-func (h *hasher) HashInt64(val int64) {
-	h.hash ^= internHash(val)
-	h.hash *= prime64
-}
-
 func (h *hasher) HashUint64(val uint64) {
 	h.hash ^= internHash(val)
 	h.hash *= prime64
@@ -401,29 +396,9 @@ func (h *hasher) hashDatumsWithType(datums tree.Datums, typ *types.T, alwaysHash
 }
 
 func (h *hasher) HashType(val *types.T) {
-	// We hash the type's OID and a few important fields; however, the hash
-	// collisions will still occur, so IsTypeEqual makes the final call about
-	// what types are identical.
-	h.HashInt(int(val.Oid()))
-	if precision := val.InternalType.Precision; precision != 0 {
-		h.HashInt(int(precision))
-	}
-	if width := val.InternalType.Width; width != 0 {
-		h.HashInt(int(width))
-	}
-	for _, t := range val.TupleContents() {
-		h.HashType(t)
-	}
-	for _, l := range val.TupleLabels() {
-		h.HashString(l)
-	}
-	if locale := val.Locale(); locale != "" {
-		h.HashString(locale)
-	}
-	if geo := val.InternalType.GeoMetadata; geo != nil {
-		h.HashInt(int(geo.SRID))
-		h.HashInt(int(geo.ShapeType))
-	}
+	// NOTE: type.String() is not a perfect hash of the type, as items such as
+	// precision and width may be lost. Collision handling must still occur.
+	h.HashString(val.String())
 }
 
 func (h *hasher) HashTypedExpr(val tree.TypedExpr) {
@@ -515,15 +490,8 @@ func (h *hasher) HashScanFlags(val ScanFlags) {
 	h.HashBool(val.NoZigzagJoin)
 	h.HashBool(val.NoFullScan)
 	h.HashBool(val.ForceIndex)
-	h.HashBool(val.ForceZigzag)
 	h.HashInt(int(val.Direction))
 	h.HashUint64(uint64(val.Index))
-	if !val.ZigzagIndexes.Empty() {
-		s := val.ZigzagIndexes
-		for i, ok := s.Next(0); ok; i, ok = s.Next(i + 1) {
-			h.HashInt(i)
-		}
-	}
 }
 
 func (h *hasher) HashJoinFlags(val JoinFlags) {
@@ -757,10 +725,6 @@ func (h *hasher) IsBoolEqual(l, r bool) bool {
 }
 
 func (h *hasher) IsIntEqual(l, r int) bool {
-	return l == r
-}
-
-func (h *hasher) IsInt64Equal(l, r int64) bool {
 	return l == r
 }
 

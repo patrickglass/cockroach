@@ -65,7 +65,10 @@ func (dsp *DistSQLPlanner) createBackfillerPhysicalPlan(
 	for i, sp := range spanPartitions {
 		ib := &execinfrapb.BackfillerSpec{}
 		*ib = spec
-		ib.Spans = sp.Spans
+		ib.Spans = make([]execinfrapb.TableReaderSpan, len(sp.Spans))
+		for j := range sp.Spans {
+			ib.Spans[j].Span = sp.Spans[j]
+		}
 
 		proc := physicalplan.Processor{
 			Node: sp.Node,

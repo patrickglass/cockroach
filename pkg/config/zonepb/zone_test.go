@@ -975,13 +975,13 @@ func TestZoneSpecifiers(t *testing.T) {
 	// Simulate exactly two named zones: one named default and one named carl.
 	// N.B. DefaultZoneName must always exist in the mapping; it is treated
 	// specially so that it always appears first in the lookup path.
-	defer func(old map[NamedZone]uint32) { NamedZones = old }(NamedZones)
-	NamedZones = map[NamedZone]uint32{
+	defer func(old map[string]uint32) { NamedZones = old }(NamedZones)
+	NamedZones = map[string]uint32{
 		DefaultZoneName: 0,
 		"carl":          42,
 	}
-	defer func(old map[uint32]NamedZone) { NamedZonesByID = old }(NamedZonesByID)
-	NamedZonesByID = map[uint32]NamedZone{
+	defer func(old map[uint32]string) { NamedZonesByID = old }(NamedZonesByID)
+	NamedZonesByID = map[uint32]string{
 		0:  DefaultZoneName,
 		42: "carl",
 	}
@@ -1188,9 +1188,12 @@ func TestZoneConfigToSpanConfigConversion(t *testing.T) {
 				GCPolicy: roachpb.GCPolicy{
 					TTLSeconds: 2400,
 				},
-				GlobalReads: false,
-				NumVoters:   0,
-				NumReplicas: 3,
+				GlobalReads:      false,
+				NumVoters:        0,
+				NumReplicas:      3,
+				Constraints:      []roachpb.ConstraintsConjunction{},
+				VoterConstraints: []roachpb.ConstraintsConjunction{},
+				LeasePreferences: []roachpb.LeasePreference{},
 			},
 		},
 		{
@@ -1210,9 +1213,12 @@ func TestZoneConfigToSpanConfigConversion(t *testing.T) {
 				GCPolicy: roachpb.GCPolicy{
 					TTLSeconds: 2400,
 				},
-				GlobalReads: true,
-				NumVoters:   0,
-				NumReplicas: 3,
+				GlobalReads:      true,
+				NumVoters:        0,
+				NumReplicas:      3,
+				Constraints:      []roachpb.ConstraintsConjunction{},
+				VoterConstraints: []roachpb.ConstraintsConjunction{},
+				LeasePreferences: []roachpb.LeasePreference{},
 			},
 		},
 		{
@@ -1232,9 +1238,12 @@ func TestZoneConfigToSpanConfigConversion(t *testing.T) {
 				GCPolicy: roachpb.GCPolicy{
 					TTLSeconds: 2400,
 				},
-				GlobalReads: false,
-				NumVoters:   0,
-				NumReplicas: 3,
+				GlobalReads:      false,
+				NumVoters:        0,
+				NumReplicas:      3,
+				Constraints:      []roachpb.ConstraintsConjunction{},
+				VoterConstraints: []roachpb.ConstraintsConjunction{},
+				LeasePreferences: []roachpb.LeasePreference{},
 			},
 		},
 		{
@@ -1303,6 +1312,8 @@ func TestZoneConfigToSpanConfigConversion(t *testing.T) {
 						},
 					},
 				},
+				VoterConstraints: []roachpb.ConstraintsConjunction{},
+				LeasePreferences: []roachpb.LeasePreference{},
 			},
 		},
 		{
@@ -1336,6 +1347,7 @@ func TestZoneConfigToSpanConfigConversion(t *testing.T) {
 				GlobalReads: false,
 				NumVoters:   0,
 				NumReplicas: 3,
+				Constraints: []roachpb.ConstraintsConjunction{},
 				VoterConstraints: []roachpb.ConstraintsConjunction{
 					{
 						Constraints: []roachpb.Constraint{
@@ -1348,6 +1360,7 @@ func TestZoneConfigToSpanConfigConversion(t *testing.T) {
 						},
 					},
 				},
+				LeasePreferences: []roachpb.LeasePreference{},
 			},
 		},
 		{
@@ -1383,9 +1396,11 @@ func TestZoneConfigToSpanConfigConversion(t *testing.T) {
 				GCPolicy: roachpb.GCPolicy{
 					TTLSeconds: 2400,
 				},
-				GlobalReads: false,
-				NumVoters:   0,
-				NumReplicas: 3,
+				GlobalReads:      false,
+				NumVoters:        0,
+				NumReplicas:      3,
+				Constraints:      []roachpb.ConstraintsConjunction{},
+				VoterConstraints: []roachpb.ConstraintsConjunction{},
 				LeasePreferences: []roachpb.LeasePreference{
 					{
 						Constraints: []roachpb.Constraint{
@@ -1413,9 +1428,4 @@ func TestZoneConfigToSpanConfigConversion(t *testing.T) {
 		}
 		require.Equal(t, tc.expectSpanConfig, spanConfig)
 	}
-}
-
-func TestDefaultZoneAndSpanConfigs(t *testing.T) {
-	converted := DefaultZoneConfigRef().AsSpanConfig()
-	require.True(t, converted.Equal(roachpb.TestingDefaultSpanConfig()))
 }

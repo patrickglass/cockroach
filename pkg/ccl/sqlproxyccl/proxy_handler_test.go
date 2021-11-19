@@ -33,7 +33,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -589,7 +588,6 @@ func TestDenylistUpdate(t *testing.T) {
 
 func TestDirectoryConnect(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	skip.UnderDeadlockWithIssue(t, 71365)
 
 	ctx := context.Background()
 	te := newTester()
@@ -1000,7 +998,7 @@ func newTester() *tester {
 	// Record successful connection and authentication.
 	originalAuthenticate := authenticate
 	te.restoreAuthenticate =
-		testutils.TestingHook(&authenticate, func(clientConn, crdbConn net.Conn, throttleHook func(status throttler.AttemptStatus) error) error {
+		testutils.TestingHook(&authenticate, func(clientConn, crdbConn net.Conn, throttleHook func(status throttler.AttemptStatus) *pgproto3.ErrorResponse) error {
 			err := originalAuthenticate(clientConn, crdbConn, throttleHook)
 			te.setAuthenticated(err == nil)
 			return err

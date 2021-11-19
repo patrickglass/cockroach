@@ -14,7 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
-	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -25,7 +25,7 @@ func CanProvide(expr memo.RelExpr, required *props.OrderingChoice) bool {
 	if required.Any() {
 		return true
 	}
-	if buildutil.CrdbTestBuild {
+	if util.CrdbTestBuild {
 		checkRequired(expr, required)
 	}
 	return funcMap[expr.Op()].canProvideOrdering(expr, required)
@@ -38,7 +38,7 @@ func BuildChildRequired(
 	parent memo.RelExpr, required *props.OrderingChoice, childIdx int,
 ) props.OrderingChoice {
 	result := funcMap[parent.Op()].buildChildReqOrdering(parent, required, childIdx)
-	if buildutil.CrdbTestBuild && !result.Any() {
+	if util.CrdbTestBuild && !result.Any() {
 		checkRequired(parent.Child(childIdx).(memo.RelExpr), &result)
 	}
 	return result
@@ -65,7 +65,7 @@ func BuildProvided(expr memo.RelExpr, required *props.OrderingChoice) opt.Orderi
 	}
 	provided := funcMap[expr.Op()].buildProvidedOrdering(expr, required)
 
-	if buildutil.CrdbTestBuild {
+	if util.CrdbTestBuild {
 		checkProvided(expr, required, provided)
 	}
 
@@ -174,11 +174,6 @@ func init() {
 		buildChildReqOrdering: limitOrOffsetBuildChildReqOrdering,
 		buildProvidedOrdering: limitOrOffsetBuildProvided,
 	}
-	funcMap[opt.TopKOp] = funcs{
-		canProvideOrdering:    topKCanProvideOrdering,
-		buildChildReqOrdering: noChildReqOrdering,
-		buildProvidedOrdering: topKBuildProvided,
-	}
 	funcMap[opt.ScalarGroupByOp] = funcs{
 		// ScalarGroupBy always has exactly one result; any required ordering should
 		// have been simplified to Any (unless normalization rules are disabled).
@@ -275,11 +270,6 @@ func init() {
 		canProvideOrdering:    canNeverProvideOrdering,
 		buildChildReqOrdering: exportBuildChildReqOrdering,
 		buildProvidedOrdering: noProvidedOrdering,
-	}
-	funcMap[opt.WithOp] = funcs{
-		canProvideOrdering:    withCanProvideOrdering,
-		buildChildReqOrdering: withBuildChildReqOrdering,
-		buildProvidedOrdering: withBuildProvided,
 	}
 }
 

@@ -244,7 +244,6 @@ const diagnosticsReportsInProgress: IStatementDiagnosticsReport[] = [
 ];
 
 const aggregatedTs = Date.parse("Sep 15 2021 01:00:00 GMT") * 1e-3;
-const aggregationInterval = 3600; // 1 hour
 
 const statementsPagePropsFixture: StatementsPageProps = {
   history,
@@ -267,17 +266,11 @@ const statementsPagePropsFixture: StatementsPageProps = {
     "3": "gcp-us-west1",
     "4": "gcp-europe-west1",
   },
-  sortSetting: {
-    ascending: false,
-    columnTitle: "executionCount"
-  },
   statements: [
     {
       label:
         "SELECT IFNULL(a, b) FROM (SELECT (SELECT code FROM promo_codes WHERE code > $1 ORDER BY code LIMIT _) AS a, (SELECT code FROM promo_codes ORDER BY code LIMIT _) AS b)",
-      summary: "SELECT IFNULL(a, b) FROM (SELECT)",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -285,9 +278,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "INSERT INTO vehicles VALUES ($1, $2, __more6__)",
-      summary: "INSERT INTO vehicles",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -296,9 +287,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "SELECT IFNULL(a, b) FROM (SELECT (SELECT id FROM users WHERE (city = $1) AND (id > $2) ORDER BY id LIMIT _) AS a, (SELECT id FROM users WHERE city = $1 ORDER BY id LIMIT _) AS b)",
-      summary: "SELECT IFNULL(a, b) FROM (SELECT)",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -307,9 +296,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "UPSERT INTO vehicle_location_histories VALUES ($1, $2, now(), $3, $4)",
-      summary: "UPSERT INTO vehicle_location_histories",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -317,9 +304,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "INSERT INTO user_promo_codes VALUES ($1, $2, $3, now(), _)",
-      summary: "INSERT INTO user_promo_codes",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -327,9 +312,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "SELECT city, id FROM vehicles WHERE city = $1",
-      summary: "SELECT city, id FROM vehicles",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: true,
@@ -338,19 +321,16 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "INSERT INTO rides VALUES ($1, $2, $2, $3, $4, $5, _, now(), _, $6)",
-      summary: "INSERT INTO rides",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
       stats: statementStats,
     },
     {
-      label: "SELECT IFNULL(a, b) FROM (SELECT  AS a, AS b)",
-      summary: "SELECT IFNULL(a, b) FROM (SELECT)",
+      label:
+        "SELECT IFNULL(a, b) FROM (SELECT (SELECT id FROM vehicles WHERE (city = $1) AND (id > $2) ORDER BY id LIMIT _) AS a, (SELECT id FROM vehicles WHERE city = $1 ORDER BY id LIMIT _) AS b)",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -359,9 +339,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "UPDATE rides SET end_address = $3, end_time = now() WHERE (city = $1) AND (id = $2)",
-      summary: "UPDATE rides SET end_address = $... WHERE (city = $1) AND...",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -369,9 +347,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "INSERT INTO users VALUES ($1, $2, __more3__)",
-      summary: "INSERT INTO users",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -380,9 +356,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "SELECT count(*) FROM user_promo_codes WHERE ((city = $1) AND (user_id = $2)) AND (code = $3)",
-      summary: "SELECT count(*) FROM user_promo_codes",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: true,
@@ -390,9 +364,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "INSERT INTO promo_codes VALUES ($1, $2, __more3__)",
-      summary: "INSERT INTO promo_codes",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -400,9 +372,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "ALTER TABLE users SCATTER FROM (_, _) TO (_, _)",
-      summary: "ALTER TABLE users SCATTER FROM (_, _) TO (_, _)",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -411,10 +381,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "ALTER TABLE rides ADD FOREIGN KEY (vehicle_city, vehicle_id) REFERENCES vehicles (city, id)",
-      summary:
-        "ALTER TABLE rides ADD FOREIGN KEY (vehicle_city, vehicle_id) REFERENCES vehicles (city, id)",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -422,9 +389,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "SHOW database",
-      summary: "SHOW database",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -434,10 +399,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "CREATE TABLE IF NOT EXISTS promo_codes (code VARCHAR NOT NULL, description VARCHAR NULL, creation_time TIMESTAMP NULL, expiration_time TIMESTAMP NULL, rules JSONB NULL, PRIMARY KEY (code ASC))",
-      summary:
-        "CREATE TABLE IF NOT EXISTS promo_codes (code VARCHAR NOT NULL, description VARCHAR NULL, creation_time TIMESTAMP NULL, expiration_time TIMESTAMP NULL, rules JSONB NULL, PRIMARY KEY (code ASC))",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -445,9 +407,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "ALTER TABLE users SPLIT AT VALUES (_, _)",
-      summary: "ALTER TABLE users SPLIT AT VALUES (_, _)",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -455,9 +415,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "ALTER TABLE vehicles SCATTER FROM (_, _) TO (_, _)",
-      summary: "ALTER TABLE vehicles SCATTER FROM (_, _) TO (_, _)",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -466,10 +424,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "ALTER TABLE vehicle_location_histories ADD FOREIGN KEY (city, ride_id) REFERENCES rides (city, id)",
-      summary:
-        "ALTER TABLE vehicle_location_histories ADD FOREIGN KEY (city, ride_id) REFERENCES rides (city, id)",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -478,10 +433,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         'CREATE TABLE IF NOT EXISTS user_promo_codes (city VARCHAR NOT NULL, user_id UUID NOT NULL, code VARCHAR NOT NULL, "timestamp" TIMESTAMP NULL, usage_count INT8 NULL, PRIMARY KEY (city ASC, user_id ASC, code ASC))',
-      summary:
-        'CREATE TABLE IF NOT EXISTS user_promo_codes (city VARCHAR NOT NULL, user_id UUID NOT NULL, code VARCHAR NOT NULL, "timestamp" TIMESTAMP NULL, usage_count INT8 NULL, PRIMARY KEY (city ASC, user_id ASC, code ASC))',
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -489,9 +441,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "INSERT INTO users VALUES ($1, $2, __more3__), (__more40__)",
-      summary: "INSERT INTO users VALUES",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -499,9 +449,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "ALTER TABLE rides SCATTER FROM (_, _) TO (_, _)",
-      summary: "ALTER TABLE rides SCATTER FROM (_, _) TO (_, _)",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -509,9 +457,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: 'SET CLUSTER SETTING "cluster.organization" = $1',
-      summary: 'SET CLUSTER SETTING "cluster.organization" = $1',
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -520,10 +466,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "ALTER TABLE vehicles ADD FOREIGN KEY (city, owner_id) REFERENCES users (city, id)",
-      summary:
-        "ALTER TABLE vehicles ADD FOREIGN KEY (city, owner_id) REFERENCES users (city, id)",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -532,10 +475,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "CREATE TABLE IF NOT EXISTS rides (id UUID NOT NULL, city VARCHAR NOT NULL, vehicle_city VARCHAR NULL, rider_id UUID NULL, vehicle_id UUID NULL, start_address VARCHAR NULL, end_address VARCHAR NULL, start_time TIMESTAMP NULL, end_time TIMESTAMP NULL, revenue DECIMAL(10,2) NULL, PRIMARY KEY (city ASC, id ASC), INDEX rides_auto_index_fk_city_ref_users (city ASC, rider_id ASC), INDEX rides_auto_index_fk_vehicle_city_ref_vehicles (vehicle_city ASC, vehicle_id ASC), CONSTRAINT check_vehicle_city_city CHECK (vehicle_city = city))",
-      summary:
-        "CREATE TABLE IF NOT EXISTS rides (id UUID NOT NULL, city VARCHAR NOT NULL, vehicle_city VARCHAR NULL, rider_id UUID NULL, vehicle_id UUID NULL, start_address VARCHAR NULL, end_address VARCHAR NULL, start_time TIMESTAMP NULL, end_time TIMESTAMP NULL, revenue DECIMAL(10,2) NULL, PRIMARY KEY (city ASC, id ASC), INDEX rides_auto_index_fk_city_ref_users (city ASC, rider_id ASC), INDEX rides_auto_index_fk_vehicle_city_ref_vehicles (vehicle_city ASC, vehicle_id ASC), CONSTRAINT check_vehicle_city_city CHECK (vehicle_city = city))",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -544,10 +484,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "CREATE TABLE IF NOT EXISTS vehicles (id UUID NOT NULL, city VARCHAR NOT NULL, type VARCHAR NULL, owner_id UUID NULL, creation_time TIMESTAMP NULL, status VARCHAR NULL, current_location VARCHAR NULL, ext JSONB NULL, PRIMARY KEY (city ASC, id ASC), INDEX vehicles_auto_index_fk_city_ref_users (city ASC, owner_id ASC))",
-      summary:
-        "CREATE TABLE IF NOT EXISTS vehicles (id UUID NOT NULL, city VARCHAR NOT NULL, type VARCHAR NULL, owner_id UUID NULL, creation_time TIMESTAMP NULL, status VARCHAR NULL, current_location VARCHAR NULL, ext JSONB NULL, PRIMARY KEY (city ASC, id ASC), INDEX vehicles_auto_index_fk_city_ref_users (city ASC, owner_id ASC))",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -555,9 +492,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "INSERT INTO rides VALUES ($1, $2, __more8__), (__more400__)",
-      summary: "INSERT INTO rides",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -565,9 +500,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "ALTER TABLE vehicles SPLIT AT VALUES (_, _)",
-      summary: "ALTER TABLE vehicles SPLIT AT VALUES (_, _)",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -575,9 +508,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "SET sql_safe_updates = _",
-      summary: "SET sql_safe_updates = _",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -586,10 +517,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "CREATE TABLE IF NOT EXISTS users (id UUID NOT NULL, city VARCHAR NOT NULL, name VARCHAR NULL, address VARCHAR NULL, credit_card VARCHAR NULL, PRIMARY KEY (city ASC, id ASC))",
-      summary:
-        "CREATE TABLE IF NOT EXISTS users (id UUID NOT NULL, city VARCHAR NOT NULL, name VARCHAR NULL, address VARCHAR NULL, credit_card VARCHAR NULL, PRIMARY KEY (city ASC, id ASC))",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -598,10 +526,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         'CREATE TABLE IF NOT EXISTS vehicle_location_histories (city VARCHAR NOT NULL, ride_id UUID NOT NULL, "timestamp" TIMESTAMP NOT NULL, lat FLOAT8 NULL, long FLOAT8 NULL, PRIMARY KEY (city ASC, ride_id ASC, "timestamp" ASC))',
-      summary:
-        'CREATE TABLE IF NOT EXISTS vehicle_location_histories (city VARCHAR NOT NULL, ride_id UUID NOT NULL, "timestamp" TIMESTAMP NOT NULL, lat FLOAT8 NULL, long FLOAT8 NULL, PRIMARY KEY (city ASC, ride_id ASC, "timestamp" ASC))',
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -609,9 +534,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "SELECT * FROM crdb_internal.node_build_info",
-      summary: "SELECT * FROM crdb_internal.node_build_info",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -619,10 +542,8 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "CREATE DATABASE movr",
-      summary: "CREATE DATABASE movr",
       implicitTxn: true,
       aggregatedTs,
-      aggregationInterval,
       database: "defaultdb",
       fullScan: false,
       stats: statementStats,
@@ -631,9 +552,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "SELECT count(*) > _ FROM [SHOW ALL CLUSTER SETTINGS] AS _ (v) WHERE v = _",
-      summary: "SELECT count(*) > _ FROM [SHOW ALL CLUSTER SETTINGS] AS...",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -641,9 +560,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: 'SET CLUSTER SETTING "enterprise.license" = $1',
-      summary: 'SET CLUSTER SETTING "enterprise.license" = $1',
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -652,10 +569,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "ALTER TABLE rides ADD FOREIGN KEY (city, rider_id) REFERENCES users (city, id)",
-      summary:
-        "ALTER TABLE rides ADD FOREIGN KEY (city, rider_id) REFERENCES users (city, id)",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -664,10 +578,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "ALTER TABLE user_promo_codes ADD FOREIGN KEY (city, user_id) REFERENCES users (city, id)",
-      summary:
-        "ALTER TABLE user_promo_codes ADD FOREIGN KEY (city, user_id) REFERENCES users (city, id)",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -676,9 +587,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "INSERT INTO promo_codes VALUES ($1, $2, __more3__), (__more900__)",
-      summary: "INSERT INTO promo_codes",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -686,9 +595,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "ALTER TABLE rides SPLIT AT VALUES (_, _)",
-      summary: "ALTER TABLE rides SPLIT AT VALUES (_, _)",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -696,9 +603,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "SELECT value FROM crdb_internal.node_build_info WHERE field = _",
-      summary: "SELECT value FROM crdb_internal.node_build_info",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -707,9 +612,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     {
       label:
         "INSERT INTO vehicle_location_histories VALUES ($1, $2, __more3__), (__more900__)",
-      summary: "INSERT INTO vehicle_location_histories",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -717,9 +620,7 @@ const statementsPagePropsFixture: StatementsPageProps = {
     },
     {
       label: "INSERT INTO vehicles VALUES ($1, $2, __more6__), (__more10__)",
-      summary: "INSERT INTO vehicles",
       aggregatedTs,
-      aggregationInterval,
       implicitTxn: true,
       database: "defaultdb",
       fullScan: false,
@@ -742,7 +643,6 @@ const statementsPagePropsFixture: StatementsPageProps = {
   onSearchComplete: noop,
   onDiagnosticsReportDownload: noop,
   onColumnsChange: noop,
-  onSortingChange: noop,
 };
 
 export const statementsPagePropsWithRequestError: StatementsPageProps = {

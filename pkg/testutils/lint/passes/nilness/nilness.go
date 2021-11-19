@@ -110,7 +110,7 @@ var defaultConfig = analyzerConfig{
 }
 
 // CRDBAnalyzer defines a pass that checks for uses of provably nil
-// values that were likely in error with custom configuration
+// values that were likely in error with custom configuruation
 // suitable for the CRDB codebase.
 var CRDBAnalyzer = &analysis.Analyzer{
 	Name:     "nilness",

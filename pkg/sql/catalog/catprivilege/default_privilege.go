@@ -141,10 +141,10 @@ func (d *immutable) CreatePrivilegesFromDefaultPrivileges(
 	// If a new system table is being created (which should only be doable by
 	// an internal user account), make sure it gets the correct privileges.
 	if dbID == keys.SystemDatabaseID {
-		return descpb.NewBasePrivilegeDescriptor(security.NodeUserName())
+		return descpb.NewDefaultPrivilegeDescriptor(security.NodeUserName())
 	}
 
-	newPrivs := descpb.NewBasePrivilegeDescriptor(user)
+	newPrivs := descpb.NewDefaultPrivilegeDescriptor(user)
 	role := descpb.DefaultPrivilegesRole{Role: user}
 	if defaultPrivilegesForRole, found := d.GetDefaultPrivilegesForRole(role); !found {
 		// If default privileges are not defined for the creator role, we handle

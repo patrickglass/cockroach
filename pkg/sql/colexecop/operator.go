@@ -72,9 +72,6 @@ type KVReader interface {
 	// GetCumulativeContentionTime returns the amount of time KV reads spent
 	// contending. It must be safe for concurrent use.
 	GetCumulativeContentionTime() time.Duration
-	// GetScanStats returns statistics about the scan that happened during the
-	// KV reads. It must be safe for concurrent use.
-	GetScanStats() execinfra.ScanStats
 }
 
 // ZeroInputNode is an execinfra.OpNode with no inputs.
@@ -161,13 +158,14 @@ type Closers []Closer
 // sense.
 func (c Closers) CloseAndLogOnErr(ctx context.Context, prefix string) {
 	if err := colexecerror.CatchVectorizedRuntimeError(func() {
+		prefix += ":"
 		for _, closer := range c {
 			if err := closer.Close(); err != nil && log.V(1) {
-				log.Infof(ctx, "%s: error closing Closer: %v", prefix, err)
+				log.Infof(ctx, "%s error closing Closer: %v", prefix, err)
 			}
 		}
 	}); err != nil && log.V(1) {
-		log.Infof(ctx, "%s: runtime error closing the closers: %v", prefix, err)
+		log.Infof(ctx, "%s runtime error closing the closers: %v", prefix, err)
 	}
 }
 

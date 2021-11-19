@@ -154,17 +154,16 @@ var validationMap = []struct {
 			"ForeignKey":   {status: thisFieldReferencesNoObjects},
 			"ReferencedBy": {status: thisFieldReferencesNoObjects},
 
-			"Interleave":                  {status: iSolemnlySwearThisFieldIsValidated},
-			"InterleavedBy":               {status: iSolemnlySwearThisFieldIsValidated},
-			"Partitioning":                {status: iSolemnlySwearThisFieldIsValidated},
-			"Type":                        {status: thisFieldReferencesNoObjects},
-			"CreatedExplicitly":           {status: thisFieldReferencesNoObjects},
-			"EncodingType":                {status: thisFieldReferencesNoObjects},
-			"Sharded":                     {status: iSolemnlySwearThisFieldIsValidated},
-			"Disabled":                    {status: thisFieldReferencesNoObjects},
-			"GeoConfig":                   {status: thisFieldReferencesNoObjects},
-			"Predicate":                   {status: iSolemnlySwearThisFieldIsValidated},
-			"UseDeletePreservingEncoding": {status: thisFieldReferencesNoObjects},
+			"Interleave":        {status: iSolemnlySwearThisFieldIsValidated},
+			"InterleavedBy":     {status: iSolemnlySwearThisFieldIsValidated},
+			"Partitioning":      {status: iSolemnlySwearThisFieldIsValidated},
+			"Type":              {status: thisFieldReferencesNoObjects},
+			"CreatedExplicitly": {status: thisFieldReferencesNoObjects},
+			"EncodingType":      {status: thisFieldReferencesNoObjects},
+			"Sharded":           {status: iSolemnlySwearThisFieldIsValidated},
+			"Disabled":          {status: thisFieldReferencesNoObjects},
+			"GeoConfig":         {status: thisFieldReferencesNoObjects},
+			"Predicate":         {status: iSolemnlySwearThisFieldIsValidated},
 		},
 	},
 	{
@@ -852,29 +851,6 @@ func TestValidateTableDesc(t *testing.T) {
 				NextFamilyID: 1,
 				NextIndexID:  2,
 			}},
-		{`index "primary" contains deprecated foreign key representation`,
-			descpb.TableDescriptor{
-				ID:            2,
-				ParentID:      1,
-				Name:          "foo",
-				FormatVersion: descpb.InterleavedFormatVersion,
-				Columns: []descpb.ColumnDescriptor{
-					{ID: 1, Name: "bar"},
-				},
-				Families: []descpb.ColumnFamilyDescriptor{
-					{ID: 0, Name: "primary", ColumnIDs: []descpb.ColumnID{1}, ColumnNames: []string{"bar"}},
-				},
-				PrimaryIndex: descpb.IndexDescriptor{ID: 1, Name: "primary",
-					KeyColumnIDs: []descpb.ColumnID{1}, KeyColumnNames: []string{"bar"},
-					KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-					EncodingType:        descpb.PrimaryIndexEncoding,
-					Version:             descpb.PrimaryIndexWithStoredColumnsVersion,
-					ForeignKey:          descpb.ForeignKeyReference{Table: 123, Index: 456},
-				},
-				NextColumnID: 2,
-				NextFamilyID: 1,
-				NextIndexID:  2,
-			}},
 		{`at least one of LIST or RANGE partitioning must be used`,
 			// Verify that validatePartitioning is hooked up. The rest of these
 			// tests are in TestValidatePartitionion.
@@ -1424,6 +1400,213 @@ func TestValidateCrossTableReferences(t *testing.T) {
 			}},
 		},
 		{ // 4
+			// Regression test for #57066: We can handle one of the referenced tables
+			// having a pre-19.2 foreign key reference.
+			err: "",
+			desc: descpb.TableDescriptor{
+				ID:                      51,
+				Name:                    "foo",
+				ParentID:                1,
+				UnexposedParentSchemaID: keys.PublicSchemaID,
+				FormatVersion:           descpb.InterleavedFormatVersion,
+				Indexes: []descpb.IndexDescriptor{
+					{
+						ID:           2,
+						KeyColumnIDs: []descpb.ColumnID{1, 2},
+					},
+				},
+				OutboundFKs: []descpb.ForeignKeyConstraint{
+					{
+						Name:                "fk",
+						ReferencedTableID:   52,
+						ReferencedColumnIDs: []descpb.ColumnID{1},
+						OriginTableID:       51,
+						OriginColumnIDs:     []descpb.ColumnID{1},
+					},
+				},
+			},
+			otherDescs: []descpb.TableDescriptor{{
+				ID:                      52,
+				Name:                    "baz",
+				ParentID:                1,
+				UnexposedParentSchemaID: keys.PublicSchemaID,
+				FormatVersion:           descpb.InterleavedFormatVersion,
+				Indexes: []descpb.IndexDescriptor{
+					{
+						Unique:       true,
+						KeyColumnIDs: []descpb.ColumnID{1},
+						ReferencedBy: []descpb.ForeignKeyReference{{Table: 51, Index: 2}},
+					},
+				},
+			}},
+		},
+		{ // 5
+			// Regression test for #57066: We can handle one of the referenced tables
+			// having a pre-19.2 foreign key reference.
+			err: "",
+			desc: descpb.TableDescriptor{
+				ID:                      51,
+				Name:                    "foo",
+				ParentID:                1,
+				UnexposedParentSchemaID: keys.PublicSchemaID,
+				FormatVersion:           descpb.InterleavedFormatVersion,
+				Indexes: []descpb.IndexDescriptor{
+					{
+						ID:           2,
+						KeyColumnIDs: []descpb.ColumnID{7},
+						Unique:       true,
+					},
+				},
+				InboundFKs: []descpb.ForeignKeyConstraint{
+					{
+						Name:                "fk",
+						ReferencedTableID:   51,
+						ReferencedColumnIDs: []descpb.ColumnID{7},
+						OriginTableID:       52,
+						OriginColumnIDs:     []descpb.ColumnID{1},
+					},
+				},
+			},
+			otherDescs: []descpb.TableDescriptor{{
+				ID:                      52,
+				Name:                    "baz",
+				ParentID:                1,
+				UnexposedParentSchemaID: keys.PublicSchemaID,
+				FormatVersion:           descpb.InterleavedFormatVersion,
+				Indexes: []descpb.IndexDescriptor{
+					{
+						ID:           2,
+						Unique:       true,
+						KeyColumnIDs: []descpb.ColumnID{1},
+						ForeignKey:   descpb.ForeignKeyReference{Table: 51, Index: 2},
+					},
+				},
+			}},
+		},
+
+		// Interleaves
+		{ // 6
+			err: `invalid interleave: missing table=52 index=2: referenced table ID 52: descriptor not found`,
+			desc: descpb.TableDescriptor{
+				Name:                    "foo",
+				ID:                      51,
+				ParentID:                1,
+				UnexposedParentSchemaID: keys.PublicSchemaID,
+				FormatVersion:           descpb.InterleavedFormatVersion,
+				PrimaryIndex: descpb.IndexDescriptor{
+					ID: 1,
+					Interleave: descpb.InterleaveDescriptor{Ancestors: []descpb.InterleaveDescriptor_Ancestor{
+						{TableID: 52, IndexID: 2},
+					}},
+				},
+			},
+			otherDescs: nil,
+		},
+		{ // 7
+			err: `invalid interleave: missing table=baz index=2: index-id "2" does not exist`,
+			desc: descpb.TableDescriptor{
+				Name:                    "foo",
+				ID:                      51,
+				ParentID:                1,
+				UnexposedParentSchemaID: keys.PublicSchemaID,
+				FormatVersion:           descpb.InterleavedFormatVersion,
+				PrimaryIndex: descpb.IndexDescriptor{
+					ID: 1,
+					Interleave: descpb.InterleaveDescriptor{Ancestors: []descpb.InterleaveDescriptor_Ancestor{
+						{TableID: 52, IndexID: 2},
+					}},
+				},
+			},
+			otherDescs: []descpb.TableDescriptor{{
+				ID:                      52,
+				Name:                    "baz",
+				ParentID:                1,
+				UnexposedParentSchemaID: keys.PublicSchemaID,
+			}},
+		},
+		{ // 8
+			err: `missing interleave back reference to "foo"@"bar" from "baz"@"qux"`,
+			desc: descpb.TableDescriptor{
+				Name:                    "foo",
+				ID:                      51,
+				ParentID:                1,
+				UnexposedParentSchemaID: keys.PublicSchemaID,
+				PrimaryIndex: descpb.IndexDescriptor{
+					ID:   1,
+					Name: "bar",
+					Interleave: descpb.InterleaveDescriptor{Ancestors: []descpb.InterleaveDescriptor_Ancestor{
+						{TableID: 52, IndexID: 2},
+					}},
+				},
+			},
+			otherDescs: []descpb.TableDescriptor{{
+				ID:                      52,
+				Name:                    "baz",
+				ParentID:                1,
+				UnexposedParentSchemaID: keys.PublicSchemaID,
+				PrimaryIndex: descpb.IndexDescriptor{
+					ID:   2,
+					Name: "qux",
+				},
+			}},
+		},
+		{ // 9
+			err: `invalid interleave backreference table=52 index=2: referenced table ID 52: descriptor not found`,
+			desc: descpb.TableDescriptor{
+				Name:                    "foo",
+				ID:                      51,
+				ParentID:                1,
+				UnexposedParentSchemaID: keys.PublicSchemaID,
+				PrimaryIndex: descpb.IndexDescriptor{
+					ID:            1,
+					InterleavedBy: []descpb.ForeignKeyReference{{Table: 52, Index: 2}},
+				},
+			},
+		},
+		{ // 10
+			err: `invalid interleave backreference table=baz index=2: index-id "2" does not exist`,
+			desc: descpb.TableDescriptor{
+				Name:                    "foo",
+				ID:                      51,
+				ParentID:                1,
+				UnexposedParentSchemaID: keys.PublicSchemaID,
+				PrimaryIndex: descpb.IndexDescriptor{
+					ID:            1,
+					InterleavedBy: []descpb.ForeignKeyReference{{Table: 52, Index: 2}},
+				},
+			},
+			otherDescs: []descpb.TableDescriptor{{
+				ID:                      52,
+				Name:                    "baz",
+				ParentID:                1,
+				UnexposedParentSchemaID: keys.PublicSchemaID,
+			}},
+		},
+		{ // 11
+			err: `broken interleave backward reference from "foo"@"bar" to "baz"@"qux"`,
+			desc: descpb.TableDescriptor{
+				Name:                    "foo",
+				ID:                      51,
+				ParentID:                1,
+				UnexposedParentSchemaID: keys.PublicSchemaID,
+				PrimaryIndex: descpb.IndexDescriptor{
+					ID:            1,
+					Name:          "bar",
+					InterleavedBy: []descpb.ForeignKeyReference{{Table: 52, Index: 2}},
+				},
+			},
+			otherDescs: []descpb.TableDescriptor{{
+				Name:                    "baz",
+				ID:                      52,
+				ParentID:                1,
+				UnexposedParentSchemaID: keys.PublicSchemaID,
+				PrimaryIndex: descpb.IndexDescriptor{
+					ID:   2,
+					Name: "qux",
+				},
+			}},
+		},
+		{ // 12
 			err: `referenced type ID 500: descriptor not found`,
 			desc: descpb.TableDescriptor{
 				Name:                    "foo",
@@ -1446,7 +1629,7 @@ func TestValidateCrossTableReferences(t *testing.T) {
 			},
 		},
 		// Add some expressions with invalid type references.
-		{ // 5
+		{ // 13
 			err: `referenced type ID 500: descriptor not found`,
 			desc: descpb.TableDescriptor{
 				Name:                    "foo",
@@ -1469,7 +1652,7 @@ func TestValidateCrossTableReferences(t *testing.T) {
 				},
 			},
 		},
-		{ // 6
+		{ // 14
 			err: `referenced type ID 500: descriptor not found`,
 			desc: descpb.TableDescriptor{
 				Name:                    "foo",
@@ -1492,7 +1675,7 @@ func TestValidateCrossTableReferences(t *testing.T) {
 				},
 			},
 		},
-		{ // 7
+		{ // 15
 			err: `referenced type ID 500: descriptor not found`,
 			desc: descpb.TableDescriptor{
 				Name:                    "foo",
@@ -1506,7 +1689,7 @@ func TestValidateCrossTableReferences(t *testing.T) {
 				},
 			},
 		},
-		{ // 8
+		{ // 16
 			err: `referenced type ID 500: descriptor not found`,
 			desc: descpb.TableDescriptor{
 				Name:                    "foo",
@@ -1530,7 +1713,7 @@ func TestValidateCrossTableReferences(t *testing.T) {
 			},
 		},
 		// Temporary tables.
-		{ // 9
+		{ // 17
 			err: "",
 			desc: descpb.TableDescriptor{
 				Name:                    "foo",
@@ -1547,7 +1730,7 @@ func TestValidateCrossTableReferences(t *testing.T) {
 		descs := catalog.MakeMapDescGetter()
 		descs.Descriptors[1] = dbdesc.NewBuilder(&descpb.DatabaseDescriptor{ID: 1}).BuildImmutable()
 		for _, otherDesc := range test.otherDescs {
-			otherDesc.Privileges = descpb.NewBasePrivilegeDescriptor(security.AdminRoleName())
+			otherDesc.Privileges = descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName())
 			descs.Descriptors[otherDesc.ID] = NewBuilder(&otherDesc).BuildImmutable()
 		}
 		desc := NewBuilder(&test.desc).BuildImmutable()

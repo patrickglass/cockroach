@@ -13,6 +13,7 @@ package kvserver
 import (
 	"context"
 	"time"
+	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -79,7 +80,8 @@ func (s *Store) tryGetOrCreateReplica(
 	creatingReplica *roachpb.ReplicaDescriptor,
 ) (_ *Replica, created bool, _ error) {
 	// The common case: look up an existing (initialized) replica.
-	if repl, ok := s.mu.replicasByRangeID.Load(rangeID); ok {
+	if value, ok := s.mu.replicas.Load(int64(rangeID)); ok {
+		repl := (*Replica)(value)
 		repl.raftMu.Lock() // not unlocked on success
 		repl.mu.Lock()
 
@@ -295,8 +297,8 @@ func (s *Store) addReplicaToRangeMapLocked(repl *Replica) error {
 	// It's ok for the replica to exist in the replicas map as long as it is the
 	// same replica object. This occurs during splits where the right-hand side
 	// is added to the replicas map before it is initialized.
-	if existing, loaded := s.mu.replicasByRangeID.LoadOrStore(
-		repl.RangeID, repl); loaded && existing != repl {
+	if existing, loaded := s.mu.replicas.LoadOrStore(
+		int64(repl.RangeID), unsafe.Pointer(repl)); loaded && (*Replica)(existing) != repl {
 		return errors.Errorf("%s: replica already exists", repl)
 	}
 	// Check whether the replica is unquiesced but not in the map. This
@@ -312,7 +314,7 @@ func (s *Store) addReplicaToRangeMapLocked(repl *Replica) error {
 }
 
 // maybeMarkReplicaInitializedLocked should be called whenever a previously
-// uninitialized replica has become initialized so that the store can update its
+// unintialized replica has become initialized so that the store can update its
 // internal bookkeeping. It requires that Store.mu and Replica.raftMu
 // are locked.
 func (s *Store) maybeMarkReplicaInitializedLockedReplLocked(

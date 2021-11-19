@@ -25,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
@@ -64,12 +63,11 @@ func TestDBAddSSTable(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	t.Run("store=in-memory", func(t *testing.T) {
-		si, _, db := serverutils.StartServer(t, base.TestServerArgs{Insecure: true})
-		s := si.(*server.TestServer)
+		s, _, db := serverutils.StartServer(t, base.TestServerArgs{Insecure: true})
 		ctx := context.Background()
 		defer s.Stopper().Stop(ctx)
 
-		tr := s.Tracer()
+		tr := s.ClusterSettings().Tracer
 		runTestDBAddSSTable(ctx, t, db, tr, nil)
 	})
 	t.Run("store=on-disk", func(t *testing.T) {
@@ -79,11 +77,10 @@ func TestDBAddSSTable(t *testing.T) {
 		storeSpec := base.DefaultTestStoreSpec
 		storeSpec.InMemory = false
 		storeSpec.Path = dir
-		si, _, db := serverutils.StartServer(t, base.TestServerArgs{
+		s, _, db := serverutils.StartServer(t, base.TestServerArgs{
 			Insecure:   true,
 			StoreSpecs: []base.StoreSpec{storeSpec},
 		})
-		s := si.(*server.TestServer)
 		ctx := context.Background()
 		defer s.Stopper().Stop(ctx)
 		store, err := s.GetStores().(*kvserver.Stores).GetStore(s.GetFirstStoreID())
@@ -91,7 +88,7 @@ func TestDBAddSSTable(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		tr := s.TracerI().(*tracing.Tracer)
+		tr := s.ClusterSettings().Tracer
 		runTestDBAddSSTable(ctx, t, db, tr, store)
 	})
 }
@@ -126,14 +123,14 @@ func runTestDBAddSSTable(
 		}
 
 		// Do an initial ingest.
-		ingestCtx, getRecAndFinish := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
-		defer getRecAndFinish()
+		ingestCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
+		defer cancel()
 		if err := db.AddSSTable(
 			ingestCtx, "b", "c", data, false /* disallowShadowing */, nilStats, ingestAsSST, hlc.Timestamp{},
 		); err != nil {
 			t.Fatalf("%+v", err)
 		}
-		formatted := getRecAndFinish().String()
+		formatted := collect().String()
 		if err := testutils.MatchEach(formatted,
 			"evaluating AddSSTable",
 			"sideloadable proposal detected",
@@ -205,15 +202,15 @@ func runTestDBAddSSTable(
 			before = metrics.AddSSTableApplicationCopies.Count()
 		}
 		for i := 0; i < 2; i++ {
-			ingestCtx, getRecAndFinish := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
-			defer getRecAndFinish()
+			ingestCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
+			defer cancel()
 
 			if err := db.AddSSTable(
 				ingestCtx, "b", "c", data, false /* disallowShadowing */, nilStats, ingestAsSST, hlc.Timestamp{},
 			); err != nil {
 				t.Fatalf("%+v", err)
 			}
-			if err := testutils.MatchEach(getRecAndFinish().String(),
+			if err := testutils.MatchEach(collect().String(),
 				"evaluating AddSSTable",
 				"sideloadable proposal detected",
 				"ingested SSTable at index",
@@ -260,15 +257,15 @@ func runTestDBAddSSTable(
 			before = metrics.AddSSTableApplications.Count()
 		}
 		for i := 0; i < 2; i++ {
-			ingestCtx, getRecAndFinish := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
-			defer getRecAndFinish()
+			ingestCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
+			defer cancel()
 
 			if err := db.AddSSTable(
 				ingestCtx, "b", "c", data, false /* disallowShadowing */, nilStats, ingestAsWrites, hlc.Timestamp{},
 			); err != nil {
 				t.Fatalf("%+v", err)
 			}
-			if err := testutils.MatchEach(getRecAndFinish().String(),
+			if err := testutils.MatchEach(collect().String(),
 				"evaluating AddSSTable",
 				"via regular write batch",
 			); err != nil {

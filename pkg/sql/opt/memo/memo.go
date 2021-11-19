@@ -147,13 +147,11 @@ type Memo struct {
 	intervalStyleEnabled    bool
 	dateStyle               pgdate.DateStyle
 	intervalStyle           duration.IntervalStyle
-	propagateInputOrdering  bool
 	disallowFullTableScans  bool
 	largeFullScanRows       float64
-	nullOrderedLast         bool
 
-	// curRank is the highest currently in-use scalar expression rank.
-	curRank opt.ScalarRank
+	// curID is the highest currently in-use scalar expression ID.
+	curID opt.ScalarID
 
 	// curWithID is the highest currently in-use WITH ID.
 	curWithID opt.WithID
@@ -193,10 +191,8 @@ func (m *Memo) Init(evalCtx *tree.EvalContext) {
 		dateStyleEnabled:        evalCtx.SessionData().DateStyleEnabled,
 		dateStyle:               evalCtx.SessionData().GetDateStyle(),
 		intervalStyle:           evalCtx.SessionData().GetIntervalStyle(),
-		propagateInputOrdering:  evalCtx.SessionData().PropagateInputOrdering,
 		disallowFullTableScans:  evalCtx.SessionData().DisallowFullTableScans,
 		largeFullScanRows:       evalCtx.SessionData().LargeFullScanRows,
-		nullOrderedLast:         evalCtx.SessionData().NullOrderedLast,
 	}
 	m.metadata.Init()
 	m.logPropsBuilder.init(evalCtx, m)
@@ -309,10 +305,8 @@ func (m *Memo) IsStale(
 		m.dateStyleEnabled != evalCtx.SessionData().DateStyleEnabled ||
 		m.dateStyle != evalCtx.SessionData().GetDateStyle() ||
 		m.intervalStyle != evalCtx.SessionData().GetIntervalStyle() ||
-		m.propagateInputOrdering != evalCtx.SessionData().PropagateInputOrdering ||
 		m.disallowFullTableScans != evalCtx.SessionData().DisallowFullTableScans ||
-		m.largeFullScanRows != evalCtx.SessionData().LargeFullScanRows ||
-		m.nullOrderedLast != evalCtx.SessionData().NullOrderedLast {
+		m.largeFullScanRows != evalCtx.SessionData().LargeFullScanRows {
 		return true, nil
 	}
 
@@ -382,15 +376,15 @@ func (m *Memo) IsOptimized() bool {
 	return ok && rel.RequiredPhysical() != nil
 }
 
-// NextRank returns a new rank that can be assigned to a scalar expression.
-func (m *Memo) NextRank() opt.ScalarRank {
-	m.curRank++
-	return m.curRank
+// NextID returns a new unique ScalarID to number expressions with.
+func (m *Memo) NextID() opt.ScalarID {
+	m.curID++
+	return m.curID
 }
 
-// CopyNextRankFrom copies the next ScalarRank from the other memo.
-func (m *Memo) CopyNextRankFrom(other *Memo) {
-	m.curRank = other.curRank
+// CopyNextIDFrom copies the next ScalarID from the other memo.
+func (m *Memo) CopyNextIDFrom(other *Memo) {
+	m.curID = other.curID
 }
 
 // RequestColStat calculates and returns the column statistic calculated on the

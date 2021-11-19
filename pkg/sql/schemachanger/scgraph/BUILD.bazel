@@ -1,4 +1,4 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "scgraph",
@@ -9,24 +9,9 @@ go_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scgraph",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/sql/schemachanger/rel",
         "//pkg/sql/schemachanger/scop",
         "//pkg/sql/schemachanger/scpb",
-        "//pkg/sql/schemachanger/screl",
         "//pkg/util/iterutil",
         "@com_github_cockroachdb_errors//:errors",
-        "@com_github_google_btree//:btree",
-    ],
-)
-
-go_test(
-    name = "scgraph_test",
-    srcs = ["graph_test.go"],
-    deps = [
-        ":scgraph",
-        "//pkg/sql/catalog/descpb",
-        "//pkg/sql/schemachanger/scop",
-        "//pkg/sql/schemachanger/scpb",
-        "@com_github_stretchr_testify//require",
     ],
 )

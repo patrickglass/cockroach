@@ -40,8 +40,3 @@ export const selectTxnColumns = createSelector(
       ? localStorage["showColumns/TransactionPage"].split(",")
       : null,
 );
-
-export const selectSortSetting = createSelector(
-  localStorageSelector,
-  localStorage => localStorage["sortSetting/TransactionsPage"],
-);

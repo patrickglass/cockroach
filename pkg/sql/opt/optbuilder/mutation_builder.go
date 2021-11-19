@@ -321,8 +321,8 @@ func (mb *mutationBuilder) buildInputForUpdate(
 		mb.outScope.appendColumnsFromScope(mb.fetchScope)
 		mb.outScope.appendColumnsFromScope(fromScope)
 
-		left := mb.fetchScope.expr
-		right := fromScope.expr
+		left := mb.fetchScope.expr.(memo.RelExpr)
+		right := fromScope.expr.(memo.RelExpr)
 		mb.outScope.expr = mb.b.factory.ConstructInnerJoin(left, right, memo.TrueFilter, memo.EmptyJoinPrivate)
 	} else {
 		mb.outScope = mb.fetchScope
@@ -1370,7 +1370,6 @@ func resultsNeeded(r tree.ReturningClause) bool {
 // be different (eg. TEXT and VARCHAR will fit the same scalar type String).
 //
 // This is used by the UPDATE, INSERT and UPSERT code.
-// TODO(mgartner): Remove this once assignment casts are fully supported.
 func checkDatumTypeFitsColumnType(col *cat.Column, typ *types.T) {
 	if typ.Equivalent(col.DatumType()) {
 		return
@@ -1382,62 +1381,6 @@ func checkDatumTypeFitsColumnType(col *cat.Column, typ *types.T) {
 		typ, col.DatumType(), tree.ErrNameString(colName))
 	err = errors.WithHint(err, "you will need to rewrite or cast the expression")
 	panic(err)
-}
-
-// addAssignmentCasts builds a projection that wraps mutation values with
-// assignment casts when possible so that the resulting columns have types
-// identical to those in outTypes. If all the columns in inScope already have
-// identical types, then no projection is built. If there is no valid assignment
-// cast from a column type in inScope to the corresponding target column type,
-// then this function will error.
-func (mb *mutationBuilder) addAssignmentCasts(inScope *scope, outTypes []*types.T) *scope {
-	expr := inScope.expr
-
-	// Do a quick check to see if any casts are needed.
-	castRequired := false
-	for i := 0; i < len(inScope.cols); i++ {
-		if !inScope.cols[i].typ.Identical(outTypes[i]) {
-			castRequired = true
-			break
-		}
-	}
-	if !castRequired {
-		// No mutation casts are needed.
-		return inScope
-	}
-
-	projectionScope := inScope.push()
-	projectionScope.cols = make([]scopeColumn, 0, len(inScope.cols))
-	for i := 0; i < len(inScope.cols); i++ {
-		srcType := inScope.cols[i].typ
-		targetType := outTypes[i]
-		if !srcType.Identical(targetType) {
-			// Check if an assignment cast is available from the inScope column
-			// type to the out type.
-			if !tree.ValidCast(srcType, targetType, tree.CastContextAssignment) {
-				ord := mb.tabID.ColumnOrdinal(mb.targetColList[i])
-				colName := string(mb.tab.Column(ord).ColName())
-				err := pgerror.Newf(pgcode.DatatypeMismatch,
-					"value type %s doesn't match type %s of column %q",
-					srcType, targetType, tree.ErrNameString(colName))
-				err = errors.WithHint(err, "you will need to rewrite or cast the expression")
-				panic(err)
-			}
-
-			// Create a new column which casts the input column to the correct
-			// type.
-			variable := mb.b.factory.ConstructVariable(inScope.cols[i].id)
-			cast := mb.b.factory.ConstructAssignmentCast(variable, outTypes[i])
-			mb.b.synthesizeColumn(projectionScope, inScope.cols[i].name, outTypes[i], nil /* expr */, cast)
-		} else {
-			// The column is already the correct type, so add it as a
-			// passthrough column.
-			projectionScope.appendColumn(&inScope.cols[i])
-		}
-	}
-
-	projectionScope.expr = mb.b.constructProject(expr, projectionScope.cols)
-	return projectionScope
 }
 
 // checkColumnIsNotGeneratedAlwaysAsIdentity verifies that if current column

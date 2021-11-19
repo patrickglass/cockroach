@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//go:build !bazel
 // +build !bazel
 
 package bazel
@@ -33,11 +32,6 @@ func RunfilesPath() (string, error) {
 
 // TestTmpDir is not implemented.
 func TestTmpDir() string {
-	panic("not built with Bazel")
-}
-
-// NewTmpDir is not implemented.
-func NewTmpDir(prefix string) (string, error) {
 	panic("not built with Bazel")
 }
 

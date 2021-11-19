@@ -59,7 +59,7 @@ func NewHealthChecker(t test.Test, c cluster.Cluster, nodes option.NodeListOptio
 	}
 }
 
-// Done signals the HealthChecker's Runner to shut down.
+// Done signals the HeatlthChecker's Runner to shut down.
 func (hc *HealthChecker) Done() {
 	close(hc.doneCh)
 }
@@ -116,11 +116,7 @@ func (hc *HealthChecker) Runner(ctx context.Context) (err error) {
 		}
 		// TODO(tschottdorf): remove replicate queue failures when the cluster first starts.
 		// Ditto queue.raftsnapshot.process.failure.
-		_, err = db.Exec(`USE system`)
-		if err != nil {
-			return err
-		}
-		rows, err := db.QueryContext(ctx, `SELECT * FROM crdb_internal.gossip_alerts ORDER BY node_id ASC, store_id ASC `)
+		rows, err := db.QueryContext(ctx, `SELECT * FROM crdb_internal.gossip_alerts ORDER BY node_id ASC, store_id ASC`)
 		_ = db.Close()
 		if err != nil {
 			return err
@@ -429,7 +425,7 @@ func registerRestore(r registry.Registry) {
 						// If the nodes are large enough (specifically, if they
 						// have enough memory we can increase the parallelism
 						// of restore). Machines with 16 vCPUs typically have
-						// enough memory to support 3 concurrent workers.
+						// enough memory to supoprt 3 concurrent workers.
 						c.Run(ctx, c.Node(1),
 							`./cockroach sql --insecure -e "SET CLUSTER SETTING kv.bulk_io_write.restore_node_concurrency = 5"`)
 						c.Run(ctx, c.Node(1),

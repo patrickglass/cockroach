@@ -16,6 +16,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
@@ -133,11 +134,6 @@ func (n *dropDatabaseNode) startExec(params runParams) error {
 	ctx := params.ctx
 	p := params.p
 
-	// Drop all of the collected objects.
-	if err := n.d.dropAllCollectedObjects(ctx, p); err != nil {
-		return err
-	}
-
 	var schemasIDsToDelete []descpb.ID
 	for _, schemaWithDbDesc := range n.d.schemasToDelete {
 		schemaToDelete := schemaWithDbDesc.schema
@@ -173,10 +169,19 @@ func (n *dropDatabaseNode) startExec(params runParams) error {
 		return err
 	}
 
-	n.dbDesc.SetDropped()
-	b := p.txn.NewBatch()
-	p.dropNamespaceEntry(ctx, b, n.dbDesc)
+	// Drop all of the collected objects.
+	if err := n.d.dropAllCollectedObjects(ctx, p); err != nil {
+		return err
+	}
 
+	n.dbDesc.AddDrainingName(descpb.NameInfo{
+		ParentID:       keys.RootNamespaceID,
+		ParentSchemaID: keys.RootNamespaceID,
+		Name:           n.dbDesc.Name,
+	})
+	n.dbDesc.State = descpb.DescriptorState_DROP
+
+	b := &kv.Batch{}
 	// Note that a job was already queued above.
 	if err := p.writeDatabaseChangeToBatch(ctx, n.dbDesc, b); err != nil {
 		return err

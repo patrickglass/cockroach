@@ -571,7 +571,7 @@ func parseReplicasFromRange(
 
 	leaseHolder, err := tc.FindRangeLeaseHolder(desc, nil)
 	if err != nil {
-		return nil, errors.Wrap(err, "could not get leaseholder")
+		return nil, errors.Newf("could not get leaseholder: %v", err)
 	}
 	leaseHolderIdx := nodeIdToIdx(t, tc, leaseHolder.NodeID)
 	replicaMap[leaseHolderIdx] = replicaTypeLeaseholder

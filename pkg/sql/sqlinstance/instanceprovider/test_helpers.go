@@ -39,7 +39,6 @@ func NewTestInstanceProvider(
 		instanceAddr: addr,
 		initialized:  make(chan struct{}),
 	}
-	p.mu.started = true
 	return p
 }
 

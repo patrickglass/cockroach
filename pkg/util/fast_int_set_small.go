@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//go:build fast_int_set_small
 // +build fast_int_set_small
 
 package util

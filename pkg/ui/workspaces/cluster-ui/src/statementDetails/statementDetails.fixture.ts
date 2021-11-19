@@ -123,7 +123,6 @@ const statementStats: any = {
 };
 
 const aggregatedTs = Date.parse("Sep 15 2021 01:00:00 GMT") * 1e-3;
-const aggregationInterval = 3600; // 1 hour
 
 export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
   history,
@@ -153,9 +152,7 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
     byNode: [
       {
         label: "4",
-        summary: "SELECT city, id FROM vehicles",
         aggregatedTs,
-        aggregationInterval,
         implicitTxn: true,
         database: "defaultdb",
         fullScan: true,
@@ -163,9 +160,7 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
       },
       {
         label: "3",
-        summary: "SELECT city, id FROM vehicles",
         aggregatedTs,
-        aggregationInterval,
         implicitTxn: true,
         database: "defaultdb",
         fullScan: true,
@@ -173,9 +168,7 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
       },
       {
         label: "2",
-        summary: "SELECT city, id FROM vehicles",
         aggregatedTs,
-        aggregationInterval,
         implicitTxn: true,
         database: "defaultdb",
         fullScan: true,
@@ -183,9 +176,7 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
       },
       {
         label: "1",
-        summary: "SELECT city, id FROM vehicles",
         aggregatedTs,
-        aggregationInterval,
         implicitTxn: true,
         database: "defaultdb",
         fullScan: true,
@@ -198,6 +189,10 @@ export const getStatementDetailsPropsFixture = (): StatementDetailsProps => ({
       denominator: 36958,
     },
     vec: {
+      numerator: 36958,
+      denominator: 36958,
+    },
+    opt: {
       numerator: 36958,
       denominator: 36958,
     },

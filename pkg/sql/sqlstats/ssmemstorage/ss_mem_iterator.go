@@ -80,21 +80,19 @@ func (s *StmtStatsIterator) Next() bool {
 	vectorized := statementStats.mu.vectorized
 	fullScan := statementStats.mu.fullScan
 	database := statementStats.mu.database
-	querySummary := statementStats.mu.querySummary
 	statementStats.mu.Unlock()
 
 	s.currentValue = &roachpb.CollectedStatementStatistics{
 		Key: roachpb.StatementStatisticsKey{
-			Query:                    stmtKey.anonymizedStmt,
-			QuerySummary:             querySummary,
-			DistSQL:                  distSQLUsed,
-			Vec:                      vectorized,
-			ImplicitTxn:              stmtKey.implicitTxn,
-			FullScan:                 fullScan,
-			Failed:                   stmtKey.failed,
-			App:                      s.container.appName,
-			Database:                 database,
-			TransactionFingerprintID: stmtKey.transactionFingerprintID,
+			Query:       stmtKey.anonymizedStmt,
+			DistSQL:     distSQLUsed,
+			Opt:         true,
+			Vec:         vectorized,
+			ImplicitTxn: stmtKey.implicitTxn,
+			FullScan:    fullScan,
+			Failed:      stmtKey.failed,
+			App:         s.container.appName,
+			Database:    database,
 		},
 		ID:    stmtFingerprintID,
 		Stats: data,

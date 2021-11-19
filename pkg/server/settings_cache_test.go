@@ -59,7 +59,6 @@ func TestCachedSettingsServerRestart(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	ctx := context.Background()
 	stickyEngineRegistry := NewStickyInMemEnginesRegistry()
 	defer stickyEngineRegistry.CloseAllStickyInMemEngines()
 
@@ -106,7 +105,7 @@ func TestCachedSettingsServerRestart(t *testing.T) {
 		dialOpts, err := s.rpcContext.GRPCDialOptions()
 		require.NoError(t, err)
 
-		initConfig := newInitServerConfig(ctx, s.cfg, dialOpts)
+		initConfig := newInitServerConfig(s.cfg, dialOpts)
 		inspectState, err := inspectEngines(
 			context.Background(),
 			s.engines,

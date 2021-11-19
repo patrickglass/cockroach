@@ -172,11 +172,7 @@ func (l *fileSink) attachHints(stacks []byte) []byte {
 }
 
 // output implements the logSink interface.
-func (l *fileSink) output(b []byte, opts sinkOutputOptions) error {
-	if opts.ignoreErrors {
-		l.emergencyOutput(b)
-		return nil
-	}
+func (l *fileSink) output(extraFlush bool, b []byte) error {
 	if !l.enabled.Get() {
 		// NB: we need to check filesink.enabled a second time here in
 		// case a test Scope() has disabled it asynchronously while
@@ -195,7 +191,7 @@ func (l *fileSink) output(b []byte, opts sinkOutputOptions) error {
 		return err
 	}
 
-	if opts.extraFlush || !l.bufferedWrites || logging.flushWrites.Get() {
+	if extraFlush || !l.bufferedWrites || logging.flushWrites.Get() {
 		l.flushAndMaybeSyncLocked(false /*doSync*/)
 	}
 	return nil

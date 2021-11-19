@@ -60,6 +60,8 @@ func NewTableReaderSpec() *execinfrapb.TableReaderSpec {
 // releaseTableReaderSpec puts this TableReaderSpec back into its sync pool. It
 // may not be used again after Release returns.
 func releaseTableReaderSpec(s *execinfrapb.TableReaderSpec) {
-	*s = execinfrapb.TableReaderSpec{}
+	*s = execinfrapb.TableReaderSpec{
+		Spans: s.Spans[:0],
+	}
 	trSpecPool.Put(s)
 }

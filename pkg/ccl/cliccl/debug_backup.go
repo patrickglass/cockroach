@@ -181,8 +181,9 @@ func init() {
 		Use:   "backup [command]",
 		Short: "debug backups",
 		Long:  "Shows information about a SQL backup.",
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return cli.UsageAndErr(cmd, args)
+			return cmd.Usage()
 		},
 	}
 
@@ -586,6 +587,7 @@ func makeRowFetcher(
 	}
 
 	table := row.FetcherTableArgs{
+		Spans:            []roachpb.Span{entry.Span},
 		Desc:             entry.Desc,
 		Index:            entry.Desc.GetPrimaryIndex(),
 		ColIdxMap:        colIdxMap,
@@ -703,7 +705,7 @@ func (f backupFileDisplayMsg) MarshalJSON() ([]byte, error) {
 	}{
 		Path:         f.Path,
 		Span:         fmt.Sprint(f.Span),
-		DataSize:     string(humanizeutil.IBytes(f.EntryCounts.DataSize)),
+		DataSize:     humanizeutil.IBytes(f.EntryCounts.DataSize),
 		IndexEntries: f.EntryCounts.IndexEntries,
 		Rows:         f.EntryCounts.Rows,
 	}
@@ -736,7 +738,7 @@ func (b backupMetaDisplayMsg) MarshalJSON() ([]byte, error) {
 	}{
 		StartTime:           timeutil.Unix(0, b.StartTime.WallTime).Format(time.RFC3339),
 		EndTime:             timeutil.Unix(0, b.EndTime.WallTime).Format(time.RFC3339),
-		DataSize:            string(humanizeutil.IBytes(b.EntryCounts.DataSize)),
+		DataSize:            humanizeutil.IBytes(b.EntryCounts.DataSize),
 		Rows:                b.EntryCounts.Rows,
 		IndexEntries:        b.EntryCounts.IndexEntries,
 		FormatVersion:       b.FormatVersion,

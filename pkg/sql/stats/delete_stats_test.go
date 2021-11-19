@@ -63,7 +63,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     0,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(100),
@@ -74,7 +73,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     0,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(100),
@@ -85,7 +83,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     0,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(100),
@@ -96,7 +93,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     0,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(100),
@@ -107,7 +103,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     0,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(100),
@@ -118,7 +113,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     0,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(100),
@@ -129,7 +123,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     5,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(100),
@@ -140,7 +133,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     5,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(100),
@@ -151,7 +143,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     5,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(100),
@@ -162,7 +153,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     5,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(100),
@@ -173,7 +163,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     5,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(100),
@@ -184,7 +173,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     5,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(100),
@@ -195,7 +183,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     5,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(100),
@@ -206,7 +193,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     5,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(100),
@@ -217,7 +203,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      1000,
 			DistinctCount: 1000,
 			NullCount:     5,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(101),
@@ -228,7 +213,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      320000,
 			DistinctCount: 300000,
 			NullCount:     100,
-			AvgSize:       4,
 		},
 		{
 			TableID:       descpb.ID(102),
@@ -239,7 +223,6 @@ func TestDeleteOldStatsForColumns(t *testing.T) {
 			RowCount:      0,
 			DistinctCount: 0,
 			NullCount:     0,
-			AvgSize:       0,
 		},
 	}
 

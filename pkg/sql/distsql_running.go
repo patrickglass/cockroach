@@ -356,14 +356,15 @@ func (dsp *DistSQLPlanner) setupFlows(
 	}
 
 	// Set up the flow on this node.
-	setupReq.Flow = *flows[thisNodeID]
+	localReq := setupReq
+	localReq.Flow = *flows[thisNodeID]
 	var batchReceiver execinfra.BatchReceiver
 	if recv.batchWriter != nil {
 		// Use the DistSQLReceiver as an execinfra.BatchReceiver only if the
 		// former has the corresponding writer set.
 		batchReceiver = recv
 	}
-	return dsp.distSQLSrv.SetupLocalSyncFlow(ctx, evalCtx.Mon, &setupReq, recv, batchReceiver, localState)
+	return dsp.distSQLSrv.SetupLocalSyncFlow(ctx, evalCtx.Mon, &localReq, recv, batchReceiver, localState)
 }
 
 // Run executes a physical plan. The plan should have been finalized using
@@ -416,9 +417,6 @@ func (dsp *DistSQLPlanner) Run(
 	localState.EvalContext = &evalCtx.EvalContext
 	localState.Txn = txn
 	localState.LocalProcs = plan.LocalProcessors
-	// If we need to perform some operation on the flow specs, we want to
-	// preserve the specs during the flow setup.
-	localState.PreserveFlowSpecs = planCtx.saveFlows != nil
 	// If we have access to a planner and are currently being used to plan
 	// statements in a user transaction, then take the descs.Collection to resolve
 	// types with during flow execution. This is necessary to do in the case of
@@ -710,80 +708,6 @@ func (w *errOnlyResultWriter) AddBatch(ctx context.Context, batch coldata.Batch)
 
 func (w *errOnlyResultWriter) IncrementRowsAffected(ctx context.Context, n int) {
 	panic("IncrementRowsAffected not supported by errOnlyResultWriter")
-}
-
-// RowResultWriter is a thin wrapper around a RowContainer.
-type RowResultWriter struct {
-	rowContainer *rowContainerHelper
-	rowsAffected int
-	err          error
-}
-
-var _ rowResultWriter = &RowResultWriter{}
-
-// NewRowResultWriter creates a new RowResultWriter.
-func NewRowResultWriter(rowContainer *rowContainerHelper) *RowResultWriter {
-	return &RowResultWriter{rowContainer: rowContainer}
-}
-
-// IncrementRowsAffected implements the rowResultWriter interface.
-func (b *RowResultWriter) IncrementRowsAffected(ctx context.Context, n int) {
-	b.rowsAffected += n
-}
-
-// AddRow implements the rowResultWriter interface.
-func (b *RowResultWriter) AddRow(ctx context.Context, row tree.Datums) error {
-	if b.rowContainer != nil {
-		return b.rowContainer.AddRow(ctx, row)
-	}
-	return nil
-}
-
-// SetError is part of the rowResultWriter interface.
-func (b *RowResultWriter) SetError(err error) {
-	b.err = err
-}
-
-// Err is part of the rowResultWriter interface.
-func (b *RowResultWriter) Err() error {
-	return b.err
-}
-
-// CallbackResultWriter is a rowResultWriter that runs a callback function
-// on AddRow.
-type CallbackResultWriter struct {
-	fn           func(ctx context.Context, row tree.Datums) error
-	rowsAffected int
-	err          error
-}
-
-var _ rowResultWriter = &CallbackResultWriter{}
-
-// NewCallbackResultWriter creates a new CallbackResultWriter.
-func NewCallbackResultWriter(
-	fn func(ctx context.Context, row tree.Datums) error,
-) *CallbackResultWriter {
-	return &CallbackResultWriter{fn: fn}
-}
-
-// IncrementRowsAffected is part of the rowResultWriter interface.
-func (c *CallbackResultWriter) IncrementRowsAffected(ctx context.Context, n int) {
-	c.rowsAffected += n
-}
-
-// AddRow is part of the rowResultWriter interface.
-func (c *CallbackResultWriter) AddRow(ctx context.Context, row tree.Datums) error {
-	return c.fn(ctx, row)
-}
-
-// SetError is part of the rowResultWriter interface.
-func (c *CallbackResultWriter) SetError(err error) {
-	c.err = err
-}
-
-// Err is part of the rowResultWriter interface.
-func (c *CallbackResultWriter) Err() error {
-	return c.err
 }
 
 var _ execinfra.RowReceiver = &DistSQLReceiver{}
@@ -1218,7 +1142,7 @@ func (dsp *DistSQLPlanner) planAndRunSubquery(
 	if err != nil {
 		return err
 	}
-	dsp.finalizePlanWithRowCount(subqueryPlanCtx, subqueryPhysPlan, subqueryPlan.rowCount)
+	dsp.FinalizePlan(subqueryPlanCtx, subqueryPhysPlan)
 
 	// TODO(arjun): #28264: We set up a row container, wrap it in a row
 	// receiver, and use it and serialize the results of the subquery. The type
@@ -1233,8 +1157,8 @@ func (dsp *DistSQLPlanner) planAndRunSubquery(
 		typs = subqueryPhysPlan.GetResultTypes()
 	}
 	var rows rowContainerHelper
-	rows.Init(typs, evalCtx, "subquery" /* opName */)
-	defer rows.Close(ctx)
+	rows.init(typs, evalCtx, "subquery" /* opName */)
+	defer rows.close(ctx)
 
 	// TODO(yuzefovich): consider implementing batch receiving result writer.
 	subqueryRowReceiver := NewRowResultWriter(&rows)
@@ -1247,7 +1171,7 @@ func (dsp *DistSQLPlanner) planAndRunSubquery(
 	switch subqueryPlan.execMode {
 	case rowexec.SubqueryExecModeExists:
 		// For EXISTS expressions, all we want to know if there is at least one row.
-		hasRows := rows.Len() != 0
+		hasRows := rows.len() != 0
 		subqueryPlans[planIdx].result = tree.MakeDBool(tree.DBool(hasRows))
 	case rowexec.SubqueryExecModeAllRows, rowexec.SubqueryExecModeAllRowsNormalized:
 		// TODO(yuzefovich): this is unfortunate - we're materializing all
@@ -1255,9 +1179,9 @@ func (dsp *DistSQLPlanner) planAndRunSubquery(
 		// accounting. Refactor it.
 		var result tree.DTuple
 		iterator := newRowContainerIterator(ctx, rows, typs)
-		defer iterator.Close()
+		defer iterator.close()
 		for {
-			row, err := iterator.Next()
+			row, err := iterator.next()
 			if err != nil {
 				return err
 			}
@@ -1280,13 +1204,13 @@ func (dsp *DistSQLPlanner) planAndRunSubquery(
 		}
 		subqueryPlans[planIdx].result = &result
 	case rowexec.SubqueryExecModeOneRow:
-		switch rows.Len() {
+		switch rows.len() {
 		case 0:
 			subqueryPlans[planIdx].result = tree.DNull
 		case 1:
 			iterator := newRowContainerIterator(ctx, rows, typs)
-			defer iterator.Close()
-			row, err := iterator.Next()
+			defer iterator.close()
+			row, err := iterator.next()
 			if err != nil {
 				return err
 			}
@@ -1347,7 +1271,7 @@ func (dsp *DistSQLPlanner) PlanAndRun(
 		recv.SetError(err)
 		return physPlanCleanup
 	}
-	dsp.finalizePlanWithRowCount(planCtx, physPlan, planCtx.planner.curPlan.mainRowCount)
+	dsp.FinalizePlan(planCtx, physPlan)
 	recv.expectedRowsRead = int64(physPlan.TotalEstimatedScannedRows)
 	runCleanup := dsp.Run(planCtx, txn, physPlan, recv, evalCtx, nil /* finishedSetupFn */)
 	return func() {

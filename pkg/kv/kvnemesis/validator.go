@@ -35,6 +35,11 @@ import (
 // ambiguous results). Non-transactional read/write operations are treated as
 // though they had been wrapped in a transaction and are verified accordingly.
 //
+// TODO(dan): Verify that the results of reads match the data visible at the
+// commit timestamp. We should be able to construct a validity timespan for each
+// read in the transaction and fail if there isn't some timestamp that overlaps
+// all of them.
+//
 // TODO(dan): Verify that there is no causality inversion between steps. That
 // is, if transactions corresponding to two steps are sequential (i.e.
 // txn1CommitStep.After < txn2BeginStep.Before) then the commit timestamps need
@@ -160,14 +165,14 @@ func (ts disjointTimeSpans) validIntersections(
 // accessed by a ranged operation and one for the keys missed by the ranged
 // operation.
 type multiKeyTimeSpan struct {
-	Keys []disjointTimeSpans
+	Keys []timeSpan
 	Gaps disjointTimeSpans
 }
 
 func (mts multiKeyTimeSpan) Combined() disjointTimeSpans {
 	validPossibilities := mts.Gaps
 	for _, validKey := range mts.Keys {
-		validPossibilities = validPossibilities.validIntersections(validKey)
+		validPossibilities = validPossibilities.validIntersections(disjointTimeSpans{validKey})
 	}
 	return validPossibilities
 }
@@ -175,15 +180,8 @@ func (mts multiKeyTimeSpan) Combined() disjointTimeSpans {
 func (mts multiKeyTimeSpan) String() string {
 	var buf strings.Builder
 	buf.WriteByte('{')
-	for i, timeSpans := range mts.Keys {
-		fmt.Fprintf(&buf, "%d:", i)
-		for tsIdx, ts := range timeSpans {
-			if tsIdx != 0 {
-				fmt.Fprintf(&buf, ",")
-			}
-			fmt.Fprintf(&buf, "%s", ts)
-		}
-		fmt.Fprintf(&buf, ", ")
+	for i, ts := range mts.Keys {
+		fmt.Fprintf(&buf, "%d:%s, ", i, ts)
 	}
 	fmt.Fprintf(&buf, "gap:")
 	for idx, gapSpan := range mts.Gaps {
@@ -210,9 +208,8 @@ type observedWrite struct {
 	Key   roachpb.Key
 	Value roachpb.Value
 	// Timestamp will only be filled if Materialized is true.
-	Timestamp     hlc.Timestamp
-	Materialized  bool
-	IsDeleteRange bool
+	Timestamp    hlc.Timestamp
+	Materialized bool
 }
 
 func (*observedWrite) observedMarker() {}
@@ -230,11 +227,10 @@ type observedRead struct {
 func (*observedRead) observedMarker() {}
 
 type observedScan struct {
-	Span          roachpb.Span
-	IsDeleteRange bool
-	Reverse       bool
-	KVs           []roachpb.KeyValue
-	Valid         multiKeyTimeSpan
+	Span    roachpb.Span
+	Reverse bool
+	KVs     []roachpb.KeyValue
+	Valid   multiKeyTimeSpan
 }
 
 func (*observedScan) observedMarker() {}
@@ -375,39 +371,6 @@ func (v *validator) processOp(txnID *string, op Operation) {
 				Value: roachpb.Value{},
 			}
 			v.observedOpsByTxn[*txnID] = append(v.observedOpsByTxn[*txnID], write)
-		}
-	case *DeleteRangeOperation:
-		if txnID == nil {
-			v.checkAtomic(`deleteRange`, t.Result, nil, op)
-		} else {
-			// For the purposes of validation, DelRange operations decompose into
-			// a specialized scan for keys with non-nil values, followed by
-			// writes for each key, with a span to validate that the keys we are
-			// deleting are within the proper bounds.  See above comment for how
-			// the individual deletion tombstones for each key are validated.
-			scan := &observedScan{
-				Span: roachpb.Span{
-					Key:    t.Key,
-					EndKey: t.EndKey,
-				},
-				IsDeleteRange: true,
-				KVs:           make([]roachpb.KeyValue, len(t.Result.Keys)),
-			}
-			deleteOps := make([]observedOp, len(t.Result.Keys))
-			for i, key := range t.Result.Keys {
-				scan.KVs[i] = roachpb.KeyValue{
-					Key:   key,
-					Value: roachpb.Value{},
-				}
-				write := &observedWrite{
-					Key:           key,
-					Value:         roachpb.Value{},
-					IsDeleteRange: true,
-				}
-				deleteOps[i] = write
-			}
-			v.observedOpsByTxn[*txnID] = append(v.observedOpsByTxn[*txnID], scan)
-			v.observedOpsByTxn[*txnID] = append(v.observedOpsByTxn[*txnID], deleteOps...)
 		}
 	case *ScanOperation:
 		v.failIfError(op, t.Result)
@@ -697,16 +660,12 @@ func (v *validator) checkCommittedTxn(
 				panic(err)
 			}
 		case *observedRead:
-			o.ValidTimes = validReadTimes(batch, o.Key, o.Value.RawBytes, false)
+			o.ValidTimes = validReadTimes(batch, o.Key, o.Value.RawBytes)
 		case *observedScan:
 			// All kvs should be within scan boundary.
 			for _, kv := range o.KVs {
 				if !o.Span.ContainsKey(kv.Key) {
-					opCode := "scan"
-					if o.IsDeleteRange {
-						opCode = "delete range"
-					}
-					failure = fmt.Sprintf(`key %s outside %s bounds`, kv.Key, opCode)
+					failure = fmt.Sprintf(`key %s outside scan bounds`, kv.Key)
 					break
 				}
 			}
@@ -718,7 +677,7 @@ func (v *validator) checkCommittedTxn(
 			if !sort.IsSorted(orderedKVs) {
 				failure = `scan result not ordered correctly`
 			}
-			o.Valid = validScanTime(batch, o.Span, o.KVs, o.IsDeleteRange)
+			o.Valid = validScanTime(batch, o.Span, o.KVs)
 		default:
 			panic(errors.AssertionFailedf(`unknown observedOp: %T %s`, observation, observation))
 		}
@@ -923,9 +882,7 @@ func mustGetStringValue(value []byte) string {
 	return string(v)
 }
 
-func validReadTimes(
-	b *pebble.Batch, key roachpb.Key, value []byte, anyValueAccepted bool,
-) disjointTimeSpans {
+func validReadTimes(b *pebble.Batch, key roachpb.Key, value []byte) disjointTimeSpans {
 	var validTimes disjointTimeSpans
 	end := hlc.MaxTimestamp
 
@@ -940,13 +897,12 @@ func validReadTimes(
 		if !mvccKey.Key.Equal(key) {
 			break
 		}
-		if (anyValueAccepted && len(iter.Value()) > 0) ||
-			(!anyValueAccepted && mustGetStringValue(iter.Value()) == mustGetStringValue(value)) {
+		if mustGetStringValue(iter.Value()) == mustGetStringValue(value) {
 			validTimes = append(validTimes, timeSpan{Start: mvccKey.Timestamp, End: end})
 		}
 		end = mvccKey.Timestamp
 	}
-	if !anyValueAccepted && len(value) == 0 {
+	if len(value) == 0 {
 		validTimes = append(disjointTimeSpans{{Start: hlc.MinTimestamp, End: end}}, validTimes...)
 	}
 
@@ -959,9 +915,7 @@ func validReadTimes(
 	return validTimes
 }
 
-func validScanTime(
-	b *pebble.Batch, span roachpb.Span, kvs []roachpb.KeyValue, isDeleteRange bool,
-) multiKeyTimeSpan {
+func validScanTime(b *pebble.Batch, span roachpb.Span, kvs []roachpb.KeyValue) multiKeyTimeSpan {
 	valid := multiKeyTimeSpan{
 		Gaps: disjointTimeSpans{{Start: hlc.MinTimestamp, End: hlc.MaxTimestamp}},
 	}
@@ -969,21 +923,19 @@ func validScanTime(
 	// Find the valid time span for each kv returned.
 	for _, kv := range kvs {
 		// Since scan results don't include deleted keys, there should only ever
-		// be 0 or 1 valid read time span for each `(key, specific-non-nil-value)`
-		// returned, given that the values are guaranteed to be unique by the
-		// Generator. However, in the DeleteRange case where we are looking for
-		// `(key, any-non-nil-value)`, it is of course valid for there to be
-		// multiple disjoint time spans.
-		validTimes := validReadTimes(b, kv.Key, kv.Value.RawBytes, isDeleteRange)
-		if !isDeleteRange && len(validTimes) > 1 {
+		// be 0 or 1 valid read time span for each `(key, non-nil-value)` returned,
+		// given that the values are guaranteed to be unique by the Generator.
+		validTimes := validReadTimes(b, kv.Key, kv.Value.RawBytes)
+		if len(validTimes) > 1 {
 			panic(errors.AssertionFailedf(
 				`invalid number of read time spans for a (key,non-nil-value) pair in scan results: %s->%s`,
 				kv.Key, mustGetStringValue(kv.Value.RawBytes)))
 		}
-		if len(validTimes) == 0 {
-			validTimes = append(validTimes, timeSpan{})
+		validTime := timeSpan{}
+		if len(validTimes) > 0 {
+			validTime = validTimes[0]
 		}
-		valid.Keys = append(valid.Keys, validTimes)
+		valid.Keys = append(valid.Keys, validTime)
 	}
 
 	// Augment with the valid time span for any kv not observed but that
@@ -1013,7 +965,7 @@ func validScanTime(
 		if _, ok := missingKeys[string(mvccKey.Key)]; !ok {
 			// Key not in scan response. Only valid if scan was before key's time, or
 			// at a time when the key was deleted.
-			missingKeys[string(mvccKey.Key)] = validReadTimes(b, mvccKey.Key, nil, false)
+			missingKeys[string(mvccKey.Key)] = validReadTimes(b, mvccKey.Key, nil)
 		}
 	}
 
@@ -1032,14 +984,6 @@ func printObserved(observedOps ...observedOp) string {
 		}
 		switch o := observed.(type) {
 		case *observedWrite:
-			opCode := "w"
-			if o.isDelete() {
-				if o.IsDeleteRange {
-					opCode = "dr.d"
-				} else {
-					opCode = "d"
-				}
-			}
 			ts := `missing`
 			if o.Materialized {
 				if o.isDelete() && o.Timestamp.IsEmpty() {
@@ -1048,8 +992,8 @@ func printObserved(observedOps ...observedOp) string {
 					ts = o.Timestamp.String()
 				}
 			}
-			fmt.Fprintf(&buf, "[%s]%s:%s->%s",
-				opCode, o.Key, ts, mustGetStringValue(o.Value.RawBytes))
+			fmt.Fprintf(&buf, "[w]%s:%s->%s",
+				o.Key, ts, mustGetStringValue(o.Value.RawBytes))
 		case *observedRead:
 			fmt.Fprintf(&buf, "[r]%s:", o.Key)
 			validTimes := o.ValidTimes
@@ -1065,9 +1009,6 @@ func printObserved(observedOps ...observedOp) string {
 			fmt.Fprintf(&buf, "->%s", mustGetStringValue(o.Value.RawBytes))
 		case *observedScan:
 			opCode := "s"
-			if o.IsDeleteRange {
-				opCode = "dr.s"
-			}
 			if o.Reverse {
 				opCode = "rs"
 			}
@@ -1077,10 +1018,8 @@ func printObserved(observedOps ...observedOp) string {
 					kvs.WriteString(`, `)
 				}
 				kvs.WriteString(kv.Key.String())
-				if !o.IsDeleteRange {
-					kvs.WriteByte(':')
-					kvs.WriteString(mustGetStringValue(kv.Value.RawBytes))
-				}
+				kvs.WriteByte(':')
+				kvs.WriteString(mustGetStringValue(kv.Value.RawBytes))
 			}
 			fmt.Fprintf(&buf, "[%s]%s:%s->[%s]",
 				opCode, o.Span, o.Valid, kvs.String())

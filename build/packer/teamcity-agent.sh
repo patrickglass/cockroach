@@ -31,13 +31,10 @@ apt-get update --yes
 apt-get install --yes sudo
 
 apt-get install --yes \
-  autoconf \
-  bison \
   build-essential \
   curl \
   docker-ce \
   docker-compose \
-  flex \
   gnome-keyring \
   gnupg2 \
   git \
@@ -46,16 +43,9 @@ apt-get install --yes \
   pass \
   unzip
 
-curl -fsSL https://github.com/Kitware/CMake/releases/download/v3.20.3/cmake-3.20.3-linux-x86_64.tar.gz -o /tmp/cmake.tar.gz
+curl -fsSL https://dl.google.com/go/go1.16.6.linux-amd64.tar.gz > /tmp/go.tgz
 sha256sum -c - <<EOF
-97bf730372f9900b2dfb9206fccbcf92f5c7f3b502148b832e77451aa0f9e0e6 /tmp/cmake.tar.gz
-EOF
-tar --strip-components=1 -C /usr -xzf /tmp/cmake.tar.gz
-rm -f /tmp/cmake.tar.gz
-
-curl -fsSL https://dl.google.com/go/go1.17.3.linux-amd64.tar.gz > /tmp/go.tgz
-sha256sum -c - <<EOF
-550f9845451c0c94be679faf116291e7807a8d78b43149f9506c1b15eb89008c /tmp/go.tgz
+be333ef18b3016e9d7cb7b1ff1fdb0cac800ca0be4cf2290fe613b3d069dfe0d /tmp/go.tgz
 EOF
 tar -C /usr/local -zxf /tmp/go.tgz && rm /tmp/go.tgz
 

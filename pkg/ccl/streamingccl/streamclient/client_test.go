@@ -11,40 +11,30 @@ package streamclient
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/streamingccl"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 type testStreamClient struct{}
 
 var _ Client = testStreamClient{}
 
-// Create implements the Client interface.
-func (sc testStreamClient) Create(ctx context.Context, target roachpb.TenantID) (StreamID, error) {
-	return StreamID(1), nil
+// GetTopology implements the Client interface.
+func (sc testStreamClient) GetTopology(
+	_ streamingccl.StreamAddress,
+) (streamingccl.Topology, error) {
+	return streamingccl.Topology{Partitions: []streamingccl.PartitionAddress{
+		"s3://my_bucket/my_stream/partition_1",
+		"s3://my_bucket/my_stream/partition_2",
+	}}, nil
 }
 
-// Plan implements the Client interface.
-func (sc testStreamClient) Plan(ctx context.Context, ID StreamID) (Topology, error) {
-	return Topology([]PartitionInfo{
-		{SrcAddr: streamingccl.PartitionAddress("test://host1")},
-		{SrcAddr: streamingccl.PartitionAddress("test://host2")},
-	}), nil
-}
-
-// Heartbeat implements the Client interface.
-func (sc testStreamClient) Heartbeat(ctx context.Context, ID StreamID, _ hlc.Timestamp) error {
-	return nil
-}
-
-// Subscribe implements the Client interface.
-func (sc testStreamClient) Subscribe(
-	ctx context.Context, stream StreamID, spec SubscriptionToken, checkpoint hlc.Timestamp,
+// ConsumePartition implements the Client interface.
+func (sc testStreamClient) ConsumePartition(
+	_ context.Context, _ streamingccl.PartitionAddress, _ hlc.Timestamp,
 ) (chan streamingccl.Event, chan error, error) {
 	sampleKV := roachpb.KeyValue{
 		Key: []byte("key_1"),
@@ -66,81 +56,35 @@ func (sc testStreamClient) Subscribe(
 // client could be used.
 func ExampleClient() {
 	client := testStreamClient{}
-
-	id, err := client.Create(context.Background(), roachpb.MakeTenantID(1))
+	topology, err := client.GetTopology("s3://my_bucket/my_stream")
 	if err != nil {
 		panic(err)
 	}
 
-	var ingested struct {
-		ts hlc.Timestamp
-		syncutil.Mutex
-	}
+	startTimestamp := hlc.Timestamp{WallTime: timeutil.Now().UnixNano()}
 
-	done := make(chan struct{})
-
-	grp := ctxgroup.WithContext(context.Background())
-	grp.GoCtx(func(ctx context.Context) error {
-		ticker := time.NewTicker(time.Second * 30)
-		for {
-			select {
-			case <-done:
-				return nil
-			case <-ticker.C:
-				ingested.Lock()
-				ts := ingested.ts
-				ingested.Unlock()
-
-				if err := client.Heartbeat(ctx, id, ts); err != nil {
-					return err
-				}
-			}
-		}
-	})
-
-	grp.GoCtx(func(ctx context.Context) error {
-		defer close(done)
-		ingested.Lock()
-		ts := ingested.ts
-		ingested.Unlock()
-
-		topology, err := client.Plan(context.Background(), id)
+	for _, partition := range topology.Partitions {
+		eventCh, _ /* errCh */, err := client.ConsumePartition(context.Background(), partition, startTimestamp)
 		if err != nil {
 			panic(err)
 		}
 
-		for _, partition := range topology {
-			// TODO(dt): use Subscribe helper and partition.SrcAddr
-			eventCh, _ /* errCh */, err := client.Subscribe(context.Background(), id, partition.SubscriptionToken, ts)
-			if err != nil {
-				panic(err)
-			}
-
-			// This example looks for the closing of the channel to terminate the test,
-			// but an ingestion job should look for another event such as the user
-			// cutting over to the new cluster to move to the next stage.
-			for event := range eventCh {
-				switch event.Type() {
-				case streamingccl.KVEvent:
-					kv := event.GetKV()
-					fmt.Printf("%s->%s@%d\n", kv.Key.String(), string(kv.Value.RawBytes), kv.Value.Timestamp.WallTime)
-				case streamingccl.CheckpointEvent:
-					ingested.Lock()
-					ingested.ts.Forward(*event.GetResolved())
-					ingested.Unlock()
-					fmt.Printf("resolved %d\n", event.GetResolved().WallTime)
-				case streamingccl.GenerationEvent:
-					fmt.Printf("received generation event")
-				default:
-					panic(fmt.Sprintf("unexpected event type %v", event.Type()))
-				}
+		// This example looks for the closing of the channel to terminate the test,
+		// but an ingestion job should look for another event such as the user
+		// cutting over to the new cluster to move to the next stage.
+		for event := range eventCh {
+			switch event.Type() {
+			case streamingccl.KVEvent:
+				kv := event.GetKV()
+				fmt.Printf("%s->%s@%d\n", kv.Key.String(), string(kv.Value.RawBytes), kv.Value.Timestamp.WallTime)
+			case streamingccl.CheckpointEvent:
+				fmt.Printf("resolved %d\n", event.GetResolved().WallTime)
+			case streamingccl.GenerationEvent:
+				fmt.Printf("received generation event")
+			default:
+				panic(fmt.Sprintf("unexpected event type %v", event.Type()))
 			}
 		}
-		return nil
-	})
-
-	if err := grp.Wait(); err != nil {
-		panic(err)
 	}
 
 	// Output:

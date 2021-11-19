@@ -72,14 +72,14 @@ query T
 EXPLAIN (DISTSQL)
 SELECT a FROM json_tab WHERE b @> '[1, 2]' ORDER BY a
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • sort
 │ order: +a
 │
 └── • lookup join
-    │ table: json_tab@json_tab_pkey
+    │ table: json_tab@primary
     │ equality: (a) = (a)
     │ equality cols are key
     │ pred: b @> '[1, 2]'
@@ -100,14 +100,14 @@ query T
 EXPLAIN (DISTSQL)
 SELECT a FROM json_tab WHERE b @> '[1]' AND b @> '[2]' ORDER BY a
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • sort
 │ order: +a
 │
 └── • lookup join
-    │ table: json_tab@json_tab_pkey
+    │ table: json_tab@primary
     │ equality: (a) = (a)
     │ equality cols are key
     │ pred: (b @> '[1]') AND (b @> '[2]')
@@ -128,14 +128,14 @@ query T
 EXPLAIN (DISTSQL)
 SELECT a FROM json_tab WHERE b @> '[[1, 2]]' ORDER BY a
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • sort
 │ order: +a
 │
 └── • lookup join
-    │ table: json_tab@json_tab_pkey
+    │ table: json_tab@primary
     │ equality: (a) = (a)
     │ equality cols are key
     │ pred: b @> '[[1, 2]]'
@@ -189,14 +189,14 @@ query T
 EXPLAIN (DISTSQL)
 SELECT a FROM array_tab@foo_inv WHERE b @> '{1, 2}' ORDER BY a
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • sort
 │ order: +a
 │
 └── • lookup join
-    │ table: array_tab@array_tab_pkey
+    │ table: array_tab@primary
     │ equality: (a) = (a)
     │ equality cols are key
     │ pred: b @> ARRAY[1,2]

@@ -94,7 +94,10 @@ func ClearTableData(
 ) error {
 	// If DropTime isn't set, assume this drop request is from a version
 	// 1.1 server and invoke legacy code that uses DeleteRange and range GC.
-	if table.GetDropTime() == 0 {
+	// TODO(pbardea): Note that we never set the drop time for interleaved tables,
+	// but this check was added to be more explicit about it. This should get
+	// cleaned up.
+	if table.GetDropTime() == 0 || table.IsInterleaved() {
 		log.Infof(ctx, "clearing data in chunks for table %d", table.GetID())
 		return sql.ClearTableDataInChunks(ctx, db, codec, sv, table, false /* traceKV */)
 	}

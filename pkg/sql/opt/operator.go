@@ -83,19 +83,18 @@ type Expr interface {
 	String() string
 }
 
-// ScalarRank is the type of the sort order given to every scalar
+// ScalarID is the type of the memo-unique identifier given to every scalar
 // expression.
-type ScalarRank int
+type ScalarID int
 
 // ScalarExpr is a scalar expression, which is an expression that returns a
 // primitive-typed value like boolean or string rather than rows and columns.
 type ScalarExpr interface {
 	Expr
 
-	// Rank is a value that defines how the scalar expression should be ordered
-	// among a collection of scalar expressions. It defines a total order over
-	// ScalarExprs within the context of a memo.
-	Rank() ScalarRank
+	// ID is a unique (within the context of a memo) ID that can be
+	// used to define a total order over ScalarExprs.
+	ID() ScalarID
 
 	// DataType is the SQL type of the expression.
 	DataType() *types.T

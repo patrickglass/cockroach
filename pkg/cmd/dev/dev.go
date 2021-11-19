@@ -27,6 +27,13 @@ type dev struct {
 	exec *exec.Exec
 }
 
+var (
+	// Shared flags.
+	remoteCacheAddr string
+	numCPUs         int
+	skipDevConfig   bool
+)
+
 func makeDevCmd() *dev {
 	var ret dev
 	ret.log = log.New(ioutil.Discard, "DEBUG: ", 0) // used for debug logging (see --debug)
@@ -38,12 +45,15 @@ func makeDevCmd() *dev {
 		Short:   "Dev is the general-purpose dev tool for working on cockroach/cockroachdb.",
 		Version: "v0.0",
 		Long: `
-Dev is the general-purpose dev tool for working on cockroachdb/cockroach. With dev you can:
+Dev is the general-purpose dev tool for working cockroachdb/cockroach. It
+lets engineers do a few things:
 
 - build various binaries (cockroach, optgen, ...)
 - run arbitrary tests (unit tests, logic tests, ...)
 - run tests under arbitrary configurations (under stress, using race builds, ...)
-- generate code (bazel files, docs, ...)
+- generate code (bazel files, protobufs, ...)
+
+...and much more.
 `,
 		// Disable automatic printing of usage information whenever an error
 		// occurs. We presume that most errors will not the result of bad
@@ -64,9 +74,7 @@ Dev is the general-purpose dev tool for working on cockroachdb/cockroach. With d
 		makeBenchCmd(ret.bench),
 		makeBuildCmd(ret.build),
 		makeBuilderCmd(ret.builder),
-		makeDoctorCmd(ret.doctor),
 		makeGenerateCmd(ret.generate),
-		makeTestLogicCmd(ret.testlogic),
 		makeLintCmd(ret.lint),
 		makeTestCmd(ret.test),
 	)
@@ -74,6 +82,14 @@ Dev is the general-purpose dev tool for working on cockroachdb/cockroach. With d
 	var debugVar bool
 	for _, subCmd := range ret.cli.Commands() {
 		subCmd.Flags().BoolVar(&debugVar, "debug", false, "enable debug logging for dev")
+		subCmd.Flags().IntVar(&numCPUs, "cpus", 0, "cap the number of cpu cores used")
+		// This points to the grpc endpoint of a running `buchr/bazel-remote`
+		// instance. We're tying ourselves to the one implementation, but that
+		// seems fine for now. It seems mature, and has (very experimental)
+		// support for the  Remote Asset API, which helps speed things up when
+		// the cache sits across the network boundary.
+		subCmd.Flags().StringVar(&remoteCacheAddr, "remote-cache", "", "remote caching grpc endpoint to use")
+		subCmd.Flags().BoolVar(&skipDevConfig, "skip-dev-config", false, "Don't infer an appropriate dev config to build with")
 	}
 	for _, subCmd := range ret.cli.Commands() {
 		subCmd.PreRun = func(cmd *cobra.Command, args []string) {
@@ -82,6 +98,12 @@ Dev is the general-purpose dev tool for working on cockroachdb/cockroach. With d
 			}
 		}
 	}
+
+	// Hide the `help` sub-command.
+	ret.cli.SetHelpCommand(&cobra.Command{
+		Use:    "noop-help",
+		Hidden: true,
+	})
 
 	return &ret
 }

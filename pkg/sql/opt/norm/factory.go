@@ -17,7 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -236,10 +236,10 @@ func (f *Factory) CopyAndReplace(
 		panic(errors.AssertionFailedf("destination memo must be empty"))
 	}
 
-	// Copy the next scalar rank to the target memo so that new scalar
-	// expressions built with the new memo will not share scalar ranks with
-	// existing expressions.
-	f.mem.CopyNextRankFrom(from.Memo())
+	// Copy the next scalar ID to the target memo so that new scalar expressions
+	// built with the new memo will not share scalar IDs with existing
+	// expressions.
+	f.mem.CopyNextIDFrom(from.Memo())
 
 	// Copy all metadata to the target memo so that referenced tables and
 	// columns can keep the same ids they had in the "from" memo. Scalar
@@ -302,7 +302,7 @@ func (f *Factory) AssignPlaceholders(from *memo.Memo) (err error) {
 // function returns. It is used to verify that the stack depth is correctly
 // decremented for each constructor function.
 func (f *Factory) CheckConstructorStackDepth() {
-	if buildutil.CrdbTestBuild && f.constructorStackDepth != 0 {
+	if util.CrdbTestBuild && f.constructorStackDepth != 0 {
 		panic(errors.AssertionFailedf(
 			"expected constructor stack depth %v to be 0",
 			f.constructorStackDepth,
@@ -318,7 +318,7 @@ func (f *Factory) onMaxConstructorStackDepthExceeded() {
 		"optimizer factory constructor call stack exceeded max depth of %v",
 		maxConstructorStackDepth,
 	)
-	if buildutil.CrdbTestBuild {
+	if util.CrdbTestBuild {
 		panic(err)
 	}
 	errorutil.SendReport(f.evalCtx.Ctx(), &f.evalCtx.Settings.SV, err)

@@ -86,7 +86,7 @@ func TestGCQueueMakeGCScoreInvariantQuick(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	rnd, seed := randutil.NewTestRand()
+	rnd, seed := randutil.NewPseudoRand()
 	cfg := quick.Config{
 		MaxCount: 50000,
 		Rand:     rnd,
@@ -479,23 +479,17 @@ func TestGCQueueProcess(t *testing.T) {
 	ts3 := makeTS(now-intentAgeThreshold.Nanoseconds(), 0)     // 2h old
 	ts4 := makeTS(now-(intentAgeThreshold.Nanoseconds()-1), 0) // 2h-1ns old
 	ts5 := makeTS(now-1e9, 0)                                  // 1s old
-	mkKey := func(suff string) roachpb.Key {
-		var k roachpb.Key
-		k = append(k, keys.ScratchRangeMin...)
-		k = append(k, suff...)
-		return k
-	}
-	key1 := mkKey("a")
-	key2 := mkKey("b")
-	key3 := mkKey("c")
-	key4 := mkKey("d")
-	key5 := mkKey("e")
-	key6 := mkKey("f")
-	key7 := mkKey("g")
-	key8 := mkKey("h")
-	key9 := mkKey("i")
-	key10 := mkKey("j")
-	key11 := mkKey("k")
+	key1 := roachpb.Key("a")
+	key2 := roachpb.Key("b")
+	key3 := roachpb.Key("c")
+	key4 := roachpb.Key("d")
+	key5 := roachpb.Key("e")
+	key6 := roachpb.Key("f")
+	key7 := roachpb.Key("g")
+	key8 := roachpb.Key("h")
+	key9 := roachpb.Key("i")
+	key10 := roachpb.Key("j")
+	key11 := roachpb.Key("k")
 
 	data := []struct {
 		key roachpb.Key
@@ -588,16 +582,16 @@ func TestGCQueueProcess(t *testing.T) {
 	}
 
 	// The total size of the GC'able versions of the keys and values in Info.
-	// Key size: len(scratch+"a") + MVCCVersionTimestampSize (13 bytes) = 15 bytes.
+	// Key size: len("a") + MVCCVersionTimestampSize (13 bytes) = 14 bytes.
 	// Value size: len("value") + headerSize (5 bytes) = 10 bytes.
-	// key1 at ts1  (15 bytes) => "value" (10 bytes)
-	// key2 at ts1  (15 bytes) => "value" (10 bytes)
-	// key3 at ts1  (15 bytes) => "value" (10 bytes)
-	// key4 at ts1  (15 bytes) => "value" (10 bytes)
-	// key5 at ts1  (15 bytes) => "value" (10 bytes)
-	// key5 at ts2  (15 bytes) => delete (0 bytes)
-	// key10 at ts1 (15 bytes) => delete (0 bytes)
-	var expectedVersionsKeyBytes int64 = 7 * 15
+	// key1 at ts1  (14 bytes) => "value" (10 bytes)
+	// key2 at ts1  (14 bytes) => "value" (10 bytes)
+	// key3 at ts1  (14 bytes) => "value" (10 bytes)
+	// key4 at ts1  (14 bytes) => "value" (10 bytes)
+	// key5 at ts1  (14 bytes) => "value" (10 bytes)
+	// key5 at ts2  (14 bytes) => delete (0 bytes)
+	// key10 at ts1 (14 bytes) => delete (0 bytes)
+	var expectedVersionsKeyBytes int64 = 7 * 14
 	var expectedVersionsValBytes int64 = 5 * 10
 
 	// Call Run with dummy functions to get current Info.
@@ -676,7 +670,7 @@ func TestGCQueueProcess(t *testing.T) {
 			return err
 		}
 		for i, kv := range kvs {
-			t.Logf("%d: %s", i, kv.Key)
+			log.VEventf(ctx, 1, "%d: %s", i, kv.Key)
 		}
 		if len(kvs) != len(expKVs) {
 			return fmt.Errorf("expected length %d; got %d", len(expKVs), len(kvs))

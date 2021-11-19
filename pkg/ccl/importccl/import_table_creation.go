@@ -11,8 +11,10 @@ package importccl
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
@@ -43,6 +45,40 @@ const (
 	defaultCSVParentID descpb.ID = keys.MinNonPredefinedUserDescID
 	defaultCSVTableID  descpb.ID = defaultCSVParentID + 1
 )
+
+func readCreateTableFromStore(
+	ctx context.Context,
+	filename string,
+	externalStorageFromURI cloud.ExternalStorageFromURIFactory,
+	user security.SQLUsername,
+) (*tree.CreateTable, error) {
+	store, err := externalStorageFromURI(ctx, filename, user)
+	if err != nil {
+		return nil, err
+	}
+	defer store.Close()
+	reader, err := store.ReadFile(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	tableDefStr, err := ioutil.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	stmts, err := parser.Parse(string(tableDefStr))
+	if err != nil {
+		return nil, err
+	}
+	if len(stmts) != 1 {
+		return nil, errors.Errorf("expected 1 create table statement, found %d", len(stmts))
+	}
+	create, ok := stmts[0].AST.(*tree.CreateTable)
+	if !ok {
+		return nil, errors.New("expected CREATE TABLE statement in table file")
+	}
+	return create, nil
+}
 
 type fkHandler struct {
 	allowed  bool
@@ -115,6 +151,9 @@ func MakeSimpleTableDescriptor(
 	if create.IfNotExists {
 		return nil, unimplemented.NewWithIssueDetailf(42846, "import.if-no-exists", "unsupported IF NOT EXISTS")
 	}
+	if create.Interleave != nil {
+		return nil, unimplemented.NewWithIssueDetailf(42846, "import.interleave", "interleaved not supported")
+	}
 	if create.AsSource != nil {
 		return nil, unimplemented.NewWithIssueDetailf(42846, "import.create-as", "CREATE AS not supported")
 	}
@@ -184,7 +223,7 @@ func MakeSimpleTableDescriptor(
 		tableID,
 		nil, /* regionConfig */
 		hlc.Timestamp{WallTime: walltime},
-		descpb.NewBasePrivilegeDescriptor(security.AdminRoleName()),
+		descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName()),
 		affected,
 		semaCtx,
 		&evalCtx,
@@ -330,19 +369,34 @@ func (so *importSequenceOperators) IsTypeVisible(
 	return false, false, errors.WithStack(errSequenceOperators)
 }
 
-// HasPrivilege is part of the tree.EvalDatabase interface.
+// HasTablePrivilege is part of the tree.EvalDatabase interface.
 func (so *importSequenceOperators) HasPrivilege(
 	ctx context.Context,
 	specifier tree.HasPrivilegeSpecifier,
 	user security.SQLUsername,
 	kind privilege.Kind,
+	withGrantOpt bool,
 ) (bool, error) {
 	return false, errors.WithStack(errSequenceOperators)
+}
+
+// IncrementSequence implements the tree.SequenceOperators interface.
+func (so *importSequenceOperators) IncrementSequence(
+	ctx context.Context, seqName *tree.TableName,
+) (int64, error) {
+	return 0, errSequenceOperators
 }
 
 // IncrementSequenceByID implements the tree.SequenceOperators interface.
 func (so *importSequenceOperators) IncrementSequenceByID(
 	ctx context.Context, seqID int64,
+) (int64, error) {
+	return 0, errSequenceOperators
+}
+
+// GetLatestValueInSessionForSequence implements the tree.SequenceOperators interface.
+func (so *importSequenceOperators) GetLatestValueInSessionForSequence(
+	ctx context.Context, seqName *tree.TableName,
 ) (int64, error) {
 	return 0, errSequenceOperators
 }
@@ -354,9 +408,16 @@ func (so *importSequenceOperators) GetLatestValueInSessionForSequenceByID(
 	return 0, errSequenceOperators
 }
 
+// SetSequenceValue implements the tree.SequenceOperators interface.
+func (so *importSequenceOperators) SetSequenceValue(
+	ctx context.Context, seqName *tree.TableName, newVal int64, isCalled bool,
+) error {
+	return errSequenceOperators
+}
+
 // SetSequenceValueByID implements the tree.SequenceOperators interface.
 func (so *importSequenceOperators) SetSequenceValueByID(
-	ctx context.Context, seqID uint32, newVal int64, isCalled bool,
+	ctx context.Context, seqID int64, newVal int64, isCalled bool,
 ) error {
 	return errSequenceOperators
 }

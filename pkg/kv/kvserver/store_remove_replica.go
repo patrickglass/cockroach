@@ -69,6 +69,7 @@ func (s *Store) removeInitializedReplicaRaftMuLocked(
 	// destroy status.
 	var desc *roachpb.RangeDescriptor
 	var replicaID roachpb.ReplicaID
+	var tenantID roachpb.TenantID
 	{
 		rep.readOnlyCmdMu.Lock()
 		rep.mu.Lock()
@@ -111,6 +112,7 @@ func (s *Store) removeInitializedReplicaRaftMuLocked(
 		rep.mu.destroyStatus.Set(roachpb.NewRangeNotFoundError(rep.RangeID, rep.StoreID()),
 			destroyReasonRemoved)
 		replicaID = rep.mu.replicaID
+		tenantID = rep.mu.tenantID
 		rep.mu.Unlock()
 		rep.readOnlyCmdMu.Unlock()
 	}
@@ -142,7 +144,7 @@ func (s *Store) removeInitializedReplicaRaftMuLocked(
 	// Destroy, but this configuration helps avoid races in stat verification
 	// tests.
 
-	s.metrics.subtractMVCCStats(ctx, rep.tenantMetricsRef, rep.GetMVCCStats())
+	s.metrics.subtractMVCCStats(ctx, tenantID, rep.GetMVCCStats())
 	s.metrics.ReplicaCount.Dec(1)
 	s.mu.Unlock()
 
@@ -236,10 +238,11 @@ func (s *Store) removeUninitializedReplicaRaftMuLocked(
 	defer s.mu.Unlock()
 
 	// Sanity check, could be removed.
-	existing, stillExists := s.mu.replicasByRangeID.Load(rep.RangeID)
+	value, stillExists := s.mu.replicas.Load(int64(rep.RangeID))
 	if !stillExists {
 		log.Fatalf(ctx, "uninitialized replica was removed in the meantime")
 	}
+	existing := (*Replica)(value)
 	if existing == rep {
 		log.Infof(ctx, "removing uninitialized replica %v", rep)
 	} else {
@@ -261,7 +264,7 @@ func (s *Store) unlinkReplicaByRangeIDLocked(ctx context.Context, rangeID roachp
 	s.unquiescedReplicas.Unlock()
 	delete(s.mu.uninitReplicas, rangeID)
 	s.replicaQueues.Delete(int64(rangeID))
-	s.mu.replicasByRangeID.Delete(rangeID)
+	s.mu.replicas.Delete(int64(rangeID))
 	s.unregisterLeaseholderByID(ctx, rangeID)
 }
 
@@ -312,54 +315,58 @@ const (
 func (s *Store) removePlaceholderLocked(
 	ctx context.Context, inPH *ReplicaPlaceholder, typ removePlaceholderType,
 ) (removed bool, _ error) {
+	wasTainted := !atomic.CompareAndSwapInt32(&inPH.tainted, 0, 1)
+	idempotent := wasTainted && typ == removePlaceholderFailed || typ == removePlaceholderDropped
+	if wasTainted {
+		// The placeholder was already tainted, i.e. it was passed to
+		// removePlaceholderLocked before.
+		if !idempotent {
+			// We need the placeholder to exist, but it's already gone. This is a bug.
+			return false, errors.AssertionFailedf(
+				"attempt to remove already removed placeholder %+v", inPH,
+			)
+		}
+		// Continue so that we can verify that the placeholder is indeed gone.
+	}
+
 	rngID := inPH.Desc().RangeID
 	placeholder, ok := s.mu.replicaPlaceholders[rngID]
 
-	if wasTainted := !atomic.CompareAndSwapInt32(&inPH.tainted, 0, 1); wasTainted {
-		if typ == removePlaceholderFilled {
-			// If we're filling a placeholder, we do so exactly once. This is a bug,
-			// and could cause correctness problems due to improperly synchronized
-			// overlapping snapshots.
-			return false, errors.AssertionFailedf(
-				"attempting to fill tainted placeholder %+v (stored placeholder: %+v)", inPH, placeholder,
-			)
-		}
-		// "Our" placeholder (inPH) was already handled by an earlier call, so if
-		// there is one now, it better be someone else's.
-		if ok && inPH == placeholder {
-			return false, errors.AssertionFailedf(
-				"tainted placeholder %+v unexpectedly present in replicaPlaceholders: %+v", inPH, placeholder,
-			)
+	if wasTainted != !ok {
+		return false, errors.AssertionFailedf("expected placeholder to exist: %t but found in store: %t", !wasTainted, ok)
+	}
 
-		}
+	if !ok {
+		// The placeholder is not in the store, but that's ok since wasTainted is
+		// thus true (since we got here) and this implies that idempotent==true
+		// (again since we made it here).
 		return false, nil
 	}
 
-	// We were the ones to taint the placeholder, so it must exist in
-	// replicaPlaceholders at this point. We really shouldn't hit this assertion
-	// even if there is a bug; if anything we would hit the one above in the
-	// wasTainted branch, but better safe than sorry.
-	if !ok {
-		return false, errors.AssertionFailedf("expected placeholder %+v to exist", inPH)
-	}
-
 	if placeholder != inPH {
+		if idempotent {
+			// In idempotent mode, the placeholder was not in the store before, so
+			// nothing would have prevented another placeholder for the same range to
+			// slip in.
+			return false, nil
+		}
 		// The placeholder acts as a lock, and when we're filling or dropping it we
 		// only do so once, so how would we now see a different placeholder from the
 		// one we previously inserted? There must be a bug.
 		return false, errors.AssertionFailedf(
-			"placeholder %+v is being dropped or filled, but store has conflicting placeholder %+v",
+			"placeholder %s is being dropped or filled, but store has conflicting placeholder %s",
 			inPH, placeholder,
 		)
 	}
 
-	// Unlink the placeholder from the store.
+	// Remove the placeholder from the store.
+
 	if it := s.mu.replicasByKey.DeletePlaceholder(ctx, placeholder); it.ph != placeholder {
-		return false, errors.AssertionFailedf("placeholder %+v not found, got %+v", placeholder, it)
+		return false, errors.AssertionFailedf("placeholder %v not found, got %+v", placeholder, it)
 	}
 	delete(s.mu.replicaPlaceholders, rngID)
 	if it := s.getOverlappingKeyRangeLocked(&placeholder.rangeDesc); it.item != nil {
-		return false, errors.AssertionFailedf("corrupted replicasByKey map: %+v and %+v overlapped", it.ph, it.item)
+		return false, errors.AssertionFailedf("corrupted replicasByKey map: %s and %s overlapped", it.ph, it.item)
 	}
 	switch typ {
 	case removePlaceholderDropped:

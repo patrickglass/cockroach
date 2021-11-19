@@ -39,13 +39,13 @@ create-view t.public.v1
       └── ab@idx [columns: a]
 
 build
-CREATE VIEW v1 AS SELECT a FROM ab@ab_pkey
+CREATE VIEW v1 AS SELECT a FROM ab@primary
 ----
 create-view t.public.v1
- ├── SELECT a FROM t.public.ab@ab_pkey
+ ├── SELECT a FROM t.public.ab@primary
  ├── columns: a:1
  └── dependencies
-      └── ab@ab_pkey [columns: a]
+      └── ab@primary [columns: a]
 
 # Test dependency on view.
 exec-ddl

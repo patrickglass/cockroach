@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -24,10 +23,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/internal/sqlsmith"
-	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/errors"
-	"github.com/google/go-cmp/cmp"
 )
 
 const statementTimeout = time.Minute
@@ -66,7 +63,7 @@ func runTLP(ctx context.Context, t test.Test, c cluster.Cluster) {
 
 	conn := c.Conn(ctx, 1)
 
-	rnd, seed := randutil.NewTestRand()
+	rnd, seed := randutil.NewPseudoRand()
 	t.L().Printf("seed: %d", seed)
 
 	c.Put(ctx, t.Cockroach(), "./cockroach")
@@ -75,7 +72,7 @@ func runTLP(ctx context.Context, t test.Test, c cluster.Cluster) {
 	}
 	c.Start(ctx)
 
-	setup := sqlsmith.Setups[sqlsmith.RandTableSetupName](rnd)
+	setup := sqlsmith.Setups["rand-tables"](rnd)
 
 	t.Status("executing setup")
 	t.L().Printf("setup:\n%s", setup)
@@ -155,11 +152,12 @@ func runMutationStatement(conn *gosql.DB, smither *sqlsmith.Smither, logStmt fun
 	})
 }
 
-// runTLPQuery runs two queries to perform TLP. One is partitioned and one is
-// unpartitioned. If the results of the queries are not equal, an error is
-// returned. GenerateTLP also returns any placeholder arguments needed for the
-// partitioned query. See GenerateTLP for more information on TLP and the
-// generated queries.
+// runTLPQuery runs two queries to perform TLP. If the results of the query are
+// not equal, an error is returned. Currently GenerateTLP always returns
+// unpartitioned and partitioned queries of the form "SELECT count(*) ...". The
+// resulting counts of the queries are compared in order to verify logical
+// correctness. See GenerateTLP for more information on TLP and the generated
+// queries.
 func runTLPQuery(conn *gosql.DB, smither *sqlsmith.Smither, logStmt func(string)) error {
 	// Ignore panics from GenerateTLP.
 	defer func() {
@@ -168,59 +166,35 @@ func runTLPQuery(conn *gosql.DB, smither *sqlsmith.Smither, logStmt func(string)
 		}
 	}()
 
-	unpartitioned, partitioned, args := smither.GenerateTLP()
+	unpartitioned, partitioned := smither.GenerateTLP()
 
 	return runWithTimeout(func() error {
-		rows1, err := conn.Query(unpartitioned)
-		if err != nil {
-			// Ignore errors.
-			//nolint:returnerrcheck
-			return nil
-		}
-		defer rows1.Close()
-		unpartitionedRows, err := sqlutils.RowsToStrMatrix(rows1)
-		if err != nil {
-			// Ignore errors.
-			//nolint:returnerrcheck
-			return nil
-		}
-		rows2, err := conn.Query(partitioned, args...)
-		if err != nil {
-			// Ignore errors.
-			//nolint:returnerrcheck
-			return nil
-		}
-		defer rows2.Close()
-		partitionedRows, err := sqlutils.RowsToStrMatrix(rows2)
-		if err != nil {
+		var unpartitionedCount int
+		row := conn.QueryRow(unpartitioned)
+		if err := row.Scan(&unpartitionedCount); err != nil {
 			// Ignore errors.
 			//nolint:returnerrcheck
 			return nil
 		}
 
-		if diff := unsortedMatricesDiff(unpartitionedRows, partitionedRows); diff != "" {
+		var partitionedCount int
+		row = conn.QueryRow(partitioned)
+		if err := row.Scan(&partitionedCount); err != nil {
+			// Ignore errors.
+			//nolint:returnerrcheck
+			return nil
+		}
+
+		if unpartitionedCount != partitionedCount {
 			logStmt(unpartitioned)
 			logStmt(partitioned)
 			return errors.Newf(
-				"expected unpartitioned and partitioned results to be equal\n%s\nsql: %s\n%s\nwith args: %s",
-				diff, unpartitioned, partitioned, args)
+				"expected unpartitioned count %d to equal partitioned count %d\nsql: %s\n%s",
+				unpartitionedCount, partitionedCount, unpartitioned, partitioned)
 		}
+
 		return nil
 	})
-}
-
-func unsortedMatricesDiff(rowMatrix1, rowMatrix2 [][]string) string {
-	var rows1 []string
-	for _, row := range rowMatrix1 {
-		rows1 = append(rows1, strings.Join(row[:], ","))
-	}
-	var rows2 []string
-	for _, row := range rowMatrix2 {
-		rows2 = append(rows2, strings.Join(row[:], ","))
-	}
-	sort.Strings(rows1)
-	sort.Strings(rows2)
-	return cmp.Diff(rows1, rows2)
 }
 
 func runWithTimeout(f func() error) error {

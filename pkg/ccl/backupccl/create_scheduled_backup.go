@@ -32,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
-	"github.com/cockroachdb/cockroach/pkg/sql/protoreflect"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -336,8 +335,9 @@ func doCreateBackupSchedules(
 	// Prepare backup statement (full).
 	backupNode := &tree.Backup{
 		Options: tree.BackupOptions{
-			CaptureRevisionHistory: eval.BackupOptions.CaptureRevisionHistory,
-			Detached:               true,
+			CaptureRevisionHistory:       eval.BackupOptions.CaptureRevisionHistory,
+			Detached:                     true,
+			IncludeDeprecatedInterleaves: eval.BackupOptions.IncludeDeprecatedInterleaves,
 		},
 		Nested:         true,
 		AppendToLatest: false,
@@ -349,7 +349,7 @@ func doCreateBackupSchedules(
 		if err != nil {
 			return errors.Wrapf(err, "failed to evaluate backup encryption_passphrase")
 		}
-		backupNode.Options.EncryptionPassphrase = tree.NewStrVal(pw)
+		backupNode.Options.EncryptionPassphrase = tree.NewDString(pw)
 	}
 
 	// Evaluate encryption KMS URIs if set.
@@ -363,7 +363,7 @@ func doCreateBackupSchedules(
 		}
 		for _, kmsURI := range kmsURIs {
 			backupNode.Options.EncryptionKMSURI = append(backupNode.Options.EncryptionKMSURI,
-				tree.NewStrVal(kmsURI))
+				tree.NewDString(kmsURI))
 		}
 	}
 
@@ -374,7 +374,7 @@ func doCreateBackupSchedules(
 	}
 
 	for _, dest := range destinations {
-		backupNode.To = append(backupNode.To, tree.NewStrVal(dest))
+		backupNode.To = append(backupNode.To, tree.NewDString(dest))
 	}
 
 	backupNode.Targets = eval.Targets
@@ -603,7 +603,10 @@ func makeBackupSchedule(
 
 	// We do not set backupNode.AsOf: this is done when the scheduler kicks off the backup.
 	// Serialize backup statement and set schedule executor and its args.
-	args.BackupStatement = tree.AsStringWithFlags(backupNode, tree.FmtParsable|tree.FmtShowPasswords)
+	//
+	// TODO(bulkio): this serialization is erroneous, see issue
+	// https://github.com/cockroachdb/cockroach/issues/63216
+	args.BackupStatement = tree.AsStringWithFlags(backupNode, tree.FmtSimple|tree.FmtShowPasswords)
 	any, err := pbtypes.MarshalAny(args)
 	if err != nil {
 		return nil, nil, err
@@ -939,13 +942,9 @@ func createBackupScheduleHook(
 	return fn, scheduledBackupHeader, nil, false, nil
 }
 
-// MarshalJSONPB implements jsonpb.JSONPBMarshaller to provide a custom Marshaller
-// for jsonpb that redacts secrets in URI fields.
-func (m ScheduledBackupExecutionArgs) MarshalJSONPB(marshaller *jsonpb.Marshaler) ([]byte, error) {
-	if !protoreflect.ShouldRedact(marshaller) {
-		return json.Marshal(m)
-	}
-
+// MarshalJSONPB provides a custom Marshaller for jsonpb that redacts secrets in
+// URI fields.
+func (m ScheduledBackupExecutionArgs) MarshalJSONPB(x *jsonpb.Marshaler) ([]byte, error) {
 	stmt, err := parser.ParseOne(m.BackupStatement)
 	if err != nil {
 		return nil, err

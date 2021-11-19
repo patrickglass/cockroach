@@ -39,8 +39,7 @@ func TestSetupLogging(t *testing.T) {
 		`filter: INFO, ` +
 		`format: json-fluent-compact, ` +
 		`redactable: true, ` +
-		`exit-on-error: false, ` +
-		`buffering: NONE}`
+		`exit-on-error: false}`
 	const defaultHTTPConfig = `http-defaults: {` +
 		`method: POST, ` +
 		`unsafe-tls: false, ` +
@@ -49,8 +48,7 @@ func TestSetupLogging(t *testing.T) {
 		`filter: INFO, ` +
 		`format: json-compact, ` +
 		`redactable: true, ` +
-		`exit-on-error: false, ` +
-		`buffering: NONE}`
+		`exit-on-error: false}`
 	stdFileDefaultsRe := regexp.MustCompile(
 		`file-defaults: \{` +
 			`dir: (?P<path>[^,]+), ` +
@@ -59,8 +57,7 @@ func TestSetupLogging(t *testing.T) {
 			`buffered-writes: true, ` +
 			`filter: INFO, ` +
 			`format: crdb-v2, ` +
-			`redactable: true, ` +
-			`buffering: NONE\}`)
+			`redactable: true\}`)
 	fileDefaultsNoMaxSizeRe := regexp.MustCompile(
 		`file-defaults: \{` +
 			`dir: (?P<path>[^,]+), ` +
@@ -68,15 +65,13 @@ func TestSetupLogging(t *testing.T) {
 			`buffered-writes: true, ` +
 			`filter: INFO, ` +
 			`format: crdb-v2, ` +
-			`redactable: true, ` +
-			`buffering: NONE\}`)
+			`redactable: true\}`)
 	const fileDefaultsNoDir = `file-defaults: {` +
 		`file-permissions: "0644", ` +
 		`buffered-writes: true, ` +
 		`filter: INFO, ` +
 		`format: crdb-v2, ` +
-		`redactable: true, ` +
-		`buffering: NONE}`
+		`redactable: true}`
 	const defaultLogDir = `PWD/cockroach-data/logs`
 	stdCaptureFd2Re := regexp.MustCompile(
 		`capture-stray-errors: \{` +
@@ -90,8 +85,7 @@ func TestSetupLogging(t *testing.T) {
 			`buffered-writes: (?P<buf>[^,]+), ` +
 			`filter: INFO, ` +
 			`format: (?P<format>[^,]+), ` +
-			`redactable: true, ` +
-			`buffering: NONE\}`)
+			`redactable: true\}`)
 	telemetryFileCfgRe := regexp.MustCompile(
 		`\{channels: \{INFO: \[TELEMETRY\]\}, ` +
 			`dir: (?P<path>[^,]+), ` +
@@ -101,21 +95,18 @@ func TestSetupLogging(t *testing.T) {
 			`buffered-writes: true, ` +
 			`filter: INFO, ` +
 			`format: crdb-v2, ` +
-			`redactable: true, ` +
-			`buffering: NONE\}`)
+			`redactable: true\}`)
 
 	stderrCfgRe := regexp.MustCompile(
 		`stderr: {channels: \{(?P<level>[^:]+): all\}, ` +
 			`filter: [^,]+, ` +
 			`format: crdb-v2-tty, ` +
-			`redactable: (?P<redactable>[^}]+), ` +
-			`buffering: NONE}`)
+			`redactable: (?P<redactable>[^}]+)}`)
 
 	stderrCfgNoneRe := regexp.MustCompile(
 		`stderr: {filter: NONE, ` +
 			`format: crdb-v2-tty, ` +
-			`redactable: (?P<redactable>[^}]+), ` +
-			`buffering: NONE}`)
+			`redactable: (?P<redactable>[^}]+)}`)
 
 	wd, err := os.Getwd()
 	if err != nil {

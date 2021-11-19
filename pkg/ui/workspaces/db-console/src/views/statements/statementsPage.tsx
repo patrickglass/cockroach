@@ -46,6 +46,7 @@ import {
   trackDownloadDiagnosticsBundleAction,
   trackStatementsPaginationAction,
   trackStatementsSearchAction,
+  trackTableSortAction,
 } from "src/redux/analyticsActions";
 import { resetSQLStatsAction } from "src/redux/sqlStats";
 import { LocalSetting } from "src/redux/localsettings";
@@ -56,9 +57,7 @@ type IStatementDiagnosticsReport = protos.cockroach.server.serverpb.IStatementDi
 
 interface StatementsSummaryData {
   statement: string;
-  statementSummary: string;
   aggregatedTs: number;
-  aggregationInterval: number;
   implicitTxn: boolean;
   fullScan: boolean;
   database: string;
@@ -114,9 +113,7 @@ export const selectStatements = createSelector(
       if (!(key in statsByStatementKey)) {
         statsByStatementKey[key] = {
           statement: stmt.statement,
-          statementSummary: stmt.statement_summary,
           aggregatedTs: stmt.aggregated_ts,
-          aggregationInterval: stmt.aggregation_interval,
           implicitTxn: stmt.implicit_txn,
           fullScan: stmt.full_scan,
           database: stmt.database,
@@ -130,9 +127,7 @@ export const selectStatements = createSelector(
       const stmt = statsByStatementKey[key];
       return {
         label: stmt.statement,
-        summary: stmt.statementSummary,
         aggregatedTs: stmt.aggregatedTs,
-        aggregationInterval: stmt.aggregationInterval,
         implicitTxn: stmt.implicitTxn,
         fullScan: stmt.fullScan,
         database: stmt.database,
@@ -234,25 +229,18 @@ export const statementColumnsLocalSetting = new LocalSetting(
   null,
 );
 
-export const sortSettingLocalSetting = new LocalSetting(
-  "sortSetting/StatementsPage",
-  (state: AdminUIState) => state.localSettings,
-  { ascending: false, columnTitle: "executionCount" },
-);
-
 export default withRouter(
   connect(
     (state: AdminUIState, props: RouteComponentProps) => ({
       statements: selectStatements(state, props),
       statementsError: state.cachedData.statements.lastError,
+      dateRange: selectDateRange(state),
       apps: selectApps(state),
       databases: selectDatabases(state),
       totalFingerprints: selectTotalFingerprints(state),
       lastReset: selectLastReset(state),
       columns: statementColumnsLocalSetting.selectorToArray(state),
       nodeRegions: nodeRegionsByIDSelector(state),
-      dateRange: selectDateRange(state),
-      sortSetting: sortSettingLocalSetting.selector(state),
     }),
     {
       refreshStatements: refreshStatements,
@@ -266,15 +254,7 @@ export default withRouter(
       onSearchComplete: (results: AggregateStatistics[]) =>
         trackStatementsSearchAction(results.length),
       onPageChanged: trackStatementsPaginationAction,
-      onSortingChange: (
-        _tableName: string,
-        columnName: string,
-        ascending: boolean,
-      ) =>
-        sortSettingLocalSetting.set({
-          ascending: ascending,
-          columnTitle: columnName,
-        }),
+      onSortingChange: trackTableSortAction,
       onDiagnosticsReportDownload: (report: IStatementDiagnosticsReport) =>
         trackDownloadDiagnosticsBundleAction(report.statement_fingerprint),
       // We use `null` when the value was never set and it will show all columns.

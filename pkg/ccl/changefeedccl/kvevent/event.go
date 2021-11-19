@@ -23,22 +23,7 @@ import (
 
 // ErrBufferClosed is returned by Readers when no more values will be
 // returned from the buffer.
-type ErrBufferClosed struct {
-	reason error
-}
-
-// Error() implements the error interface
-func (e ErrBufferClosed) Error() string {
-	return "buffer closed"
-}
-
-func (e ErrBufferClosed) Unwrap() error {
-	return e.reason
-}
-
-// ErrNormalRestartReason is a sentinel error to indicate the
-// ErrBufferClosed's reason is a pending restart
-var ErrNormalRestartReason = errors.New("writer can restart")
+var ErrBufferClosed = errors.New("buffer closed")
 
 // Buffer is an interface for communicating kvfeed entries between processors.
 type Buffer interface {
@@ -58,8 +43,8 @@ type Writer interface {
 	Add(ctx context.Context, event Event) error
 	// Drain waits until all events buffered by this writer has been consumed.
 	Drain(ctx context.Context) error
-	// CloseWithReason closes this writer. reason may be added as a detail to ErrBufferClosed.
-	CloseWithReason(ctx context.Context, reason error) error
+	// Close closes this writer.
+	Close(ctx context.Context) error
 }
 
 // Type indicates the type of the event.
@@ -164,8 +149,6 @@ func (b *Event) Timestamp() hlc.Timestamp {
 			return b.backfillTimestamp
 		}
 		return b.kv.Value.Timestamp
-	case TypeFlush:
-		return hlc.Timestamp{}
 	default:
 		log.Warningf(context.TODO(),
 			"setting empty timestamp for unknown event type")
@@ -182,8 +165,6 @@ func (b *Event) MVCCTimestamp() hlc.Timestamp {
 		return b.resolved.Timestamp
 	case TypeKV:
 		return b.kv.Value.Timestamp
-	case TypeFlush:
-		return hlc.Timestamp{}
 	default:
 		log.Warningf(context.TODO(),
 			"setting empty timestamp for unknown event type")

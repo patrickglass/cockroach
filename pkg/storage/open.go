@@ -12,10 +12,12 @@ package storage
 
 import (
 	"context"
+	"math/rand"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
 )
@@ -49,11 +51,16 @@ var MustExist ConfigOption = func(cfg *engineConfig) error {
 }
 
 // ForTesting configures the engine for use in testing. It may randomize some
-// config options to improve test coverage.
+// config options to improve test coverage
 var ForTesting ConfigOption = func(cfg *engineConfig) error {
 	if cfg.Settings == nil {
 		cfg.Settings = cluster.MakeTestingClusterSettings()
 	}
+	disableSeparatedIntents := rand.Intn(2) == 0
+	log.Infof(context.Background(),
+		"engine creation is randomly setting disableSeparatedIntents: %t",
+		disableSeparatedIntents)
+	cfg.DisableSeparatedIntents = disableSeparatedIntents
 	return nil
 }
 
@@ -161,7 +168,7 @@ func Filesystem(dir string) Location {
 		// fs is left nil intentionally, so that it will be left as the
 		// default of vfs.Default wrapped in vfs.WithDiskHealthChecks
 		// (initialized by DefaultPebbleOptions).
-		// TODO(jackson): Refactor to make it harder to accidentally remove
+		// TODO(jackson): Refactor to make it harder to accidentially remove
 		// disk health checks by setting your own VFS in a call to NewPebble.
 	}
 }

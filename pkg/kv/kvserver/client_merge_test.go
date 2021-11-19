@@ -757,7 +757,7 @@ func mergeCheckingTimestampCaches(
 
 		// Install a filter to capture the Raft snapshot.
 		snapshotFilter = func(inSnap kvserver.IncomingSnapshot) {
-			if inSnap.Desc.RangeID == lhsDesc.RangeID {
+			if inSnap.State.Desc.RangeID == lhsDesc.RangeID {
 				snapChan <- inSnap
 			}
 		}
@@ -809,7 +809,7 @@ func mergeCheckingTimestampCaches(
 		case <-time.After(45 * time.Second):
 			t.Fatal("timed out waiting for snapChan")
 		}
-		inSnapDesc := inSnap.Desc
+		inSnapDesc := inSnap.State.Desc
 		require.Equal(t, lhsDesc.StartKey, inSnapDesc.StartKey)
 		require.Equal(t, rhsDesc.EndKey, inSnapDesc.EndKey)
 
@@ -3229,9 +3229,7 @@ func (h *slowSnapRaftHandler) unblock() {
 }
 
 func (h *slowSnapRaftHandler) HandleSnapshot(
-	ctx context.Context,
-	header *kvserver.SnapshotRequest_Header,
-	respStream kvserver.SnapshotResponseStream,
+	header *kvserver.SnapshotRequest_Header, respStream kvserver.SnapshotResponseStream,
 ) error {
 	if header.RaftMessageRequest.RangeID == h.rangeID {
 		h.Lock()
@@ -3241,7 +3239,7 @@ func (h *slowSnapRaftHandler) HandleSnapshot(
 			<-waitCh
 		}
 	}
-	return h.RaftMessageHandler.HandleSnapshot(ctx, header, respStream)
+	return h.RaftMessageHandler.HandleSnapshot(header, respStream)
 }
 
 // TestStoreRangeMergeUninitializedLHSFollower reproduces a rare bug in which a
@@ -3733,7 +3731,7 @@ func TestStoreRangeMergeRaftSnapshot(t *testing.T) {
 		// on in the test. This function verifies that the subsumed replicas have
 		// been handled properly.
 		if snapType != kvserver.SnapshotRequest_VIA_SNAPSHOT_QUEUE ||
-			inSnap.Desc.RangeID != rangeIds[string(keyA)] {
+			inSnap.State.Desc.RangeID != rangeIds[string(keyA)] {
 			return nil
 		}
 
@@ -3781,15 +3779,15 @@ func TestStoreRangeMergeRaftSnapshot(t *testing.T) {
 
 		// Construct SSTs for the the first 4 bullets as numbered above, but only
 		// ultimately keep the last one.
-		keyRanges := rditer.MakeReplicatedKeyRanges(inSnap.Desc)
-		it := rditer.NewReplicaEngineDataIterator(inSnap.Desc, sendingEng, true /* replicatedOnly */)
+		keyRanges := rditer.MakeReplicatedKeyRanges(inSnap.State.Desc)
+		it := rditer.NewReplicaEngineDataIterator(inSnap.State.Desc, sendingEng, true /* replicatedOnly */)
 		defer it.Close()
 		// Write a range deletion tombstone to each of the SSTs then put in the
 		// kv entries from the sender of the snapshot.
 		for _, r := range keyRanges {
 			sstFile := &storage.MemFile{}
 			sst := storage.MakeIngestionSSTWriter(sstFile)
-			if err := sst.ClearRawRange(r.Start, r.End); err != nil {
+			if err := sst.ClearRawRange(r.Start.Key, r.End.Key); err != nil {
 				return err
 			}
 
@@ -3800,7 +3798,7 @@ func TestStoreRangeMergeRaftSnapshot(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				if !valid || r.End.Compare(it.UnsafeKey().Key) <= 0 {
+				if !valid || r.End.Key.Compare(it.UnsafeKey().Key) <= 0 {
 					if err := sst.Finish(); err != nil {
 						return err
 					}
@@ -3828,7 +3826,7 @@ func TestStoreRangeMergeRaftSnapshot(t *testing.T) {
 			sst := storage.MakeIngestionSSTWriter(sstFile)
 			defer sst.Close()
 			r := rditer.MakeRangeIDLocalKeyRange(rangeID, false /* replicatedOnly */)
-			if err := sst.ClearRawRange(r.Start, r.End); err != nil {
+			if err := sst.ClearRawRange(r.Start.Key, r.End.Key); err != nil {
 				return err
 			}
 			tombstoneKey := keys.RangeTombstoneKey(rangeID)
@@ -3852,7 +3850,7 @@ func TestStoreRangeMergeRaftSnapshot(t *testing.T) {
 			EndKey:   roachpb.RKey(keyEnd),
 		}
 		r := rditer.MakeUserKeyRange(&desc)
-		if err := storage.ClearRangeWithHeuristic(receivingEng, &sst, r.Start, r.End); err != nil {
+		if err := storage.ClearRangeWithHeuristic(receivingEng, &sst, r.Start.Key, r.End.Key); err != nil {
 			return err
 		}
 		err := sst.Finish()
@@ -4124,7 +4122,10 @@ func TestStoreRangeMergeDuringShutdown(t *testing.T) {
 
 	// Send a dummy get request on the RHS to force a lease acquisition. We expect
 	// this to fail, as quiescing stores cannot acquire leases.
-	_, err = store.DB().Get(ctx, key.Next())
+	err = s.Stopper().RunTaskWithErr(ctx, "test-get-rhs-key", func(ctx context.Context) error {
+		_, err := store.DB().Get(ctx, key.Next())
+		return err
+	})
 	if exp := "not lease holder"; !testutils.IsError(err, exp) {
 		t.Fatalf("expected %q error, but got %v", exp, err)
 	}
@@ -4206,7 +4207,7 @@ func TestMergeQueue(t *testing.T) {
 			t.Fatal(pErr)
 		}
 	}
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	randBytes := randutil.RandBytes(rng, int(conf.RangeMinBytes))
 
 	lhsStartKey := roachpb.RKey(tc.ScratchRange(t))
@@ -5019,7 +5020,7 @@ func setupClusterWithSubsumedRange(
 			newDesc, err = tc.AddVoters(desc.StartKey.AsRawKey(), tc.Target(1))
 			if kv.IsExpectedRelocateError(err) {
 				// Retry.
-				return errors.Wrap(err, "ChangeReplicas received error")
+				return errors.Newf("ChangeReplicas: received error %s", err)
 			}
 			return nil
 		})

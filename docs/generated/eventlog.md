@@ -648,32 +648,6 @@ An event of type `comment_on_column` is recorded when a column is commented.
 | `ApplicationName` | The application name for the session where the event was emitted. This is included in the event to ease filtering of logging output by application. Application names starting with a dollar sign (`$`) are not considered sensitive. | depends |
 | `PlaceholderValues` | The mapping of SQL placeholders to their values, for prepared statements. | yes |
 
-### `comment_on_constraint`
-
-An event of type `comment_on_constraint` is recorded when an constraint is commented.
-
-
-| Field | Description | Sensitive |
-|--|--|--|
-| `TableName` | The name of the table containing the affected constraint. | yes |
-| `ConstraintName` | The name of the affected constraint. | yes |
-| `Comment` | The new comment. | yes |
-| `NullComment` | Set to true if the comment was removed entirely. | no |
-
-
-#### Common fields
-
-| Field | Description | Sensitive |
-|--|--|--|
-| `Timestamp` | The timestamp of the event. Expressed as nanoseconds since the Unix epoch. | no |
-| `EventType` | The type of the event. | no |
-| `Statement` | A normalized copy of the SQL statement that triggered the event. The statement string contains a mix of sensitive and non-sensitive details (it is redactable). | partially |
-| `Tag` | The statement tag. This is separate from the statement string, since the statement string can contain sensitive information. The tag is guaranteed not to. | no |
-| `User` | The user account that triggered the event. The special usernames `root` and `node` are not considered sensitive. | depends |
-| `DescriptorID` | The primary object descriptor affected by the operation. Set to zero for operations that don't affect descriptors. | no |
-| `ApplicationName` | The application name for the session where the event was emitted. This is included in the event to ease filtering of logging output by application. Application names starting with a dollar sign (`$`) are not considered sensitive. | depends |
-| `PlaceholderValues` | The mapping of SQL placeholders to their values, for prepared statements. | yes |
-
 ### `comment_on_database`
 
 CommentOnTable is recorded when a database is commented.
@@ -1766,8 +1740,7 @@ Events of this type are only emitted when the cluster setting
 | `Network` | The network protocol for this connection: tcp4, tcp6, unix, etc. | no |
 | `RemoteAddress` | The remote address of the SQL client. Note that when using a proxy or other intermediate server, this field will contain the address of the intermediate server. | yes |
 | `Transport` | The connection type after transport negotiation. | no |
-| `User` | The database username the session is for. This username will have undergone case-folding and Unicode normalization. | yes |
-| `SystemIdentity` | The original system identity provided by the client, if an identity mapping was used per Host-Based Authentication rules. This may be a GSSAPI or X.509 principal or any other external value, so no specific assumptions should be made about the contents of this field. | yes |
+| `User` | The username the session is for. This is the username passed by the client, after case-folding and Unicode normalization. | yes |
 
 ### `client_authentication_info`
 
@@ -1794,8 +1767,7 @@ Events of this type are only emitted when the cluster setting
 | `Network` | The network protocol for this connection: tcp4, tcp6, unix, etc. | no |
 | `RemoteAddress` | The remote address of the SQL client. Note that when using a proxy or other intermediate server, this field will contain the address of the intermediate server. | yes |
 | `Transport` | The connection type after transport negotiation. | no |
-| `User` | The database username the session is for. This username will have undergone case-folding and Unicode normalization. | yes |
-| `SystemIdentity` | The original system identity provided by the client, if an identity mapping was used per Host-Based Authentication rules. This may be a GSSAPI or X.509 principal or any other external value, so no specific assumptions should be made about the contents of this field. | yes |
+| `User` | The username the session is for. This is the username passed by the client, after case-folding and Unicode normalization. | yes |
 
 ### `client_authentication_ok`
 
@@ -1821,8 +1793,7 @@ Events of this type are only emitted when the cluster setting
 | `Network` | The network protocol for this connection: tcp4, tcp6, unix, etc. | no |
 | `RemoteAddress` | The remote address of the SQL client. Note that when using a proxy or other intermediate server, this field will contain the address of the intermediate server. | yes |
 | `Transport` | The connection type after transport negotiation. | no |
-| `User` | The database username the session is for. This username will have undergone case-folding and Unicode normalization. | yes |
-| `SystemIdentity` | The original system identity provided by the client, if an identity mapping was used per Host-Based Authentication rules. This may be a GSSAPI or X.509 principal or any other external value, so no specific assumptions should be made about the contents of this field. | yes |
+| `User` | The username the session is for. This is the username passed by the client, after case-folding and Unicode normalization. | yes |
 
 ### `client_connection_end`
 
@@ -1895,8 +1866,7 @@ Events of this type are only emitted when the cluster setting
 | `Network` | The network protocol for this connection: tcp4, tcp6, unix, etc. | no |
 | `RemoteAddress` | The remote address of the SQL client. Note that when using a proxy or other intermediate server, this field will contain the address of the intermediate server. | yes |
 | `Transport` | The connection type after transport negotiation. | no |
-| `User` | The database username the session is for. This username will have undergone case-folding and Unicode normalization. | yes |
-| `SystemIdentity` | The original system identity provided by the client, if an identity mapping was used per Host-Based Authentication rules. This may be a GSSAPI or X.509 principal or any other external value, so no specific assumptions should be made about the contents of this field. | yes |
+| `User` | The username the session is for. This is the username passed by the client, after case-folding and Unicode normalization. | yes |
 
 ## SQL Slow Query Log
 

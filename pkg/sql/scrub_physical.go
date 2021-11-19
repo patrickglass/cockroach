@@ -114,7 +114,6 @@ func (o *physicalCheckOperation) Start(params runParams) error {
 	}
 	scan.index = scan.specifiedIndex
 	sb := span.MakeBuilder(params.EvalContext(), params.ExecCfg().Codec, o.tableDesc, o.index)
-	defer sb.Release()
 	scan.spans, err = sb.UnconstrainedSpans()
 	if err != nil {
 		return err
@@ -143,7 +142,7 @@ func (o *physicalCheckOperation) Start(params runParams) error {
 	}
 	o.run.rows = rows
 	o.run.iterator = newRowContainerIterator(ctx, *rows, rowexec.ScrubTypes)
-	o.run.currentRow, err = o.run.iterator.Next()
+	o.run.currentRow, err = o.run.iterator.next()
 	return err
 }
 
@@ -173,7 +172,7 @@ func (o *physicalCheckOperation) Next(params runParams) (tree.Datums, error) {
 	}
 
 	// Advance to the next row.
-	o.run.currentRow, err = o.run.iterator.Next()
+	o.run.currentRow, err = o.run.iterator.next()
 	return res, err
 }
 
@@ -190,11 +189,11 @@ func (o *physicalCheckOperation) Done(context.Context) bool {
 // Close implements the checkOperation interface.
 func (o *physicalCheckOperation) Close(ctx context.Context) {
 	if o.run.rows != nil {
-		o.run.rows.Close(ctx)
+		o.run.rows.close(ctx)
 		o.run.rows = nil
 	}
 	if o.run.iterator != nil {
-		o.run.iterator.Close()
+		o.run.iterator.close()
 		o.run.iterator = nil
 	}
 }

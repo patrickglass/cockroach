@@ -11,22 +11,18 @@
 package main
 
 import (
-	"errors"
-	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	bazelutil "github.com/cockroachdb/cockroach/pkg/build/util"
+	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
 )
-
-const mirrorFlag = "mirror"
 
 // makeGenerateCmd constructs the subcommand used to generate the specified
 // artifacts.
 func makeGenerateCmd(runE func(cmd *cobra.Command, args []string) error) *cobra.Command {
-	lintCmd := &cobra.Command{
+	return &cobra.Command{
 		Use:     "generate [target..]",
 		Aliases: []string{"gen"},
 		Short:   `Generate the specified files`,
@@ -43,8 +39,6 @@ func makeGenerateCmd(runE func(cmd *cobra.Command, args []string) error) *cobra.
 		// (especially considering we've SilenceErrors-ed things away).
 		RunE: runE,
 	}
-	lintCmd.Flags().Bool(mirrorFlag, false, "mirror new dependencies to cloud storage")
-	return lintCmd
 }
 
 func (d *dev) generate(cmd *cobra.Command, targets []string) error {
@@ -69,7 +63,7 @@ func (d *dev) generate(cmd *cobra.Command, targets []string) error {
 	for _, target := range targets {
 		generator, ok := generatorTargetMapping[target]
 		if !ok {
-			return fmt.Errorf("unrecognized target: %s", target)
+			return errors.Newf("unrecognized target: %s", target)
 		}
 
 		if err := generator(cmd); err != nil {
@@ -82,18 +76,11 @@ func (d *dev) generate(cmd *cobra.Command, targets []string) error {
 
 func (d *dev) generateBazel(cmd *cobra.Command) error {
 	ctx := cmd.Context()
-	mirror := mustGetFlagBool(cmd, mirrorFlag)
 	workspace, err := d.getWorkspace(ctx)
 	if err != nil {
 		return err
 	}
-	executable := filepath.Join(workspace, "build", "bazelutil", "bazel-generate.sh")
-	if mirror {
-		env := os.Environ()
-		env = append(env, "COCKROACH_BAZEL_CAN_MIRROR=1")
-		return d.exec.CommandContextWithEnv(ctx, env, executable)
-	}
-	return d.exec.CommandContextInheritingStdStreams(ctx, executable)
+	return d.exec.CommandContextInheritingStdStreams(ctx, filepath.Join(workspace, "build", "bazelutil", "bazel-generate.sh"))
 }
 
 func (d *dev) generateDocs(cmd *cobra.Command) error {
@@ -116,8 +103,9 @@ func (d *dev) generateDocs(cmd *cobra.Command) error {
 	}
 	// Build targets.
 	var args []string
-	args = append(args, "build")
+	args = append(args, "build", "--color=yes", "--experimental_convenience_symlinks=ignore")
 	args = append(args, mustGetRemoteCacheArgs(remoteCacheAddr)...)
+	args = append(args, getConfigFlags()...)
 	args = append(args, targets...)
 	err = d.exec.CommandContextInheritingStdStreams(ctx, "bazel", args...)
 	if err != nil {
@@ -177,8 +165,9 @@ func (d *dev) generateGo(cmd *cobra.Command) error {
 	}
 	// Build targets.
 	var args []string
-	args = append(args, "build")
+	args = append(args, "build", "--color=yes", "--experimental_convenience_symlinks=ignore")
 	args = append(args, mustGetRemoteCacheArgs(remoteCacheAddr)...)
+	args = append(args, getConfigFlags()...)
 	args = append(args, targets...)
 	err = d.exec.CommandContextInheritingStdStreams(ctx, "bazel", args...)
 	if err != nil {
@@ -205,7 +194,7 @@ func (d *dev) generateGo(cmd *cobra.Command) error {
 }
 
 func (*dev) generateUnimplemented(*cobra.Command) error {
-	return errors.New("to hoist all generated code into the workspace, run " +
+	return errors.New("To hoist all generated code into the workspace, run " +
 		"`dev build` with the flag `--hoist-generated-code`; to build the generated Go " +
 		"code needed to pass CI, run `dev generate go`")
 }

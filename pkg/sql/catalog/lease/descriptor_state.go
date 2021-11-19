@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/logtags"
 	"github.com/cockroachdb/redact"
 )
 
@@ -94,7 +93,6 @@ type descriptorState struct {
 func (t *descriptorState) findForTimestamp(
 	ctx context.Context, timestamp hlc.Timestamp,
 ) (*descriptorVersionState, bool, error) {
-	expensiveLogEnabled := log.ExpensiveLogEnabled(ctx, 2)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -110,7 +108,7 @@ func (t *descriptorState) findForTimestamp(
 			latest := i+1 == len(t.mu.active.data)
 			if !desc.hasExpired(timestamp) {
 				// Existing valid descriptor version.
-				desc.incRefCount(ctx, expensiveLogEnabled)
+				desc.incRefCount(ctx)
 				return desc, latest, nil
 			}
 
@@ -221,37 +219,29 @@ func (t *descriptorState) release(ctx context.Context, s *descriptorVersionState
 
 	// Decrements the refcount and returns true if the lease has to be removed
 	// from the store.
-	expensiveLoggingEnabled := log.ExpensiveLogEnabled(ctx, 2)
-	decRefCount := func(s *descriptorVersionState) (shouldRemove bool) {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.mu.refcount--
-		if expensiveLoggingEnabled {
-			log.Infof(ctx, "release: %s", s.stringLocked())
-		}
-		return s.mu.refcount == 0
-	}
-	maybeMarkRemoveStoredLease := func(s *descriptorVersionState) *storedLease {
+	decRefcount := func(s *descriptorVersionState) *storedLease {
 		// Figure out if we'd like to remove the lease from the store asap (i.e.
 		// when the refcount drops to 0). If so, we'll need to mark the lease as
 		// invalid.
-		removeOnceDereferenced :=
+		removeOnceDereferenced := t.m.removeOnceDereferenced() ||
 			// Release from the store if the descriptor has been dropped or taken
 			// offline.
 			t.mu.takenOffline ||
-				// Release from the store if the lease is not for the latest
-				// version; only leases for the latest version can be acquired.
-				s != t.mu.active.findNewest() ||
-				s.GetVersion() < t.mu.maxVersionSeen ||
-				t.m.removeOnceDereferenced()
-		if !removeOnceDereferenced {
-			return nil
-		}
+			// Release from the store if the lease is not for the latest
+			// version; only leases for the latest version can be acquired.
+			s != t.mu.active.findNewest() ||
+			s.GetVersion() < t.mu.maxVersionSeen
+
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		s.mu.refcount--
+		if log.ExpensiveLogEnabled(ctx, 2) {
+			log.Infof(ctx, "release: %s", s.stringLocked())
+		}
 		if s.mu.refcount < 0 {
 			panic(errors.AssertionFailedf("negative ref count: %s", s))
 		}
+
 		if s.mu.refcount == 0 && s.mu.lease != nil && removeOnceDereferenced {
 			l := s.mu.lease
 			s.mu.lease = nil
@@ -260,19 +250,16 @@ func (t *descriptorState) release(ctx context.Context, s *descriptorVersionState
 		return nil
 	}
 	maybeRemoveLease := func() *storedLease {
-		if shouldRemove := decRefCount(s); !shouldRemove {
-			return nil
-		}
 		t.mu.Lock()
 		defer t.mu.Unlock()
-		if l := maybeMarkRemoveStoredLease(s); l != nil {
+		if l := decRefcount(s); l != nil {
 			t.mu.active.remove(s)
 			return l
 		}
 		return nil
 	}
 	if l := maybeRemoveLease(); l != nil {
-		releaseLease(ctx, l, t.m)
+		releaseLease(l, t.m)
 	}
 }
 
@@ -286,11 +273,7 @@ func (t *descriptorState) maybeQueueLeaseRenewal(
 	}
 
 	// Start the renewal. When it finishes, it will reset t.renewalInProgress.
-	newCtx := m.ambientCtx.AnnotateCtx(context.Background())
-	// AddTags and not WithTags, so that we combine the tags with those
-	// filled by AnnotateCtx.
-	newCtx = logtags.AddTags(newCtx, logtags.FromContext(ctx))
-	return t.stopper.RunAsyncTask(newCtx,
+	return t.stopper.RunAsyncTask(context.Background(),
 		"lease renewal", func(ctx context.Context) {
 			t.startLeaseRenewal(ctx, m, id, name)
 		})

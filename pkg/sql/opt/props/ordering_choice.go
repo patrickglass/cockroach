@@ -189,7 +189,7 @@ func ParseOrdering(str string) opt.Ordering {
 		panic(errors.AssertionFailedf("invalid ordering %s", str))
 	}
 	for i := range prov.Columns {
-		if prov.Group(i).Len() != 1 {
+		if prov.Columns[i].Group.Len() != 1 {
 			panic(errors.AssertionFailedf("invalid ordering %s", str))
 		}
 	}
@@ -247,7 +247,7 @@ func (oc *OrderingChoice) ToOrdering() opt.Ordering {
 func (oc *OrderingChoice) ColSet() opt.ColSet {
 	var cs opt.ColSet
 	for i := range oc.Columns {
-		cs.UnionWith(oc.Group(i))
+		cs.UnionWith(oc.Columns[i].Group)
 	}
 	return cs
 }
@@ -581,7 +581,7 @@ func (oc *OrderingChoice) SubsetOfCols(cs opt.ColSet) bool {
 		return false
 	}
 	for i := range oc.Columns {
-		if !oc.Group(i).SubsetOf(cs) {
+		if !oc.Columns[i].Group.SubsetOf(cs) {
 			return false
 		}
 	}
@@ -603,7 +603,7 @@ func (oc *OrderingChoice) SubsetOfCols(cs opt.ColSet) bool {
 //
 func (oc *OrderingChoice) CanProjectCols(cs opt.ColSet) bool {
 	for i := range oc.Columns {
-		if !oc.Group(i).Intersects(cs) {
+		if !oc.Columns[i].Group.Intersects(cs) {
 			return false
 		}
 	}
@@ -797,9 +797,9 @@ func (oc *OrderingChoice) RestrictToCols(cols opt.ColSet) {
 		oc.Optional = oc.Optional.Intersection(cols)
 	}
 	for i := range oc.Columns {
-		if !oc.Group(i).SubsetOf(cols) {
-			oc.Columns[i].Group = oc.Group(i).Intersection(cols)
-			if oc.Group(i).Empty() {
+		if !oc.Columns[i].Group.SubsetOf(cols) {
+			oc.Columns[i].Group = oc.Columns[i].Group.Intersection(cols)
+			if oc.Columns[i].Group.Empty() {
 				oc.Columns = oc.Columns[:i]
 				break
 			}
@@ -849,22 +849,22 @@ func (oc OrderingChoice) PrefixIntersection(
 			result.Columns = append(result.Columns, suffix...)
 			return result, true
 		case prefixHelper.empty() && len(oc.Columns) > 0 && len(suffix) > 0 &&
-			oc.Group(0).Intersects(suffix[0].Group) &&
+			oc.Columns[0].Group.Intersects(suffix[0].Group) &&
 			oc.Columns[0].Descending == suffix[0].Descending:
 			// <prefix> is empty, and <suffix> and <oc> agree on the first column, so
 			// emit that column, remove it from both, and loop.
 			newCol := oc.Columns[0]
-			newCol.Group = oc.Group(0).Intersection(suffix[0].Group)
+			newCol.Group = oc.Columns[0].Group.Intersection(suffix[0].Group)
 			result.Columns = append(result.Columns, newCol)
 
 			oc.Columns = oc.Columns[1:]
 			suffix = suffix[1:]
-		case len(oc.Columns) > 0 && prefixHelper.intersects(oc.Group(0)):
+		case len(oc.Columns) > 0 && prefixHelper.intersects(oc.Columns[0].Group):
 			// <prefix> contains the first column in <oc>, so emit it and remove it
 			// from both.
 			result.Columns = append(result.Columns, oc.Columns[0])
 
-			prefixHelper.differenceWith(oc.Group(0))
+			prefixHelper.differenceWith(oc.Columns[0].Group)
 			oc.Columns = oc.Columns[1:]
 		default:
 			// If no rule applied, fail.
@@ -895,14 +895,6 @@ func (oc *OrderingChoice) Equals(rhs *OrderingChoice) bool {
 		}
 	}
 	return true
-}
-
-// Group returns the group of this instance's column col.
-func (oc *OrderingChoice) Group(col int) opt.ColSet {
-	if col < 0 || col >= len(oc.Columns) {
-		return opt.ColSet{}
-	}
-	return oc.Columns[col].Group
 }
 
 func (oc OrderingChoice) String() string {

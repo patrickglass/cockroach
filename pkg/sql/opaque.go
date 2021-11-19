@@ -47,7 +47,7 @@ func buildOpaque(
 	scalarProps.Require(stmt.StatementTag(), tree.RejectSubqueries)
 
 	var plan planNode
-	if tree.CanModifySchema(stmt) {
+	if tree.CanModifySchema(stmt) && p.execCfg.TestingKnobs.AllowDeclarativeSchemaChanger {
 		scPlan, usePlan, err := p.SchemaChange(ctx, stmt)
 		if err != nil {
 			return nil, err
@@ -112,8 +112,6 @@ func planOpaque(ctx context.Context, p *planner, stmt tree.Statement) (planNode,
 		return p.AlterSequence(ctx, n)
 	case *tree.CommentOnColumn:
 		return p.CommentOnColumn(ctx, n)
-	case *tree.CommentOnConstraint:
-		return p.CommentOnConstraint(ctx, n)
 	case *tree.CommentOnDatabase:
 		return p.CommentOnDatabase(ctx, n)
 	case *tree.CommentOnSchema:
@@ -206,8 +204,6 @@ func planOpaque(ctx context.Context, p *planner, stmt tree.Statement) (planNode,
 		return p.ShowTableStats(ctx, n)
 	case *tree.ShowTraceForSession:
 		return p.ShowTrace(ctx, n)
-	case *tree.ShowVar:
-		return p.ShowVar(ctx, n)
 	case *tree.ShowZoneConfig:
 		return p.ShowZoneConfig(ctx, n)
 	case *tree.ShowFingerprints:
@@ -249,7 +245,6 @@ func init() {
 		&tree.CommentOnDatabase{},
 		&tree.CommentOnSchema{},
 		&tree.CommentOnIndex{},
-		&tree.CommentOnConstraint{},
 		&tree.CommentOnTable{},
 		&tree.CreateDatabase{},
 		&tree.CreateExtension{},
@@ -295,7 +290,6 @@ func init() {
 		&tree.ShowTraceForSession{},
 		&tree.ShowZoneConfig{},
 		&tree.ShowFingerprints{},
-		&tree.ShowVar{},
 		&tree.Truncate{},
 
 		// CCL statements (without Export which has an optimizer operator).

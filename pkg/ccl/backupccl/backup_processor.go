@@ -33,12 +33,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/storage"
-	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
@@ -55,10 +53,10 @@ var (
 	)
 	priorityAfter = settings.RegisterDurationSetting(
 		"bulkio.backup.read_with_priority_after",
-		"amount of time since the read-as-of time above which a BACKUP should use priority when retrying reads",
+		"age of read-as-of time above which a BACKUP should read with priority",
 		time.Minute,
 		settings.NonNegativeDuration,
-	).WithPublic()
+	)
 	delayPerAttmpt = settings.RegisterDurationSetting(
 		"bulkio.backup.read_retry_delay",
 		"amount of time since the read-as-of time, per-prior attempt, to wait before making another attempt",
@@ -67,23 +65,22 @@ var (
 	)
 	timeoutPerAttempt = settings.RegisterDurationSetting(
 		"bulkio.backup.read_timeout",
-		"amount of time after which a read attempt is considered timed out, which causes the backup to fail",
+		"amount of time after which a read attempt is considered timed out and is canceled. "+
+			"Hitting this timeout will cause the backup job to fail.",
 		time.Minute*5,
 		settings.NonNegativeDuration,
-	).WithPublic()
+	)
 	targetFileSize = settings.RegisterByteSizeSetting(
 		"bulkio.backup.file_size",
-		"target size for individual data files produced during BACKUP",
+		"target file size",
 		128<<20,
-	).WithPublic()
-
+	)
 	smallFileBuffer = settings.RegisterByteSizeSetting(
 		"bulkio.backup.merge_file_buffer_size",
 		"size limit used when buffering backup files before merging them",
 		16<<20,
 		settings.NonNegativeInt,
 	)
-
 	splitKeysOnTimestamps = settings.RegisterBoolSetting(
 		"bulkio.backup.split_keys_on_timestamps",
 		"split backup data on timestamps when writing revision history",
@@ -113,11 +110,8 @@ type backupDataProcessor struct {
 	spec    execinfrapb.BackupDataSpec
 	output  execinfra.RowReceiver
 
-	// cancelAndWaitForWorker cancels the producer goroutine and waits for it to
-	// finish. It can be called multiple times.
-	cancelAndWaitForWorker func()
-	progCh                 chan execinfrapb.RemoteProducerMetadata_BulkProcessorProgress
-	backupErr              error
+	progCh    chan execinfrapb.RemoteProducerMetadata_BulkProcessorProgress
+	backupErr error
 }
 
 var _ execinfra.Processor = &backupDataProcessor{}
@@ -140,10 +134,6 @@ func newBackupDataProcessor(
 		execinfra.ProcStateOpts{
 			// This processor doesn't have any inputs to drain.
 			InputsToDrain: nil,
-			TrailingMetaCallback: func() []execinfrapb.ProducerMetadata {
-				bp.close()
-				return nil
-			},
 		}); err != nil {
 		return nil, err
 	}
@@ -153,25 +143,10 @@ func newBackupDataProcessor(
 // Start is part of the RowSource interface.
 func (bp *backupDataProcessor) Start(ctx context.Context) {
 	ctx = bp.StartInternal(ctx, backupProcessorName)
-	ctx, cancel := context.WithCancel(ctx)
-	bp.cancelAndWaitForWorker = func() {
-		cancel()
-		for range bp.progCh {
-		}
-	}
-	if err := bp.flowCtx.Stopper().RunAsyncTaskEx(ctx, stop.TaskOpts{
-		TaskName: "backup-worker",
-		SpanOpt:  stop.ChildSpan,
-	}, func(ctx context.Context) {
+	go func() {
+		defer close(bp.progCh)
 		bp.backupErr = runBackupProcessor(ctx, bp.flowCtx, &bp.spec, bp.progCh)
-		cancel()
-		close(bp.progCh)
-	}); err != nil {
-		// The closure above hasn't run, so we have to do the cleanup.
-		bp.backupErr = err
-		cancel()
-		close(bp.progCh)
-	}
+	}()
 }
 
 // Next is part of the RowSource interface.
@@ -194,17 +169,6 @@ func (bp *backupDataProcessor) Next() (rowenc.EncDatumRow, *execinfrapb.Producer
 
 	bp.MoveToDraining(nil /* error */)
 	return nil, bp.DrainHelper()
-}
-
-func (bp *backupDataProcessor) close() {
-	bp.cancelAndWaitForWorker()
-	bp.ProcessorBase.InternalClose()
-}
-
-// ConsumerClosed is part of the RowSource interface. We have to override the
-// implementation provided by ProcessorBase.
-func (bp *backupDataProcessor) ConsumerClosed() {
-	bp.close()
 }
 
 type spanAndTime struct {
@@ -371,19 +335,7 @@ func runBackupProcessor(
 					// value. The sentinel value of 1 forces the ExportRequest to paginate
 					// after creating a single SST.
 					header.TargetBytes = 1
-					admissionHeader := roachpb.AdmissionHeader{
-						// Export requests are currently assigned NormalPri.
-						//
-						// TODO(bulkio): the priority should vary based on the urgency of
-						// these background requests. These exports should get LowPri,
-						// unless they are being retried and need to be completed in a
-						// timely manner for compliance with RPO and data retention
-						// policies. Consider deriving this from the UserPriority field.
-						Priority:                 int32(admission.NormalPri),
-						CreateTime:               timeutil.Now().UnixNano(),
-						Source:                   roachpb.AdmissionHeader_ROOT_KV,
-						NoMemoryReservedAtSource: true,
-					}
+
 					log.Infof(ctx, "sending ExportRequest for span %s (attempt %d, priority %s)",
 						span.span, span.attempts+1, header.UserPriority.String())
 					var rawRes roachpb.Response
@@ -401,8 +353,8 @@ func runBackupProcessor(
 								ReqSentTime: reqSentTime.String(),
 							})
 
-							rawRes, pErr = kv.SendWrappedWithAdmission(
-								ctx, flowCtx.Cfg.DB.NonTransactionalSender(), header, admissionHeader, req)
+							rawRes, pErr = kv.SendWrappedWith(ctx, flowCtx.Cfg.DB.NonTransactionalSender(),
+								header, req)
 							respReceivedTime = timeutil.Now()
 							if pErr != nil {
 								return pErr.GoError()
@@ -423,7 +375,7 @@ func runBackupProcessor(
 						// TimeoutError improves the opaque `context deadline exceeded` error
 						// message so use that instead.
 						if errors.HasType(exportRequestErr, (*contextutil.TimeoutError)(nil)) {
-							return errors.Wrap(exportRequestErr, "export request timeout")
+							return errors.Wrapf(exportRequestErr, "timeout: %s", exportRequestErr.Error())
 						}
 						return errors.Wrapf(exportRequestErr, "exporting %s", span.span)
 					}

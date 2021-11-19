@@ -39,7 +39,7 @@ var timeTimerPool sync.Pool
 //  defer timer.Stop()
 //  for {
 //      timer.Reset(wait)
-//      select {
+//      switch {
 //      case <-timer.C:
 //          timer.Read = true
 //          ...

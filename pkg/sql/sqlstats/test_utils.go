@@ -14,13 +14,9 @@ import "time"
 
 // TestingKnobs provides hooks and knobs for unit tests.
 type TestingKnobs struct {
-	// OnStmtStatsFlushFinished is a callback that is triggered when stmt stats
-	// finishes flushing.
-	OnStmtStatsFlushFinished func()
-
-	// OnTxnStatsFlushFinished is a callback that is triggered when txn stats
-	// finishes flushing.
-	OnTxnStatsFlushFinished func()
+	// OnStatsFlushFinished is a callback that is triggered when a single
+	// statistics object is flushed.
+	OnStatsFlushFinished func(error)
 
 	// StubTimeNow allows tests to override the timeutil.Now() function used
 	// by the flush operation to calculate aggregated_ts timestamp.

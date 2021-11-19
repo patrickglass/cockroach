@@ -67,9 +67,9 @@ var UnitTestFormatter = IssueFormatter{
 			r.CodeBlock("", data.CondensedMessage.Digest(50))
 		}
 
-		r.Collapsed("Help", func() {
-			if data.HelpCommand != nil {
-				data.HelpCommand(r)
+		r.Collapsed("Reproduce", func() {
+			if data.ReproductionCommand != nil {
+				data.ReproductionCommand(r)
 			}
 
 			if len(data.Parameters) != 0 {
@@ -104,9 +104,9 @@ var UnitTestFormatter = IssueFormatter{
 			r.Escaped("\n")
 		}
 
-		if len(data.MentionOnCreate) > 0 {
+		if len(data.Mention) > 0 {
 			r.Escaped("/cc")
-			for _, handle := range data.MentionOnCreate {
+			for _, handle := range data.Mention {
 				r.Escaped(" ")
 				r.Escaped(handle)
 			}

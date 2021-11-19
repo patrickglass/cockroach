@@ -11,6 +11,7 @@
 package install
 
 import (
+	"context"
 	_ "embed" // required for go:embed
 	"fmt"
 	"net/url"
@@ -26,12 +27,27 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachprod/config"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/ssh"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/version"
 	"github.com/cockroachdb/errors"
 )
 
 //go:embed scripts/start.sh
 var startScript string
+
+// StartOptsType houses the options needed by Start()
+type StartOptsType struct {
+	Encrypt    bool
+	Sequential bool
+	SkipInit   bool
+	StoreCount int
+}
+
+// StartOpts is exported to be updated before calling Start()
+var StartOpts StartOptsType
+
+// Cockroach TODO(peter): document
+type Cockroach struct{}
 
 func cockroachNodeBinary(c *SyncedCluster, node int) string {
 	if filepath.IsAbs(config.Binary) {
@@ -120,27 +136,25 @@ func argExists(args []string, target string) int {
 	return -1
 }
 
-// Start the cockroach process on the cluster.
-//
-// Starting the first node is special-cased quite a bit, it's used to distribute
-// certs, set cluster settings, and initialize the cluster. Also, if we're only
-// starting a single node in the cluster and it happens to be the "first" node
-// (node 1, as understood by SyncedCluster.TargetNodes), we use
+// Start implements the ClusterImpl.NodeDir interface, and powers `roachprod
+// start`. Starting the first node is special-cased quite a bit, it's used to
+// distribute certs, set cluster settings, and initialize the cluster. Also,
+// if we're only starting a single node in the cluster and it happens to be the
+// "first" node (node 1, as understood by SyncedCluster.ServerNodes), we use
 // `start-single-node` (this was written to provide a short hand to start a
 // single node cluster with a replication factor of one).
-func (c *SyncedCluster) Start(startOpts StartOpts) error {
-	if err := c.distributeCerts(); err != nil {
-		return err
-	}
+func (r Cockroach) Start(c *SyncedCluster, extraArgs []string) {
+	h := &crdbInstallHelper{c: c, r: r}
+	h.distributeCerts()
 
-	nodes := c.TargetNodes()
+	nodes := c.ServerNodes()
 	var parallelism = 0
-	if startOpts.Sequential {
+	if StartOpts.Sequential {
 		parallelism = 1
 	}
 
 	fmt.Printf("%s: starting nodes\n", c.Name)
-	return c.Parallel("", len(nodes), parallelism, func(nodeIdx int) ([]byte, error) {
+	c.Parallel("", len(nodes), parallelism, func(nodeIdx int) ([]byte, error) {
 		vers, err := getCockroachVersion(c, nodes[nodeIdx])
 		if err != nil {
 			return nil, err
@@ -148,7 +162,7 @@ func (c *SyncedCluster) Start(startOpts StartOpts) error {
 
 		// NB: if cockroach started successfully, we ignore the output as it is
 		// some harmless start messaging.
-		if _, err := c.startNode(nodeIdx, startOpts, vers); err != nil {
+		if _, err := h.startNode(nodeIdx, extraArgs, vers); err != nil {
 			return nil, err
 		}
 
@@ -168,16 +182,16 @@ func (c *SyncedCluster) Start(startOpts StartOpts) error {
 		//   `generateStartArgs`),which prompts CRDB to auto-initialize. For
 		//    nodes running >=20.1, we need to explicitly initialize.
 
-		if startOpts.SkipInit {
+		if StartOpts.SkipInit {
 			return nil, nil
 		}
 
-		shouldInit := !c.useStartSingleNode(vers) && vers.AtLeast(version.MustParse("v20.1.0"))
+		shouldInit := !h.useStartSingleNode(vers) && vers.AtLeast(version.MustParse("v20.1.0"))
 		if shouldInit {
-			fmt.Printf("%s: initializing cluster\n", c.Name)
-			initOut, err := c.initializeCluster(nodeIdx)
+			fmt.Printf("%s: initializing cluster\n", h.c.Name)
+			initOut, err := h.initializeCluster(nodeIdx)
 			if err != nil {
-				return nil, errors.WithDetail(err, "unable to initialize cluster")
+				log.Fatalf(context.Background(), "unable to initialize cluster: %v", err)
 			}
 
 			if initOut != "" {
@@ -195,10 +209,10 @@ func (c *SyncedCluster) Start(startOpts StartOpts) error {
 			// addressing #51897.
 			//
 			// TODO(irfansharif): Remove this once #51897 is resolved.
-			markBootstrap := fmt.Sprintf("touch %s/%s", c.NodeDir(nodes[nodeIdx], 1 /* storeIndex */), "cluster-bootstrapped")
-			cmdOut, err := c.run(nodeIdx, markBootstrap)
+			markBootstrap := fmt.Sprintf("touch %s/%s", h.c.Impl.NodeDir(h.c, nodes[nodeIdx], 1 /* storeIndex */), "cluster-bootstrapped")
+			cmdOut, err := h.run(nodeIdx, markBootstrap)
 			if err != nil {
-				return nil, errors.WithDetail(err, "unable to run cmd")
+				log.Fatalf(context.Background(), "unable to run cmd: %v", err)
 			}
 			if cmdOut != "" {
 				fmt.Println(cmdOut)
@@ -208,10 +222,10 @@ func (c *SyncedCluster) Start(startOpts StartOpts) error {
 		// We're sure to set cluster settings after having initialized the
 		// cluster.
 
-		fmt.Printf("%s: setting cluster settings\n", c.Name)
-		clusterSettingsOut, err := c.setClusterSettings(nodeIdx)
+		fmt.Printf("%s: setting cluster settings\n", h.c.Name)
+		clusterSettingsOut, err := h.setClusterSettings(nodeIdx)
 		if err != nil {
-			return nil, errors.Wrap(err, "unable to set cluster settings")
+			log.Fatalf(context.Background(), "unable to set cluster settings: %v", err)
 		}
 		if clusterSettingsOut != "" {
 			fmt.Println(clusterSettingsOut)
@@ -220,44 +234,44 @@ func (c *SyncedCluster) Start(startOpts StartOpts) error {
 	})
 }
 
-// NodeDir returns the data directory for the given node and store.
-func (c *SyncedCluster) NodeDir(nodeIndex, storeIndex int) string {
+// NodeDir implements the ClusterImpl.NodeDir interface.
+func (Cockroach) NodeDir(c *SyncedCluster, index, storeIndex int) string {
 	if c.IsLocal() {
 		if storeIndex != 1 {
-			panic("NodeDir only supports one store for local deployments")
+			panic("Cockroach.NodeDir only supports one store for local deployments")
 		}
-		return filepath.Join(c.localVMDir(nodeIndex), "data")
+		return filepath.Join(c.localVMDir(index), "data")
 	}
 	return fmt.Sprintf("/mnt/data%d/cockroach", storeIndex)
 }
 
-// LogDir returns the logs directory for the given node.
-func (c *SyncedCluster) LogDir(nodeIndex int) string {
+// LogDir implements the ClusterImpl.NodeDir interface.
+func (Cockroach) LogDir(c *SyncedCluster, index int) string {
 	if c.IsLocal() {
-		return filepath.Join(c.localVMDir(nodeIndex), "logs")
+		return filepath.Join(c.localVMDir(index), "logs")
 	}
 	return "logs"
 }
 
-// CertsDir returns the certificate directory for the given node.
-func (c *SyncedCluster) CertsDir(nodeIndex int) string {
+// CertsDir implements the ClusterImpl.NodeDir interface.
+func (Cockroach) CertsDir(c *SyncedCluster, index int) string {
 	if c.IsLocal() {
-		return filepath.Join(c.localVMDir(nodeIndex), "certs")
+		return filepath.Join(c.localVMDir(index), "certs")
 	}
 	return "certs"
 }
 
-// NodeURL constructs a postgres URL.
-func (c *SyncedCluster) NodeURL(host string, port int) string {
+// NodeURL implements the ClusterImpl.NodeDir interface.
+func (Cockroach) NodeURL(c *SyncedCluster, host string, port int) string {
 	var u url.URL
 	u.User = url.User("root")
 	u.Scheme = "postgres"
 	u.Host = fmt.Sprintf("%s:%d", host, port)
 	v := url.Values{}
 	if c.Secure {
-		v.Add("sslcert", c.PGUrlCertsDir+"/client.root.crt")
-		v.Add("sslkey", c.PGUrlCertsDir+"/client.root.key")
-		v.Add("sslrootcert", c.PGUrlCertsDir+"/ca.crt")
+		v.Add("sslcert", c.CertsDir+"/client.root.crt")
+		v.Add("sslkey", c.CertsDir+"/client.root.key")
+		v.Add("sslrootcert", c.CertsDir+"/ca.crt")
 		v.Add("sslmode", "verify-full")
 	} else {
 		v.Add("sslmode", "disable")
@@ -266,31 +280,25 @@ func (c *SyncedCluster) NodeURL(host string, port int) string {
 	return "'" + u.String() + "'"
 }
 
-// NodePort returns the SQL port for the given node.
-func (c *SyncedCluster) NodePort(nodeIndex int) int {
-	return c.VMs[nodeIndex-1].SQLPort
+// NodePort implements the ClusterImpl.NodeDir interface.
+func (Cockroach) NodePort(c *SyncedCluster, index int) int {
+	return c.VMs[index-1].SQLPort
 }
 
-// NodeUIPort returns the AdminUI port for the given node.
-func (c *SyncedCluster) NodeUIPort(nodeIndex int) int {
-	return c.VMs[nodeIndex-1].AdminUIPort
+// NodeUIPort implements the ClusterImpl.NodeDir interface.
+func (r Cockroach) NodeUIPort(c *SyncedCluster, index int) int {
+	return c.VMs[index-1].AdminUIPort
 }
 
-// SQL runs `cockroach sql`, which starts a SQL shell or runs a SQL command.
-//
-// In interactive mode, there must be exactly one node target (as per
-// TargetNodes).
-//
-// In non-interactive mode, a command specified via the `-e` flag is run against
-// all nodes.
-func (c *SyncedCluster) SQL(args []string) error {
+// SQL implements the ClusterImpl.NodeDir interface.
+func (r Cockroach) SQL(c *SyncedCluster, args []string) error {
 	if len(args) == 0 || len(c.Nodes) == 1 {
 		// If no arguments, we're going to get an interactive SQL shell. Require
 		// exactly one target and ask SSH to provide a pseudoterminal.
 		if len(args) == 0 && len(c.Nodes) != 1 {
 			return fmt.Errorf("invalid number of nodes for interactive sql: %d", len(c.Nodes))
 		}
-		url := c.NodeURL("localhost", c.NodePort(c.Nodes[0]))
+		url := r.NodeURL(c, "localhost", r.NodePort(c, c.Nodes[0]))
 		binary := cockroachNodeBinary(c, c.Nodes[0])
 		allArgs := []string{binary, "sql", "--url", url}
 		allArgs = append(allArgs, ssh.Escape(args))
@@ -306,7 +314,7 @@ func (c *SyncedCluster) SQL(args []string) error {
 	resultChan := make(chan result, len(c.Nodes))
 
 	display := fmt.Sprintf("%s: executing sql", c.Name)
-	if err := c.Parallel(display, len(c.Nodes), 0, func(nodeIdx int) ([]byte, error) {
+	c.Parallel(display, len(c.Nodes), 0, func(nodeIdx int) ([]byte, error) {
 		sess, err := c.newSession(c.Nodes[nodeIdx])
 		if err != nil {
 			return nil, err
@@ -318,7 +326,7 @@ func (c *SyncedCluster) SQL(args []string) error {
 			cmd = fmt.Sprintf(`cd %s ; `, c.localVMDir(c.Nodes[nodeIdx]))
 		}
 		cmd += cockroachNodeBinary(c, c.Nodes[nodeIdx]) + " sql --url " +
-			c.NodeURL("localhost", c.NodePort(c.Nodes[nodeIdx])) + " " +
+			r.NodeURL(c, "localhost", r.NodePort(c, c.Nodes[nodeIdx])) + " " +
 			ssh.Escape(args)
 
 		out, err := sess.CombinedOutput(cmd)
@@ -328,9 +336,7 @@ func (c *SyncedCluster) SQL(args []string) error {
 
 		resultChan <- result{node: c.Nodes[nodeIdx], output: string(out)}
 		return nil, nil
-	}); err != nil {
-		return err
-	}
+	})
 
 	results := make([]result, 0, len(c.Nodes))
 	for range c.Nodes {
@@ -346,17 +352,22 @@ func (c *SyncedCluster) SQL(args []string) error {
 	return nil
 }
 
-func (c *SyncedCluster) startNode(
-	nodeIdx int, startOpts StartOpts, vers *version.Version,
+type crdbInstallHelper struct {
+	c *SyncedCluster
+	r Cockroach
+}
+
+func (h *crdbInstallHelper) startNode(
+	nodeIdx int, extraArgs []string, vers *version.Version,
 ) (string, error) {
-	startCmd, err := c.generateStartCmd(nodeIdx, startOpts, vers)
+	startCmd, err := h.generateStartCmd(nodeIdx, extraArgs, vers)
 	if err != nil {
 		return "", err
 	}
 
-	nodes := c.TargetNodes()
+	nodes := h.c.ServerNodes()
 	if err := func() error {
-		sess, err := c.newSession(nodes[nodeIdx])
+		sess, err := h.c.newSession(nodes[nodeIdx])
 		if err != nil {
 			return err
 		}
@@ -364,8 +375,8 @@ func (c *SyncedCluster) startNode(
 
 		sess.SetStdin(strings.NewReader(startCmd))
 		var cmd string
-		if c.IsLocal() {
-			cmd = fmt.Sprintf(`cd %s ; `, c.localVMDir(nodes[nodeIdx]))
+		if h.c.IsLocal() {
+			cmd = fmt.Sprintf(`cd %s ; `, h.c.localVMDir(nodes[nodeIdx]))
 		}
 		cmd += `cat > cockroach.sh && chmod +x cockroach.sh`
 		if out, err := sess.CombinedOutput(cmd); err != nil {
@@ -377,15 +388,15 @@ func (c *SyncedCluster) startNode(
 		return "", err
 	}
 
-	sess, err := c.newSession(nodes[nodeIdx])
+	sess, err := h.c.newSession(nodes[nodeIdx])
 	if err != nil {
 		return "", err
 	}
 	defer sess.Close()
 
 	var cmd string
-	if c.IsLocal() {
-		cmd = fmt.Sprintf(`cd %s ; `, c.localVMDir(nodes[nodeIdx]))
+	if h.c.IsLocal() {
+		cmd = fmt.Sprintf(`cd %s ; `, h.c.localVMDir(nodes[nodeIdx]))
 	}
 	cmd += "./cockroach.sh"
 	out, err := sess.CombinedOutput(cmd)
@@ -395,11 +406,11 @@ func (c *SyncedCluster) startNode(
 	return strings.TrimSpace(string(out)), nil
 }
 
-func (c *SyncedCluster) generateStartCmd(
-	nodeIdx int, startOpts StartOpts, vers *version.Version,
+func (h *crdbInstallHelper) generateStartCmd(
+	nodeIdx int, extraArgs []string, vers *version.Version,
 ) (string, error) {
 
-	args, advertiseFirstIP, err := c.generateStartArgs(nodeIdx, startOpts, vers)
+	args, advertiseFirstIP, err := h.generateStartArgs(nodeIdx, extraArgs, vers)
 	if err != nil {
 		return "", err
 	}
@@ -407,25 +418,25 @@ func (c *SyncedCluster) generateStartCmd(
 	// For a one-node cluster, use `start-single-node` to disable replication.
 	// For everything else we'll fall back to using `cockroach start`.
 	var startCmd string
-	if c.useStartSingleNode(vers) {
+	if h.useStartSingleNode(vers) {
 		startCmd = "start-single-node"
 	} else {
 		startCmd = "start"
 	}
-	nodes := c.TargetNodes()
+	nodes := h.c.ServerNodes()
 	return execStartTemplate(startTemplateData{
-		LogDir: c.LogDir(nodes[nodeIdx]),
-		KeyCmd: c.generateKeyCmd(nodeIdx, startOpts),
+		LogDir: h.c.Impl.LogDir(h.c, nodes[nodeIdx]),
+		KeyCmd: h.generateKeyCmd(nodeIdx, extraArgs),
 		EnvVars: append(append([]string{
-			fmt.Sprintf("ROACHPROD=%s", c.roachprodEnvValue(nodes[nodeIdx])),
+			fmt.Sprintf("ROACHPROD=%s", h.c.roachprodEnvValue(nodes[nodeIdx])),
 			"GOTRACEBACK=crash",
 			"COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING=1",
-		}, c.Env...), getEnvVars()...),
-		Binary:           cockroachNodeBinary(c, nodes[nodeIdx]),
+		}, h.c.Env...), h.getEnvVars()...),
+		Binary:           cockroachNodeBinary(h.c, nodes[nodeIdx]),
 		StartCmd:         startCmd,
 		Args:             args,
 		MemoryMax:        config.MemoryMax,
-		Local:            c.IsLocal(),
+		Local:            h.c.IsLocal(),
 		AdvertiseFirstIP: advertiseFirstIP,
 	})
 }
@@ -459,22 +470,22 @@ func execStartTemplate(data startTemplateData) (string, error) {
 	return buf.String(), nil
 }
 
-func (c *SyncedCluster) generateStartArgs(
-	nodeIdx int, startOpts StartOpts, vers *version.Version,
+func (h *crdbInstallHelper) generateStartArgs(
+	nodeIdx int, extraArgs []string, vers *version.Version,
 ) (_ []string, _advertiseFirstIP bool, _ error) {
 	var args []string
-	nodes := c.TargetNodes()
+	nodes := h.c.ServerNodes()
 
-	if c.Secure {
-		args = append(args, `--certs-dir`, c.CertsDir(nodes[nodeIdx]))
+	if h.c.Secure {
+		args = append(args, `--certs-dir`, h.c.Impl.CertsDir(h.c, nodes[nodeIdx]))
 	} else {
 		args = append(args, "--insecure")
 	}
 
 	var storeDirs []string
-	if idx := argExists(startOpts.ExtraArgs, "--store"); idx == -1 {
-		for i := 1; i <= startOpts.StoreCount; i++ {
-			storeDir := c.NodeDir(nodes[nodeIdx], i)
+	if idx := argExists(extraArgs, "--store"); idx == -1 {
+		for i := 1; i <= StartOpts.StoreCount; i++ {
+			storeDir := h.c.Impl.NodeDir(h.c, nodes[nodeIdx], i)
 			storeDirs = append(storeDirs, storeDir)
 			// Place a store{i} attribute on each store to allow for zone configs
 			// that use specific stores.
@@ -482,11 +493,11 @@ func (c *SyncedCluster) generateStartArgs(
 				`path=`+storeDir+`,attrs=`+fmt.Sprintf("store%d", i))
 		}
 	} else {
-		storeDir := strings.TrimPrefix(startOpts.ExtraArgs[idx], "--store=")
+		storeDir := strings.TrimPrefix(extraArgs[idx], "--store=")
 		storeDirs = append(storeDirs, storeDir)
 	}
 
-	if startOpts.Encrypt {
+	if StartOpts.Encrypt {
 		// Encryption at rest is turned on for the cluster.
 		for _, storeDir := range storeDirs {
 			// TODO(windchan7): allow key size to be specified through flags.
@@ -496,7 +507,7 @@ func (c *SyncedCluster) generateStartArgs(
 		}
 	}
 
-	logDir := c.LogDir(nodes[nodeIdx])
+	logDir := h.c.Impl.LogDir(h.c, nodes[nodeIdx])
 	if vers.AtLeast(version.MustParse("v21.1.0-alpha.0")) {
 		// Specify exit-on-error=false to work around #62763.
 		args = append(args, "--log", `file-defaults: {dir: '`+logDir+`', exit-on-error: false}`)
@@ -506,7 +517,7 @@ func (c *SyncedCluster) generateStartArgs(
 
 	if vers.AtLeast(version.MustParse("v1.1.0")) {
 		cache := 25
-		if c.IsLocal() {
+		if h.c.IsLocal() {
 			cache /= len(nodes)
 			if cache == 0 {
 				cache = 1
@@ -515,7 +526,7 @@ func (c *SyncedCluster) generateStartArgs(
 		args = append(args, fmt.Sprintf("--cache=%d%%", cache))
 		args = append(args, fmt.Sprintf("--max-sql-memory=%d%%", cache))
 	}
-	if c.IsLocal() {
+	if h.c.IsLocal() {
 		// This avoids annoying firewall prompts on Mac OS X.
 		if vers.AtLeast(version.MustParse("v2.1.0")) {
 			args = append(args, "--listen-addr=127.0.0.1")
@@ -525,16 +536,16 @@ func (c *SyncedCluster) generateStartArgs(
 	}
 
 	args = append(args,
-		fmt.Sprintf("--port=%d", c.NodePort(nodes[nodeIdx])),
-		fmt.Sprintf("--http-port=%d", c.NodeUIPort(nodes[nodeIdx])),
+		fmt.Sprintf("--port=%d", h.r.NodePort(h.c, nodes[nodeIdx])),
+		fmt.Sprintf("--http-port=%d", h.r.NodeUIPort(h.c, nodes[nodeIdx])),
 	)
-	if locality := c.locality(nodes[nodeIdx]); locality != "" {
-		if idx := argExists(startOpts.ExtraArgs, "--locality"); idx == -1 {
+	if locality := h.c.locality(nodes[nodeIdx]); locality != "" {
+		if idx := argExists(extraArgs, "--locality"); idx == -1 {
 			args = append(args, "--locality="+locality)
 		}
 	}
 
-	if !c.useStartSingleNode(vers) {
+	if !h.useStartSingleNode(vers) {
 		// --join flags are unsupported/unnecessary in `cockroach
 		// start-single-node`. That aside, setting up --join flags is a bit
 		// precise. We have every node point to node 1. For clusters running
@@ -543,14 +554,14 @@ func (c *SyncedCluster) generateStartArgs(
 		// node 1 also points to itself, and an explicit `cockroach init` is
 		// needed.
 		if nodes[nodeIdx] != 1 || vers.AtLeast(version.MustParse("v20.1.0")) {
-			args = append(args, fmt.Sprintf("--join=%s:%d", c.host(1), c.NodePort(1)))
+			args = append(args, fmt.Sprintf("--join=%s:%d", h.c.host(1), h.r.NodePort(h.c, 1)))
 		}
 	}
 
 	var advertiseFirstIP bool
-	if c.shouldAdvertisePublicIP() {
-		args = append(args, fmt.Sprintf("--advertise-host=%s", c.host(nodeIdx+1)))
-	} else if !c.IsLocal() {
+	if h.shouldAdvertisePublicIP() {
+		args = append(args, fmt.Sprintf("--advertise-host=%s", h.c.host(nodeIdx+1)))
+	} else if !h.c.IsLocal() {
 		// Explicitly advertise by IP address so that we don't need to
 		// deal with cross-region name resolution. The `hostname -I`
 		// prints all IP addresses for the host and then we'll select
@@ -563,8 +574,8 @@ func (c *SyncedCluster) generateStartArgs(
 	e := expander{
 		node: nodes[nodeIdx],
 	}
-	for _, arg := range startOpts.ExtraArgs {
-		expandedArg, err := e.expand(c, arg)
+	for _, arg := range extraArgs {
+		expandedArg, err := e.expand(h.c, arg)
 		if err != nil {
 			return nil, false, err
 		}
@@ -574,11 +585,11 @@ func (c *SyncedCluster) generateStartArgs(
 	return args, advertiseFirstIP, nil
 }
 
-func (c *SyncedCluster) initializeCluster(nodeIdx int) (string, error) {
-	nodes := c.TargetNodes()
-	initCmd := c.generateInitCmd(nodeIdx)
+func (h *crdbInstallHelper) initializeCluster(nodeIdx int) (string, error) {
+	nodes := h.c.ServerNodes()
+	initCmd := h.generateInitCmd(nodeIdx)
 
-	sess, err := c.newSession(nodes[nodeIdx])
+	sess, err := h.c.newSession(nodes[nodeIdx])
 	if err != nil {
 		return "", err
 	}
@@ -591,11 +602,11 @@ func (c *SyncedCluster) initializeCluster(nodeIdx int) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func (c *SyncedCluster) setClusterSettings(nodeIdx int) (string, error) {
-	nodes := c.TargetNodes()
-	clusterSettingCmd := c.generateClusterSettingCmd(nodeIdx)
+func (h *crdbInstallHelper) setClusterSettings(nodeIdx int) (string, error) {
+	nodes := h.c.ServerNodes()
+	clusterSettingCmd := h.generateClusterSettingCmd(nodeIdx)
 
-	sess, err := c.newSession(nodes[nodeIdx])
+	sess, err := h.c.newSession(nodes[nodeIdx])
 	if err != nil {
 		return "", err
 	}
@@ -608,22 +619,22 @@ func (c *SyncedCluster) setClusterSettings(nodeIdx int) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func (c *SyncedCluster) generateClusterSettingCmd(nodeIdx int) string {
-	nodes := c.TargetNodes()
+func (h *crdbInstallHelper) generateClusterSettingCmd(nodeIdx int) string {
+	nodes := h.c.ServerNodes()
 	license := envutil.EnvOrDefaultString("COCKROACH_DEV_LICENSE", "")
 	if license == "" {
 		fmt.Printf("%s: COCKROACH_DEV_LICENSE unset: enterprise features will be unavailable\n",
-			c.Name)
+			h.c.Name)
 	}
 
 	var clusterSettingCmd string
-	if c.IsLocal() {
-		clusterSettingCmd = fmt.Sprintf(`cd %s ; `, c.localVMDir(1))
+	if h.c.IsLocal() {
+		clusterSettingCmd = fmt.Sprintf(`cd %s ; `, h.c.localVMDir(1))
 	}
 
-	binary := cockroachNodeBinary(c, nodes[nodeIdx])
-	path := fmt.Sprintf("%s/%s", c.NodeDir(nodes[nodeIdx], 1 /* storeIndex */), "settings-initialized")
-	url := c.NodeURL("localhost", c.NodePort(1))
+	binary := cockroachNodeBinary(h.c, nodes[nodeIdx])
+	path := fmt.Sprintf("%s/%s", h.c.Impl.NodeDir(h.c, nodes[nodeIdx], 1 /* storeIndex */), "settings-initialized")
+	url := h.r.NodeURL(h.c, "localhost", h.r.NodePort(h.c, 1))
 
 	// We ignore failures to set remote_debugging.mode, which was
 	// removed in v21.2.
@@ -638,17 +649,17 @@ func (c *SyncedCluster) generateClusterSettingCmd(nodeIdx int) string {
 	return clusterSettingCmd
 }
 
-func (c *SyncedCluster) generateInitCmd(nodeIdx int) string {
-	nodes := c.TargetNodes()
+func (h *crdbInstallHelper) generateInitCmd(nodeIdx int) string {
+	nodes := h.c.ServerNodes()
 
 	var initCmd string
-	if c.IsLocal() {
-		initCmd = fmt.Sprintf(`cd %s ; `, c.localVMDir(1))
+	if h.c.IsLocal() {
+		initCmd = fmt.Sprintf(`cd %s ; `, h.c.localVMDir(1))
 	}
 
-	path := fmt.Sprintf("%s/%s", c.NodeDir(nodes[nodeIdx], 1 /* storeIndex */), "cluster-bootstrapped")
-	url := c.NodeURL("localhost", c.NodePort(nodes[nodeIdx]))
-	binary := cockroachNodeBinary(c, nodes[nodeIdx])
+	path := fmt.Sprintf("%s/%s", h.c.Impl.NodeDir(h.c, nodes[nodeIdx], 1 /* storeIndex */), "cluster-bootstrapped")
+	url := h.r.NodeURL(h.c, "localhost", h.r.NodePort(h.c, nodes[nodeIdx]))
+	binary := cockroachNodeBinary(h.c, nodes[nodeIdx])
 	initCmd += fmt.Sprintf(`
 		if ! test -e %[1]s ; then
 			COCKROACH_CONNECT_TIMEOUT=0 %[2]s init --url %[3]s && touch %[1]s
@@ -656,20 +667,20 @@ func (c *SyncedCluster) generateInitCmd(nodeIdx int) string {
 	return initCmd
 }
 
-func (c *SyncedCluster) generateKeyCmd(nodeIdx int, startOpts StartOpts) string {
-	if !startOpts.Encrypt {
+func (h *crdbInstallHelper) generateKeyCmd(nodeIdx int, extraArgs []string) string {
+	if !StartOpts.Encrypt {
 		return ""
 	}
 
-	nodes := c.TargetNodes()
+	nodes := h.c.ServerNodes()
 	var storeDirs []string
-	if idx := argExists(startOpts.ExtraArgs, "--store"); idx == -1 {
-		for i := 1; i <= startOpts.StoreCount; i++ {
-			storeDir := c.NodeDir(nodes[nodeIdx], i)
+	if idx := argExists(extraArgs, "--store"); idx == -1 {
+		for i := 1; i <= StartOpts.StoreCount; i++ {
+			storeDir := h.c.Impl.NodeDir(h.c, nodes[nodeIdx], i)
 			storeDirs = append(storeDirs, storeDir)
 		}
 	} else {
-		storeDir := strings.TrimPrefix(startOpts.ExtraArgs[idx], "--store=")
+		storeDir := strings.TrimPrefix(extraArgs[idx], "--store=")
 		storeDirs = append(storeDirs, storeDir)
 	}
 
@@ -685,36 +696,34 @@ func (c *SyncedCluster) generateKeyCmd(nodeIdx int, startOpts StartOpts) string 
 	return keyCmd.String()
 }
 
-func (c *SyncedCluster) useStartSingleNode(vers *version.Version) bool {
-	return len(c.VMs) == 1 && vers.AtLeast(version.MustParse("v19.2.0"))
+func (h *crdbInstallHelper) useStartSingleNode(vers *version.Version) bool {
+	return len(h.c.VMs) == 1 && vers.AtLeast(version.MustParse("v19.2.0"))
 }
 
-// distributeCerts distributes certs if it's a secure cluster and we're
-// starting n1.
-func (c *SyncedCluster) distributeCerts() error {
-	for _, node := range c.TargetNodes() {
-		if node == 1 && c.Secure {
-			return c.DistributeCerts()
+// distributeCerts, like the name suggests, distributes certs if it's a secure
+// cluster and we're starting n1.
+func (h *crdbInstallHelper) distributeCerts() {
+	for _, node := range h.c.ServerNodes() {
+		if node == 1 && h.c.Secure {
+			h.c.DistributeCerts()
+			break
 		}
 	}
-	return nil
 }
 
-func (c *SyncedCluster) shouldAdvertisePublicIP() bool {
+func (h *crdbInstallHelper) shouldAdvertisePublicIP() bool {
 	// If we're creating nodes that span VPC (e.g. AWS multi-region or
 	// multi-cloud), we'll tell the nodes to advertise their public IPs
 	// so that attaching nodes to the cluster Just Works.
-	for i := range c.VMs {
-		if i > 0 && c.VMs[i].VPC != c.VMs[0].VPC {
+	for i := range h.c.VMs {
+		if i > 0 && h.c.VMs[i].VPC != h.c.VMs[0].VPC {
 			return true
 		}
 	}
 	return false
 }
 
-// getEnvVars returns all COCKROACH_* environment variables, in the form
-// "key=value".
-func getEnvVars() []string {
+func (h *crdbInstallHelper) getEnvVars() []string {
 	var sl []string
 	for _, v := range os.Environ() {
 		if strings.HasPrefix(v, "COCKROACH_") {
@@ -724,10 +733,10 @@ func getEnvVars() []string {
 	return sl
 }
 
-func (c *SyncedCluster) run(nodeIdx int, cmd string) (string, error) {
-	nodes := c.TargetNodes()
+func (h *crdbInstallHelper) run(nodeIdx int, cmd string) (string, error) {
+	nodes := h.c.ServerNodes()
 
-	sess, err := c.newSession(nodes[nodeIdx])
+	sess, err := h.c.newSession(nodes[nodeIdx])
 	if err != nil {
 		return "", err
 	}

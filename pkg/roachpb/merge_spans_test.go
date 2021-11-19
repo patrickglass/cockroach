@@ -113,7 +113,7 @@ func TestSubtractSpans(t *testing.T) {
 	t.Run("random", func(t *testing.T) {
 		const iterations = 100
 		for i := 0; i < iterations; i++ {
-			r, s := randutil.NewTestRand()
+			r, s := randutil.NewPseudoRand()
 			t.Logf("random seed: %d", s)
 			const max = 1000
 			before := makeRandomParitialCovering(r, max)

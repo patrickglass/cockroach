@@ -37,7 +37,6 @@ import {
 } from "src/util/appStats";
 import {
   aggregatedTsAttr,
-  aggregationIntervalAttr,
   appAttr,
   databaseAttr,
   implicitTxnAttr,
@@ -68,9 +67,7 @@ interface Fraction {
 
 interface StatementDetailsData {
   nodeId: number;
-  summary: string;
   aggregatedTs: number;
-  aggregationInterval: number;
   implicitTxn: boolean;
   fullScan: boolean;
   database: string;
@@ -87,9 +84,7 @@ function coalesceNodeStats(
     if (!(key in statsKey)) {
       statsKey[key] = {
         nodeId: stmt.node_id,
-        summary: stmt.statement_summary,
         aggregatedTs: stmt.aggregated_ts,
-        aggregationInterval: stmt.aggregation_interval,
         implicitTxn: stmt.implicit_txn,
         fullScan: stmt.full_scan,
         database: stmt.database,
@@ -103,9 +98,7 @@ function coalesceNodeStats(
     const stmt = statsKey[key];
     return {
       label: stmt.nodeId.toString(),
-      summary: stmt.summary,
       aggregatedTs: stmt.aggregatedTs,
-      aggregationInterval: stmt.aggregationInterval,
       implicitTxn: stmt.implicitTxn,
       fullScan: stmt.fullScan,
       database: stmt.database,
@@ -148,13 +141,10 @@ function filterByRouterParamsPredicate(
     : null;
   // If the aggregatedTs is unset, we will aggregate across the current date range.
   const aggregatedTs = queryByName(location, aggregatedTsAttr);
-  const aggInterval = queryByName(location, aggregationIntervalAttr);
 
   const filterByKeys = (stmt: ExecutionStatistics) =>
     stmt.statement === statement &&
     (aggregatedTs == null || stmt.aggregated_ts.toString() === aggregatedTs) &&
-    (aggInterval == null ||
-      stmt.aggregation_interval.toString() === aggInterval) &&
     stmt.implicit_txn === implicitTxn &&
     (stmt.database === database || database === null);
 
@@ -209,6 +199,7 @@ export const selectStatement = createSelector(
       database: queryByName(props.location, databaseAttr),
       distSQL: fractionMatching(results, s => s.distSQL),
       vec: fractionMatching(results, s => s.vec),
+      opt: fractionMatching(results, s => s.opt),
       implicit_txn: fractionMatching(results, s => s.implicit_txn),
       full_scan: fractionMatching(results, s => s.full_scan),
       failed: fractionMatching(results, s => s.failed),

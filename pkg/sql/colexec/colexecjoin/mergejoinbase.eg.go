@@ -31,12 +31,16 @@ var (
 )
 
 // isBufferedGroupFinished checks to see whether or not the buffered group
-// corresponding to the first tuple continues in batch.
+// corresponding to input continues in batch.
 func (o *mergeJoinBase) isBufferedGroupFinished(
-	input *mergeJoinInput, firstTuple []coldata.Vec, batch coldata.Batch, rowIdx int,
+	input *mergeJoinInput, batch coldata.Batch, rowIdx int,
 ) bool {
 	if batch.Length() == 0 {
 		return true
+	}
+	bufferedGroup := o.bufferedGroup.left
+	if input == &o.right {
+		bufferedGroup = o.bufferedGroup.right
 	}
 	tupleToLookAtIdx := rowIdx
 	sel := batch.Selection()
@@ -58,7 +62,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				// right side being an input) this check will always return false since
 				// nulls couldn't be buffered up though.
 				// TODO(yuzefovich): consider templating this.
-				bufferedNull := firstTuple[colIdx].MaybeHasNulls() && firstTuple[colIdx].Nulls().NullAt(0)
+				bufferedNull := bufferedGroup.firstTuple[colIdx].MaybeHasNulls() && bufferedGroup.firstTuple[colIdx].Nulls().NullAt(0)
 				incomingNull := batch.ColVec(int(colIdx)).MaybeHasNulls() && batch.ColVec(int(colIdx)).Nulls().NullAt(tupleToLookAtIdx)
 				if o.joinType.IsSetOpJoin() {
 					if bufferedNull && incomingNull {
@@ -69,7 +73,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				if bufferedNull || incomingNull {
 					return true
 				}
-				bufferedCol := firstTuple[colIdx].Bool()
+				bufferedCol := bufferedGroup.firstTuple[colIdx].Bool()
 				prevVal := bufferedCol.Get(0)
 				col := batch.ColVec(int(colIdx)).Bool()
 				curVal := col.Get(tupleToLookAtIdx)
@@ -103,7 +107,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				// right side being an input) this check will always return false since
 				// nulls couldn't be buffered up though.
 				// TODO(yuzefovich): consider templating this.
-				bufferedNull := firstTuple[colIdx].MaybeHasNulls() && firstTuple[colIdx].Nulls().NullAt(0)
+				bufferedNull := bufferedGroup.firstTuple[colIdx].MaybeHasNulls() && bufferedGroup.firstTuple[colIdx].Nulls().NullAt(0)
 				incomingNull := batch.ColVec(int(colIdx)).MaybeHasNulls() && batch.ColVec(int(colIdx)).Nulls().NullAt(tupleToLookAtIdx)
 				if o.joinType.IsSetOpJoin() {
 					if bufferedNull && incomingNull {
@@ -114,7 +118,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				if bufferedNull || incomingNull {
 					return true
 				}
-				bufferedCol := firstTuple[colIdx].Bytes()
+				bufferedCol := bufferedGroup.firstTuple[colIdx].Bytes()
 				prevVal := bufferedCol.Get(0)
 				col := batch.ColVec(int(colIdx)).Bytes()
 				curVal := col.Get(tupleToLookAtIdx)
@@ -140,7 +144,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				// right side being an input) this check will always return false since
 				// nulls couldn't be buffered up though.
 				// TODO(yuzefovich): consider templating this.
-				bufferedNull := firstTuple[colIdx].MaybeHasNulls() && firstTuple[colIdx].Nulls().NullAt(0)
+				bufferedNull := bufferedGroup.firstTuple[colIdx].MaybeHasNulls() && bufferedGroup.firstTuple[colIdx].Nulls().NullAt(0)
 				incomingNull := batch.ColVec(int(colIdx)).MaybeHasNulls() && batch.ColVec(int(colIdx)).Nulls().NullAt(tupleToLookAtIdx)
 				if o.joinType.IsSetOpJoin() {
 					if bufferedNull && incomingNull {
@@ -151,7 +155,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				if bufferedNull || incomingNull {
 					return true
 				}
-				bufferedCol := firstTuple[colIdx].Decimal()
+				bufferedCol := bufferedGroup.firstTuple[colIdx].Decimal()
 				prevVal := bufferedCol.Get(0)
 				col := batch.ColVec(int(colIdx)).Decimal()
 				curVal := col.Get(tupleToLookAtIdx)
@@ -176,7 +180,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				// right side being an input) this check will always return false since
 				// nulls couldn't be buffered up though.
 				// TODO(yuzefovich): consider templating this.
-				bufferedNull := firstTuple[colIdx].MaybeHasNulls() && firstTuple[colIdx].Nulls().NullAt(0)
+				bufferedNull := bufferedGroup.firstTuple[colIdx].MaybeHasNulls() && bufferedGroup.firstTuple[colIdx].Nulls().NullAt(0)
 				incomingNull := batch.ColVec(int(colIdx)).MaybeHasNulls() && batch.ColVec(int(colIdx)).Nulls().NullAt(tupleToLookAtIdx)
 				if o.joinType.IsSetOpJoin() {
 					if bufferedNull && incomingNull {
@@ -187,7 +191,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				if bufferedNull || incomingNull {
 					return true
 				}
-				bufferedCol := firstTuple[colIdx].Int16()
+				bufferedCol := bufferedGroup.firstTuple[colIdx].Int16()
 				prevVal := bufferedCol.Get(0)
 				col := batch.ColVec(int(colIdx)).Int16()
 				curVal := col.Get(tupleToLookAtIdx)
@@ -220,7 +224,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				// right side being an input) this check will always return false since
 				// nulls couldn't be buffered up though.
 				// TODO(yuzefovich): consider templating this.
-				bufferedNull := firstTuple[colIdx].MaybeHasNulls() && firstTuple[colIdx].Nulls().NullAt(0)
+				bufferedNull := bufferedGroup.firstTuple[colIdx].MaybeHasNulls() && bufferedGroup.firstTuple[colIdx].Nulls().NullAt(0)
 				incomingNull := batch.ColVec(int(colIdx)).MaybeHasNulls() && batch.ColVec(int(colIdx)).Nulls().NullAt(tupleToLookAtIdx)
 				if o.joinType.IsSetOpJoin() {
 					if bufferedNull && incomingNull {
@@ -231,7 +235,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				if bufferedNull || incomingNull {
 					return true
 				}
-				bufferedCol := firstTuple[colIdx].Int32()
+				bufferedCol := bufferedGroup.firstTuple[colIdx].Int32()
 				prevVal := bufferedCol.Get(0)
 				col := batch.ColVec(int(colIdx)).Int32()
 				curVal := col.Get(tupleToLookAtIdx)
@@ -265,7 +269,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				// right side being an input) this check will always return false since
 				// nulls couldn't be buffered up though.
 				// TODO(yuzefovich): consider templating this.
-				bufferedNull := firstTuple[colIdx].MaybeHasNulls() && firstTuple[colIdx].Nulls().NullAt(0)
+				bufferedNull := bufferedGroup.firstTuple[colIdx].MaybeHasNulls() && bufferedGroup.firstTuple[colIdx].Nulls().NullAt(0)
 				incomingNull := batch.ColVec(int(colIdx)).MaybeHasNulls() && batch.ColVec(int(colIdx)).Nulls().NullAt(tupleToLookAtIdx)
 				if o.joinType.IsSetOpJoin() {
 					if bufferedNull && incomingNull {
@@ -276,7 +280,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				if bufferedNull || incomingNull {
 					return true
 				}
-				bufferedCol := firstTuple[colIdx].Int64()
+				bufferedCol := bufferedGroup.firstTuple[colIdx].Int64()
 				prevVal := bufferedCol.Get(0)
 				col := batch.ColVec(int(colIdx)).Int64()
 				curVal := col.Get(tupleToLookAtIdx)
@@ -313,7 +317,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				// right side being an input) this check will always return false since
 				// nulls couldn't be buffered up though.
 				// TODO(yuzefovich): consider templating this.
-				bufferedNull := firstTuple[colIdx].MaybeHasNulls() && firstTuple[colIdx].Nulls().NullAt(0)
+				bufferedNull := bufferedGroup.firstTuple[colIdx].MaybeHasNulls() && bufferedGroup.firstTuple[colIdx].Nulls().NullAt(0)
 				incomingNull := batch.ColVec(int(colIdx)).MaybeHasNulls() && batch.ColVec(int(colIdx)).Nulls().NullAt(tupleToLookAtIdx)
 				if o.joinType.IsSetOpJoin() {
 					if bufferedNull && incomingNull {
@@ -324,7 +328,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				if bufferedNull || incomingNull {
 					return true
 				}
-				bufferedCol := firstTuple[colIdx].Float64()
+				bufferedCol := bufferedGroup.firstTuple[colIdx].Float64()
 				prevVal := bufferedCol.Get(0)
 				col := batch.ColVec(int(colIdx)).Float64()
 				curVal := col.Get(tupleToLookAtIdx)
@@ -369,7 +373,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				// right side being an input) this check will always return false since
 				// nulls couldn't be buffered up though.
 				// TODO(yuzefovich): consider templating this.
-				bufferedNull := firstTuple[colIdx].MaybeHasNulls() && firstTuple[colIdx].Nulls().NullAt(0)
+				bufferedNull := bufferedGroup.firstTuple[colIdx].MaybeHasNulls() && bufferedGroup.firstTuple[colIdx].Nulls().NullAt(0)
 				incomingNull := batch.ColVec(int(colIdx)).MaybeHasNulls() && batch.ColVec(int(colIdx)).Nulls().NullAt(tupleToLookAtIdx)
 				if o.joinType.IsSetOpJoin() {
 					if bufferedNull && incomingNull {
@@ -380,7 +384,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				if bufferedNull || incomingNull {
 					return true
 				}
-				bufferedCol := firstTuple[colIdx].Timestamp()
+				bufferedCol := bufferedGroup.firstTuple[colIdx].Timestamp()
 				prevVal := bufferedCol.Get(0)
 				col := batch.ColVec(int(colIdx)).Timestamp()
 				curVal := col.Get(tupleToLookAtIdx)
@@ -413,7 +417,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				// right side being an input) this check will always return false since
 				// nulls couldn't be buffered up though.
 				// TODO(yuzefovich): consider templating this.
-				bufferedNull := firstTuple[colIdx].MaybeHasNulls() && firstTuple[colIdx].Nulls().NullAt(0)
+				bufferedNull := bufferedGroup.firstTuple[colIdx].MaybeHasNulls() && bufferedGroup.firstTuple[colIdx].Nulls().NullAt(0)
 				incomingNull := batch.ColVec(int(colIdx)).MaybeHasNulls() && batch.ColVec(int(colIdx)).Nulls().NullAt(tupleToLookAtIdx)
 				if o.joinType.IsSetOpJoin() {
 					if bufferedNull && incomingNull {
@@ -424,7 +428,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				if bufferedNull || incomingNull {
 					return true
 				}
-				bufferedCol := firstTuple[colIdx].Interval()
+				bufferedCol := bufferedGroup.firstTuple[colIdx].Interval()
 				prevVal := bufferedCol.Get(0)
 				col := batch.ColVec(int(colIdx)).Interval()
 				curVal := col.Get(tupleToLookAtIdx)
@@ -450,7 +454,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				// right side being an input) this check will always return false since
 				// nulls couldn't be buffered up though.
 				// TODO(yuzefovich): consider templating this.
-				bufferedNull := firstTuple[colIdx].MaybeHasNulls() && firstTuple[colIdx].Nulls().NullAt(0)
+				bufferedNull := bufferedGroup.firstTuple[colIdx].MaybeHasNulls() && bufferedGroup.firstTuple[colIdx].Nulls().NullAt(0)
 				incomingNull := batch.ColVec(int(colIdx)).MaybeHasNulls() && batch.ColVec(int(colIdx)).Nulls().NullAt(tupleToLookAtIdx)
 				if o.joinType.IsSetOpJoin() {
 					if bufferedNull && incomingNull {
@@ -461,7 +465,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				if bufferedNull || incomingNull {
 					return true
 				}
-				bufferedCol := firstTuple[colIdx].JSON()
+				bufferedCol := bufferedGroup.firstTuple[colIdx].JSON()
 				prevVal := bufferedCol.Get(0)
 				col := batch.ColVec(int(colIdx)).JSON()
 				curVal := col.Get(tupleToLookAtIdx)
@@ -493,7 +497,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				// right side being an input) this check will always return false since
 				// nulls couldn't be buffered up though.
 				// TODO(yuzefovich): consider templating this.
-				bufferedNull := firstTuple[colIdx].MaybeHasNulls() && firstTuple[colIdx].Nulls().NullAt(0)
+				bufferedNull := bufferedGroup.firstTuple[colIdx].MaybeHasNulls() && bufferedGroup.firstTuple[colIdx].Nulls().NullAt(0)
 				incomingNull := batch.ColVec(int(colIdx)).MaybeHasNulls() && batch.ColVec(int(colIdx)).Nulls().NullAt(tupleToLookAtIdx)
 				if o.joinType.IsSetOpJoin() {
 					if bufferedNull && incomingNull {
@@ -504,7 +508,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				if bufferedNull || incomingNull {
 					return true
 				}
-				bufferedCol := firstTuple[colIdx].Datum()
+				bufferedCol := bufferedGroup.firstTuple[colIdx].Datum()
 				prevVal := bufferedCol.Get(0)
 				col := batch.ColVec(int(colIdx)).Datum()
 				curVal := col.Get(tupleToLookAtIdx)

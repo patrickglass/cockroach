@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
@@ -33,8 +34,8 @@ import (
 // See docs/RFCS/distributed_sql.md
 type tableReader struct {
 	execinfra.ProcessorBase
-	execinfra.SpansWithCopy
 
+	spans           roachpb.Spans
 	limitHint       rowinfra.RowLimit
 	parallelize     bool
 	batchBytesLimit rowinfra.BytesLimit
@@ -50,8 +51,6 @@ type tableReader struct {
 	// collection layer.
 	fetcher rowFetcher
 	alloc   rowenc.DatumAlloc
-
-	scanStats execinfra.ScanStats
 
 	// rowsRead is the number of rows read and is tracked unconditionally.
 	rowsRead int64
@@ -104,13 +103,13 @@ func newTableReader(
 	tr.maxTimestampAge = time.Duration(spec.MaxTimestampAgeNanos)
 
 	tableDesc := spec.BuildTableDescriptor()
-	invertedColumn := tabledesc.FindInvertedColumn(tableDesc, spec.InvertedColumn)
+	virtualColumn := tabledesc.FindVirtualColumn(tableDesc, spec.VirtualColumn)
 	cols := tableDesc.PublicColumns()
 	if spec.Visibility == execinfra.ScanVisibilityPublicAndNotPublic {
 		cols = tableDesc.DeletableColumns()
 	}
 	columnIdxMap := catalog.ColumnIDToOrdinalMap(cols)
-	resultTypes := catalog.ColumnTypesWithInvertedCol(cols, invertedColumn)
+	resultTypes := catalog.ColumnTypesWithVirtualCol(cols, virtualColumn)
 
 	// Add all requested system columns to the output.
 	if spec.HasSystemColumns {
@@ -159,16 +158,19 @@ func newTableReader(
 		spec.LockingStrength,
 		spec.LockingWaitPolicy,
 		spec.HasSystemColumns,
-		invertedColumn,
+		virtualColumn,
 	); err != nil {
 		return nil, err
 	}
 
-	tr.Spans = spec.Spans
-	if !tr.ignoreMisplannedRanges {
-		// Make a copy of the spans so that we could get the misplanned ranges
-		// info.
-		tr.MakeSpansCopy()
+	nSpans := len(spec.Spans)
+	if cap(tr.spans) >= nSpans {
+		tr.spans = tr.spans[:nSpans]
+	} else {
+		tr.spans = make(roachpb.Spans, nSpans)
+	}
+	for i, s := range spec.Spans {
+		tr.spans[i] = s.Span
 	}
 
 	if execinfra.ShouldCollectStats(flowCtx.EvalCtx.Ctx(), flowCtx) {
@@ -213,14 +215,14 @@ func (tr *tableReader) startScan(ctx context.Context) error {
 	var err error
 	if tr.maxTimestampAge == 0 {
 		err = tr.fetcher.StartScan(
-			ctx, tr.FlowCtx.Txn, tr.Spans, bytesLimit, tr.limitHint,
+			ctx, tr.FlowCtx.Txn, tr.spans, bytesLimit, tr.limitHint,
 			tr.FlowCtx.TraceKV,
 			tr.EvalCtx.TestingKnobs.ForceProductionBatchSizes,
 		)
 	} else {
 		initialTS := tr.FlowCtx.Txn.ReadTimestamp()
 		err = tr.fetcher.StartInconsistentScan(
-			ctx, tr.FlowCtx.Cfg.DB, initialTS, tr.maxTimestampAge, tr.Spans,
+			ctx, tr.FlowCtx.Cfg.DB, initialTS, tr.maxTimestampAge, tr.spans,
 			bytesLimit, tr.limitHint, tr.FlowCtx.TraceKV,
 			tr.EvalCtx.TestingKnobs.ForceProductionBatchSizes,
 		)
@@ -234,11 +236,13 @@ func (tr *tableReader) Release() {
 	tr.ProcessorBase.Reset()
 	tr.fetcher.Reset()
 	// Deeply reset the spans so that we don't hold onto the keys of the spans.
-	tr.SpansWithCopy.Reset()
+	for i := range tr.spans {
+		tr.spans[i] = roachpb.Span{}
+	}
 	*tr = tableReader{
 		ProcessorBase: tr.ProcessorBase,
-		SpansWithCopy: tr.SpansWithCopy,
 		fetcher:       tr.fetcher,
+		spans:         tr.spans[:0],
 		rowsRead:      0,
 	}
 	trPool.Put(tr)
@@ -310,8 +314,7 @@ func (tr *tableReader) execStatsForTrace() *execinfrapb.ComponentStats {
 	if !ok {
 		return nil
 	}
-	tr.scanStats = execinfra.GetScanStats(tr.Ctx)
-	ret := &execinfrapb.ComponentStats{
+	return &execinfrapb.ComponentStats{
 		KV: execinfrapb.KVStats{
 			BytesRead:      optional.MakeUint(uint64(tr.fetcher.GetBytesRead())),
 			TuplesRead:     is.NumTuples,
@@ -320,8 +323,6 @@ func (tr *tableReader) execStatsForTrace() *execinfrapb.ComponentStats {
 		},
 		Output: tr.OutputHelper.Stats(),
 	}
-	execinfra.PopulateKVMVCCStats(&ret.KV, &tr.scanStats)
-	return ret
 }
 
 func (tr *tableReader) generateMeta() []execinfrapb.ProducerMetadata {
@@ -329,7 +330,7 @@ func (tr *tableReader) generateMeta() []execinfrapb.ProducerMetadata {
 	if !tr.ignoreMisplannedRanges {
 		nodeID, ok := tr.FlowCtx.NodeID.OptionalNodeID()
 		if ok {
-			ranges := execinfra.MisplannedRanges(tr.Ctx, tr.SpansCopy, nodeID, tr.FlowCtx.Cfg.RangeCache)
+			ranges := execinfra.MisplannedRanges(tr.Ctx, tr.spans, nodeID, tr.FlowCtx.Cfg.RangeCache)
 			if ranges != nil {
 				trailingMeta = append(trailingMeta, execinfrapb.ProducerMetadata{Ranges: ranges})
 			}

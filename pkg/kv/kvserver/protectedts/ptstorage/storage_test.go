@@ -30,7 +30,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -572,7 +571,7 @@ func TestCorruptData(t *testing.T) {
 		entries, err := log.FetchEntriesFromFiles(0, math.MaxInt64, 100, msg,
 			log.WithFlattenedSensitiveData)
 		require.NoError(t, err)
-		require.GreaterOrEqual(t, 1, len(entries), "entries: %v", entries)
+		require.Len(t, entries, 1)
 		for _, e := range entries {
 			require.Equal(t, severity.ERROR, e.Severity)
 		}
@@ -624,7 +623,7 @@ func TestCorruptData(t *testing.T) {
 		entries, err := log.FetchEntriesFromFiles(0, math.MaxInt64, 100, msg,
 			log.WithFlattenedSensitiveData)
 		require.NoError(t, err)
-		require.GreaterOrEqual(t, 1, len(entries), "entries: %v", entries)
+		require.Len(t, entries, 1)
 		for _, e := range entries {
 			require.Equal(t, severity.ERROR, e.Severity)
 		}
@@ -801,10 +800,4 @@ func (ie *wrappedInternalExecutor) setErrFunc(f func(statement string) error) {
 	ie.mu.Lock()
 	defer ie.mu.Unlock()
 	ie.mu.errFunc = f
-}
-
-func (ie *wrappedInternalExecutor) WithSyntheticDescriptors(
-	descs []catalog.Descriptor, run func() error,
-) error {
-	panic("not implemented")
 }

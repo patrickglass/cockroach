@@ -1007,8 +1007,6 @@ func TestHashJoiner(t *testing.T) {
 		EvalCtx: &evalCtx,
 		Cfg:     &execinfra.ServerConfig{Settings: st},
 	}
-	var monitorRegistry colexecargs.MonitorRegistry
-	defer monitorRegistry.Close(ctx)
 
 	for _, tcs := range [][]*joinTestCase{getHJTestCases(), getMJTestCases()} {
 		for _, tc := range tcs {
@@ -1016,10 +1014,11 @@ func TestHashJoiner(t *testing.T) {
 				runHashJoinTestCase(t, tc, func(sources []colexecop.Operator) (colexecop.Operator, error) {
 					spec := createSpecForHashJoiner(tc)
 					args := &colexecargs.NewColOperatorArgs{
-						Spec:            spec,
-						Inputs:          colexectestutils.MakeInputs(sources),
-						MonitorRegistry: &monitorRegistry,
+						Spec:                spec,
+						Inputs:              colexectestutils.MakeInputs(sources),
+						StreamingMemAccount: testMemAcc,
 					}
+					args.TestingKnobs.UseStreamingMemAccountForBuffering = true
 					args.TestingKnobs.DiskSpillingDisabled = true
 					result, err := colexecargs.TestNewColOperator(ctx, flowCtx, args)
 					if err != nil {
@@ -1133,8 +1132,6 @@ func TestHashJoinerProjection(t *testing.T) {
 			Settings: st,
 		},
 	}
-	var monitorRegistry colexecargs.MonitorRegistry
-	defer monitorRegistry.Close(ctx)
 
 	leftTypes := []*types.T{types.Bool, types.Int, types.Bytes}
 	rightTypes := []*types.T{types.Int, types.Float, types.Decimal}
@@ -1166,10 +1163,11 @@ func TestHashJoinerProjection(t *testing.T) {
 	leftSource := colexectestutils.NewOpTestInput(testAllocator, 1, leftTuples, leftTypes)
 	rightSource := colexectestutils.NewOpTestInput(testAllocator, 1, rightTuples, rightTypes)
 	args := &colexecargs.NewColOperatorArgs{
-		Spec:            spec,
-		Inputs:          []colexecargs.OpWithMetaInfo{{Root: leftSource}, {Root: rightSource}},
-		MonitorRegistry: &monitorRegistry,
+		Spec:                spec,
+		Inputs:              []colexecargs.OpWithMetaInfo{{Root: leftSource}, {Root: rightSource}},
+		StreamingMemAccount: testMemAcc,
 	}
+	args.TestingKnobs.UseStreamingMemAccountForBuffering = true
 	args.TestingKnobs.DiskSpillingDisabled = true
 	hjOp, err := colexecargs.TestNewColOperator(ctx, flowCtx, args)
 	require.NoError(t, err)

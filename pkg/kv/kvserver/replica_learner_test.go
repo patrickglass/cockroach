@@ -884,7 +884,7 @@ func TestLearnerAndVoterOutgoingFollowerRead(t *testing.T) {
 	})
 	defer tc.Stopper().Stop(ctx)
 	db := sqlutils.MakeSQLRunner(tc.ServerConn(0))
-	tr := tc.Server(0).TracerI().(*tracing.Tracer)
+	tr := tc.Server(0).Tracer().(*tracing.Tracer)
 	db.Exec(t, fmt.Sprintf(`SET CLUSTER SETTING kv.closed_timestamp.target_duration = '%s'`,
 		testingTargetDuration))
 	db.Exec(t, fmt.Sprintf(`SET CLUSTER SETTING kv.closed_timestamp.side_transport_interval = '%s'`, testingSideTransportInterval))
@@ -912,15 +912,15 @@ func TestLearnerAndVoterOutgoingFollowerRead(t *testing.T) {
 		testutils.SucceedsSoon(t, func() error {
 			// Trace the Send call so we can verify that it hit the exact `learner
 			// replicas cannot serve follower reads` branch that we're trying to test.
-			sendCtx, getRecAndFinish := tracing.ContextWithRecordingSpan(ctx, tr, "manual read request")
-			defer getRecAndFinish()
+			sendCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "manual read request")
+			defer cancel()
 			_, pErr := repl.Send(sendCtx, req)
 			err := pErr.GoError()
 			if !testutils.IsError(err, `not lease holder`) {
 				return errors.Errorf(`expected "not lease holder" error got: %+v`, err)
 			}
 			const msg = `cannot serve follower reads`
-			formattedTrace := getRecAndFinish().String()
+			formattedTrace := collect().String()
 			if !strings.Contains(formattedTrace, msg) {
 				return errors.Errorf("expected a trace with `%s` got:\n%s", msg, formattedTrace)
 			}

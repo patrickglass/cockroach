@@ -86,8 +86,6 @@ func GetAggregateInfo(
 
 // GetAggregateConstructor processes the specification of a single aggregate
 // function.
-//
-// evalCtx will not be mutated.
 func GetAggregateConstructor(
 	evalCtx *tree.EvalContext,
 	semaCtx *tree.SemaContext,

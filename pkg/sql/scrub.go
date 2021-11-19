@@ -475,7 +475,7 @@ func scrubRunDistSQL(
 	ctx context.Context, planCtx *PlanningCtx, p *planner, plan *PhysicalPlan, columnTypes []*types.T,
 ) (*rowContainerHelper, error) {
 	var rowContainer rowContainerHelper
-	rowContainer.Init(columnTypes, &p.extendedEvalCtx, "scrub" /* opName */)
+	rowContainer.init(columnTypes, &p.extendedEvalCtx, "scrub" /* opName */)
 	rowResultWriter := NewRowResultWriter(&rowContainer)
 	recv := MakeDistSQLReceiver(
 		ctx,
@@ -496,10 +496,10 @@ func scrubRunDistSQL(
 		planCtx, p.txn, plan, recv, &evalCtxCopy, nil, /* finishedSetupFn */
 	)()
 	if rowResultWriter.Err() != nil {
-		rowContainer.Close(ctx)
+		rowContainer.close(ctx)
 		return nil, rowResultWriter.Err()
-	} else if rowContainer.Len() == 0 {
-		rowContainer.Close(ctx)
+	} else if rowContainer.len() == 0 {
+		rowContainer.close(ctx)
 		return nil, nil
 	}
 

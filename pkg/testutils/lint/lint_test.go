@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//go:build lint
 // +build lint
 
 package lint
@@ -724,6 +723,8 @@ func TestLint(t *testing.T) {
 			"--",
 			"*.go",
 			":!**/embedded.go",
+			":!util/timeutil/now_unix.go",
+			":!util/timeutil/now_windows.go",
 			":!util/timeutil/time.go",
 			":!util/timeutil/zoneinfo.go",
 			":!util/tracing/span.go",
@@ -752,42 +753,6 @@ func TestLint(t *testing.T) {
 		}
 	})
 
-	// Forbid timeutil.Now().Sub(t) in favor of timeutil.Since(t).
-	t.Run("TestNowSub", func(t *testing.T) {
-		t.Parallel()
-		cmd, stderr, filter, err := dirCmd(
-			pkgDir,
-			"git",
-			"grep",
-			"-nE",
-			`\btime(util)?\.Now\(\)\.Sub\(`,
-			"--",
-			"*.go",
-			":!*/lint_test.go", // This file.
-			":!cmd/dev/**",
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if err := cmd.Start(); err != nil {
-			t.Fatal(err)
-		}
-
-		if err := stream.ForEach(filter, func(s string) {
-			t.Errorf("\n%s <- forbidden; use 'timeutil.Since(t)' instead "+
-				"because it is more efficient", s)
-		}); err != nil {
-			t.Error(err)
-		}
-
-		if err := cmd.Wait(); err != nil {
-			if out := stderr.String(); len(out) > 0 {
-				t.Fatalf("err=%s, stderr=%s", err, out)
-			}
-		}
-	})
-
 	t.Run("TestOsErrorIs", func(t *testing.T) {
 		t.Parallel()
 		cmd, stderr, filter, err := dirCmd(
@@ -798,8 +763,6 @@ func TestLint(t *testing.T) {
 			`\bos\.Is(Exist|NotExist|Timeout|Permission)`,
 			"--",
 			"*.go",
-			":!cmd/dev/**",
-			":!cmd/mirror/**",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -1069,6 +1032,7 @@ func TestLint(t *testing.T) {
 			":!rpc/codec_test.go",
 			":!settings/settings_test.go",
 			":!sql/types/types_jsonpb.go",
+			":!sql/schemachanger/scbuild/builder_test.go",
 			":!sql/schemachanger/scgraphviz/graphviz.go",
 		)
 		if err != nil {
@@ -1191,7 +1155,6 @@ func TestLint(t *testing.T) {
 			":!sql/pgwire/pgerror/severity.go",
 			":!sql/pgwire/pgerror/with_candidate_code.go",
 			":!sql/pgwire/pgwirebase/too_big_error.go",
-			":!sql/protoreflect/redact.go",
 			":!sql/colexecerror/error.go",
 			":!util/contextutil/timeout_error.go",
 			":!util/protoutil/jsonpb_marshal.go",
@@ -1348,7 +1311,6 @@ func TestLint(t *testing.T) {
 			stream.GrepNot(`^sql/opt/testutils/opttester/testfixtures/.*`),
 			stream.GrepNot(`^util/timeutil/lowercase_timezones_generated.go$`),
 			stream.GrepNot(`^cmd/roachtest/tests/ruby_pg_blocklist.go$`),
-			stream.GrepNot(`^cmd/roachtest/tests/asyncpg_blocklist.go$`),
 			stream.Map(func(s string) string {
 				return filepath.Join(pkgDir, s)
 			}),
@@ -1672,7 +1634,6 @@ func TestLint(t *testing.T) {
 				stream.GrepNot("pkg/sql/oidext/oidext.go.*don't use underscores in Go names; const T_"),
 				stream.GrepNot("server/api_v2.go.*package comment should be of the form"),
 				stream.GrepNot("type name will be used as row.RowLimit by other packages, and that stutters; consider calling this Limit"),
-				stream.GrepNot("pkg/util/timeutil/time_zone_util.go.*error strings should not be capitalized or end with punctuation or a newline"),
 			), func(s string) {
 				t.Errorf("\n%s", s)
 			}); err != nil {
@@ -1690,11 +1651,16 @@ func TestLint(t *testing.T) {
 		// staticcheck uses 2.4GB of ram (as of 2019-05-10), so don't parallelize it.
 		skip.UnderShort(t)
 		skip.UnderBazelWithIssue(t, 68496, "A TON of build errors")
-
+		var args []string
+		if pkgSpecified {
+			args = []string{pkgScope}
+		} else {
+			args = []string{"-unused.whole-program", pkgScope}
+		}
 		cmd, stderr, filter, err := dirCmd(
 			crdb.Dir,
 			"staticcheck",
-			pkgScope)
+			args...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1711,8 +1677,6 @@ func TestLint(t *testing.T) {
 				// This file is a conditionally-compiled stub implementation that
 				// will produce fake "func is unused" errors.
 				stream.GrepNot(`pkg/build/bazel/non_bazel.go`),
-				// NOTE(ricky): No idea what's wrong with mirror.go. See #72521
-				stream.GrepNot(`pkg/cmd/mirror/mirror.go`),
 				// Skip generated file.
 				stream.GrepNot(`pkg/ui/distoss/bindata.go`),
 				stream.GrepNot(`pkg/ui/distccl/bindata.go`),

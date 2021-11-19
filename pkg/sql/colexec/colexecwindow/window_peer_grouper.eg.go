@@ -35,7 +35,7 @@ func NewWindowPeerGrouper(
 	orderingCols []execinfrapb.Ordering_Column,
 	partitionColIdx int,
 	outputColIdx int,
-) colexecop.Operator {
+) (op colexecop.Operator, err error) {
 	allPeers := len(orderingCols) == 0
 	var distinctCol []bool
 	if !allPeers {
@@ -43,9 +43,12 @@ func NewWindowPeerGrouper(
 		for i, ordCol := range orderingCols {
 			orderIdxs[i] = ordCol.ColIdx
 		}
-		input, distinctCol = colexecbase.OrderedDistinctColsToOperators(
+		input, distinctCol, err = colexecbase.OrderedDistinctColsToOperators(
 			input, orderIdxs, typs, false, /* nullsAreDistinct */
 		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	input = colexecutils.NewVectorTypeEnforcer(allocator, input, types.Bool, outputColIdx)
 	initFields := windowPeerGrouperInitFields{
@@ -59,20 +62,20 @@ func NewWindowPeerGrouper(
 		if partitionColIdx != tree.NoColumnIdx {
 			return &windowPeerGrouperAllPeersWithPartitionOp{
 				windowPeerGrouperInitFields: initFields,
-			}
+			}, nil
 		}
 		return &windowPeerGrouperAllPeersNoPartitionOp{
 			windowPeerGrouperInitFields: initFields,
-		}
+		}, nil
 	}
 	if partitionColIdx != tree.NoColumnIdx {
 		return &windowPeerGrouperWithPartitionOp{
 			windowPeerGrouperInitFields: initFields,
-		}
+		}, nil
 	}
 	return &windowPeerGrouperNoPartitionOp{
 		windowPeerGrouperInitFields: initFields,
-	}
+	}, nil
 }
 
 type windowPeerGrouperInitFields struct {

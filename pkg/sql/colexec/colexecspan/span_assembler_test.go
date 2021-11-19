@@ -55,7 +55,7 @@ func TestSpanAssembler(t *testing.T) {
 	testColumnFactory := coldataext.NewExtendedColumnFactory(&evalCtx)
 	testAllocator := colmem.NewAllocator(ctx, testMemAcc, testColumnFactory)
 	defer testMemAcc.Close(ctx)
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	typs := []*types.T{types.Int, types.Bytes, types.Decimal}
 
 	for _, useColFamilies := range []bool{true, false} {
@@ -192,7 +192,7 @@ func makeTable(useColFamilies bool) catalog.TableDescriptor {
 	var testTableDesc = descpb.TableDescriptor{
 		Name:       "abcd",
 		ID:         descpb.ID(tableID),
-		Privileges: descpb.NewBasePrivilegeDescriptor(security.AdminRoleName()),
+		Privileges: descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName()),
 		Version:    1,
 		Columns: []descpb.ColumnDescriptor{
 			{Name: "a", ID: 1, Type: types.Int},

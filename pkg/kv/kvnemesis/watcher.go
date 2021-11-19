@@ -207,7 +207,7 @@ func (w *Watcher) processEvents(ctx context.Context, eventC chan *roachpb.RangeF
 				if frontierAdvanced {
 					frontier := w.mu.frontier.Frontier()
 					log.Infof(ctx, `watcher reached frontier %s lagging by %s`,
-						frontier, timeutil.Since(frontier.GoTime()))
+						frontier, timeutil.Now().Sub(frontier.GoTime()))
 					for ts, chs := range w.mu.frontierWaiters {
 						if frontier.Less(ts) {
 							continue

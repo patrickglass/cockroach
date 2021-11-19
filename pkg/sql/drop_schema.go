@@ -14,7 +14,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -199,41 +198,26 @@ func (n *dropSchemaNode) startExec(params runParams) error {
 func (p *planner) dropSchemaImpl(
 	ctx context.Context, parentDB *dbdesc.Mutable, sc *schemadesc.Mutable,
 ) error {
-
-	// Update parent database schemas mapping.
-	if p.execCfg.Settings.Version.IsActive(ctx, clusterversion.AvoidDrainingNames) {
-		delete(parentDB.Schemas, sc.GetName())
-	} else {
-		// TODO (rohany): This can be removed once RESTORE installs schemas into
-		//  the parent database.
-		if parentDB.Schemas == nil {
-			parentDB.Schemas = make(map[string]descpb.DatabaseDescriptor_SchemaInfo)
-		}
-		parentDB.Schemas[sc.GetName()] = descpb.DatabaseDescriptor_SchemaInfo{
-			ID:      sc.GetID(),
-			Dropped: true,
-		}
+	sc.DrainingNames = append(sc.DrainingNames, descpb.NameInfo{
+		ParentID:       parentDB.ID,
+		ParentSchemaID: keys.RootNamespaceID,
+		Name:           sc.Name,
+	})
+	// TODO (rohany): This can be removed once RESTORE installs schemas into
+	//  the parent database.
+	if parentDB.Schemas == nil {
+		parentDB.Schemas = make(map[string]descpb.DatabaseDescriptor_SchemaInfo)
 	}
-
-	// Update the schema descriptor as dropped.
-	sc.SetDropped()
-
-	// Populate namespace update batch.
-	b := p.txn.NewBatch()
-	p.dropNamespaceEntry(ctx, b, sc)
-
-	// Remove any associated comments.
+	parentDB.Schemas[sc.GetName()] = descpb.DatabaseDescriptor_SchemaInfo{
+		ID:      sc.GetID(),
+		Dropped: true,
+	}
+	// Mark the descriptor as dropped.
+	sc.State = descpb.DescriptorState_DROP
 	if err := p.removeSchemaComment(ctx, sc.GetID()); err != nil {
 		return err
 	}
-
-	// Write the updated descriptor.
-	if err := p.writeSchemaDesc(ctx, sc); err != nil {
-		return err
-	}
-
-	// Run the namespace update batch.
-	return p.txn.Run(ctx, b)
+	return p.writeSchemaDesc(ctx, sc)
 }
 
 func (p *planner) createDropSchemaJob(

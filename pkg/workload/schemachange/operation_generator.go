@@ -2809,7 +2809,7 @@ func (og *operationGenerator) createSchema(ctx context.Context, tx pgx.Tx) (stri
 	}
 
 	// TODO(jayshrivastava): Support authorization
-	stmt := randgen.MakeSchemaName(ifNotExists, schemaName, tree.MakeRoleSpecWithRoleName(security.RootUserName().Normalized()))
+	stmt := randgen.MakeSchemaName(ifNotExists, schemaName, security.RootUserName())
 	return tree.Serialize(stmt), nil
 }
 

@@ -146,16 +146,7 @@ func (t *Times) GetServiceLatencyNoOverhead() time.Duration {
 		queryReceivedTime = t.times[SessionQueryReceived]
 	}
 	parseLatency := t.times[SessionEndParse].Sub(queryReceivedTime)
-	// If we encounter an error during the logical planning, the
-	// PlannerEndExecStmt phase will not be set, so we need to use the end of
-	// planning phase in the computation of planAndExecuteLatency.
-	var queryEndExecTime time.Time
-	if t.times[PlannerEndExecStmt].IsZero() {
-		queryEndExecTime = t.times[PlannerEndLogicalPlan]
-	} else {
-		queryEndExecTime = t.times[PlannerEndExecStmt]
-	}
-	planAndExecuteLatency := queryEndExecTime.Sub(t.times[PlannerStartLogicalPlan])
+	planAndExecuteLatency := t.times[PlannerEndExecStmt].Sub(t.times[PlannerStartLogicalPlan])
 	return parseLatency + planAndExecuteLatency
 }
 

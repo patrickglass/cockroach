@@ -17,15 +17,15 @@ import { PayloadAction } from "src/interfaces/action";
 import { cockroach } from "src/js/protos";
 import ITimeSeriesDatapoint = cockroach.ts.tspb.ITimeSeriesDatapoint;
 
-function fakeTimeSeriesDatapoint(timestamp?: Long): ITimeSeriesDatapoint {
+function fakeTimeSeriesDatapoint(): ITimeSeriesDatapoint {
   return {
-    timestamp_nanos: timestamp || Long.fromNumber(Date.now() * 1000000),
+    timestamp_nanos: Long.fromNumber(Date.now() * 1000000),
     value: Math.ceil(Math.random() * 100),
   };
 }
 
 /**
- * @summary Redux Middleware which intercepts RESPONSE actions with requested metrics data
+ * @summary Redux Middleware which intercepts RESPONSE actions with requrested metrics data
  * and populates datapoints for entire requested date period.
  * @example Display datapoints for 2 months period even if cluster was created today and
  * there is no available data for requested period, then missing datapoints will be randomly generated.
@@ -57,7 +57,7 @@ export const fakeMetricsDataGenerationMiddleware = (
       const samplePoint =
         actualDatapointsCount > 0
           ? clone(res.datapoints[0])
-          : fakeTimeSeriesDatapoint(end_nanos);
+          : fakeTimeSeriesDatapoint();
 
       const datapoints = Array(expectedDatapointsCount - actualDatapointsCount)
         .fill(1)

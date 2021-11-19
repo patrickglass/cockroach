@@ -295,6 +295,7 @@ func (p *planner) HasPrivilege(
 	specifier tree.HasPrivilegeSpecifier,
 	user security.SQLUsername,
 	kind privilege.Kind,
+	withGrantOpt bool,
 ) (bool, error) {
 	desc, err := p.ResolveDescriptorForPrivilegeSpecifier(
 		ctx,
@@ -322,6 +323,16 @@ func (p *planner) HasPrivilege(
 	}
 	if hasPrivilege {
 		return true, nil
+	}
+	// For WITH GRANT OPTION, check the roles also has the GRANT privilege.
+	if withGrantOpt {
+		hasPrivilege, err := hasPrivilegeFunc(privilege.GRANT)
+		if err != nil {
+			return false, err
+		}
+		if !hasPrivilege {
+			return false, nil
+		}
 	}
 	return hasPrivilegeFunc(kind)
 }
@@ -1230,6 +1241,37 @@ func (l *internalLookupCtx) getSchemaName(table catalog.TableDescriptor) string 
 		schemaName = fmt.Sprintf("[%d]", table.GetParentSchemaID())
 	}
 	return schemaName
+}
+
+// getParentAsTableName returns a TreeTable object of the parent table for a
+// given table ID. Used to get the parent table of a table with interleaved
+// indexes.
+func getParentAsTableName(
+	l simpleSchemaResolver, parentTableID descpb.ID, dbPrefix string,
+) (tree.TableName, error) {
+	var parentName tree.TableName
+	parentTable, err := l.getTableByID(parentTableID)
+	if err != nil {
+		return tree.TableName{}, err
+	}
+	var parentSchemaName tree.Name
+	if parentTable.GetParentSchemaID() == keys.PublicSchemaID {
+		parentSchemaName = tree.PublicSchemaName
+	} else {
+		parentSchema, err := l.getSchemaByID(parentTable.GetParentSchemaID())
+		if err != nil {
+			return tree.TableName{}, err
+		}
+		parentSchemaName = tree.Name(parentSchema.GetName())
+	}
+	parentDbDesc, err := l.getDatabaseByID(parentTable.GetParentID())
+	if err != nil {
+		return tree.TableName{}, err
+	}
+	parentName = tree.MakeTableNameWithSchema(tree.Name(parentDbDesc.GetName()),
+		parentSchemaName, tree.Name(parentTable.GetName()))
+	parentName.ExplicitCatalog = parentDbDesc.GetName() != dbPrefix
+	return parentName, nil
 }
 
 // getTableNameFromTableDescriptor returns a TableName object for a given

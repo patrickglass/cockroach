@@ -212,9 +212,6 @@ func (b *Builder) buildInsert(ins *tree.Insert, inScope *scope) (outScope *scope
 		}
 	}
 
-	// Check if this table has already been mutated in another subquery.
-	b.checkMultipleMutations(tab, ins.OnConflict == nil /* simpleInsert */)
-
 	var mb mutationBuilder
 	if ins.OnConflict != nil && ins.OnConflict.IsUpsertAlias() {
 		mb.init(b, "upsert", tab, alias)
@@ -258,7 +255,6 @@ func (b *Builder) buildInsert(ins *tree.Insert, inScope *scope) (outScope *scope
 	//
 	//   INSERT INTO <table> DEFAULT VALUES
 	//
-	isUpsert := ins.OnConflict != nil && !ins.OnConflict.DoNothing
 	if !ins.DefaultValues() {
 		// Replace any DEFAULT expressions in the VALUES clause, if a VALUES clause
 		// exists:
@@ -267,15 +263,15 @@ func (b *Builder) buildInsert(ins *tree.Insert, inScope *scope) (outScope *scope
 		//
 		rows := mb.replaceDefaultExprs(ins.Rows)
 
-		mb.buildInputForInsert(inScope, rows, isUpsert)
+		mb.buildInputForInsert(inScope, rows)
 	} else {
-		mb.buildInputForInsert(inScope, nil /* rows */, isUpsert)
+		mb.buildInputForInsert(inScope, nil /* rows */)
 	}
 
 	// Add default columns that were not explicitly specified by name or
 	// implicitly targeted by input columns. Also add any computed columns. In
 	// both cases, include columns undergoing mutations in the write-only state.
-	mb.addSynthesizedColsForInsert(isUpsert)
+	mb.addSynthesizedColsForInsert()
 
 	var returning tree.ReturningExprs
 	if resultsNeeded(ins.Returning) {
@@ -557,9 +553,7 @@ func (mb *mutationBuilder) addTargetTableColsForInsert(maxCols int) {
 
 // buildInputForInsert constructs the memo group for the input expression and
 // constructs a new output scope containing that expression's output columns.
-func (mb *mutationBuilder) buildInputForInsert(
-	inScope *scope, inputRows *tree.Select, isUpsert bool,
-) {
+func (mb *mutationBuilder) buildInputForInsert(inScope *scope, inputRows *tree.Select) {
 	// Handle DEFAULT VALUES case by creating a single empty row as input.
 	if inputRows == nil {
 		mb.outScope = inScope.push()
@@ -609,23 +603,16 @@ func (mb *mutationBuilder) buildInputForInsert(
 		mb.addTargetTableColsForInsert(len(mb.outScope.cols))
 	}
 
-	if !isUpsert {
-		mb.outScope = mb.addAssignmentCasts(mb.outScope, desiredTypes)
-	}
-
 	// Loop over input columns and:
 	//   1. Type check each column
-	//   2. Check if the INSERT violates a GENERATED ALWAYS AS IDENTITY column.
 	//   2. Assign name to each column
 	//   3. Add column ID to the insertColIDs list.
 	for i := range mb.outScope.cols {
 		inCol := &mb.outScope.cols[i]
 		ord := mb.tabID.ColumnOrdinal(mb.targetColList[i])
 
-		if isUpsert {
-			// Type check the input column against the corresponding table column.
-			checkDatumTypeFitsColumnType(mb.tab.Column(ord), inCol.typ)
-		}
+		// Type check the input column against the corresponding table column.
+		checkDatumTypeFitsColumnType(mb.tab.Column(ord), inCol.typ)
 
 		// Check if the input column is created with `GENERATED ALWAYS AS IDENTITY`
 		// syntax. If yes, and user does not specify the `OVERRIDING SYSTEM VALUE`
@@ -647,7 +634,7 @@ func (mb *mutationBuilder) buildInputForInsert(
 // columns that are not yet part of the target column list. This includes all
 // write-only mutation columns, since they must always have default or computed
 // values.
-func (mb *mutationBuilder) addSynthesizedColsForInsert(isUpsert bool) {
+func (mb *mutationBuilder) addSynthesizedColsForInsert() {
 	// Start by adding non-computed columns that have not already been explicitly
 	// specified in the query. Do this before adding computed columns, since those
 	// may depend on non-computed columns.
@@ -659,17 +646,13 @@ func (mb *mutationBuilder) addSynthesizedColsForInsert(isUpsert bool) {
 
 	// Possibly round DECIMAL-related columns containing insertion values (whether
 	// synthesized or not).
-	if isUpsert {
-		mb.roundDecimalValues(mb.insertColIDs, false /* roundComputedCols */)
-	}
+	mb.roundDecimalValues(mb.insertColIDs, false /* roundComputedCols */)
 
 	// Now add all computed columns.
 	mb.addSynthesizedComputedCols(mb.insertColIDs, false /* restrict */)
 
 	// Possibly round DECIMAL-related computed columns.
-	if isUpsert {
-		mb.roundDecimalValues(mb.insertColIDs, true /* roundComputedCols */)
-	}
+	mb.roundDecimalValues(mb.insertColIDs, true /* roundComputedCols */)
 }
 
 // buildInsert constructs an Insert operator, possibly wrapped by a Project

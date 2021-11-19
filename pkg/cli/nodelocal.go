@@ -111,7 +111,6 @@ func uploadFile(
 		if n > 0 {
 			// TODO(adityamaru): Switch to StmtExecContext once the copyin driver
 			// supports it.
-			//lint:ignore SA1019 DriverConn doesn't support go 1.8 API
 			_, err = stmt.Exec([]driver.Value{string(send[:n])})
 			if err != nil {
 				return err
@@ -147,7 +146,7 @@ var nodeLocalCmd = &cobra.Command{
 	Use:   "nodelocal [command]",
 	Short: "upload and delete nodelocal files",
 	Long:  "Upload and delete files on the gateway node's local file system.",
-	RunE:  UsageAndErr,
+	RunE:  usageAndErr,
 }
 
 func init() {

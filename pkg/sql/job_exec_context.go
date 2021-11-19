@@ -51,9 +51,6 @@ func (e *plannerJobExecContext) ExtendedEvalContext() *extendedEvalContext {
 func (e *plannerJobExecContext) SessionData() *sessiondata.SessionData {
 	return e.p.SessionData()
 }
-func (e *plannerJobExecContext) SessionDataMutatorIterator() *sessionDataMutatorIterator {
-	return e.p.SessionDataMutatorIterator()
-}
 func (e *plannerJobExecContext) ExecCfg() *ExecutorConfig        { return e.p.ExecCfg() }
 func (e *plannerJobExecContext) DistSQLPlanner() *DistSQLPlanner { return e.p.DistSQLPlanner() }
 func (e *plannerJobExecContext) LeaseMgr() *lease.Manager        { return e.p.LeaseMgr() }
@@ -78,7 +75,6 @@ type JobExecContext interface {
 	SemaCtx() *tree.SemaContext
 	ExtendedEvalContext() *extendedEvalContext
 	SessionData() *sessiondata.SessionData
-	SessionDataMutatorIterator() *sessionDataMutatorIterator
 	ExecCfg() *ExecutorConfig
 	DistSQLPlanner() *DistSQLPlanner
 	LeaseMgr() *lease.Manager

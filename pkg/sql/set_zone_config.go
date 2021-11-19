@@ -641,12 +641,14 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 			// empty, in which case the unmarshaling will be a no-op. This is
 			// innocuous.
 			if err := yaml.UnmarshalStrict([]byte(yamlConfig), &newZone); err != nil {
-				return pgerror.Wrap(err, pgcode.CheckViolation, "could not parse zone config")
+				return pgerror.Newf(pgcode.CheckViolation,
+					"could not parse zone config: %v", err)
 			}
 
 			// Load settings from YAML into the partial zone as well.
 			if err := yaml.UnmarshalStrict([]byte(yamlConfig), &finalZone); err != nil {
-				return pgerror.Wrap(err, pgcode.CheckViolation, "could not parse zone config")
+				return pgerror.Newf(pgcode.CheckViolation,
+					"could not parse zone config: %v", err)
 			}
 
 			// Load settings from var = val assignments. If there were no such
@@ -737,7 +739,8 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 
 			// Finally revalidate everything. Validate only the completeZone config.
 			if err := completeZone.Validate(); err != nil {
-				return pgerror.Wrap(err, pgcode.CheckViolation, "could not validate zone config")
+				return pgerror.Newf(pgcode.CheckViolation,
+					"could not validate zone config: %v", err)
 			}
 
 			// Finally check for the extra protection partial zone configs would
@@ -1061,7 +1064,8 @@ func prepareZoneConfigWrites(
 	}
 	buf, err := protoutil.Marshal(zone)
 	if err != nil {
-		return nil, pgerror.Wrap(err, pgcode.CheckViolation, "could not marshal zone config")
+		return nil, pgerror.Newf(pgcode.CheckViolation,
+			"could not marshal zone config: %v", err)
 	}
 	return &zoneConfigUpdate{id: targetID, value: buf}, nil
 }

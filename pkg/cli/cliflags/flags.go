@@ -318,12 +318,6 @@ accidents. This can also be overridden in a session with SET
 sql_safe_updates = FALSE.`,
 	}
 
-	ReadOnly = FlagInfo{
-		Name: "read-only",
-		Description: `
-Set the session variable default_transaction_read_only to on.`,
-	}
-
 	Set = FlagInfo{
 		Name: "set",
 		Description: `
@@ -582,7 +576,7 @@ apply. This flag is experimental.
 		Name: "locality-advertise-addr",
 		Description: `
 List of ports to advertise to other CockroachDB nodes for intra-cluster
-communication for some locality. This should be specified as a comma
+communication for some locality. This should be specified as a commma
 separated list of locality@address. Addresses can also include ports.
 For example:
 <PRE>
@@ -688,13 +682,6 @@ Instead, require the user to always specify access keys.`,
 		Name: "external-io-disabled",
 		Description: `
 Disable use of "external" IO, such as to S3, GCS, or the file system (nodelocal), or anything other than userfile.`,
-	}
-	ExternalIOEnableNonAdminImplicitAndArbitraryOutbound = FlagInfo{
-		Name: "external-io-enable-non-admin-implicit-access",
-		Description: `
-Allow non-admin users to specify arbitrary network addressses (e.g. https:// URIs or custom endpoints in s3:// URIs) and 
-implicit credentials (machine account/role providers) when running operations like IMPORT/EXPORT/BACKUP/etc. 
-Note: that --external-io-disable-http or --external-io-disable-implicit-credentials still apply, this only removes the admin-user requirement.`,
 	}
 
 	// KeySize, CertificateLifetime, AllowKeyReuse, and OverwriteFiles are used for
@@ -1182,11 +1169,6 @@ can also be specified (e.g. .25).`,
 		Description: `Run a demo workload against the pre-loaded database.`,
 	}
 
-	DemoWorkloadMaxQPS = FlagInfo{
-		Name:        "workload-max-qps",
-		Description: "The maximum QPS when a workload is running.",
-	}
-
 	DemoNodeLocality = FlagInfo{
 		Name: "demo-locality",
 		Description: `
@@ -1217,14 +1199,6 @@ More information about the geo-partitioned replicas topology can be found at:
 %s
 </PRE>
 		`, docs.URL("topology-geo-partitioned-replicas.html")),
-	}
-
-	DemoMultitenant = FlagInfo{
-		Name: "multitenant",
-		Description: `
-If set, cockroach demo will start separate in-memory KV and SQL servers in multi-tenancy mode.
-The SQL shell will be connected to the first tenant, and can be switched between tenants
-and the system tenant using the \connect command.`,
 	}
 
 	DemoNoLicense = FlagInfo{

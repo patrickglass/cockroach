@@ -78,9 +78,8 @@ func applyOp(ctx context.Context, env *Env, db *kv.DB, op *Operation) {
 		*PutOperation,
 		*ScanOperation,
 		*BatchOperation,
-		*DeleteOperation,
-		*DeleteRangeOperation:
-		applyClientOp(ctx, db, op, false /* inTxn */)
+		*DeleteOperation:
+		applyClientOp(ctx, db, op)
 	case *SplitOperation:
 		err := db.AdminSplit(ctx, o.Key, hlc.MaxTimestamp)
 		o.Result = resultError(ctx, err)
@@ -115,7 +114,7 @@ func applyOp(ctx context.Context, env *Env, db *kv.DB, op *Operation) {
 			savedTxn = txn
 			for i := range o.Ops {
 				op := &o.Ops[i]
-				applyClientOp(ctx, txn, op, true /* inTxn */)
+				applyClientOp(ctx, txn, op)
 				// The KV api disallows use of a txn after an operation on it errors.
 				if r := op.Result(); r.Type == ResultType_Error {
 					return errors.DecodeError(ctx, *r.Err)
@@ -123,7 +122,7 @@ func applyOp(ctx context.Context, env *Env, db *kv.DB, op *Operation) {
 			}
 			if o.CommitInBatch != nil {
 				b := txn.NewBatch()
-				applyBatchOp(ctx, b, txn.CommitInBatch, o.CommitInBatch, true)
+				applyBatchOp(ctx, b, txn.CommitInBatch, o.CommitInBatch)
 				// The KV api disallows use of a txn after an operation on it errors.
 				if r := o.CommitInBatch.Result; r.Type == ResultType_Error {
 					return errors.DecodeError(ctx, *r.Err)
@@ -156,11 +155,10 @@ type clientI interface {
 	ReverseScan(context.Context, interface{}, interface{}, int64) ([]kv.KeyValue, error)
 	ReverseScanForUpdate(context.Context, interface{}, interface{}, int64) ([]kv.KeyValue, error)
 	Del(context.Context, ...interface{}) error
-	DelRange(context.Context, interface{}, interface{}, bool) ([]roachpb.Key, error)
 	Run(context.Context, *kv.Batch) error
 }
 
-func applyClientOp(ctx context.Context, db clientI, op *Operation, inTxn bool) {
+func applyClientOp(ctx context.Context, db clientI, op *Operation) {
 	switch o := op.GetValue().(type) {
 	case *GetOperation:
 		fn := db.Get
@@ -206,34 +204,16 @@ func applyClientOp(ctx context.Context, db clientI, op *Operation, inTxn bool) {
 	case *DeleteOperation:
 		err := db.Del(ctx, o.Key)
 		o.Result = resultError(ctx, err)
-	case *DeleteRangeOperation:
-		if !inTxn {
-			panic(errors.AssertionFailedf(`non-transactional DelRange operations currently unsupported`))
-		}
-		deletedKeys, err := db.DelRange(ctx, o.Key, o.EndKey, true /* returnKeys */)
-		if err != nil {
-			o.Result = resultError(ctx, err)
-		} else {
-			o.Result.Type = ResultType_Keys
-			o.Result.Keys = make([][]byte, len(deletedKeys))
-			for i, deletedKey := range deletedKeys {
-				o.Result.Keys[i] = deletedKey
-			}
-		}
 	case *BatchOperation:
 		b := &kv.Batch{}
-		applyBatchOp(ctx, b, db.Run, o, inTxn)
+		applyBatchOp(ctx, b, db.Run, o)
 	default:
 		panic(errors.AssertionFailedf(`unknown batch operation type: %T %v`, o, o))
 	}
 }
 
 func applyBatchOp(
-	ctx context.Context,
-	b *kv.Batch,
-	runFn func(context.Context, *kv.Batch) error,
-	o *BatchOperation,
-	inTxn bool,
+	ctx context.Context, b *kv.Batch, runFn func(context.Context, *kv.Batch) error, o *BatchOperation,
 ) {
 	for i := range o.Ops {
 		switch subO := o.Ops[i].GetValue().(type) {
@@ -257,11 +237,6 @@ func applyBatchOp(
 			}
 		case *DeleteOperation:
 			b.Del(subO.Key)
-		case *DeleteRangeOperation:
-			if !inTxn {
-				panic(errors.AssertionFailedf(`non-transactional batch DelRange operations currently unsupported`))
-			}
-			b.DelRange(subO.Key, subO.EndKey, true /* returnKeys */)
 		default:
 			panic(errors.AssertionFailedf(`unknown batch operation type: %T %v`, subO, subO))
 		}
@@ -302,17 +277,6 @@ func applyBatchOp(
 		case *DeleteOperation:
 			err := b.Results[i].Err
 			subO.Result = resultError(ctx, err)
-		case *DeleteRangeOperation:
-			keys, err := b.Results[i].Keys, b.Results[i].Err
-			if err != nil {
-				subO.Result = resultError(ctx, err)
-			} else {
-				subO.Result.Type = ResultType_Keys
-				subO.Result.Keys = make([][]byte, len(keys))
-				for j, key := range keys {
-					subO.Result.Keys[j] = key
-				}
-			}
 		default:
 			panic(errors.AssertionFailedf(`unknown batch operation type: %T %v`, subO, subO))
 		}

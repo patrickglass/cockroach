@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -487,7 +486,7 @@ func (tc *TxnCoordSender) Send(
 		log.Fatalf(ctx, "cannot send transactional request through unbound TxnCoordSender")
 	}
 	if sp.IsVerbose() {
-		sp.SetTag("txnID", attribute.StringValue(tc.mu.txn.ID.String()))
+		sp.SetBaggageItem("txnID", tc.mu.txn.ID.String())
 		ctx = logtags.AddTag(ctx, "txn", uuid.ShortStringer(tc.mu.txn.ID))
 		if log.V(2) {
 			ctx = logtags.AddTag(ctx, "ts", tc.mu.txn.WriteTimestamp)
@@ -586,25 +585,9 @@ func (tc *TxnCoordSender) Send(
 // transactions are guaranteed to start with higher timestamps, regardless
 // of the gateway they use. This ensures that all causally dependent
 // transactions commit with higher timestamps, even if their read and writes
-// sets do not conflict with the original transaction's. This prevents the
-// "causal reverse" anomaly which can be observed by a third, concurrent
-// transaction.
-//
-// Even when in linearizable mode and performing this extra wait on the commit
-// of read-write transactions, uncertainty intervals are still necessary. This
-// is to ensure that any two reads that touch overlapping keys but are executed
-// on different nodes obey real-time ordering and do not violate the "monotonic
-// reads" property. Without uncertainty intervals, it would be possible for a
-// read on a node with a fast clock (ts@15) to observe a committed value (ts@10)
-// and then a later read on a node with a slow clock (ts@5) to miss the
-// committed value. When contrasting this with Google Spanner, we notice that
-// Spanner performs a similar commit-wait but then does not include uncertainty
-// intervals. The reason this works in Spanner is that read-write transactions
-// in Spanner hold their locks across the commit-wait duration, which blocks
-// concurrent readers and enforces real-time ordering between any two readers as
-// well between the writer and any future reader. Read-write transactions in
-// CockroachDB do not hold locks across commit-wait (they release them before),
-// so the uncertainty interval is still needed.
+// sets do not conflict with the original transaction's. This obviates the
+// need for uncertainty intervals and prevents the "causal reverse" anamoly
+// which can be observed by a third, concurrent transaction.
 //
 // For more, see https://www.cockroachlabs.com/blog/consistency-model/ and
 // docs/RFCS/20200811_non_blocking_txns.md.
@@ -686,11 +669,7 @@ func (tc *TxnCoordSender) maybeRejectClientLocked(
 			"Trying to execute: %s", ba.Summary())
 		stack := string(debug.Stack())
 		log.Errorf(ctx, "%s. stack:\n%s", msg, stack)
-		reason := roachpb.TransactionStatusError_REASON_UNKNOWN
-		if tc.mu.txn.Status == roachpb.COMMITTED {
-			reason = roachpb.TransactionStatusError_REASON_TXN_COMMITTED
-		}
-		return roachpb.NewErrorWithTxn(roachpb.NewTransactionStatusError(reason, msg), &tc.mu.txn)
+		return roachpb.NewErrorWithTxn(roachpb.NewTransactionStatusError(msg), &tc.mu.txn)
 	}
 
 	// Check the transaction proto state, along with any finalized transaction

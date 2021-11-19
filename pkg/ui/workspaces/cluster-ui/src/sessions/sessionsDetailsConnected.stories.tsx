@@ -52,7 +52,7 @@ const store: Store<AppState> = createStore(
 
 sagaMiddleware.run(sagas);
 
-storiesOf("Sessions Details Page Connected", module)
+storiesOf("Sessions Deateils Page Connected", module)
   .addDecorator(storyFn => (
     <Provider store={store}>
       <ConnectedRouter history={history}>

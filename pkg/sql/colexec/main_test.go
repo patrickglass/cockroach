@@ -76,7 +76,6 @@ func TestMain(m *testing.M) {
 			if err := coldata.SetBatchSizeForTests(randomBatchSize); err != nil {
 				colexecerror.InternalError(err)
 			}
-			randomizeHashAggregatorMaxBuffered()
 		}
 		return m.Run()
 	}())

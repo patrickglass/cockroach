@@ -22,17 +22,13 @@ tc_prepare
 
 tc_start_block "Ensure generated code is up-to-date"
 # Buffer noisy output and only print it on failure.
-if ! (run run_bazel build/bazelutil/check.sh &> artifacts/buildshort.log || (cat artifacts/buildshort.log && false)); then
+if ! run run_bazel build/bazelutil/check.sh &> artifacts/buildshort.log || (cat artifacts/buildshort.log && false); then
     # The command will output instructions on how to fix the error.
     exit 1
 fi
 rm artifacts/buildshort.log
 run run_bazel build/bazelutil/bazel-generate.sh &> artifacts/buildshort.log || (cat artifacts/buildshort.log && false)
 rm artifacts/buildshort.log
-if grep TODO DEPS.bzl; then
-    echo "Missing TODO comment in DEPS.bzl. Did you run \`./dev generate bazel --mirror\`?"
-    exit 1
-fi
 check_clean "Run \`./dev generate bazel\` to automatically regenerate these."
 run build/builder.sh make generate &> artifacts/generate.log || (cat artifacts/generate.log && false)
 rm artifacts/generate.log

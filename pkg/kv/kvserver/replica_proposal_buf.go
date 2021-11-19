@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -140,7 +139,6 @@ type proposer interface {
 	leaseAppliedIndex() uint64
 	enqueueUpdateCheck()
 	closedTimestampTarget() hlc.Timestamp
-
 	// The following require the proposer to hold an exclusive lock.
 	withGroupLocked(func(proposerRaft) error) error
 	registerProposalLocked(*ProposalData)
@@ -158,9 +156,6 @@ type proposer interface {
 		prop *ProposalData,
 		redirectTo roachpb.ReplicaID,
 	)
-
-	// leaseDebugRLocked returns info on the current lease.
-	leaseDebugRLocked() string
 }
 
 // proposerRaft abstracts the propBuf's dependency on *raft.RawNode, to help
@@ -473,21 +468,7 @@ func (b *propBuf) FlushLockedWithRaftGroup(
 
 		// Raft processing bookkeeping.
 		b.p.registerProposalLocked(p)
-
 		// Exit the tracker.
-		if !reproposal && p.Request.IsIntentWrite() {
-			// Sanity check that the request is tracked by the evaluation tracker at
-			// this point. It's supposed to be tracked until the
-			// doneIfNotMovedLocked() call below.
-			wts := p.Request.WriteTimestamp()
-			lb := b.evalTracker.LowerBound(ctx)
-			if wts.Less(lb) {
-				wts, lb := wts, lb // copies escape to heap
-				log.Fatalf(ctx, "%v", errorutil.UnexpectedWithIssueErrorf(72428,
-					"request writing below tracked lower bound: wts: %s < lb: %s; ba: %s; lease: %s.",
-					wts, lb, p.Request, b.p.leaseDebugRLocked()))
-			}
-		}
 		p.tok.doneIfNotMovedLocked(ctx)
 
 		// If we don't have a raft group or if the raft group has rejected one
@@ -674,10 +655,9 @@ func (b *propBuf) allocateLAIAndClosedTimestampLocked(
 	// the write timestamp of any request the began evaluating after it was
 	// set).
 	if p.Request.WriteTimestamp().Less(b.assignedClosedTimestamp) && p.Request.IsIntentWrite() {
-		log.Fatalf(ctx, "%v", errorutil.UnexpectedWithIssueErrorf(72428,
-			"attempting to propose command writing below closed timestamp. "+
-				"wts: %s < assigned closed: %s; ba: %s; lease: %s.",
-			p.Request.WriteTimestamp(), b.assignedClosedTimestamp, p.Request, b.p.leaseDebugRLocked()))
+		return 0, hlc.Timestamp{}, errors.AssertionFailedf("attempting to propose command writing below closed timestamp. "+
+			"wts: %s < assigned closed: %s; ba: %s",
+			p.Request.WriteTimestamp(), b.assignedClosedTimestamp, p.Request)
 	}
 
 	lb := b.evalTracker.LowerBound(ctx)
@@ -1015,10 +995,6 @@ func (rp *replicaProposer) withGroupLocked(fn func(raftGroup proposerRaft) error
 		(*Replica)(rp).unquiesceLocked()
 		return false /* unquiesceLocked */, fn(raftGroup)
 	})
-}
-
-func (rp *replicaProposer) leaseDebugRLocked() string {
-	return rp.mu.state.Lease.String()
 }
 
 func (rp *replicaProposer) registerProposalLocked(p *ProposalData) {

@@ -33,9 +33,7 @@ import { AggregateStatistics } from "../statementsTable";
 type ICollectedStatementStatistics = cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;
 export interface StatementsSummaryData {
   statement: string;
-  statementSummary: string;
   aggregatedTs: number;
-  aggregationInterval: number;
   implicitTxn: boolean;
   fullScan: boolean;
   database: string;
@@ -184,9 +182,7 @@ export const selectStatements = createSelector(
       if (!(key in statsByStatementKey)) {
         statsByStatementKey[key] = {
           statement: stmt.statement,
-          statementSummary: stmt.statement_summary,
           aggregatedTs: stmt.aggregated_ts,
-          aggregationInterval: stmt.aggregation_interval,
           implicitTxn: stmt.implicit_txn,
           fullScan: stmt.full_scan,
           database: stmt.database,
@@ -200,9 +196,7 @@ export const selectStatements = createSelector(
       const stmt = statsByStatementKey[key];
       return {
         label: stmt.statement,
-        summary: stmt.statementSummary,
         aggregatedTs: stmt.aggregatedTs,
-        aggregationInterval: stmt.aggregationInterval,
         implicitTxn: stmt.implicitTxn,
         fullScan: stmt.fullScan,
         database: stmt.database,
@@ -239,9 +233,4 @@ export const selectDateRange = createSelector(
       Moment,
       Moment,
     ],
-);
-
-export const selectSortSetting = createSelector(
-  localStorageSelector,
-  localStorage => localStorage["sortSetting/StatementsPage"],
 );

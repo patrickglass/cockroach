@@ -86,7 +86,6 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 		colIdxMap.Set(c.GetID(), i)
 	}
 	sb := span.MakeBuilder(planCtx.EvalContext(), planCtx.ExtendedEvalCtx.Codec, desc, scan.index)
-	defer sb.Release()
 	scan.spans, err = sb.UnconstrainedSpans()
 	if err != nil {
 		return nil, err
@@ -173,7 +172,7 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 		}
 	}
 
-	// The sampler outputs the original columns plus a rank column, five
+	// The sampler outputs the original columns plus a rank column, four
 	// sketch columns, and two inverted histogram columns.
 	outTypes := make([]*types.T, 0, len(p.GetResultTypes())+5)
 	outTypes = append(outTypes, p.GetResultTypes()...)
@@ -185,8 +184,6 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 	outTypes = append(outTypes, types.Int)
 	// An INT column indicating the number of rows that have a NULL in any sketch
 	// column.
-	outTypes = append(outTypes, types.Int)
-	// An INT column indicating the size of the columns in this sketch.
 	outTypes = append(outTypes, types.Int)
 	// A BYTES column with the sketch data.
 	outTypes = append(outTypes, types.Bytes)

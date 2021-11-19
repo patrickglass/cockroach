@@ -22,12 +22,10 @@ import {
   aggregateNumericStats,
   FixLong,
   longToInt,
+  statementKey,
   TimestampToNumber,
   addStatementStats,
   flattenStatementStats,
-  DurationToNumber,
-  computeOrUseStmtSummary,
-  transactionScopedStatementKey,
 } from "../util";
 
 type Statement = protos.cockroach.server.serverpb.StatementsResponse.ICollectedStatementStatistics;
@@ -75,21 +73,6 @@ export const statementFingerprintIdsToText = (
     .join("\n");
 };
 
-// Combine all statement summaries into a string.
-export const statementFingerprintIdsToSummarizedText = (
-  statementFingerprintIds: Long[],
-  statements: Statement[],
-): string => {
-  return statementFingerprintIds
-    .map(s => {
-      const query = statements.find(stmt => stmt.id.eq(s))?.key.key_data.query;
-      const querySummary = statements.find(stmt => stmt.id.eq(s))?.key.key_data
-        .query_summary;
-      return computeOrUseStmtSummary(query, querySummary);
-    })
-    .join("\n");
-};
-
 // Aggregate transaction statements from different nodes.
 export const aggregateStatements = (
   statements: Statement[],
@@ -97,13 +80,11 @@ export const aggregateStatements = (
   const statsKey: { [key: string]: AggregateStatistics } = {};
 
   flattenStatementStats(statements).forEach(s => {
-    const key = transactionScopedStatementKey(s);
+    const key = statementKey(s);
     if (!(key in statsKey)) {
       statsKey[key] = {
         label: s.statement,
-        summary: s.statement_summary,
         aggregatedTs: s.aggregated_ts,
-        aggregationInterval: s.aggregation_interval,
         implicitTxn: s.implicit_txn,
         database: s.database,
         fullScan: s.full_scan,
@@ -295,7 +276,7 @@ const withFingerprint = function(
 };
 
 // addTransactionStats adds together two stat objects into one using their counts to compute a new
-// average for the numeric statistics. It's modeled after the similar `addStatementStats` function
+// average for the numeric statistics. It's modeled after the similar `addStatementStats` functionj
 function addTransactionStats(
   a: TransactionStats,
   b: TransactionStats,
@@ -378,8 +359,7 @@ export const aggregateAcrossNodeIDs = function(
       t =>
         t.fingerprint +
         t.stats_data.app +
-        TimestampToNumber(t.stats_data.aggregated_ts) +
-        DurationToNumber(t.stats_data.aggregation_interval),
+        TimestampToNumber(t.stats_data.aggregated_ts),
     )
     .mapValues(mergeTransactionStats)
     .values()

@@ -106,7 +106,7 @@ type rowOrMeta struct {
 func TestStreamEncodeDecode(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	for test := 0; test < 100; test++ {
 		rowLen := rng.Intn(20)
 		types := randgen.RandEncodableColumnTypes(rng, rowLen)

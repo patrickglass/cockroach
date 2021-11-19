@@ -183,6 +183,10 @@ func IsPermanentSchemaChangeError(err error) bool {
 	if errors.IsAny(err,
 		context.Canceled,
 		context.DeadlineExceeded,
+		errExistingSchemaChangeLease,
+		errExpiredSchemaChangeLease,
+		errNotHitGCTTLDeadline,
+		errSchemaChangeDuringDrain,
 		errSchemaChangeNotFirstInLine,
 		errTableVersionMismatchSentinel,
 	) {
@@ -206,7 +210,13 @@ func IsPermanentSchemaChangeError(err error) bool {
 	return true
 }
 
-var errSchemaChangeNotFirstInLine = errors.Newf("schema change not first in line")
+var (
+	errExistingSchemaChangeLease  = errors.Newf("an outstanding schema change lease exists")
+	errExpiredSchemaChangeLease   = errors.Newf("the schema change lease has expired")
+	errSchemaChangeNotFirstInLine = errors.Newf("schema change not first in line")
+	errNotHitGCTTLDeadline        = errors.Newf("not hit gc ttl deadline")
+	errSchemaChangeDuringDrain    = errors.Newf("a schema change ran during the drain phase, re-increment")
+)
 
 type errTableVersionMismatch struct {
 	version  descpb.DescriptorVersion
@@ -291,7 +301,7 @@ func (sc *SchemaChanger) backfillQueryIntoTable(
 		defer localPlanner.curPlan.close(ctx)
 
 		res := roachpb.BulkOpSummary{}
-		rw := NewCallbackResultWriter(func(ctx context.Context, row tree.Datums) error {
+		rw := newCallbackResultWriter(func(ctx context.Context, row tree.Datums) error {
 			// TODO(adityamaru): Use the BulkOpSummary for either telemetry or to
 			// return to user.
 			var counts roachpb.BulkOpSummary
@@ -492,8 +502,7 @@ func startGCJob(
 		return err
 	}
 	log.Infof(ctx, "starting GC job %d", jobID)
-	jobRegistry.NotifyToAdoptJobs(ctx)
-	return nil
+	return jobRegistry.NotifyToAdoptJobs(ctx)
 }
 
 func (sc *SchemaChanger) execLogTags() *logtags.Buffer {
@@ -736,6 +745,7 @@ func (sc *SchemaChanger) handlePermanentSchemaChangeError(
 		// than tables. For jobs intended to drop other types of descriptors, we do
 		// nothing.
 		if _, ok := desc.(catalog.TableDescriptor); !ok {
+			// Mark the error as permanent so that is not retried in reverting state.
 			return jobs.MarkAsPermanentJobError(errors.Newf("schema change jobs on databases and schemas cannot be reverted"))
 		}
 
@@ -886,8 +896,7 @@ func (sc *SchemaChanger) rollbackSchemaChange(ctx context.Context, err error) er
 		return err
 	}
 	log.Infof(ctx, "starting GC job %d", gcJobID)
-	sc.jobRegistry.NotifyToAdoptJobs(ctx)
-	return nil
+	return sc.jobRegistry.NotifyToAdoptJobs(ctx)
 }
 
 // RunStateMachineBeforeBackfill moves the state machine forward
@@ -1082,24 +1091,25 @@ func (sc *SchemaChanger) done(ctx context.Context) error {
 			}
 			isRollback = m.IsRollback()
 			if idx := m.AsIndex(); m.Dropped() && idx != nil {
-				// how we keep track of dropped index names (for, e.g., zone config
-				// lookups), even though in the absence of a GC job there's nothing to
-				// clean them up.
-				scTable.GCMutations = append(
-					scTable.GCMutations,
-					descpb.TableDescriptor_GCDescriptorMutation{
-						IndexID: idx.GetID(),
-					})
+				if canClearRangeForDrop(idx) {
+					// how we keep track of dropped index names (for, e.g., zone config
+					// lookups), even though in the absence of a GC job there's nothing to
+					// clean them up.
+					scTable.GCMutations = append(
+						scTable.GCMutations,
+						descpb.TableDescriptor_GCDescriptorMutation{
+							IndexID: idx.GetID(),
+						})
 
-				description := sc.job.Payload().Description
-				if isRollback {
-					description = "ROLLBACK of " + description
+					description := sc.job.Payload().Description
+					if isRollback {
+						description = "ROLLBACK of " + description
+					}
+
+					if err := sc.createIndexGCJob(ctx, idx.GetID(), txn, description); err != nil {
+						return err
+					}
 				}
-
-				if err := sc.createIndexGCJob(ctx, idx.GetID(), txn, description); err != nil {
-					return err
-				}
-
 			}
 			if constraint := m.AsConstraint(); constraint != nil && constraint.Adding() {
 				if constraint.IsForeignKey() && constraint.ForeignKey().Validity == descpb.ConstraintValidity_Unvalidated {
@@ -1196,12 +1206,10 @@ func (sc *SchemaChanger) done(ctx context.Context) error {
 							}
 							col.ColumnDesc().DefaultExpr = lcSwap.NewRegionalByRowColumnDefaultExpr
 						}
-
 					} else {
 						// DROP is hit on cancellation, in which case we must roll back.
 						localityConfigToSwapTo = lcSwap.OldLocalityConfig
 					}
-
 					if err := setNewLocalityConfig(
 						ctx, scTable, txn, b, localityConfigToSwapTo, kvTrace, descsCol); err != nil {
 						return err
@@ -1220,6 +1228,48 @@ func (sc *SchemaChanger) done(ctx context.Context) error {
 					}
 				}
 
+				// If any old index had an interleaved parent, remove the
+				// backreference from the parent.
+				// N.B. This logic needs to be kept up to date with the
+				// corresponding piece in runSchemaChangesInTxn.
+				err := pkSwap.ForEachOldIndexIDs(func(idxID descpb.IndexID) error {
+					oldIndex, err := scTable.FindIndexWithID(idxID)
+					if err != nil {
+						return err
+					}
+					if oldIndex.NumInterleaveAncestors() != 0 {
+						ancestorInfo := oldIndex.GetInterleaveAncestor(oldIndex.NumInterleaveAncestors() - 1)
+						ancestor, err := descsCol.GetMutableTableVersionByID(ctx, ancestorInfo.TableID, txn)
+						if err != nil {
+							return err
+						}
+						ancestorIdxI, err := ancestor.FindIndexWithID(ancestorInfo.IndexID)
+						if err != nil {
+							return err
+						}
+						ancestorIdx := ancestorIdxI.IndexDesc()
+						foundAncestor := false
+						for k, ref := range ancestorIdx.InterleavedBy {
+							if ref.Table == scTable.ID && ref.Index == oldIndex.GetID() {
+								if foundAncestor {
+									return errors.AssertionFailedf(
+										"ancestor entry in %s for %s@%s found more than once",
+										ancestor.Name, scTable.Name, oldIndex.GetName())
+								}
+								ancestorIdx.InterleavedBy = append(
+									ancestorIdx.InterleavedBy[:k], ancestorIdx.InterleavedBy[k+1:]...)
+								foundAncestor = true
+								if err := descsCol.WriteDescToBatch(ctx, kvTrace, ancestor, b); err != nil {
+									return err
+								}
+							}
+						}
+					}
+					return nil
+				})
+				if err != nil {
+					return err
+				}
 				// If we performed MakeMutationComplete on a PrimaryKeySwap mutation, then we need to start
 				// a job for the index deletion mutations that the primary key swap mutation added, if any.
 				if err := sc.queueCleanupJobs(ctx, scTable, txn); err != nil {
@@ -1333,7 +1383,9 @@ func (sc *SchemaChanger) done(ctx context.Context) error {
 		return err
 	}
 	// Notify the job registry to start jobs, in case we started any.
-	sc.jobRegistry.NotifyToAdoptJobs(ctx)
+	if err := sc.jobRegistry.NotifyToAdoptJobs(ctx); err != nil {
+		return err
+	}
 
 	// If any operations was skipped because a mutation was made
 	// redundant due to a column getting dropped later on then we should
@@ -1977,7 +2029,6 @@ func createSchemaChangeEvalCtx(
 			NodeID:             execCfg.NodeID,
 			Codec:              execCfg.Codec,
 			Locality:           execCfg.Locality,
-			Tracer:             execCfg.AmbientCtx.Tracer,
 		},
 	}
 	// The backfill is going to use the current timestamp for the various
@@ -2169,7 +2220,7 @@ func (r schemaChangeResumer) Resume(ctx context.Context, execCtx interface{}) er
 					log.VEventf(ctx, 2, "DelRange %s", zoneKeyPrefix)
 				}
 				// Delete the zone config entry for this database.
-				if _, err := p.ExecCfg().DB.DelRange(ctx, zoneKeyPrefix, zoneKeyPrefix.PrefixEnd(), false /* returnKeys */); err != nil {
+				if err := p.ExecCfg().DB.DelRange(ctx, zoneKeyPrefix, zoneKeyPrefix.PrefixEnd()); err != nil {
 					return err
 				}
 			}
@@ -2216,17 +2267,12 @@ func (r schemaChangeResumer) OnFailOrCancel(ctx context.Context, execCtx interfa
 	p := execCtx.(JobExecContext)
 	details := r.job.Details().(jobspb.SchemaChangeDetails)
 
-	if fn := p.ExecCfg().SchemaChangerTestingKnobs.RunBeforeOnFailOrCancel; fn != nil {
-		if err := fn(r.job.ID()); err != nil {
-			return err
-		}
-	}
-
 	// If this is a schema change to drop a database or schema, DescID will be
 	// unset. We cannot revert such schema changes, so just exit early with an
 	// error.
 	if details.DescID == descpb.InvalidID {
-		return errors.Newf("schema change jobs on databases and schemas cannot be reverted")
+		// Mark the error as permanent so that is not retried in reverting state.
+		return jobs.MarkAsPermanentJobError(errors.Newf("schema change jobs on databases and schemas cannot be reverted"))
 	}
 	sc := SchemaChanger{
 		descID:               details.DescID,
@@ -2245,6 +2291,12 @@ func (r schemaChangeResumer) OnFailOrCancel(ctx context.Context, execCtx interfa
 		ieFactory: func(ctx context.Context, sd *sessiondata.SessionData) sqlutil.InternalExecutor {
 			return r.job.MakeSessionBoundInternalExecutor(ctx, sd)
 		},
+	}
+
+	if fn := sc.testingKnobs.RunBeforeOnFailOrCancel; fn != nil {
+		if err := fn(r.job.ID()); err != nil {
+			return err
+		}
 	}
 
 	if r.job.Payload().FinalResumeError == nil {

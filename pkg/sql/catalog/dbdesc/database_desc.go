@@ -81,8 +81,6 @@ func (desc *immutable) DatabaseDesc() *descpb.DatabaseDescriptor {
 }
 
 // SetDrainingNames implements the MutableDescriptor interface.
-//
-// Deprecated: Do not use.
 func (desc *Mutable) SetDrainingNames(names []descpb.NameInfo) {
 	desc.DrainingNames = names
 }
@@ -137,26 +135,14 @@ func (desc *immutable) DescriptorProto() *descpb.Descriptor {
 	}
 }
 
-// NewBuilder implements the catalog.Descriptor interface.
-func (desc *immutable) NewBuilder() catalog.DescriptorBuilder {
-	return NewBuilder(desc.DatabaseDesc())
-}
-
-// IsMultiRegion implements the DatabaseDescriptor interface.
+// IsMultiRegion returns whether the database has multi-region properties
+// configured. If so, desc.RegionConfig can be used.
 func (desc *immutable) IsMultiRegion() bool {
 	return desc.RegionConfig != nil
 }
 
-// PrimaryRegionName implements the DatabaseDescriptor interface.
-func (desc *immutable) PrimaryRegionName() (descpb.RegionName, error) {
-	if !desc.IsMultiRegion() {
-		return "", errors.AssertionFailedf(
-			"can not get the primary region of a non multi-region database")
-	}
-	return desc.RegionConfig.PrimaryRegion, nil
-}
-
-// MultiRegionEnumID implements the DatabaseDescriptor interface.
+// MultiRegionEnumID returns the ID of the multi-region enum if the database
+// is a multi-region database, and an error otherwise.
 func (desc *immutable) MultiRegionEnumID() (descpb.ID, error) {
 	if !desc.IsMultiRegion() {
 		return descpb.InvalidID, errors.AssertionFailedf(
@@ -165,12 +151,22 @@ func (desc *immutable) MultiRegionEnumID() (descpb.ID, error) {
 	return desc.RegionConfig.RegionEnumID, nil
 }
 
+// PrimaryRegionName returns the primary region for a multi-region database.
+func (desc *immutable) PrimaryRegionName() (descpb.RegionName, error) {
+	if !desc.IsMultiRegion() {
+		return "", errors.AssertionFailedf(
+			"can not get the primary region of a non multi-region database")
+	}
+	return desc.RegionConfig.PrimaryRegion, nil
+}
+
 // SetName sets the name on the descriptor.
 func (desc *Mutable) SetName(name string) {
 	desc.Name = name
 }
 
-// ForEachSchemaInfo implements the DatabaseDescriptor interface.
+// ForEachSchemaInfo iterates f over each schema info mapping in the descriptor.
+// iterutil.StopIteration is supported.
 func (desc *immutable) ForEachSchemaInfo(
 	f func(id descpb.ID, name string, isDropped bool) error,
 ) error {
@@ -185,23 +181,8 @@ func (desc *immutable) ForEachSchemaInfo(
 	return nil
 }
 
-// ForEachNonDroppedSchema implements the DatabaseDescriptor interface.
-func (desc *immutable) ForEachNonDroppedSchema(f func(id descpb.ID, name string) error) error {
-	for name, info := range desc.Schemas {
-		if info.Dropped {
-			continue
-		}
-		if err := f(info.ID, name); err != nil {
-			if iterutil.Done(err) {
-				return nil
-			}
-			return err
-		}
-	}
-	return nil
-}
-
-// GetSchemaID implements the DatabaseDescriptor interface.
+// GetSchemaID returns the ID in the schema mapping entry for the
+// given name, 0 otherwise.
 func (desc *immutable) GetSchemaID(name string) descpb.ID {
 	info := desc.Schemas[name]
 	if info.Dropped {
@@ -210,7 +191,8 @@ func (desc *immutable) GetSchemaID(name string) descpb.ID {
 	return info.ID
 }
 
-// GetNonDroppedSchemaName implements the DatabaseDescriptor interface.
+// GetNonDroppedSchemaName returns the name in the schema mapping entry for the
+// given ID, if it's not marked as dropped, empty string otherwise.
 func (desc *immutable) GetNonDroppedSchemaName(schemaID descpb.ID) string {
 	for name, info := range desc.Schemas {
 		if !info.Dropped && info.ID == schemaID {
@@ -389,8 +371,6 @@ func (desc *Mutable) SetOffline(reason string) {
 
 // AddDrainingName adds a draining name to the DatabaseDescriptor's slice of
 // draining names.
-//
-// Deprecated: Do not use.
 func (desc *Mutable) AddDrainingName(name descpb.NameInfo) {
 	desc.DrainingNames = append(desc.DrainingNames, name)
 }

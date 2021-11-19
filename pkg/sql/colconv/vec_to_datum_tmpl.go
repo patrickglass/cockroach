@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for vec_to_datum.eg.go. It's formatted
 // in a special way, so it's both valid Go and a valid text/template input.
@@ -25,26 +23,11 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
-	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/lib/pq/oid"
-)
-
-// Workaround for bazel auto-generated code. goimports does not automatically
-// pick up the right packages when run within the bazel sandbox.
-var (
-	_ colexecerror.StorageError
-	_ json.JSON
-	_ pgdate.Date
-	_ = typeconv.DatumVecCanonicalTypeFamily
-	_ uuid.UUID
 )
 
 // VecToDatumConverter is a helper struct that converts vectors from batches to

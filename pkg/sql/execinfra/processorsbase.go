@@ -21,14 +21,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/optional"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 // Processor is a common interface implemented by all processors, used by the
@@ -666,12 +664,12 @@ func (pb *ProcessorBaseNoHelper) moveToTrailingMeta() {
 				pb.span.RecordStructured(stats)
 			}
 		}
-		if trace := pb.span.GetRecording(pb.span.RecordingType()); trace != nil {
+		if trace := pb.span.GetRecording(); trace != nil {
 			pb.trailingMeta = append(pb.trailingMeta, execinfrapb.ProducerMetadata{TraceData: trace})
 		}
 	}
 
-	if buildutil.CrdbTestBuild && pb.Ctx == nil {
+	if util.CrdbTestBuild && pb.Ctx == nil {
 		panic(
 			errors.AssertionFailedf(
 				"unexpected nil ProcessorBase.Ctx when draining. Was StartInternal called?",
@@ -866,8 +864,8 @@ func (pb *ProcessorBaseNoHelper) startImpl(
 	if createSpan {
 		pb.Ctx, pb.span = ProcessorSpan(ctx, spanName)
 		if pb.span != nil && pb.span.IsVerbose() {
-			pb.span.SetTag(execinfrapb.FlowIDTagKey, attribute.StringValue(pb.FlowCtx.ID.String()))
-			pb.span.SetTag(execinfrapb.ProcessorIDTagKey, attribute.IntValue(int(pb.ProcessorID)))
+			pb.span.SetTag(execinfrapb.FlowIDTagKey, pb.FlowCtx.ID.String())
+			pb.span.SetTag(execinfrapb.ProcessorIDTagKey, pb.ProcessorID)
 		}
 	} else {
 		pb.Ctx = ctx

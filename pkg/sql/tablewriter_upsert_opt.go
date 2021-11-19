@@ -14,7 +14,6 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -98,11 +97,11 @@ var _ tableWriter = &optTableUpserter{}
 
 // init is part of the tableWriter interface.
 func (tu *optTableUpserter) init(
-	ctx context.Context, txn *kv.Txn, evalCtx *tree.EvalContext, sv *settings.Values,
+	ctx context.Context, txn *kv.Txn, evalCtx *tree.EvalContext,
 ) error {
-	tu.tableWriterBase.init(txn, tu.ri.Helper.TableDesc, evalCtx, sv)
+	tu.tableWriterBase.init(txn, tu.ri.Helper.TableDesc, evalCtx)
 
-	// rowsNeeded, set upon initialization, indicates pkg/sql/backfill.gowhether or not we want
+	// rowsNeeded, set upon initialization, indicates whether or not we want
 	// rows returned from the operation.
 	if tu.rowsNeeded {
 		tu.resultRow = make(tree.Datums, len(tu.returnCols))
@@ -268,11 +267,7 @@ func (tu *optTableUpserter) updateConflictingRow(
 	//   via GenerateInsertRow().
 	// - for the fetched part, we assume that the data in the table is
 	//   correct already.
-	if err := enforceLocalColumnConstraints(
-		updateValues,
-		tu.updateCols,
-		true, /* isUpdate */
-	); err != nil {
+	if err := enforceLocalColumnConstraints(updateValues, tu.updateCols); err != nil {
 		return err
 	}
 

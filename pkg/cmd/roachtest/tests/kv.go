@@ -48,15 +48,13 @@ func registerKV(r registry.Registry) {
 		blockSize int
 		splits    int // 0 implies default, negative implies 0
 		// If true, load-based splitting will be disabled.
-		disableLoadSplits        bool
-		encryption               bool
-		sequential               bool
-		admissionControlDisabled bool
-		concMultiplier           int
-		duration                 time.Duration
-		tracing                  bool // `trace.debug.enable`
-		tags                     []string
-		owner                    registry.Owner // defaults to KV
+		disableLoadSplits       bool
+		encryption              bool
+		sequential              bool
+		admissionControlEnabled bool
+		concMultiplier          int
+		duration                time.Duration
+		tags                    []string
 	}
 	computeNumSplits := func(opts kvOptions) int {
 		// TODO(ajwerner): set this default to a more sane value or remove it and
@@ -77,19 +75,16 @@ func registerKV(r registry.Registry) {
 		c.Put(ctx, t.DeprecatedWorkload(), "./workload", c.Node(nodes+1))
 		c.Start(ctx, c.Range(1, nodes), option.StartArgs(fmt.Sprintf("--encrypt=%t", opts.encryption)))
 
-		db := c.Conn(ctx, 1)
-		defer db.Close()
 		if opts.disableLoadSplits {
+			db := c.Conn(ctx, 1)
+			defer db.Close()
 			if _, err := db.ExecContext(ctx, "SET CLUSTER SETTING kv.range_split.by_load_enabled = 'false'"); err != nil {
 				t.Fatalf("failed to disable load based splitting: %v", err)
 			}
 		}
-		if opts.tracing {
-			if _, err := db.ExecContext(ctx, "SET CLUSTER SETTING trace.debug.enable = true"); err != nil {
-				t.Fatalf("failed to enable tracing: %v", err)
-			}
+		if opts.admissionControlEnabled {
+			EnableAdmissionControl(ctx, t, c)
 		}
-		SetAdmissionControl(ctx, t, c, !opts.admissionControlDisabled)
 
 		t.Status("running workload")
 		m := c.NewMonitor(ctx, c.Range(1, nodes))
@@ -155,13 +150,12 @@ func registerKV(r registry.Registry) {
 		{nodes: 1, cpus: 32, readPercent: 95},
 		{nodes: 3, cpus: 8, readPercent: 0},
 		{nodes: 3, cpus: 8, readPercent: 95},
-		{nodes: 3, cpus: 8, readPercent: 95, tracing: true, owner: registry.OwnerObsInf},
 		{nodes: 3, cpus: 8, readPercent: 0, splits: -1 /* no splits */},
 		{nodes: 3, cpus: 8, readPercent: 95, splits: -1 /* no splits */},
 		{nodes: 3, cpus: 32, readPercent: 0},
 		{nodes: 3, cpus: 32, readPercent: 95},
-		{nodes: 3, cpus: 32, readPercent: 0, admissionControlDisabled: true},
-		{nodes: 3, cpus: 32, readPercent: 95, admissionControlDisabled: true},
+		{nodes: 3, cpus: 32, readPercent: 0, admissionControlEnabled: true},
+		{nodes: 3, cpus: 32, readPercent: 95, admissionControlEnabled: true},
 		{nodes: 3, cpus: 32, readPercent: 0, splits: -1 /* no splits */},
 		{nodes: 3, cpus: 32, readPercent: 95, splits: -1 /* no splits */},
 
@@ -175,9 +169,9 @@ func registerKV(r registry.Registry) {
 		{nodes: 3, cpus: 32, readPercent: 0, blockSize: 1 << 16 /* 64 KB */},
 		{nodes: 3, cpus: 32, readPercent: 95, blockSize: 1 << 16 /* 64 KB */},
 		{nodes: 3, cpus: 32, readPercent: 0, blockSize: 1 << 16, /* 64 KB */
-			admissionControlDisabled: true},
+			admissionControlEnabled: true},
 		{nodes: 3, cpus: 32, readPercent: 95, blockSize: 1 << 16, /* 64 KB */
-			admissionControlDisabled: true},
+			admissionControlEnabled: true},
 
 		// Configs with large batch sizes.
 		{nodes: 3, cpus: 8, readPercent: 0, batchSize: 16},
@@ -234,8 +228,8 @@ func registerKV(r registry.Registry) {
 		if opts.sequential {
 			nameParts = append(nameParts, "seq")
 		}
-		if opts.admissionControlDisabled {
-			nameParts = append(nameParts, "no-admission")
+		if opts.admissionControlEnabled {
+			nameParts = append(nameParts, "admission")
 		}
 		if opts.concMultiplier != 0 { // support legacy test name which didn't include this multiplier
 			nameParts = append(nameParts, fmt.Sprintf("conc=%d", opts.concMultiplier))
@@ -243,16 +237,10 @@ func registerKV(r registry.Registry) {
 		if opts.disableLoadSplits {
 			nameParts = append(nameParts, "no-load-splitting")
 		}
-		if opts.tracing {
-			nameParts = append(nameParts, "tracing")
-		}
-		owner := registry.OwnerKV
-		if opts.owner != "" {
-			owner = opts.owner
-		}
+
 		r.Add(registry.TestSpec{
 			Name:    strings.Join(nameParts, "/"),
-			Owner:   owner,
+			Owner:   registry.OwnerKV,
 			Cluster: r.MakeClusterSpec(opts.nodes+1, spec.CPU(opts.cpus)),
 			Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
 				runKV(ctx, t, c, opts)
@@ -579,7 +567,7 @@ func registerKVGracefulDraining(r registry.Registry) {
 				// to run for 5 minutes, we should be fine here, however we want to guarantee
 				// there's at least 10s left to go. Check this.
 				t.WorkerStatus("checking workload is still running")
-				runDuration := timeutil.Since(workloadStartTime)
+				runDuration := timeutil.Now().Sub(workloadStartTime)
 				if runDuration > desiredRunDuration-10*time.Second {
 					t.Fatalf("not enough workload time left to reliably determine performance (%s left)",
 						desiredRunDuration-runDuration)
@@ -866,9 +854,7 @@ func registerKVMultiStoreWithOverload(r registry.Registry) {
 				t.Fatalf("failed to configure zone for %s: %v", name, err)
 			}
 		}
-		// Defensive, since admission control is enabled by default. This test can
-		// fail if admission control is disabled.
-		SetAdmissionControl(ctx, t, c, true)
+		EnableAdmissionControl(ctx, t, c)
 		if _, err := db.ExecContext(ctx,
 			"SET CLUSTER SETTING kv.range_split.by_load_enabled = 'false'"); err != nil {
 			t.Fatalf("failed to disable load based splitting: %v", err)

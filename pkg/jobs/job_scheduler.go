@@ -300,12 +300,6 @@ func (s *jobScheduler) executeSchedules(
 			continue
 		}
 
-		if !s.env.IsExecutorEnabled(schedule.ExecutorType()) {
-			log.Infof(ctx, "Ignoring schedule %d: %s executor disabled",
-				schedule.ScheduleID(), schedule.ExecutorType())
-			continue
-		}
-
 		if processErr := withSavePoint(ctx, txn, func() error {
 			return s.processSchedule(ctx, schedule, numRunning, stats, txn)
 		}); processErr != nil {
@@ -361,7 +355,7 @@ func (s *jobScheduler) runDaemon(ctx context.Context, stopper *stop.Stopper) {
 		}
 
 		for timer := time.NewTimer(initialDelay); ; timer.Reset(
-			getWaitPeriod(ctx, &s.Settings.SV, s.TestingKnobs)) {
+			getWaitPeriod(&s.Settings.SV, s.TestingKnobs)) {
 			select {
 			case <-stopper.ShouldQuiesce():
 				return
@@ -421,9 +415,7 @@ const recheckEnabledAfterPeriod = 5 * time.Minute
 var warnIfPaceTooLow = log.Every(time.Minute)
 
 // Returns duration to wait before scanning system.scheduled_jobs.
-func getWaitPeriod(
-	ctx context.Context, sv *settings.Values, knobs base.ModuleTestingKnobs,
-) time.Duration {
+func getWaitPeriod(sv *settings.Values, knobs base.ModuleTestingKnobs) time.Duration {
 	if k, ok := knobs.(*TestingKnobs); ok && k.SchedulerDaemonScanDelay != nil {
 		return k.SchedulerDaemonScanDelay()
 	}
@@ -435,7 +427,7 @@ func getWaitPeriod(
 	pace := schedulerPaceSetting.Get(sv)
 	if pace < minPacePeriod {
 		if warnIfPaceTooLow.ShouldLog() {
-			log.Warningf(ctx,
+			log.Warningf(context.Background(),
 				"job.scheduler.pace setting too low (%s < %s)", pace, minPacePeriod)
 		}
 		pace = minPacePeriod

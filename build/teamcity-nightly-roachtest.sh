@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 
 source "$(dirname "${0}")/teamcity-support.sh"
 
@@ -102,7 +102,11 @@ case "${CLOUD}" in
     ;;
 esac
 
-build/teamcity-roachtest-invoke.sh \
+# Teamcity has a 1300 minute timeout that, when reached, kills the process
+# without a stack trace (probably SIGKILL).  We'd love to see a stack trace
+# though, so after 1200 minutes, kill with SIGINT which will allow roachtest to
+# fail tests and cleanup.
+timeout -s INT $((1200*60)) "build/teamcity-roachtest-invoke.sh" \
   --cloud="${CLOUD}" \
   --count="${COUNT-1}" \
   --parallelism="${PARALLELISM}" \

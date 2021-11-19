@@ -145,7 +145,9 @@ func (c *vmoduleConfig) setV(pc [1]uintptr) Level {
 	frame, _ := runtime.CallersFrames(pc[:]).Next()
 	file := frame.File
 	// The file is something like /a/b/c/d.go. We want just the d.
-	file = strings.TrimSuffix(file, ".go")
+	if strings.HasSuffix(file, ".go") {
+		file = file[:len(file)-3]
+	}
 	if slash := strings.LastIndexByte(file, '/'); slash >= 0 {
 		file = file[slash+1:]
 	}

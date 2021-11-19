@@ -226,7 +226,9 @@ func TestInitResolvedTSScan(t *testing.T) {
 
 	makeEngine := func(enableSeparatedIntents bool) storage.Engine {
 		ctx := context.Background()
-		engine := storage.NewInMemForTesting(enableSeparatedIntents)
+		engine, err := storage.Open(context.Background(), storage.InMemory(),
+			storage.SetSeparatedIntents(!enableSeparatedIntents), storage.MaxSize(1<<20))
+		require.NoError(t, err)
 		testData := []op{
 			{kv: makeKV("a", "val1", 10)},
 			{kv: makeInline("b", "val2")},

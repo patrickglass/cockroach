@@ -643,7 +643,7 @@ func (yw *ycsbWorker) nextInsertKeyIndex() uint64 {
 
 var letters = []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
-// Generate a random string of alphabetic characters.
+// Gnerate a random string of alphabetic characters.
 func (yw *ycsbWorker) randString(length int) string {
 	str := make([]byte, length)
 	// prepend current timestamp matching the default CRDB UTC time format

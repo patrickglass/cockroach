@@ -13,11 +13,7 @@ package spanconfig
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
 // KVAccessor mediates access to KV span configurations pertaining to a given
@@ -25,10 +21,7 @@ import (
 type KVAccessor interface {
 	// GetSpanConfigEntriesFor returns the span configurations that overlap with
 	// the given spans.
-	GetSpanConfigEntriesFor(
-		ctx context.Context,
-		spans []roachpb.Span,
-	) ([]roachpb.SpanConfigEntry, error)
+	GetSpanConfigEntriesFor(ctx context.Context, spans []roachpb.Span) ([]roachpb.SpanConfigEntry, error)
 
 	// UpdateSpanConfigEntries updates configurations for the given spans. This
 	// is a "targeted" API: the spans being deleted are expected to have been
@@ -37,138 +30,7 @@ type KVAccessor interface {
 	// divvying up an existing span into multiple others with distinct configs,
 	// callers are to issue a delete for the previous span and upserts for the
 	// new ones.
-	UpdateSpanConfigEntries(
-		ctx context.Context,
-		toDelete []roachpb.Span,
-		toUpsert []roachpb.SpanConfigEntry,
-	) error
-}
-
-// KVSubscriber presents a consistent[1] snapshot of a StoreReader that's
-// incrementally maintained with changes made to the global span configurations
-// state (system.span_configurations). The maintenance happens transparently;
-// callers can subscribe to learn about what key spans may have seen a
-// configuration change. After learning about a span update through a callback
-// invocation, subscribers can consult the embedded StoreReader to retrieve an
-// up-to-date[2] config for the updated span. The callback is called in a single
-// goroutine; it should avoid doing any long-running or blocking work.
-//
-// When a callback is first installed, it's invoked with the [min,max) span --
-// a shorthand to indicate that subscribers should consult the StoreReader for all
-// spans of interest. Subsequent updates are of the more incremental kind. It's
-// possible that the span updates received are no-ops, i.e. consulting the
-// StoreReader for the given span would still retrieve the last config observed
-// for the span[3].
-//
-// [1]: The contents of the StoreReader at t1 corresponds exactly to the
-//      contents of the global span configuration state at t0 where t0 <= t1. If
-//      the StoreReader is read from at t2 where t2 > t1, it's guaranteed to
-//      observe a view of the global state at t >= t0.
-// [2]: For the canonical KVSubscriber implementation, this is typically lagging
-//      by the closed timestamp target duration.
-// [3]: The canonical KVSubscriber implementation is bounced whenever errors
-//      occur, which may result in the re-transmission of earlier updates
-//      (typically through a coarsely targeted [min,max) span).
-type KVSubscriber interface {
-	StoreReader
-	Subscribe(func(updated roachpb.Span))
-}
-
-// SQLTranslator translates SQL descriptors and their corresponding zone
-// configurations to constituent spans and span configurations.
-//
-// Concretely, for the following zone configuration hierarchy:
-//
-//    CREATE DATABASE db;
-//    CREATE TABLE db.t1();
-//    ALTER DATABASE db CONFIGURE ZONE USING num_replicas=7;
-//    ALTER TABLE db.t1 CONFIGURE ZONE USING num_voters=5;
-//
-// The SQLTranslator produces the following translation (represented as a diff
-// against RANGE DEFAULT for brevity):
-//
-// 		Table/5{3-4}                  num_replicas=7 num_voters=5
-type SQLTranslator interface {
-	// Translate generates the span configuration state given a list of
-	// {descriptor, named zone} IDs. No entry is returned for an ID if it
-	// doesn't exist or if it's dropped. The timestamp at which the translation
-	// is valid is also returned.
-	//
-	// For every ID we first descend the zone configuration hierarchy with the
-	// ID as the root to accumulate IDs of all leaf objects. Leaf objects are
-	// tables and named zones (other than RANGE DEFAULT) which have actual span
-	// configurations associated with them (as opposed to non-leaf nodes that
-	// only serve to hold zone configurations for inheritance purposes). Then,
-	// for each one of these accumulated IDs, we generate <span, span
-	// config> tuples by following up the inheritance chain to fully hydrate the
-	// span configuration. Translate also accounts for and negotiates subzone
-	// spans.
-	Translate(ctx context.Context, ids descpb.IDs) ([]roachpb.SpanConfigEntry, hlc.Timestamp, error)
-}
-
-// FullTranslate translates the entire SQL zone configuration state to the
-// span configuration state. The timestamp at which such a translation is valid
-// is also returned.
-func FullTranslate(
-	ctx context.Context, s SQLTranslator,
-) ([]roachpb.SpanConfigEntry, hlc.Timestamp, error) {
-	// As RANGE DEFAULT is the root of all zone configurations (including
-	// other named zones for the system tenant), we can construct the entire
-	// span configuration state by starting from RANGE DEFAULT.
-	return s.Translate(ctx, descpb.IDs{keys.RootNamespaceID})
-}
-
-// SQLWatcher watches for events on system.zones and system.descriptors.
-type SQLWatcher interface {
-	// WatchForSQLUpdates watches for updates to zones and descriptors starting at
-	// the given timestamp (exclusive), informing callers using the handler
-	// callback.
-	//
-	// The handler callback[1] is invoked from time to time with a list of updates
-	// and a checkpointTS. Invocations of the handler callback provide the
-	// following semantics:
-	// 	1. Calls to the handler are serial.
-	// 	2. The timestamp supplied to the handler is monotonically increasing.
-	// 	3. The list of DescriptorUpdates supplied to handler includes all events
-	//	in the window (prevInvocationCheckpointTS, checkpointTS].
-	// 	4. No further calls to the handler are made if a call to the handler
-	// 	returns an error.
-	//
-	// These guarantees mean that users of this interface are free to persist the
-	// checkpointTS and later use it to re-establish a SQLWatcher without missing
-	// any updates.
-	//
-	// WatchForSQLUpdates can only ever be called once, effectively making the
-	// SQLWatcher a single use interface.
-	//
-	// WatchForSQLUpdates may run out of memory and return an error if it is
-	// tracking too many events between two checkpoints.
-	//
-	// [1] Users of this interface should not intend to do expensive work in the
-	// handler callback.
-	// TODO(arul): Possibly get rid of this limitation.
-	WatchForSQLUpdates(
-		ctx context.Context,
-		startTS hlc.Timestamp,
-		handler func(ctx context.Context, updates []DescriptorUpdate, checkpointTS hlc.Timestamp) error,
-	) error
-}
-
-// DescriptorUpdate captures the ID and type of a descriptor or zone that the
-// SQLWatcher has observed updated.
-type DescriptorUpdate struct {
-	// ID of the descriptor/zone that has been updated.
-	ID descpb.ID
-
-	// DescriptorType of the descriptor/zone that has been updated. Could be either
-	// the specific type or catalog.Any if no information is available.
-	DescriptorType catalog.DescriptorType
-}
-
-// SQLWatcherFactory is used to construct new SQLWatchers.
-type SQLWatcherFactory interface {
-	// New returns a new SQLWatcher.
-	New() SQLWatcher
+	UpdateSpanConfigEntries(ctx context.Context, toDelete []roachpb.Span, toUpsert []roachpb.SpanConfigEntry) error
 }
 
 // ReconciliationDependencies captures what's needed by the span config
@@ -178,114 +40,31 @@ type SQLWatcherFactory interface {
 type ReconciliationDependencies interface {
 	KVAccessor
 
-	SQLTranslator
-
-	SQLWatcherFactory
+	// TODO(irfansharif): We'll also want access to a "SQLWatcher", something
+	// that watches for changes to system.{descriptor,zones} and be responsible
+	// for generating corresponding span config updates. Put together, the
+	// reconciliation job will react to these updates by installing them into KV
+	// through the KVAccessor.
 }
 
-// Store is a data structure used to store spans and their corresponding
-// configs.
+// Store is a data structure used to store span configs.
 type Store interface {
-	StoreWriter
 	StoreReader
+
+	// TODO(irfansharif): We'll want to add a StoreWriter interface here once we
+	// implement a data structure to store span configs. We expect this data
+	// structure to be used in KV to eventually replace the use of the
+	// gossip-backed system config span.
 }
 
-// StoreWriter is the write-only portion of the Store interface.
-type StoreWriter interface {
-	// Apply applies the given update[1]. It also returns the existing spans that
-	// were deleted and entries that were newly added to make room for the
-	// update. The deleted list can double as a list of overlapping spans in the
-	// Store, provided the update is not a no-op[2].
-	//
-	// Span configs are stored in non-overlapping fashion. When an update
-	// overlaps with existing configs, the existing configs are deleted. If the
-	// overlap is only partial, the non-overlapping components of the existing
-	// configs are re-added. If the update itself is adding an entry, that too
-	// is added. This is best illustrated with the following example:
-	//
-	//                                         [--- X --) is a span with config X
-	//
-	//  Store    | [--- A ----)[------------- B -----------)[---------- C -----)
-	//  Update   |             [------------------ D -------------)
-	//           |
-	//  Deleted  |             [------------- B -----------)[---------- C -----)
-	//  Added    |             [------------------ D -------------)[--- C -----)
-	//  Store*   | [--- A ----)[------------------ D -------------)[--- C -----)
-	//
-	// TODO(irfansharif): We'll make use of the dryrun option in a future PR
-	// when wiring up the reconciliation job to use the KVAccessor. Since the
-	// KVAccessor is a "targeted" API (the spans being deleted/upserted
-	// have to already be present with the exact same bounds), we'll dryrun an
-	// update against a StoreWriter (pre-populated with the entries present in
-	// KV) to generate the targeted deletes and upserts we'd need to issue.
-	// After successfully installing them in KV, we can keep our StoreWriter
-	// up-to-date by actually applying the update.
-	//
-	// There's also the question of a "full reconciliation pass". We'll be
-	// generating updates reactively listening in on changes to
-	// system.{descriptor,zones} (see SQLWatcher). It's possible then for a
-	// suspended tenant's table history to be GC-ed away and for its SQLWatcher
-	// to never detect that a certain table/index/partition has been deleted.
-	// Left as is, this results in us never issuing a corresponding span config
-	// deletion request. We'd be leaving a bunch of delete-able span configs
-	// lying around, and a bunch of empty ranges as a result of those. A "full
-	// reconciliation pass" is our attempt to find all these extraneous entries
-	// in KV and to delete them.
-	//
-	// We can use a StoreWriter here too (one that's pre-populated with the
-	// contents of KVAccessor, as before). We'd iterate through all descriptors,
-	// find all overlapping spans, issue KVAccessor deletes for them, and upsert
-	// the descriptor's span config[3]. As for the StoreWriter itself, we'd
-	// simply delete the overlapping entries. After iterating through all the
-	// descriptors, we'd finally issue KVAccessor deletes for all span configs
-	// still remaining in the Store.
-	//
-	// TODO(irfansharif): The descriptions above presume holding the entire set
-	// of span configs in memory, but we could break away from that by adding
-	// pagination + retrieval limit to the GetSpanConfigEntriesFor API. We'd
-	// then paginate through chunks of the keyspace at a time, do a "full
-	// reconciliation pass" over just that chunk, and continue.
-	//
-	// [1]: Unless dryrun is true. We'll still generate the same {deleted,added}
-	//      lists.
-	// [2]: We could alternatively expose a GetAllOverlapping() API to make
-	//      things clearer.
-	// [3]: We could skip the delete + upsert dance if the descriptor's exact
-	//      span config entry already exists in KV. Using Apply (dryrun=true)
-	//      against a StoreWriter (populated using KVAccessor contents) using
-	//      the descriptor's span config entry would return empty lists,
-	//      indicating a no-op.
-	Apply(ctx context.Context, update Update, dryrun bool) (
-		deleted []roachpb.Span, added []roachpb.SpanConfigEntry,
-	)
-}
+// Silence the unused linter.
+var _ Store = nil
 
-// StoreReader is the read-only portion of the Store interface. It doubles as an
-// adaptor interface for config.SystemConfig.
+// StoreReader is the read-only portion of the Store interface. It's an adaptor
+// interface implemented by config.SystemConfig to let us later swap out the
+// source with one backed by a view of `system.span_configurations`.
 type StoreReader interface {
 	NeedsSplit(ctx context.Context, start, end roachpb.RKey) bool
 	ComputeSplitKey(ctx context.Context, start, end roachpb.RKey) roachpb.RKey
 	GetSpanConfigForKey(ctx context.Context, key roachpb.RKey) (roachpb.SpanConfig, error)
-}
-
-// Update captures a span and the corresponding config change. It's the unit of
-// what can be applied to a StoreWriter.
-type Update struct {
-	// Span captures the key span being updated.
-	Span roachpb.Span
-
-	// Config captures the span config the key span was updated to. An empty
-	// config indicates the span config being deleted.
-	Config roachpb.SpanConfig
-}
-
-// Deletion returns true if the update corresponds to a span config being
-// deleted.
-func (u Update) Deletion() bool {
-	return u.Config.IsEmpty()
-}
-
-// Addition returns true if the update corresponds to a span config being added.
-func (u Update) Addition() bool {
-	return !u.Deletion()
 }

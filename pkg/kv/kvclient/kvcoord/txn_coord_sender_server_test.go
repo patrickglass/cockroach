@@ -151,7 +151,8 @@ func TestNoDuplicateHeartbeatLoops(t *testing.T) {
 	key := roachpb.Key("a")
 
 	tracer := tracing.NewTracer()
-	sp := tracer.StartSpan("test", tracing.WithRecording(tracing.RecordingVerbose))
+	sp := tracer.StartSpan("test", tracing.WithForceRealSpan())
+	sp.SetVerbose(true)
 	txnCtx := tracing.ContextWithSpan(context.Background(), sp)
 
 	push := func(ctx context.Context, key roachpb.Key) error {
@@ -177,7 +178,8 @@ func TestNoDuplicateHeartbeatLoops(t *testing.T) {
 	if attempts != 2 {
 		t.Fatalf("expected 2 attempts, got: %d", attempts)
 	}
-	recording := sp.FinishAndGetRecording(tracing.RecordingVerbose)
+	sp.Finish()
+	recording := sp.GetRecording()
 	var foundHeartbeatLoop bool
 	for _, sp := range recording {
 		if tracing.LogsContainMsg(sp, kvbase.SpawningHeartbeatLoopMsg) {

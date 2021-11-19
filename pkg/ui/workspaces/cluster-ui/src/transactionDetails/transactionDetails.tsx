@@ -29,14 +29,8 @@ import { SqlBox } from "../sql";
 import { aggregateStatements } from "../transactionsPage/utils";
 import { Loading } from "../loading";
 import { SummaryCard } from "../summaryCard";
-import {
-  Bytes,
-  calculateTotalWorkload,
-  Duration,
-  formatNumberForDisplay,
-} from "src/util";
+import { Bytes, Duration, formatNumberForDisplay } from "src/util";
 import { UIConfigState } from "../store";
-import SQLActivityError from "../sqlActivity/errorComponent";
 
 import summaryCardStyles from "../summaryCard/summaryCard.module.scss";
 import transactionDetailsStyles from "./transactionDetails.modules.scss";
@@ -46,7 +40,7 @@ import { formatTwoPlaces } from "../barCharts";
 import { ArrowLeft } from "@cockroachlabs/icons";
 import {
   populateRegionNodeForStatements,
-  makeStatementsColumns,
+  makeStatementFingerprintColumn,
 } from "src/statementsTable/statementsTable";
 import { TransactionInfo } from "src/transactionsTable";
 import Long from "long";
@@ -70,7 +64,6 @@ interface TransactionDetailsProps {
   error?: Error | null;
   resetSQLStats: () => void;
   isTenant: UIConfigState["isTenant"];
-  transactionFingerprintId: Long;
 }
 
 interface TState {
@@ -117,7 +110,6 @@ export class TransactionDetails extends React.Component<
       handleDetails,
       error,
       nodeRegions,
-      transactionFingerprintId,
     } = this.props;
     return (
       <div>
@@ -140,12 +132,7 @@ export class TransactionDetails extends React.Component<
           render={() => {
             const { statements, transactionStats, isTenant } = this.props;
             const { sortSetting, pagination } = this.state;
-            const txnScopedStmts = statements.filter(s =>
-              s.key.key_data.transaction_fingerprint_id.equals(
-                transactionFingerprintId,
-              ),
-            );
-            const aggregatedStatements = aggregateStatements(txnScopedStmts);
+            const aggregatedStatements = aggregateStatements(statements);
             populateRegionNodeForStatements(
               aggregatedStatements,
               nodeRegions,
@@ -298,14 +285,12 @@ export class TransactionDetails extends React.Component<
                   <div className={cx("table-area")}>
                     <SortedTable
                       data={aggregatedStatements}
-                      columns={makeStatementsColumns(
-                        aggregatedStatements,
-                        "", // selectedApp
-                        calculateTotalWorkload(aggregatedStatements),
-                        nodeRegions,
-                        "transactionDetails",
-                        isTenant,
-                      )}
+                      columns={[
+                        makeStatementFingerprintColumn(
+                          "transactionDetails",
+                          "",
+                        ),
+                      ]}
                       className={cx("statements-table")}
                       sortSetting={sortSetting}
                       onChangeSortSetting={this.onChangeSortSetting}
@@ -321,11 +306,6 @@ export class TransactionDetails extends React.Component<
               </React.Fragment>
             );
           }}
-          renderError={() =>
-            SQLActivityError({
-              statsType: "transactions",
-            })
-          }
         />
       </div>
     );

@@ -8,6 +8,8 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
+// +build crdb_test
+
 package memo
 
 import (
@@ -15,7 +17,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -26,10 +27,6 @@ import (
 //
 // This function does not assume that the expression has been fully normalized.
 func (m *Memo) CheckExpr(e opt.Expr) {
-	if !buildutil.CrdbTestBuild {
-		return
-	}
-
 	if m.disableCheckExpr {
 		return
 	}
@@ -309,21 +306,6 @@ func (m *Memo) CheckExpr(e opt.Expr) {
 		}
 		if t.Value == tree.DBoolFalse {
 			panic(errors.AssertionFailedf("false values should always use FalseSingleton, not ConstExpr"))
-		}
-
-	case *WithExpr:
-		if !t.BindingOrdering.Any() && (!t.Mtr.Set || !t.Mtr.Materialize) {
-			panic(errors.AssertionFailedf("with ordering can only be specified with forced materialization"))
-		}
-
-	case *WithScanExpr:
-		// Verify the input columns exist in the binding.
-		binding := m.Metadata().WithBinding(t.With)
-		if binding == nil {
-			panic(errors.AssertionFailedf("WithScan binding missing"))
-		}
-		if !t.InCols.ToSet().SubsetOf(binding.(RelExpr).Relational().OutputCols) {
-			panic(errors.AssertionFailedf("invalid WithScan input columns %v", t.InCols))
 		}
 
 	default:

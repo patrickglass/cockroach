@@ -21,31 +21,18 @@ import (
 )
 
 const (
-	offsetBoundSecs = 167*60*60 + 59*60
-	// PG supports UTC hour offsets in the range [-167, 167].
-	maxUTCHourOffset = 167
+	fixedOffsetPrefix = "fixed offset:"
+	offsetBoundSecs   = 167*60*60 + 59*60
 )
 
 var timezoneOffsetRegex = regexp.MustCompile(`(?i)^(GMT|UTC)?([+-])?(\d{1,3}(:[0-5]?\d){0,2})$`)
 
-// FixedTimeZoneOffsetToLocation creates a time.Location with an offset and a
-// time zone string.
-func FixedTimeZoneOffsetToLocation(offset int, origRepr string) *time.Location {
-	return time.FixedZone(origRepr, offset)
-}
-
-// TimeZoneOffsetToLocation takes an offset and name that can be marshaled by
-// crdb between nodes and creates a time.Location.
-// Note that the display time zone is always shown with ISO sign convention.
-func TimeZoneOffsetToLocation(offset int) *time.Location {
-	origRepr := secondsToHoursMinutesSeconds(offset)
-	if offset <= 0 {
-		origRepr = fmt.Sprintf("<-%s>+%s", origRepr, origRepr)
-	} else {
-		origRepr = fmt.Sprintf("<+%s>-%s", origRepr, origRepr)
-	}
-
-	return time.FixedZone(origRepr, offset)
+// FixedOffsetTimeZoneToLocation creates a time.Location with a set offset and
+// with a name that can be marshaled by crdb between nodes.
+func FixedOffsetTimeZoneToLocation(offset int, origRepr string) *time.Location {
+	return time.FixedZone(
+		fmt.Sprintf("%s%d (%s)", fixedOffsetPrefix, offset, origRepr),
+		offset)
 }
 
 // TimeZoneStringToLocationStandard is an option for the standard to use
@@ -63,13 +50,13 @@ const (
 
 // TimeZoneStringToLocation transforms a string into a time.Location. It
 // supports the usual locations and also time zones with fixed offsets created
-// by FixedTimeZoneOffsetToLocation().
+// by FixedOffsetTimeZoneToLocation().
 func TimeZoneStringToLocation(
 	locStr string, std TimeZoneStringToLocationStandard,
 ) (*time.Location, error) {
-	offset, _, parsed := ParseTimeZoneOffset(locStr, std)
+	offset, origRepr, parsed := ParseFixedOffsetTimeZone(locStr)
 	if parsed {
-		return TimeZoneOffsetToLocation(offset), nil
+		return FixedOffsetTimeZoneToLocation(offset, origRepr), nil
 	}
 
 	// The time may just be a raw int value.
@@ -79,10 +66,7 @@ func TimeZoneStringToLocation(
 		if std == TimeZoneStringToLocationPOSIXStandard {
 			intVal *= -1
 		}
-		if intVal < -maxUTCHourOffset || intVal > maxUTCHourOffset {
-			return nil, errors.New("UTC timezone offset is out of range.")
-		}
-		return TimeZoneOffsetToLocation(int(intVal) * 60 * 60), nil
+		return FixedOffsetTimeZoneToLocation(int(intVal)*60*60, locStr), nil
 	}
 
 	locTransforms := []func(string) string{
@@ -97,77 +81,41 @@ func TimeZoneStringToLocation(
 	}
 
 	tzOffset, ok := timeZoneOffsetStringConversion(locStr, std)
-	if !ok {
-		return nil, errors.Newf("could not parse %q as time zone", locStr)
+	if ok {
+		return FixedOffsetTimeZoneToLocation(int(tzOffset), locStr), nil
 	}
-	return FixedTimeZoneOffsetToLocation(int(tzOffset), locStr), nil
+	return nil, errors.Newf("could not parse %q as time zone", locStr)
 }
 
-// ParseTimeZoneOffset takes the string representation of a time.Location
-// created by TimeZoneOffsetToLocation and parses it to the offset and the
+// ParseFixedOffsetTimeZone takes the string representation of a time.Location
+// created by FixedOffsetTimeZoneToLocation and parses it to the offset and the
 // original representation specified by the user. The bool returned is true if
 // parsing was successful.
-// The offset is formatted <-%s>+%s or <+%s>+%s.
-// A string with whitespace padding optionally followed by a (+/-)
-// and a float should be able to be parsed. Example: "    +10.5" is parsed in
-// PG and displayed as  <+10:06:36>-10:06:36.
-func ParseTimeZoneOffset(
-	location string, standard TimeZoneStringToLocationStandard,
-) (offset int, origRepr string, success bool) {
-	if strings.HasPrefix(location, "<") {
-		// The string has the format <+HH:MM:SS>-HH:MM:SS or <-HH:MM:SS>+HH:MM:SS.
-		// Parse the time between the < >.
-		// Grab the time from between the < >.
-		regexPattern, err := regexp.Compile(`\<[+-].*\>`)
-		if err != nil {
-			return 0, "", false
-		}
-		origRepr = regexPattern.FindString(location)
-		origRepr = strings.TrimPrefix(origRepr, "<")
-		origRepr = strings.TrimSuffix(origRepr, ">")
-
-		offsetMultiplier := 1
-		if strings.HasPrefix(origRepr, "-") {
-			offsetMultiplier = -1
-		}
-
-		origRepr = strings.Trim(origRepr, "+")
-		origRepr = strings.Trim(origRepr, "-")
-
-		// Parse HH:MM:SS time.
-		offset = hoursMinutesSecondsToSeconds(origRepr)
-		offset *= offsetMultiplier
-
-		if err != nil {
-			return 0, "", false
-		}
-
-		return offset, location, true
+//
+// The strings produced by FixedOffsetTimeZoneToLocation look like
+// "<fixedOffsetPrefix><offset> (<origRepr>)".
+// TODO(#42404): this is not the format given by the results in
+// pgwire/testdata/connection_params.
+func ParseFixedOffsetTimeZone(location string) (offset int, origRepr string, success bool) {
+	if !strings.HasPrefix(location, fixedOffsetPrefix) {
+		return 0, "", false
+	}
+	location = strings.TrimPrefix(location, fixedOffsetPrefix)
+	parts := strings.SplitN(location, " ", 2)
+	if len(parts) < 2 {
+		return 0, "", false
 	}
 
-	// Try parsing the string in the format whitespaces optionally followed by
-	// (+/-) followed immediately by a float.
-	origRepr = strings.TrimSpace(location)
-	origRepr = strings.TrimPrefix(origRepr, "+")
-
-	multiplier := 1
-	if strings.HasPrefix(origRepr, "-") {
-		multiplier = -1
-		origRepr = strings.TrimPrefix(origRepr, "-")
-	}
-
-	if standard == TimeZoneStringToLocationPOSIXStandard {
-		multiplier *= -1
-	}
-
-	f, err := strconv.ParseFloat(origRepr, 64)
+	offset, err := strconv.Atoi(parts[0])
 	if err != nil {
 		return 0, "", false
 	}
 
-	origRepr = floatToHoursMinutesSeconds(f)
-	offset = hoursMinutesSecondsToSeconds(origRepr)
-	return multiplier * offset, origRepr, true
+	origRepr = parts[1]
+	if !strings.HasPrefix(origRepr, "(") || !strings.HasSuffix(origRepr, ")") {
+		return 0, "", false
+	}
+	return offset, strings.TrimSuffix(strings.TrimPrefix(origRepr, "("), ")"), true
 }
 
 // timeZoneOffsetStringConversion converts a time string to offset seconds.
@@ -186,28 +134,6 @@ func timeZoneOffsetStringConversion(
 	prefix := submatch[2]
 	timeString := submatch[3]
 
-	offsets := strings.Split(timeString, ":")
-	offset = int64(hoursMinutesSecondsToSeconds(timeString))
-
-	// GMT/UTC prefix, colons and POSIX standard characters have "opposite" timezones.
-	if hasUTCPrefix || len(offsets) > 1 || std == TimeZoneStringToLocationPOSIXStandard {
-		offset *= -1
-	}
-	if prefix == "-" {
-		offset *= -1
-	}
-
-	if offset > offsetBoundSecs || offset < -offsetBoundSecs {
-		return 0, false
-	}
-	return offset, true
-}
-
-// The timestamp must be of one of the following formats:
-//   HH
-//   HH:MM
-//   HH:MM:SS
-func hoursMinutesSecondsToSeconds(timeString string) int {
 	var (
 		hoursString   = "0"
 		minutesString = "0"
@@ -226,55 +152,18 @@ func hoursMinutesSecondsToSeconds(timeString string) int {
 	hours, _ := strconv.ParseInt(hoursString, 10, 64)
 	minutes, _ := strconv.ParseInt(minutesString, 10, 64)
 	seconds, _ := strconv.ParseInt(secondsString, 10, 64)
-	return int((hours * 60 * 60) + (minutes * 60) + seconds)
-}
+	offset = (hours * 60 * 60) + (minutes * 60) + seconds
 
-// secondsToHoursMinutesSeconds converts seconds to a timestamp of the format
-//   HH
-//   HH:MM
-//   HH:MM:SS
-func secondsToHoursMinutesSeconds(totalSeconds int) string {
-	secondsPerHour := 60 * 60
-	secondsPerMinute := 60
-	if totalSeconds < 0 {
-		totalSeconds = totalSeconds * -1
+	// GMT/UTC prefix, colons and POSIX standard characters have "opposite" timezones.
+	if hasUTCPrefix || len(offsets) > 1 || std == TimeZoneStringToLocationPOSIXStandard {
+		offset *= -1
 	}
-	hours := totalSeconds / secondsPerHour
-	minutes := (totalSeconds - hours*secondsPerHour) / secondsPerMinute
-	seconds := totalSeconds - hours*secondsPerHour - minutes*secondsPerMinute
-
-	if seconds == 0 && minutes == 0 {
-		return fmt.Sprintf("%02d", hours)
-	} else if seconds == 0 {
-		return fmt.Sprintf("%d:%d", hours, minutes)
-	} else {
-		// PG doesn't round, truncate precision.
-		return fmt.Sprintf("%d:%d:%2.0d", hours, minutes, seconds)
+	if prefix == "-" {
+		offset *= -1
 	}
-}
 
-// floatToHoursMinutesSeconds converts a float to a HH:MM:SS.
-// The minutes and seconds sections are only included in the precision is
-// necessary.
-// For example:
-//    11.00 -> 11
-//    11.5 -> 11:30
-//    11.51 -> 11:30:36
-func floatToHoursMinutesSeconds(f float64) string {
-	hours := int(f)
-	remaining := f - float64(hours)
-
-	secondsPerHour := float64(60 * 60)
-	totalSeconds := remaining * secondsPerHour
-	minutes := int(totalSeconds / 60)
-	seconds := totalSeconds - float64(minutes*60)
-
-	if seconds == 0 && minutes == 0 {
-		return fmt.Sprintf("%02d", hours)
-	} else if seconds == 0 {
-		return fmt.Sprintf("%d:%d", hours, minutes)
-	} else {
-		// PG doesn't round, truncate precision.
-		return fmt.Sprintf("%d:%d:%2.0f", hours, minutes, seconds)
+	if offset > offsetBoundSecs || offset < -offsetBoundSecs {
+		return 0, false
 	}
+	return offset, true
 }

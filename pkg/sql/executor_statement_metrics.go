@@ -17,10 +17,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 )
 
 // EngineMetrics groups a set of SQL metrics.
@@ -153,39 +151,13 @@ func (ex *connExecutor) recordStatementSummary(
 	}
 
 	recordedStmtStatsKey := roachpb.StatementStatisticsKey{
-		Query:        stmt.StmtNoConstants,
-		QuerySummary: stmt.StmtSummary,
-		DistSQL:      flags.IsDistributed(),
-		Vec:          flags.IsSet(planFlagVectorized),
-		ImplicitTxn:  flags.IsSet(planFlagImplicitTxn),
-		FullScan:     flags.IsSet(planFlagContainsFullIndexScan) || flags.IsSet(planFlagContainsFullTableScan),
-		Failed:       stmtErr != nil,
-		Database:     planner.SessionData().Database,
-	}
-
-	// We only populate the transaction fingerprint ID field if we are in an
-	// implicit transaction.
-	//
-	// TODO(azhng): This will require some big refactoring later, we already
-	//  compute statement's fingerprintID in RecordStatement().
-	//  However, we need to recompute the Fingerprint() here because this
-	//  is required to populate the transaction fingerprint ID field.
-	//
-	//  The reason behind it is that: for explicit transactions, we have a final
-	//  callback that will eventually invoke
-	//  statsCollector.EndExplicitTransaction() which will use the extraTxnState
-	//  stored in the connExecutor to compute the transaction fingerprintID.
-	//  Unfortunately, that callback is not invoked for implicit transactions,
-	//  because we don't create temporary stats container for the implicit
-	//  transactions. (The statement stats directly gets written to the actual
-	//  stats container). This means that, unless we populate the transaction
-	//  fingerprintID here, we will not have another chance to do so later.
-	if ex.implicitTxn() {
-		stmtFingerprintID := recordedStmtStatsKey.FingerprintID()
-		txnFingerprintHash := util.MakeFNV64()
-		txnFingerprintHash.Add(uint64(stmtFingerprintID))
-		recordedStmtStatsKey.TransactionFingerprintID =
-			roachpb.TransactionFingerprintID(txnFingerprintHash.Sum())
+		Query:       stmt.StmtNoConstants,
+		DistSQL:     flags.IsDistributed(),
+		Vec:         flags.IsSet(planFlagVectorized),
+		ImplicitTxn: flags.IsSet(planFlagImplicitTxn),
+		FullScan:    flags.IsSet(planFlagContainsFullIndexScan) || flags.IsSet(planFlagContainsFullTableScan),
+		Failed:      stmtErr != nil,
+		Database:    planner.SessionData().Database,
 	}
 
 	recordedStmtStats := sqlstats.RecordedStmtStats{
@@ -212,7 +184,7 @@ func (ex *connExecutor) recordStatementSummary(
 		if log.V(1) {
 			log.Warningf(ctx, "failed to record statement: %s", err)
 		}
-		ex.server.ServerMetrics.StatsMetrics.DiscardedStatsCount.Inc(1)
+		ex.metrics.StatsMetrics.DiscardedStatsCount.Inc(1)
 	}
 
 	// Do some transaction level accounting for the transaction this statement is
@@ -274,7 +246,7 @@ func getNodesFromPlanner(planner *planner) []int64 {
 	// Retrieve the list of all nodes which the statement was executed on.
 	var nodes []int64
 	if planner.instrumentation.sp != nil {
-		trace := planner.instrumentation.sp.GetRecording(tracing.RecordingStructured)
+		trace := planner.instrumentation.sp.GetRecording()
 		// ForEach returns nodes in order.
 		execinfrapb.ExtractNodesFromSpans(planner.EvalContext().Context, trace).ForEach(func(i int) {
 			nodes = append(nodes, int64(i))

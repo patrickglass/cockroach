@@ -39,7 +39,7 @@ func TestBackpressureNotAppliedWhenReducingRangeSize(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	rRand, _ := randutil.NewTestRand()
+	rRand, _ := randutil.NewPseudoRand()
 	ctx := context.Background()
 
 	// Some arbitrary data sizes we'll load into a table and then use to derive
@@ -302,9 +302,6 @@ func TestBackpressureNotAppliedWhenReducingRangeSize(t *testing.T) {
 		case err := <-upsertErrCh:
 			t.Fatalf("expected no error because the request should hang, got %v", err)
 		}
-		// Unfortunately we can't match on the error (context canceled) here since we can also
-		// get random other errors such as:
-		// "write failed: write tcp 127.0.0.1:37720->127.0.0.1:44313: i/o timeout"
-		require.Error(t, <-upsertErrCh)
+		require.Equal(t, context.Canceled, errors.Unwrap(<-upsertErrCh))
 	})
 }

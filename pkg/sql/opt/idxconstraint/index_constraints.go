@@ -817,42 +817,19 @@ func (c *indexConstraintCtx) makeSpansForAnd(
 	return true
 }
 
-// makeSpansForOr calculates spans for a contiguous chain of OrOps.
+// makeSpansForOr calculates spans for an OrOp.
 func (c *indexConstraintCtx) makeSpansForOr(
 	offset int, e opt.Expr, out *constraint.Constraint,
 ) (tight bool) {
 	or := e.(*memo.OrExpr)
-	disjunctions := memo.CollectContiguousOrExprs(or)
-	return c.binaryMergeSpansForOr(offset, disjunctions, out)
-}
-
-// binaryMergeSpansForOr builds and merges the spans for disjunctions with a
-// given offset using divide and conquer.
-func (c *indexConstraintCtx) binaryMergeSpansForOr(
-	offset int, disjunctions []opt.ScalarExpr, out *constraint.Constraint,
-) (tight bool) {
-	size := len(disjunctions)
-	if size == 1 {
-		tight := c.makeSpansForExpr(offset, disjunctions[0], out)
-		return tight
-	}
-	mid := size / 2
-	left := disjunctions[:mid]
-	right := disjunctions[mid:]
-	var rightConstraint constraint.Constraint
-
-	tightLeft := c.binaryMergeSpansForOr(offset, left, out)
+	tightLeft := c.makeSpansForExpr(offset, or.Left, out)
 	if out.IsUnconstrained() {
 		// If spans can't be generated for the left child, exit early.
 		c.unconstrained(offset, out)
 		return false
 	}
-	tightRight := c.binaryMergeSpansForOr(offset, right, &rightConstraint)
-	if rightConstraint.IsUnconstrained() {
-		// If spans can't be generated for the right child, exit early.
-		c.unconstrained(offset, out)
-		return false
-	}
+	var rightConstraint constraint.Constraint
+	tightRight := c.makeSpansForExpr(offset, or.Right, &rightConstraint)
 	out.UnionWith(c.evalCtx, &rightConstraint)
 
 	// The OR is "tight" if both constraints were tight.
@@ -945,60 +922,51 @@ func (c *indexConstraintCtx) getMaxSimplifyPrefix(idxConstraint *constraint.Cons
 //    by getMaxSimplifyPrefix). So `[/1/2 - /1/2]` is contained in the
 //    expression span and we can simplify `@2 = 2` to `true`.
 //
-// nestedUnderOrExpr indicates if we are processing a ScalarExpr which is the child
-// of an OrExpr.
 func (c *indexConstraintCtx) simplifyFilter(
-	scalar opt.ScalarExpr,
-	final *constraint.Constraint,
-	maxSimplifyPrefix int,
-	nestedUnderOrExpr bool,
+	scalar opt.ScalarExpr, final *constraint.Constraint, maxSimplifyPrefix int,
 ) opt.ScalarExpr {
 	// Special handling for And, Range.
 	switch t := scalar.(type) {
 	case *memo.AndExpr:
-		left := c.simplifyFilter(t.Left, final, maxSimplifyPrefix, false /* nestedUnderOrExpr */)
-		right := c.simplifyFilter(t.Right, final, maxSimplifyPrefix, false /* nestedUnderOrExpr */)
+		left := c.simplifyFilter(t.Left, final, maxSimplifyPrefix)
+		right := c.simplifyFilter(t.Right, final, maxSimplifyPrefix)
 		return c.factory.ConstructAnd(left, right)
 
 	case *memo.RangeExpr:
-		return c.factory.ConstructRange(c.simplifyFilter(t.And, final, maxSimplifyPrefix, false /* nestedUnderOrExpr */))
+		return c.factory.ConstructRange(c.simplifyFilter(t.And, final, maxSimplifyPrefix))
 	}
 
 	// We try to create tight spans for the expression (as allowed by
 	// maxSimplifyPrefix), and check if the condition is implied by the final
 	// spans. See getMaxSimplifyPrefix for more information.
-	// makeSpansForExpr processes an entire contiguous chain of OrExprs, so for
-	// OrExprs, only call it on the top-most OrExpr.
-	if scalar.Op() != opt.OrOp || !nestedUnderOrExpr {
-		for offset := 0; offset <= maxSimplifyPrefix; offset++ {
-			var cExpr constraint.Constraint
-			tight := c.makeSpansForExpr(offset, scalar, &cExpr)
+	for offset := 0; offset <= maxSimplifyPrefix; offset++ {
+		var cExpr constraint.Constraint
+		tight := c.makeSpansForExpr(offset, scalar, &cExpr)
 
-			if !tight {
-				continue
-			}
-			for i := 0; i < final.Spans.Count(); i++ {
-				sp := *final.Spans.Get(i)
-				if offset > 0 {
-					sp.CutFront(offset)
-				}
-				if !cExpr.ContainsSpan(c.evalCtx, &sp) {
-					// We won't get another tight constraint at another offset.
-					return scalar
-				}
-			}
-
-			// The final spans are a subset of the spans for this expression; there
-			// is no need for a remaining filter for this condition.
-			return memo.TrueSingleton
+		if !tight {
+			continue
 		}
+		for i := 0; i < final.Spans.Count(); i++ {
+			sp := *final.Spans.Get(i)
+			if offset > 0 {
+				sp.CutFront(offset)
+			}
+			if !cExpr.ContainsSpan(c.evalCtx, &sp) {
+				// We won't get another tight constraint at another offset.
+				return scalar
+			}
+		}
+
+		// The final spans are a subset of the spans for this expression; there
+		// is no need for a remaining filter for this condition.
+		return memo.TrueSingleton
 	}
 
 	// Special handling for Or.
 	switch t := scalar.(type) {
 	case *memo.OrExpr:
-		left := c.simplifyFilter(t.Left, final, maxSimplifyPrefix, true /* nestedUnderOrExpr */)
-		right := c.simplifyFilter(t.Right, final, maxSimplifyPrefix, true /* nestedUnderOrExpr */)
+		left := c.simplifyFilter(t.Left, final, maxSimplifyPrefix)
+		right := c.simplifyFilter(t.Right, final, maxSimplifyPrefix)
 		return c.factory.ConstructOr(left, right)
 	}
 	return scalar
@@ -1123,7 +1091,7 @@ func (ic *Instance) RemainingFilters() memo.FiltersExpr {
 	var newFilters memo.FiltersExpr
 	for i := range ic.requiredFilters {
 		prefix := ic.getMaxSimplifyPrefix(&ic.constraint)
-		condition := ic.simplifyFilter(ic.requiredFilters[i].Condition, &ic.constraint, prefix, false /* nestedUnderOrExpr */)
+		condition := ic.simplifyFilter(ic.requiredFilters[i].Condition, &ic.constraint, prefix)
 		if condition.Op() != opt.TrueOp {
 			if newFilters == nil {
 				newFilters = make(memo.FiltersExpr, 0, len(ic.requiredFilters))

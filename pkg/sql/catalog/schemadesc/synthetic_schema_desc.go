@@ -45,8 +45,6 @@ func (p synthetic) GetVersion() descpb.DescriptorVersion {
 func (p synthetic) GetModificationTime() hlc.Timestamp {
 	return hlc.Timestamp{}
 }
-
-// Deprecated: Do not use.
 func (p synthetic) GetDrainingNames() []descpb.NameInfo {
 	return nil
 }
@@ -78,11 +76,6 @@ func (p synthetic) GetOfflineReason() string {
 func (p synthetic) DescriptorProto() *descpb.Descriptor {
 	log.Fatalf(context.TODO(),
 		"%s schema cannot be encoded", p.kindName())
-	return nil // unreachable
-}
-func (p synthetic) NewBuilder() catalog.DescriptorBuilder {
-	log.Fatalf(context.TODO(),
-		"%s schema cannot create a builder", p.kindName())
 	return nil // unreachable
 }
 func (p synthetic) GetReferencedDescIDs() (catalog.DescriptorIDSet, error) {

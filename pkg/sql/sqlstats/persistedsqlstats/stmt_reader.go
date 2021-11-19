@@ -14,7 +14,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
@@ -40,8 +39,7 @@ func (s *PersistedSQLStats) IterateStatementStats(
 	// We compute the current aggregated_ts so that the in-memory stats can be
 	// merged with the persisted stats.
 	curAggTs := s.computeAggregatedTs()
-	aggInterval := SQLStatsFlushInterval.Get(&s.cfg.Settings.SV)
-	memIter := newMemStmtStatsIterator(s.SQLStats, options, curAggTs, aggInterval)
+	memIter := newMemStmtStatsIterator(s.SQLStats, options, curAggTs)
 
 	var persistedIter sqlutil.InternalRows
 	var colCnt int
@@ -104,13 +102,11 @@ func (s *PersistedSQLStats) getFetchQueryForStmtStatsTable(
 	selectedColumns := []string{
 		"aggregated_ts",
 		"fingerprint_id",
-		"transaction_fingerprint_id",
 		"plan_hash",
 		"app_name",
 		"metadata",
 		"statistics",
 		"plan",
-		"agg_interval",
 	}
 
 	// [1]: selection columns
@@ -142,7 +138,6 @@ FROM
 		orderByColumns = append(orderByColumns, "metadata ->> 'query'")
 	}
 
-	orderByColumns = append(orderByColumns, "transaction_fingerprint_id")
 	query = fmt.Sprintf("%s ORDER BY %s", query, strings.Join(orderByColumns, ","))
 
 	return query, len(selectedColumns)
@@ -156,41 +151,31 @@ func rowToStmtStats(row tree.Datums) (*roachpb.CollectedStatementStatistics, err
 	if err != nil {
 		return nil, err
 	}
+
 	stats.ID = roachpb.StmtFingerprintID(stmtFingerprintID)
-
-	transactionFingerprintID, err := sqlstatsutil.DatumToUint64(row[2])
-	if err != nil {
-		return nil, err
-	}
-	stats.Key.TransactionFingerprintID =
-		roachpb.TransactionFingerprintID(transactionFingerprintID)
-
-	stats.Key.PlanHash, err = sqlstatsutil.DatumToUint64(row[3])
+	stats.Key.PlanHash, err = sqlstatsutil.DatumToUint64(row[2])
 	if err != nil {
 		return nil, err
 	}
 
-	stats.Key.App = string(tree.MustBeDString(row[4]))
+	stats.Key.App = string(tree.MustBeDString(row[3]))
 
-	metadata := tree.MustBeDJSON(row[5]).JSON
+	metadata := tree.MustBeDJSON(row[4]).JSON
 	if err = sqlstatsutil.DecodeStmtStatsMetadataJSON(metadata, &stats); err != nil {
 		return nil, err
 	}
 
-	statistics := tree.MustBeDJSON(row[6]).JSON
+	statistics := tree.MustBeDJSON(row[5]).JSON
 	if err = sqlstatsutil.DecodeStmtStatsStatisticsJSON(statistics, &stats.Stats); err != nil {
 		return nil, err
 	}
 
-	jsonPlan := tree.MustBeDJSON(row[7]).JSON
+	jsonPlan := tree.MustBeDJSON(row[6]).JSON
 	plan, err := sqlstatsutil.JSONToExplainTreePlanNode(jsonPlan)
 	if err != nil {
 		return nil, err
 	}
 	stats.Stats.SensitiveInfo.MostRecentPlanDescription = *plan
-
-	aggInterval := tree.MustBeDInterval(row[8]).Duration
-	stats.AggregationInterval = time.Duration(aggInterval.Nanos())
 
 	return &stats, nil
 }

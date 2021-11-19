@@ -239,19 +239,8 @@ func (v *distSQLExprCheckVisitor) VisitPre(expr tree.Expr) (recurse bool, newExp
 	case *tree.CastExpr:
 		// TODO (rohany): I'm not sure why this CastExpr doesn't have a type
 		//  annotation at this stage of processing...
-		if typ, ok := tree.GetStaticallyKnownType(t.Type); ok {
-			switch typ.Family() {
-			case types.OidFamily:
-				v.err = newQueryNotSupportedErrorf("cast to %s is not supported by distsql", t.Type)
-				return false, expr
-			}
-		}
-	case *tree.DArray:
-		// We need to check for arrays of untyped tuples here since constant-folding
-		// on builtin functions sometimes produces this. DecodeUntaggedDatum
-		// requires that all the types of the tuple contents are known.
-		if t.ResolvedType().ArrayContents() == types.AnyTuple {
-			v.err = newQueryNotSupportedErrorf("array %s cannot be executed with distsql", t)
+		if typ, ok := tree.GetStaticallyKnownType(t.Type); ok && typ.Family() == types.OidFamily {
+			v.err = newQueryNotSupportedErrorf("cast to %s is not supported by distsql", t.Type)
 			return false, expr
 		}
 	}
@@ -350,7 +339,6 @@ func (dsp *DistSQLPlanner) mustWrapNode(planCtx *PlanningCtx, node planNode) boo
 	case *renderNode:
 	case *scanNode:
 	case *sortNode:
-	case *topKNode:
 	case *unaryNode:
 	case *unionNode:
 	case *valuesNode:
@@ -389,23 +377,23 @@ func mustWrapValuesNode(planCtx *PlanningCtx, specifiedInQuery bool) bool {
 // The error doesn't indicate complete failure - it's instead the reason that
 // this plan couldn't be distributed.
 // TODO(radu): add tests for this.
-func checkSupportForPlanNode(node planNode) (distRecommendation, error) {
+func checkSupportForPlanNode(node planNode, outputNodeHasLimit bool) (distRecommendation, error) {
 	switch n := node.(type) {
 	// Keep these cases alphabetized, please!
 	case *distinctNode:
-		return checkSupportForPlanNode(n.plan)
+		return checkSupportForPlanNode(n.plan, false /* outputNodeHasLimit */)
 
 	case *exportNode:
-		return checkSupportForPlanNode(n.source)
+		return checkSupportForPlanNode(n.source, false /* outputNodeHasLimit */)
 
 	case *filterNode:
 		if err := checkExpr(n.filter); err != nil {
 			return cannotDistribute, err
 		}
-		return checkSupportForPlanNode(n.source.plan)
+		return checkSupportForPlanNode(n.source.plan, false /* outputNodeHasLimit */)
 
 	case *groupNode:
-		rec, err := checkSupportForPlanNode(n.plan)
+		rec, err := checkSupportForPlanNode(n.plan, false /* outputNodeHasLimit */)
 		if err != nil {
 			return cannotDistribute, err
 		}
@@ -415,10 +403,10 @@ func checkSupportForPlanNode(node planNode) (distRecommendation, error) {
 	case *indexJoinNode:
 		// n.table doesn't have meaningful spans, but we need to check support (e.g.
 		// for any filtering expression).
-		if _, err := checkSupportForPlanNode(n.table); err != nil {
+		if _, err := checkSupportForPlanNode(n.table, false /* outputNodeHasLimit */); err != nil {
 			return cannotDistribute, err
 		}
-		return checkSupportForPlanNode(n.input)
+		return checkSupportForPlanNode(n.input, false /* outputNodeHasLimit */)
 
 	case *invertedFilterNode:
 		return checkSupportForInvertedFilterNode(n)
@@ -427,7 +415,7 @@ func checkSupportForPlanNode(node planNode) (distRecommendation, error) {
 		if err := checkExpr(n.onExpr); err != nil {
 			return cannotDistribute, err
 		}
-		rec, err := checkSupportForPlanNode(n.input)
+		rec, err := checkSupportForPlanNode(n.input, false /* outputNodeHasLimit */)
 		if err != nil {
 			return cannotDistribute, err
 		}
@@ -437,11 +425,11 @@ func checkSupportForPlanNode(node planNode) (distRecommendation, error) {
 		if err := checkExpr(n.pred.onCond); err != nil {
 			return cannotDistribute, err
 		}
-		recLeft, err := checkSupportForPlanNode(n.left.plan)
+		recLeft, err := checkSupportForPlanNode(n.left.plan, false /* outputNodeHasLimit */)
 		if err != nil {
 			return cannotDistribute, err
 		}
-		recRight, err := checkSupportForPlanNode(n.right.plan)
+		recRight, err := checkSupportForPlanNode(n.right.plan, false /* outputNodeHasLimit */)
 		if err != nil {
 			return cannotDistribute, err
 		}
@@ -458,7 +446,7 @@ func checkSupportForPlanNode(node planNode) (distRecommendation, error) {
 		// Note that we don't need to check whether we support distribution of
 		// n.countExpr or n.offsetExpr because those expressions are evaluated
 		// locally, during the physical planning.
-		return checkSupportForPlanNode(n.plan)
+		return checkSupportForPlanNode(n.plan, true /* outputNodeHasLimit */)
 
 	case *lookupJoinNode:
 		if n.table.lockingStrength != descpb.ScanLockingStrength_FOR_NONE {
@@ -478,7 +466,7 @@ func checkSupportForPlanNode(node planNode) (distRecommendation, error) {
 		if err := checkExpr(n.onCond); err != nil {
 			return cannotDistribute, err
 		}
-		rec, err := checkSupportForPlanNode(n.input)
+		rec, err := checkSupportForPlanNode(n.input, false /* outputNodeHasLimit */)
 		if err != nil {
 			return cannotDistribute, err
 		}
@@ -490,7 +478,7 @@ func checkSupportForPlanNode(node planNode) (distRecommendation, error) {
 		return cannotDistribute, nil
 
 	case *projectSetNode:
-		return checkSupportForPlanNode(n.source)
+		return checkSupportForPlanNode(n.source, false /* outputNodeHasLimit */)
 
 	case *renderNode:
 		for _, e := range n.render {
@@ -498,7 +486,7 @@ func checkSupportForPlanNode(node planNode) (distRecommendation, error) {
 				return cannotDistribute, err
 			}
 		}
-		return checkSupportForPlanNode(n.source.plan)
+		return checkSupportForPlanNode(n.source.plan, outputNodeHasLimit)
 
 	case *scanNode:
 		if n.lockingStrength != descpb.ScanLockingStrength_FOR_NONE {
@@ -527,29 +515,28 @@ func checkSupportForPlanNode(node planNode) (distRecommendation, error) {
 		}
 
 	case *sortNode:
-		rec, err := checkSupportForPlanNode(n.plan)
+		rec, err := checkSupportForPlanNode(n.plan, false /* outputNodeHasLimit */)
 		if err != nil {
 			return cannotDistribute, err
 		}
-		return rec.compose(shouldDistribute), nil
-
-	case *topKNode:
-		rec, err := checkSupportForPlanNode(n.plan)
-		if err != nil {
-			return cannotDistribute, err
+		if outputNodeHasLimit {
+			// If we have a top K sort, we can distribute the query.
+			rec = rec.compose(canDistribute)
+		} else {
+			// If we have to sort, distribute the query.
+			rec = rec.compose(shouldDistribute)
 		}
-		// If we have a top K sort, we can distribute the query.
-		return rec.compose(canDistribute), nil
+		return rec, nil
 
 	case *unaryNode:
 		return canDistribute, nil
 
 	case *unionNode:
-		recLeft, err := checkSupportForPlanNode(n.left)
+		recLeft, err := checkSupportForPlanNode(n.left, false /* outputNodeHasLimit */)
 		if err != nil {
 			return cannotDistribute, err
 		}
-		recRight, err := checkSupportForPlanNode(n.right)
+		recRight, err := checkSupportForPlanNode(n.right, false /* outputNodeHasLimit */)
 		if err != nil {
 			return cannotDistribute, err
 		}
@@ -573,7 +560,7 @@ func checkSupportForPlanNode(node planNode) (distRecommendation, error) {
 		return canDistribute, nil
 
 	case *windowNode:
-		return checkSupportForPlanNode(n.plan)
+		return checkSupportForPlanNode(n.plan, false /* outputNodeHasLimit */)
 
 	case *zeroNode:
 		return canDistribute, nil
@@ -596,7 +583,7 @@ func checkSupportForPlanNode(node planNode) (distRecommendation, error) {
 }
 
 func checkSupportForInvertedFilterNode(n *invertedFilterNode) (distRecommendation, error) {
-	rec, err := checkSupportForPlanNode(n.input)
+	rec, err := checkSupportForPlanNode(n.input, false /* outputNodeHasLimit */)
 	if err != nil {
 		return cannotDistribute, err
 	}
@@ -1105,11 +1092,13 @@ func initTableReaderSpec(
 		Visibility:        n.colCfg.visibility,
 		LockingStrength:   n.lockingStrength,
 		LockingWaitPolicy: n.lockingWaitPolicy,
-		HasSystemColumns:  n.containsSystemColumns,
-		NeededColumns:     n.colCfg.wantedColumnsOrdinals,
+		// Retain the capacity of the spans slice.
+		Spans:            s.Spans[:0],
+		HasSystemColumns: n.containsSystemColumns,
+		NeededColumns:    n.colCfg.wantedColumnsOrdinals,
 	}
-	if vc := getInvertedColumn(n.colCfg.invertedColumn, n.cols); vc != nil {
-		s.InvertedColumn = vc.ColumnDesc()
+	if vc := getVirtualColumn(n.colCfg.virtualColumn, n.cols); vc != nil {
+		s.VirtualColumn = vc.ColumnDesc()
 	}
 
 	indexIdx, err := getIndexIdx(n.index, n.desc)
@@ -1134,20 +1123,20 @@ func initTableReaderSpec(
 	return s, post, nil
 }
 
-// getInvertedColumn returns the column in cols with ID matching
-// invertedColumn.colID.
-func getInvertedColumn(
-	invertedColumn *struct {
+// getVirtualColumn returns the column in cols with ID matching
+// virtualColumn.colID.
+func getVirtualColumn(
+	virtualColumn *struct {
 		colID tree.ColumnID
 		typ   *types.T
 	}, cols []catalog.Column,
 ) catalog.Column {
-	if invertedColumn == nil {
+	if virtualColumn == nil {
 		return nil
 	}
 
 	for i := range cols {
-		if tree.ColumnID(cols[i].GetID()) == invertedColumn.colID {
+		if tree.ColumnID(cols[i].GetID()) == virtualColumn.colID {
 			return cols[i]
 		}
 	}
@@ -1501,12 +1490,15 @@ func (dsp *DistSQLPlanner) planTableReaders(
 		} else {
 			// For the rest, we have to copy the spec into a fresh spec.
 			tr = physicalplan.NewTableReaderSpec()
+			// Grab the Spans field of the new spec, and reuse it in case the pooled
+			// TableReaderSpec we got has pre-allocated Spans memory.
+			newSpansSlice := tr.Spans
 			*tr = *info.spec
+			tr.Spans = newSpansSlice
 		}
-		// TODO(yuzefovich): figure out how we could reuse the Spans slice if we
-		// kept the reference to it in TableReaderSpec (rather than allocating
-		// new slices in generateScanSpans and PartitionSpans).
-		tr.Spans = sp.Spans
+		for j := range sp.Spans {
+			tr.Spans = append(tr.Spans, execinfrapb.TableReaderSpan{Span: sp.Spans[j]})
+		}
 
 		tr.Parallelize = info.parallelize
 		if !tr.Parallelize {
@@ -1519,13 +1511,13 @@ func (dsp *DistSQLPlanner) planTableReaders(
 		corePlacement[i].Core.TableReader = tr
 	}
 
-	invertedColumn := tabledesc.FindInvertedColumn(info.desc, info.spec.InvertedColumn)
+	virtualColumn := tabledesc.FindVirtualColumn(info.desc, info.spec.VirtualColumn)
 	cols := info.desc.PublicColumns()
 	returnMutations := info.scanVisibility == execinfra.ScanVisibilityPublicAndNotPublic
 	if returnMutations {
 		cols = info.desc.DeletableColumns()
 	}
-	typs := catalog.ColumnTypesWithInvertedCol(cols, invertedColumn)
+	typs := catalog.ColumnTypesWithVirtualCol(cols, virtualColumn)
 	if info.containsSystemColumns {
 		for _, col := range info.desc.SystemColumns() {
 			typs = append(typs, col.GetType())
@@ -1540,16 +1532,7 @@ func (dsp *DistSQLPlanner) planTableReaders(
 	var descColumnIDs util.FastIntMap
 	colID := 0
 	for _, col := range info.desc.AllColumns() {
-		var addCol bool
-		if col.IsSystemColumn() {
-			// If it is a system column, we want to treat it carefully because
-			// its ID is a very large number, so adding it into util.FastIntMap
-			// will incur an allocation.
-			addCol = info.containsSystemColumns
-		} else {
-			addCol = col.Public() || returnMutations
-		}
-		if addCol {
+		if col.Public() || returnMutations || (col.IsSystemColumn() && info.containsSystemColumns) {
 			descColumnIDs.Set(colID, int(col.GetID()))
 			colID++
 		}
@@ -1616,7 +1599,7 @@ func (dsp *DistSQLPlanner) createPlanForRender(
 // accordingly. When alreadyOrderedPrefix is non-zero, the input is already
 // ordered on the prefix ordering[:alreadyOrderedPrefix].
 func (dsp *DistSQLPlanner) addSorters(
-	p *PhysicalPlan, ordering colinfo.ColumnOrdering, alreadyOrderedPrefix int, limit int64,
+	p *PhysicalPlan, ordering colinfo.ColumnOrdering, alreadyOrderedPrefix int,
 ) {
 	// Sorting is needed; we add a stage of sorting processors.
 	outputOrdering := execinfrapb.ConvertToMappedSpecOrdering(ordering, p.PlanToStreamColMap)
@@ -1626,41 +1609,25 @@ func (dsp *DistSQLPlanner) addSorters(
 			Sorter: &execinfrapb.SorterSpec{
 				OutputOrdering:   outputOrdering,
 				OrderingMatchLen: uint32(alreadyOrderedPrefix),
-				Limit:            limit,
 			},
 		},
 		execinfrapb.PostProcessSpec{},
 		p.GetResultTypes(),
 		outputOrdering,
 	)
-
-	// Add a node to limit the number of output rows to the top K if a limit is
-	// required and there are multiple routers.
-	if limit > 0 && len(p.ResultRouters) > 1 {
-		post := execinfrapb.PostProcessSpec{
-			Limit: uint64(limit),
-		}
-		p.AddSingleGroupStage(
-			p.GatewayNodeID,
-			execinfrapb.ProcessorCoreUnion{Noop: &execinfrapb.NoopCoreSpec{}},
-			post,
-			p.GetResultTypes(),
-		)
-	}
 }
 
 // aggregatorPlanningInfo is a utility struct that contains the information
 // needed to perform the physical planning of aggregators once the specs have
 // been created.
 type aggregatorPlanningInfo struct {
-	aggregations             []execinfrapb.AggregatorSpec_Aggregation
-	argumentsColumnTypes     [][]*types.T
-	isScalar                 bool
-	groupCols                []int
-	groupColOrdering         colinfo.ColumnOrdering
-	inputMergeOrdering       execinfrapb.Ordering
-	reqOrdering              ReqOrdering
-	allowPartialDistribution bool
+	aggregations         []execinfrapb.AggregatorSpec_Aggregation
+	argumentsColumnTypes [][]*types.T
+	isScalar             bool
+	groupCols            []int
+	groupColOrdering     colinfo.ColumnOrdering
+	inputMergeOrdering   execinfrapb.Ordering
+	reqOrdering          ReqOrdering
 }
 
 // addAggregators adds aggregators corresponding to a groupNode and updates the plan to
@@ -2183,7 +2150,7 @@ func (dsp *DistSQLPlanner) planAggregators(
 
 		// We have multiple streams, so we definitely have a processor planned
 		// on a remote node.
-		stageID := p.NewStage(true /* containsRemoteProcessor */, info.allowPartialDistribution)
+		stageID := p.NewStage(true /* containsRemoteProcessor */)
 
 		// We have one final stage processor for each result router. This is a
 		// somewhat arbitrary decision; we could have a different number of nodes
@@ -2546,62 +2513,15 @@ func (dsp *DistSQLPlanner) createPlanForInvertedJoin(
 func (dsp *DistSQLPlanner) createPlanForZigzagJoin(
 	planCtx *PlanningCtx, n *zigzagJoinNode,
 ) (plan *PhysicalPlan, err error) {
-
-	sides := make([]zigzagPlanningSide, len(n.sides))
-
-	for i, side := range n.sides {
-		// The fixed values are represented as a Values node with one tuple.
-		typs := getTypesFromResultColumns(side.fixedVals.columns)
-		valuesSpec, err := dsp.createValuesSpecFromTuples(planCtx, side.fixedVals.tuples, typs)
-		if err != nil {
-			return nil, err
-		}
-
-		sides[i] = zigzagPlanningSide{
-			desc:        side.scan.desc,
-			index:       side.scan.index,
-			cols:        side.scan.cols,
-			eqCols:      side.eqCols,
-			fixedValues: valuesSpec,
-		}
-	}
-
-	return dsp.planZigzagJoin(planCtx, zigzagPlanningInfo{
-		sides:       sides,
-		columns:     n.columns,
-		onCond:      n.onCond,
-		reqOrdering: n.reqOrdering,
-	})
-}
-
-type zigzagPlanningSide struct {
-	desc        catalog.TableDescriptor
-	index       catalog.Index
-	cols        []catalog.Column
-	eqCols      []int
-	fixedValues *execinfrapb.ValuesCoreSpec
-}
-
-type zigzagPlanningInfo struct {
-	sides       []zigzagPlanningSide
-	columns     colinfo.ResultColumns
-	onCond      tree.TypedExpr
-	reqOrdering ReqOrdering
-}
-
-func (dsp *DistSQLPlanner) planZigzagJoin(
-	planCtx *PlanningCtx, pi zigzagPlanningInfo,
-) (plan *PhysicalPlan, err error) {
-
 	plan = planCtx.NewPhysicalPlan()
-	tables := make([]descpb.TableDescriptor, len(pi.sides))
-	indexOrdinals := make([]uint32, len(pi.sides))
-	cols := make([]execinfrapb.Columns, len(pi.sides))
-	fixedValues := make([]*execinfrapb.ValuesCoreSpec, len(pi.sides))
 
-	for i, side := range pi.sides {
-		tables[i] = *side.desc.TableDesc()
-		indexOrdinals[i], err = getIndexIdx(side.index, side.desc)
+	tables := make([]descpb.TableDescriptor, len(n.sides))
+	indexOrdinals := make([]uint32, len(n.sides))
+	cols := make([]execinfrapb.Columns, len(n.sides))
+	numStreamCols := 0
+	for i, side := range n.sides {
+		tables[i] = *side.scan.desc.TableDesc()
+		indexOrdinals[i], err = getIndexIdx(side.scan.index, side.scan.desc)
 		if err != nil {
 			return nil, err
 		}
@@ -2610,17 +2530,29 @@ func (dsp *DistSQLPlanner) planZigzagJoin(
 		for j, col := range side.eqCols {
 			cols[i].Columns[j] = uint32(col)
 		}
-		fixedValues[i] = side.fixedValues
+
+		numStreamCols += len(side.scan.desc.PublicColumns())
 	}
 
 	// The zigzag join node only represents inner joins, so hardcode Type to
 	// InnerJoin.
 	zigzagJoinerSpec := execinfrapb.ZigzagJoinerSpec{
 		Tables:        tables,
-		EqColumns:     cols,
 		IndexOrdinals: indexOrdinals,
-		FixedValues:   fixedValues,
+		EqColumns:     cols,
 		Type:          descpb.InnerJoin,
+	}
+	zigzagJoinerSpec.FixedValues = make([]*execinfrapb.ValuesCoreSpec, len(n.sides))
+
+	// The fixed values are represented as a Values node with one tuple.
+	for i := range n.sides {
+		fixedVals := n.sides[i].fixedVals
+		typs := getTypesFromResultColumns(fixedVals.columns)
+		valuesSpec, err := dsp.createValuesSpecFromTuples(planCtx, fixedVals.tuples, typs)
+		if err != nil {
+			return nil, err
+		}
+		zigzagJoinerSpec.FixedValues[i] = valuesSpec
 	}
 
 	// The internal schema of the zigzag joiner is:
@@ -2632,7 +2564,8 @@ func (dsp *DistSQLPlanner) planZigzagJoin(
 	// so the planToStreamColMap has to basically map index ordinals
 	// to table ordinals.
 	post := execinfrapb.PostProcessSpec{Projection: true}
-	numOutCols := len(pi.columns)
+	numOutCols := len(n.columns)
+
 	post.OutputColumns = make([]uint32, numOutCols)
 	types := make([]*types.T, numOutCols)
 	planToStreamColMap := makePlanToStreamColMap(numOutCols)
@@ -2641,31 +2574,33 @@ func (dsp *DistSQLPlanner) planZigzagJoin(
 
 	// Populate post.OutputColumns (the implicit projection), result types,
 	// and the planToStreamColMap for index columns from all sides.
-	for _, side := range pi.sides {
+	for _, side := range n.sides {
 		// Note that the side's scanNode only contains the columns from that
 		// index that are also in n.columns. This is because we generated
 		// colCfg.wantedColumns for only the necessary columns in
 		// opt/exec/execbuilder/relational_builder.go, similar to lookup joins.
-		for _, col := range side.cols {
-			ord := tableOrdinal(side.desc, col.GetID(), execinfra.ScanVisibilityPublic)
+		for _, col := range side.scan.cols {
+			ord := tableOrdinal(side.scan.desc, col.GetID(), side.scan.colCfg.visibility)
 			post.OutputColumns[i] = uint32(colOffset + ord)
 			types[i] = col.GetType()
 			planToStreamColMap[i] = i
+
 			i++
 		}
-		colOffset += len(side.desc.PublicColumns())
+
+		colOffset += len(side.scan.desc.PublicColumns())
 	}
 
 	// Set the ON condition.
-	if pi.onCond != nil {
+	if n.onCond != nil {
 		// Note that the ON condition refers to the *internal* columns of the
 		// processor (before the OutputColumns projection).
-		indexVarMap := makePlanToStreamColMap(len(pi.columns))
-		for i := 0; i < len(pi.columns); i++ {
+		indexVarMap := makePlanToStreamColMap(len(n.columns))
+		for i := range n.columns {
 			indexVarMap[i] = int(post.OutputColumns[i])
 		}
 		zigzagJoinerSpec.OnExpr, err = physicalplan.MakeExpression(
-			pi.onCond, planCtx, indexVarMap,
+			n.onCond, planCtx, indexVarMap,
 		)
 		if err != nil {
 			return nil, err
@@ -2674,10 +2609,10 @@ func (dsp *DistSQLPlanner) planZigzagJoin(
 
 	// Figure out the node where this zigzag joiner goes.
 	//
-	// TODO(itsbilal): Add support for restricting the Zigzag joiner to a
-	// certain set of spans on one side. Once that's done, we can split this
-	// processor across multiple nodes here. Until then, schedule on the current
-	// node.
+	// TODO(itsbilal): Add support for restricting the Zigzag joiner
+	// to a certain set of spans (similar to the InterleavedReaderJoiner)
+	// on one side. Once that's done, we can split this processor across
+	// multiple nodes here. Until then, schedule on the current node.
 	corePlacement := []physicalplan.ProcessorCorePlacement{{
 		NodeID: dsp.gatewayNodeID,
 		Core:   execinfrapb.ProcessorCoreUnion{ZigzagJoiner: &zigzagJoinerSpec},
@@ -2885,7 +2820,7 @@ func (dsp *DistSQLPlanner) planJoiners(
 	p := planCtx.NewPhysicalPlan()
 	physicalplan.MergePlans(
 		&p.PhysicalPlan, &info.leftPlan.PhysicalPlan, &info.rightPlan.PhysicalPlan,
-		info.leftPlanDistribution, info.rightPlanDistribution, info.allowPartialDistribution,
+		info.leftPlanDistribution, info.rightPlanDistribution,
 	)
 	leftRouters := info.leftPlan.ResultRouters
 	rightRouters := info.rightPlan.ResultRouters
@@ -3024,18 +2959,7 @@ func (dsp *DistSQLPlanner) createPhysPlanForPlanNode(
 			return nil, err
 		}
 
-		dsp.addSorters(plan, n.ordering, n.alreadyOrderedPrefix, 0 /* limit */)
-
-	case *topKNode:
-		plan, err = dsp.createPhysPlanForPlanNode(planCtx, n.plan)
-		if err != nil {
-			return nil, err
-		}
-
-		if n.k <= 0 {
-			return nil, errors.New("negative or zero value for LIMIT")
-		}
-		dsp.addSorters(plan, n.ordering, n.alreadyOrderedPrefix, n.k)
+		dsp.addSorters(plan, n.ordering, n.alreadyOrderedPrefix)
 
 	case *unaryNode:
 		plan, err = dsp.createPlanForUnary(planCtx, n)
@@ -3045,7 +2969,7 @@ func (dsp *DistSQLPlanner) createPhysPlanForPlanNode(
 
 	case *valuesNode:
 		if mustWrapValuesNode(planCtx, n.specifiedInQuery) {
-			plan, err = dsp.wrapPlan(planCtx, n, false /* allowPartialDistribution */)
+			plan, err = dsp.wrapPlan(planCtx, n)
 		} else {
 			colTypes := getTypesFromResultColumns(n.columns)
 			var spec *execinfrapb.ValuesCoreSpec
@@ -3067,7 +2991,7 @@ func (dsp *DistSQLPlanner) createPhysPlanForPlanNode(
 
 	case *createStatsNode:
 		if n.runAsJob {
-			plan, err = dsp.wrapPlan(planCtx, n, false /* allowPartialDistribution */)
+			plan, err = dsp.wrapPlan(planCtx, n)
 		} else {
 			// Create a job record but don't actually start the job.
 			var record *jobs.Record
@@ -3081,7 +3005,7 @@ func (dsp *DistSQLPlanner) createPhysPlanForPlanNode(
 
 	default:
 		// Can't handle a node? We wrap it and continue on our way.
-		plan, err = dsp.wrapPlan(planCtx, n, false /* allowPartialDistribution */)
+		plan, err = dsp.wrapPlan(planCtx, n)
 	}
 
 	if err != nil {
@@ -3126,9 +3050,7 @@ func (dsp *DistSQLPlanner) createPhysPlanForPlanNode(
 // will create a planNodeToRowSource wrapper for the sub-tree that's not
 // plannable by DistSQL. If that sub-tree has DistSQL-plannable sources, they
 // will be planned by DistSQL and connected to the wrapper.
-func (dsp *DistSQLPlanner) wrapPlan(
-	planCtx *PlanningCtx, n planNode, allowPartialDistribution bool,
-) (*PhysicalPlan, error) {
+func (dsp *DistSQLPlanner) wrapPlan(planCtx *PlanningCtx, n planNode) (*PhysicalPlan, error) {
 	useFastPath := planCtx.planDepth == 1 && planCtx.stmtType == tree.RowsAffected
 
 	// First, we search the planNode tree we're trying to wrap for the first
@@ -3219,7 +3141,7 @@ func (dsp *DistSQLPlanner) wrapPlan(
 				Type: execinfrapb.OutputRouterSpec_PASS_THROUGH,
 			}},
 			// This stage consists of a single processor planned on the gateway.
-			StageID:     p.NewStage(false /* containsRemoteProcessor */, allowPartialDistribution),
+			StageID:     p.NewStage(false /* containsRemoteProcessor */),
 			ResultTypes: wrapper.outputTypes,
 		},
 	}
@@ -3639,7 +3561,6 @@ func (dsp *DistSQLPlanner) createPlanForSetOp(
 		// the distribution of the whole plans.
 		leftPlan.GetLastStageDistribution(),
 		rightPlan.GetLastStageDistribution(),
-		false, /* allowPartialDistribution */
 	)
 
 	if n.unionType == tree.UnionOp {
@@ -3854,7 +3775,7 @@ func (dsp *DistSQLPlanner) createPlanForWindow(
 			}
 			// We have multiple streams, so we definitely have a processor planned
 			// on a remote node.
-			stageID := plan.NewStage(true /* containsRemoteProcessor */, false /* allowPartialDistribution */)
+			stageID := plan.NewStage(true /* containsRemoteProcessor */)
 
 			// We put a windower on each node and we connect it
 			// with all hash routers from the previous stage in
@@ -3922,7 +3843,7 @@ func (dsp *DistSQLPlanner) createPlanForWindow(
 }
 
 // createPlanForExport creates a physical plan for EXPORT.
-// We add a new stage of CSV/Parquet Writer processors to the input plan.
+// We add a new stage of CSVWriter processors to the input plan.
 func (dsp *DistSQLPlanner) createPlanForExport(
 	planCtx *PlanningCtx, n *exportNode,
 ) (*PhysicalPlan, error) {
@@ -3930,32 +3851,15 @@ func (dsp *DistSQLPlanner) createPlanForExport(
 	if err != nil {
 		return nil, err
 	}
-
-	var core execinfrapb.ProcessorCoreUnion
-
-	if n.csvOpts != nil {
-		core.CSVWriter = &execinfrapb.CSVWriterSpec{
-			Destination:      n.destination,
-			NamePattern:      n.fileNamePattern,
-			Options:          *n.csvOpts,
-			ChunkRows:        int64(n.chunkRows),
-			ChunkSize:        n.chunkSize,
-			CompressionCodec: n.fileCompression,
-			UserProto:        planCtx.planner.User().EncodeProto(),
-		}
-	} else if n.parquetOpts != nil {
-		core.ParquetWriter = &execinfrapb.ParquetWriterSpec{
-			Destination: n.destination,
-			NamePattern: n.fileNamePattern,
-			Options:     *n.parquetOpts,
-			ChunkRows:   int64(n.chunkRows),
-			ChunkSize:   n.chunkSize,
-			UserProto:   planCtx.planner.User().EncodeProto(),
-		}
-	} else {
-		return nil, errors.AssertionFailedf("parquetOpts and csvOpts are both empty. " +
-			"One must be not nil")
-	}
+	core := execinfrapb.ProcessorCoreUnion{CSVWriter: &execinfrapb.CSVWriterSpec{
+		Destination:      n.destination,
+		NamePattern:      n.fileNamePattern,
+		Options:          n.csvOpts,
+		ChunkRows:        int64(n.chunkRows),
+		ChunkSize:        n.chunkSize,
+		CompressionCodec: n.fileCompression,
+		UserProto:        planCtx.planner.User().EncodeProto(),
+	}}
 
 	resTypes := make([]*types.T, len(colinfo.ExportColumns))
 	for i := range colinfo.ExportColumns {
@@ -4019,6 +3923,9 @@ func checkScanParallelizationIfLocal(
 				}
 				return true, nil
 			case *indexJoinNode:
+				// Vectorized index join is only supported for non-interleaved
+				// tables.
+				prohibitParallelization = n.table.desc.TableDesc().PrimaryIndex.IsInterleaved()
 				return true, nil
 			case *joinNode:
 				prohibitParallelization = n.pred.onCond != nil
@@ -4102,83 +4009,9 @@ func (dsp *DistSQLPlanner) NewPlanningCtx(
 	return planCtx
 }
 
-// maybeMoveSingleFlowToGateway checks whether plan consists of a single flow
-// on the remote node and would benefit from bringing that flow to the gateway.
-func maybeMoveSingleFlowToGateway(planCtx *PlanningCtx, plan *PhysicalPlan, rowCount int64) {
-	if !planCtx.isLocal && planCtx.ExtendedEvalCtx.SessionData().DistSQLMode != sessiondatapb.DistSQLAlways {
-		// If we chose to distribute this plan, yet we created only a single
-		// remote flow, it might be a good idea to bring that whole flow back
-		// to the gateway.
-		//
-		// This comes from the limitation of pinning each flow based on the
-		// physical planning of table readers. However, if later stages of the
-		// plan contain other processors, e.g. joinReaders, the whole flow can
-		// become quite expensive. With high enough frequency of such flows, the
-		// node having the lease for the ranges of the table readers becomes the
-		// hot spot. In such a scenario we might choose to run the flow locally
-		// to distribute the load on the cluster better (assuming that the
-		// queries are issued against all nodes with equal frequency).
-
-		// If we estimate that the plan reads far more rows than it returns in
-		// the output, it probably makes sense to keep the flow as distributed
-		// (i.e. keep the computation where the data is). Therefore, when we
-		// don't have a good estimate (rowCount is negative) or the data
-		// cardinality is reduced significantly (the reduction ratio is at least
-		// 10), we will keep the plan as is.
-		const rowReductionRatio = 10
-		keepPlan := rowCount <= 0 || float64(plan.TotalEstimatedScannedRows)/float64(rowCount) >= rowReductionRatio
-		if keepPlan {
-			return
-		}
-		singleFlow := true
-		moveFlowToGateway := false
-		nodeID := plan.Processors[0].Node
-		for _, p := range plan.Processors[1:] {
-			if p.Node != nodeID {
-				if p.Node != plan.GatewayNodeID || p.Spec.Core.Noop == nil {
-					// We want to ignore the noop processors planned on the
-					// gateway because their job is to simply communicate the
-					// results back to the client. If, however, there is another
-					// non-noop processor on the gateway, then we'll correctly
-					// treat the plan as having multiple flows.
-					singleFlow = false
-					break
-				}
-			}
-			core := p.Spec.Core
-			if core.JoinReader != nil || core.MergeJoiner != nil || core.HashJoiner != nil ||
-				core.ZigzagJoiner != nil || core.InvertedJoiner != nil {
-				// We want to move the flow when it contains a processor that
-				// might increase the cardinality of the data flowing through it
-				// or that performs the KV work.
-				moveFlowToGateway = true
-			}
-		}
-		if singleFlow && moveFlowToGateway {
-			for i := range plan.Processors {
-				plan.Processors[i].Node = plan.GatewayNodeID
-			}
-			planCtx.isLocal = true
-			planCtx.planner.curPlan.flags.Unset(planFlagFullyDistributed)
-			planCtx.planner.curPlan.flags.Unset(planFlagPartiallyDistributed)
-			plan.Distribution = physicalplan.LocalPlan
-		}
-	}
-}
-
 // FinalizePlan adds a final "result" stage and a final projection if necessary
 // as well as populates the endpoints of the plan.
 func (dsp *DistSQLPlanner) FinalizePlan(planCtx *PlanningCtx, plan *PhysicalPlan) {
-	dsp.finalizePlanWithRowCount(planCtx, plan, -1 /* rowCount */)
-}
-
-// finalizePlanWithRowCount adds a final "result" stage and a final projection
-// if necessary as well as populates the endpoints of the plan.
-// - rowCount is the estimated number of rows that the plan outputs. Use a
-// negative number if the stats were not available to make an estimate.
-func (dsp *DistSQLPlanner) finalizePlanWithRowCount(
-	planCtx *PlanningCtx, plan *PhysicalPlan, rowCount int64,
-) {
 	// Find all MetadataTestSenders in the plan, so that the MetadataTestReceiver
 	// knows how many sender IDs it should expect.
 	var metadataSenders []string
@@ -4187,8 +4020,6 @@ func (dsp *DistSQLPlanner) finalizePlanWithRowCount(
 			metadataSenders = append(metadataSenders, proc.Spec.Core.MetadataTestSender.ID)
 		}
 	}
-
-	maybeMoveSingleFlowToGateway(planCtx, plan, rowCount)
 
 	// Add a final "result" stage if necessary.
 	plan.EnsureSingleStreamOnGateway()

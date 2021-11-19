@@ -19,9 +19,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colflow/colrpc"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -213,8 +212,6 @@ func (vsc *vectorizedStatsCollectorImpl) GetStats() *execinfrapb.ComponentStats 
 		s.KV.TuplesRead.Set(uint64(vsc.kvReader.GetRowsRead()))
 		s.KV.BytesRead.Set(uint64(vsc.kvReader.GetBytesRead()))
 		s.KV.ContentionTime.Set(vsc.kvReader.GetCumulativeContentionTime())
-		scanStats := vsc.kvReader.GetScanStats()
-		execinfra.PopulateKVMVCCStats(&s.KV, &scanStats)
 	} else {
 		s.Exec.ExecTime.Set(time)
 	}
@@ -287,7 +284,7 @@ func (nvsc *networkVectorizedStatsCollectorImpl) GetStats() *execinfrapb.Compone
 // specified. See comment on statsInvariantChecker for the kind of invariants
 // checked.
 func maybeAddStatsInvariantChecker(op *colexecargs.OpWithMetaInfo) {
-	if buildutil.CrdbTestBuild {
+	if util.CrdbTestBuild {
 		c := &statsInvariantChecker{}
 		op.StatsCollectors = append(op.StatsCollectors, c)
 		op.MetadataSources = append(op.MetadataSources, c)

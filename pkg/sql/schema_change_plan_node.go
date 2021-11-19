@@ -16,54 +16,44 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scbuild"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scdeps"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scerrors"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scrun"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scsqldeps"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/errors"
 )
 
 // SchemaChange provides the planNode for the new schema changer.
 func (p *planner) SchemaChange(ctx context.Context, stmt tree.Statement) (planNode, bool, error) {
 	// TODO(ajwerner): Call featureflag.CheckEnabled appropriately.
 	mode := p.extendedEvalCtx.SchemaChangerState.mode
-	// When new schema changer is on we will not support it for explicit
-	// transaction, since we don't know if subsequent statements don't
-	// support it.
 	if mode == sessiondatapb.UseNewSchemaChangerOff ||
 		(mode == sessiondatapb.UseNewSchemaChangerOn && !p.extendedEvalCtx.TxnImplicit) {
 		return nil, false, nil
 	}
 	scs := p.extendedEvalCtx.SchemaChangerState
 	scs.stmts = append(scs.stmts, p.stmt.SQL)
-	deps := scdeps.NewBuilderDependencies(
-		p.ExecCfg().Codec,
-		p.Txn(),
-		p.Descriptors(),
-		p,
-		p,
-		p.SessionData(),
-		p.ExecCfg().Settings,
-		scs.stmts,
-	)
-	outputNodes, err := scbuild.Build(ctx, deps, scs.state, stmt)
-	if scerrors.HasNotImplemented(err) && mode == sessiondatapb.UseNewSchemaChangerOn {
+	buildDeps := scbuild.Dependencies{
+		Res:          p,
+		SemaCtx:      p.SemaCtx(),
+		EvalCtx:      p.EvalContext(),
+		Descs:        p.Descriptors(),
+		AuthAccessor: p,
+	}
+	outputNodes, err := scbuild.Build(ctx, buildDeps, p.extendedEvalCtx.SchemaChangerState.state, stmt)
+	if scbuild.HasNotImplemented(err) && mode == sessiondatapb.UseNewSchemaChangerOn {
 		return nil, false, nil
 	}
 	if err != nil {
 		// If we need to wait for a concurrent schema change to finish, release our
 		// leases, and then return the error to wait and retry.
-		if scerrors.ConcurrentSchemaChangeDescID(err) != descpb.InvalidID {
+		if cscErr := (*scbuild.ConcurrentSchemaChangeError)(nil); errors.As(err, &cscErr) {
 			p.Descriptors().ReleaseLeases(ctx)
 		}
 		return nil, false, err
@@ -107,7 +97,7 @@ func (p *planner) WaitForDescriptorSchemaChanges(
 				if err != nil {
 					return err
 				}
-				blocked = catalog.HasConcurrentSchemaChanges(table)
+				blocked = scbuild.HasConcurrentSchemaChanges(table)
 				return nil
 			}); err != nil {
 			return err
@@ -131,23 +121,13 @@ type schemaChangePlanNode struct {
 
 func (s *schemaChangePlanNode) startExec(params runParams) error {
 	p := params.p
-	scs := p.ExtendedEvalContext().SchemaChangerState
-	deps := scdeps.NewExecutorDependencies(
-		p.EvalContext().Codec,
-		p.Txn(),
-		p.Descriptors(),
-		p.ExecCfg().JobRegistry,
-		p.ExecCfg().IndexBackfiller,
-		p.ExecCfg().IndexValidator,
-		scsqldeps.NewCCLCallbacks(p.ExecCfg().Settings, p.EvalContext()),
-		func(ctx context.Context, txn *kv.Txn, depth int, descID descpb.ID, metadata scpb.ElementMetadata, event eventpb.EventPayload) error {
-			return LogEventForSchemaChanger(ctx, p.ExecCfg(), txn, depth+1, descID, metadata, event)
-		},
-		p.ExecCfg().NewSchemaChangerTestingKnobs,
-		scs.stmts,
-		scop.StatementPhase,
+	scs := p.extendedEvalCtx.SchemaChangerState
+	executor := scexec.NewExecutor(p.txn, p.Descriptors(), p.EvalContext().Codec,
+		nil /* backfiller */, nil /* jobTracker */, p.ExecCfg().NewSchemaChangerTestingKnobs,
+		params.extendedEvalCtx.ExecCfg.JobRegistry, params.p.execCfg.InternalExecutor)
+	after, err := runNewSchemaChanger(
+		params.ctx, scplan.StatementPhase, s.plannedState, executor, scs.stmts,
 	)
-	after, err := scrun.RunSchemaChangesInTxn(params.ctx, deps, s.plannedState)
 	if err != nil {
 		return err
 	}

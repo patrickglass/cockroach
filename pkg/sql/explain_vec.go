@@ -47,6 +47,7 @@ func (n *explainVecNode) startExec(params runParams) error {
 		params.ctx, params.p, params.extendedEvalCtx.ExecCfg.NodeID,
 		params.extendedEvalCtx.SessionData().DistSQLMode, n.plan.main,
 	)
+	willDistribute := distribution.WillDistribute()
 	outerSubqueries := params.p.curPlan.subqueryPlans
 	planCtx := newPlanningCtxForExplainPurposes(distSQLPlanner, params, n.plan.subqueryPlans, distribution)
 	defer func() {
@@ -61,7 +62,7 @@ func (n *explainVecNode) startExec(params runParams) error {
 		return err
 	}
 
-	distSQLPlanner.finalizePlanWithRowCount(planCtx, physPlan, n.plan.mainRowCount)
+	distSQLPlanner.FinalizePlan(planCtx, physPlan)
 	flows := physPlan.GenerateFlowSpecs()
 	flowCtx := newFlowCtxForExplainPurposes(planCtx, params.p)
 
@@ -75,7 +76,6 @@ func (n *explainVecNode) startExec(params runParams) error {
 		return errors.New("vectorize is set to 'off'")
 	}
 	verbose := n.options.Flags[tree.ExplainFlagVerbose]
-	willDistribute := physPlan.Distribution.WillDistribute()
 	n.run.lines, n.run.cleanup, err = colflow.ExplainVec(
 		params.ctx, flowCtx, flows, physPlan.LocalProcessors, nil, /* opChains */
 		distSQLPlanner.gatewayNodeID, verbose, willDistribute,

@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 )
@@ -161,7 +160,6 @@ func FormatExprForDisplay(
 	desc catalog.TableDescriptor,
 	exprStr string,
 	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
 	fmtFlags tree.FmtFlags,
 ) (string, error) {
 	return formatExprForDisplayImpl(
@@ -169,7 +167,6 @@ func FormatExprForDisplay(
 		desc,
 		exprStr,
 		semaCtx,
-		sessionData,
 		fmtFlags,
 		false, /* wrapNonFuncExprs */
 	)
@@ -184,7 +181,6 @@ func FormatExprForExpressionIndexDisplay(
 	desc catalog.TableDescriptor,
 	exprStr string,
 	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
 	fmtFlags tree.FmtFlags,
 ) (string, error) {
 	return formatExprForDisplayImpl(
@@ -192,7 +188,6 @@ func FormatExprForExpressionIndexDisplay(
 		desc,
 		exprStr,
 		semaCtx,
-		sessionData,
 		fmtFlags,
 		true, /* wrapNonFuncExprs */
 	)
@@ -203,7 +198,6 @@ func formatExprForDisplayImpl(
 	desc catalog.TableDescriptor,
 	exprStr string,
 	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
 	fmtFlags tree.FmtFlags,
 	wrapNonFuncExprs bool,
 ) (string, error) {
@@ -216,7 +210,7 @@ func formatExprForDisplayImpl(
 	if err != nil {
 		return "", err
 	}
-	f := tree.NewFmtCtx(fmtFlags, tree.FmtDataConversionConfig(sessionData.DataConversionConfig))
+	f := tree.NewFmtCtx(fmtFlags)
 	_, isFunc := expr.(*tree.FuncExpr)
 	if wrapNonFuncExprs && !isFunc {
 		f.WriteByte('(')

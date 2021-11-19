@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -369,11 +368,6 @@ func (oc *optCatalog) fullyQualifiedNameWithTxn(
 			scName,
 			tree.Name(desc.GetName())),
 		nil
-}
-
-// RoleExists is part of the cat.Catalog interface.
-func (oc *optCatalog) RoleExists(ctx context.Context, role security.SQLUsername) (bool, error) {
-	return RoleExists(ctx, oc.planner.ExecCfg(), oc.planner.Txn(), role)
 }
 
 // dataSourceForDesc returns a data source wrapper for the given descriptor.
@@ -842,7 +836,8 @@ func newOptTable(
 		}
 	}
 
-	_ = ot.desc.ForeachOutboundFK(func(fk *descpb.ForeignKeyConstraint) error {
+	for i := range ot.desc.GetOutboundFKs() {
+		fk := &ot.desc.GetOutboundFKs()[i]
 		ot.outboundFKs = append(ot.outboundFKs, optForeignKeyConstraint{
 			name:              fk.Name,
 			originTable:       ot.ID(),
@@ -854,9 +849,9 @@ func newOptTable(
 			deleteAction:      fk.OnDelete,
 			updateAction:      fk.OnUpdate,
 		})
-		return nil
-	})
-	_ = ot.desc.ForeachInboundFK(func(fk *descpb.ForeignKeyConstraint) error {
+	}
+	for i := range ot.desc.GetInboundFKs() {
+		fk := &ot.desc.GetInboundFKs()[i]
 		ot.inboundFKs = append(ot.inboundFKs, optForeignKeyConstraint{
 			name:              fk.Name,
 			originTable:       cat.StableID(fk.OriginTableID),
@@ -868,8 +863,7 @@ func newOptTable(
 			deleteAction:      fk.OnDelete,
 			updateAction:      fk.OnUpdate,
 		})
-		return nil
-	})
+	}
 
 	ot.primaryFamily.init(ot, &desc.GetFamilies()[0])
 	ot.families = make([]optFamily, len(desc.GetFamilies())-1)
@@ -1406,6 +1400,28 @@ func (oi *optIndex) Ordinal() int {
 // ImplicitPartitioningColumnCount is part of the cat.Index interface.
 func (oi *optIndex) ImplicitPartitioningColumnCount() int {
 	return oi.idx.GetPartitioning().NumImplicitColumns()
+}
+
+// InterleaveAncestorCount is part of the cat.Index interface.
+func (oi *optIndex) InterleaveAncestorCount() int {
+	return oi.idx.NumInterleaveAncestors()
+}
+
+// InterleaveAncestor is part of the cat.Index interface.
+func (oi *optIndex) InterleaveAncestor(i int) (table, index cat.StableID, numKeyCols int) {
+	a := oi.idx.GetInterleaveAncestor(i)
+	return cat.StableID(a.TableID), cat.StableID(a.IndexID), int(a.SharedPrefixLen)
+}
+
+// InterleavedByCount is part of the cat.Index interface.
+func (oi *optIndex) InterleavedByCount() int {
+	return oi.idx.NumInterleavedBy()
+}
+
+// InterleavedBy is part of the cat.Index interface.
+func (oi *optIndex) InterleavedBy(i int) (table, index cat.StableID) {
+	ref := oi.idx.GetInterleavedBy(i)
+	return cat.StableID(ref.Table), cat.StableID(ref.Index)
 }
 
 // GeoConfig is part of the cat.Index interface.
@@ -2153,6 +2169,26 @@ func (oi *optVirtualIndex) Ordinal() int {
 // ImplicitPartitioningColumnCount is part of the cat.Index interface.
 func (oi *optVirtualIndex) ImplicitPartitioningColumnCount() int {
 	return 0
+}
+
+// InterleaveAncestorCount is part of the cat.Index interface.
+func (oi *optVirtualIndex) InterleaveAncestorCount() int {
+	return 0
+}
+
+// InterleaveAncestor is part of the cat.Index interface.
+func (oi *optVirtualIndex) InterleaveAncestor(i int) (table, index cat.StableID, numKeyCols int) {
+	panic(errors.AssertionFailedf("no interleavings"))
+}
+
+// InterleavedByCount is part of the cat.Index interface.
+func (oi *optVirtualIndex) InterleavedByCount() int {
+	return 0
+}
+
+// InterleavedBy is part of the cat.Index interface.
+func (oi *optVirtualIndex) InterleavedBy(i int) (table, index cat.StableID) {
+	panic(errors.AssertionFailedf("no interleavings"))
 }
 
 // GeoConfig is part of the cat.Index interface.

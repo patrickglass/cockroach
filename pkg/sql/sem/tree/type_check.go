@@ -123,7 +123,7 @@ const (
 	// (RejectAggregates notwithstanding).
 	RejectNestedAggregates
 
-	// RejectNestedWindowFunctions rejects any use of window functions inside the
+	// RejectNestedWindows rejects any use of window functions inside the
 	// argument list of another window function.
 	RejectNestedWindowFunctions
 
@@ -417,10 +417,6 @@ func (expr *CaseExpr) TypeCheck(
 	return expr, nil
 }
 
-func invalidCastError(castFrom, castTo *types.T) error {
-	return pgerror.Newf(pgcode.CannotCoerce, "invalid cast: %s -> %s", castFrom, castTo)
-}
-
 // resolveCast checks that the cast from the two types is valid. If allowStable
 // is false, it also checks that the cast has VolatilityImmutable.
 //
@@ -454,42 +450,15 @@ func resolveCast(
 		// Casts from ENUM to ENUM type can only succeed if the two types are the
 		// same.
 		if !castFrom.Equivalent(castTo) {
-			return invalidCastError(castFrom, castTo)
+			return pgerror.Newf(pgcode.CannotCoerce, "invalid cast: %s -> %s", castFrom, castTo)
 		}
 		telemetry.Inc(sqltelemetry.EnumCastCounter)
 		return nil
 
-	case toFamily == types.TupleFamily && fromFamily == types.TupleFamily:
-		// Casts from tuple to tuple type succeed if the lengths of the tuples are
-		// the same, and if there are casts resolvable across all of the elements
-		// pointwise.
-		fromTuple := castFrom.TupleContents()
-		toTuple := castTo.TupleContents()
-		if len(fromTuple) != len(toTuple) {
-			return invalidCastError(castFrom, castTo)
-		}
-		for i, from := range fromTuple {
-			to := toTuple[i]
-			err := resolveCast(
-				context,
-				from,
-				to,
-				allowStable,
-				intervalStyleEnabled,
-				dateStyleEnabled,
-			)
-			if err != nil {
-				return err
-			}
-		}
-		telemetry.Inc(sqltelemetry.TupleCastCounter)
-		return nil
-
 	default:
-		// TODO(mgartner): Use OID cast map.
-		cast := lookupCastInfo(fromFamily, toFamily, intervalStyleEnabled, dateStyleEnabled)
+		cast := lookupCast(fromFamily, toFamily, intervalStyleEnabled, dateStyleEnabled)
 		if cast == nil {
-			return invalidCastError(castFrom, castTo)
+			return pgerror.Newf(pgcode.CannotCoerce, "invalid cast: %s -> %s", castFrom, castTo)
 		}
 		if !allowStable && cast.volatility >= VolatilityStable {
 			err := NewContextDependentOpsNotAllowedError(context)
@@ -504,9 +473,9 @@ func resolveCast(
 	}
 }
 
-func isArrayExpr(expr Expr) bool {
-	_, ok := expr.(*Array)
-	return ok
+func isEmptyArray(expr Expr) bool {
+	a, ok := expr.(*Array)
+	return ok && len(a.Exprs) == 0
 }
 
 // TypeCheck implements the Expr interface.
@@ -522,7 +491,6 @@ func (expr *CastExpr) TypeCheck(
 		return nil, err
 	}
 	expr.Type = exprType
-	canElideCast := true
 	switch {
 	case isConstant(expr.Expr):
 		c := expr.Expr.(Constant)
@@ -541,21 +509,12 @@ func (expr *CastExpr) TypeCheck(
 		// type we gave it before is not compatible with the usage here, then
 		// type-checking will fail as desired.
 		desired = exprType
-	case isArrayExpr(expr.Expr):
-		// If we're going to cast to another array type, which is a common pattern
-		// in SQL (select array[]::int[], select array[$1]::int[]), use the cast
-		// type as the the desired type.
+	case isEmptyArray(expr.Expr):
+		// An empty array can't be type-checked with a desired parameter of
+		// types.Any. If we're going to cast to another array type, which is a
+		// common pattern in SQL (select array[]::int[]), use the cast type as the
+		// the desired type.
 		if exprType.Family() == types.ArrayFamily {
-			// We can't elide the cast for arrays if the underlying typmod information
-			// is changed from the base type (e.g. `'{"hello", "world"}'::char(2)[]`
-			// should not be elided or the char(2) is lost).
-			// This needs to be checked here; otherwise the expr.Expr.TypeCheck below
-			// will have the same resolved type as exprType, which forces an incorrect
-			// elision.
-			contents := exprType.ArrayContents()
-			if baseType, ok := types.OidToType[contents.Oid()]; ok && !baseType.Identical(contents) {
-				canElideCast = false
-			}
 			desired = exprType
 		}
 	}
@@ -566,7 +525,7 @@ func (expr *CastExpr) TypeCheck(
 	}
 
 	// Elide the cast if it is a no-op.
-	if canElideCast && typedSubExpr.ResolvedType().Identical(exprType) {
+	if typedSubExpr.ResolvedType().Identical(exprType) {
 		return typedSubExpr, nil
 	}
 
@@ -739,13 +698,8 @@ func (expr *ColumnAccessExpr) TypeCheck(
 	expr.Expr = subExpr
 	resolvedType := subExpr.ResolvedType()
 
-	if resolvedType.Family() != types.TupleFamily {
+	if resolvedType.Family() != types.TupleFamily || (!expr.ByIndex && len(resolvedType.TupleLabels()) == 0) {
 		return nil, NewTypeIsNotCompositeError(resolvedType)
-	}
-
-	if !expr.ByIndex && len(resolvedType.TupleLabels()) == 0 {
-		return nil, pgerror.Newf(pgcode.UndefinedColumn, "could not identify column %q in record data type",
-			expr.ColName)
 	}
 
 	if expr.ByIndex {
@@ -766,7 +720,7 @@ func (expr *ColumnAccessExpr) TypeCheck(
 			}
 		}
 		if expr.ColIndex < 0 {
-			return nil, pgerror.Newf(pgcode.UndefinedColumn,
+			return nil, pgerror.Newf(pgcode.DatatypeMismatch,
 				"could not identify column %q in %s",
 				ErrString(&expr.ColName), resolvedType,
 			)
@@ -1591,12 +1545,6 @@ func (expr *ArrayFlatten) TypeCheck(
 func (expr *Placeholder) TypeCheck(
 	ctx context.Context, semaCtx *SemaContext, desired *types.T,
 ) (TypedExpr, error) {
-	// When we populate placeholder values from pgwire, there is no special
-	// handling of type details like widths. Therefore, we infer the types of
-	// placeholders as only canonical types. This is safe to do because a value
-	// can always be losslessly converted to its canonical type.
-	canonicalDesired := desired.CanonicalType()
-
 	// Perform placeholder typing. This function is only called during Prepare,
 	// when there are no available values for the placeholders yet, because
 	// during Execute all placeholders are replaced from the AST before type
@@ -1614,7 +1562,7 @@ func (expr *Placeholder) TypeCheck(
 			// the type system expects. Then, when the value is actually sent to us
 			// later, we cast the input value (whose type is the expected type) to the
 			// desired type here.
-			typ = canonicalDesired
+			typ = desired
 		}
 		// We call SetType regardless of the above condition to inform the
 		// placeholder struct that this placeholder is locked to its type and cannot
@@ -1628,10 +1576,10 @@ func (expr *Placeholder) TypeCheck(
 	if desired.IsAmbiguous() {
 		return nil, placeholderTypeAmbiguityError(expr.Idx)
 	}
-	if err := semaCtx.Placeholders.SetType(expr.Idx, canonicalDesired); err != nil {
+	if err := semaCtx.Placeholders.SetType(expr.Idx, desired); err != nil {
 		return nil, err
 	}
-	expr.typ = canonicalDesired
+	expr.typ = desired
 	return expr, nil
 }
 
@@ -2026,7 +1974,7 @@ func typeCheckSubqueryWithIn(left, right *types.T) error {
 			return pgerror.Newf(pgcode.InvalidParameterValue,
 				unsupportedCompErrFmt, fmt.Sprintf(compSignatureFmt, left, In, right))
 		}
-		if !left.EquivalentOrNull(right.TupleContents()[0], false /* allowNullTupleEquivalence */) {
+		if !left.EquivalentOrNull(right.TupleContents()[0]) {
 			return pgerror.Newf(pgcode.InvalidParameterValue,
 				unsupportedCompErrFmt, fmt.Sprintf(compSignatureFmt, left, In, right))
 		}
@@ -2450,8 +2398,8 @@ func typeCheckTupleComparison(
 		leftSubExprTyped, rightSubExprTyped, _, _, err := typeCheckComparisonOp(ctx, semaCtx, op, leftSubExpr, rightSubExpr)
 		if err != nil {
 			exps := Exprs([]Expr{left, right})
-			return nil, nil, pgerror.Wrapf(err, pgcode.DatatypeMismatch, "tuples %s are not comparable at index %d",
-				&exps, elemIdx+1)
+			return nil, nil, pgerror.Newf(pgcode.DatatypeMismatch, "tuples %s are not comparable at index %d: %s",
+				&exps, elemIdx+1, err)
 		}
 		left.Exprs[elemIdx] = leftSubExprTyped
 		left.typ.TupleContents()[elemIdx] = leftSubExprTyped.ResolvedType()
@@ -2509,7 +2457,7 @@ func typeCheckSameTypedTupleExprs(
 		}
 		typedSubExprs, resType, err := TypeCheckSameTypedExprs(ctx, semaCtx, desiredElem, sameTypeExprs...)
 		if err != nil {
-			return nil, nil, pgerror.Wrapf(err, pgcode.DatatypeMismatch, "tuples %s are not the same type", Exprs(exprs))
+			return nil, nil, pgerror.Newf(pgcode.DatatypeMismatch, "tuples %s are not the same type: %v", Exprs(exprs), err)
 		}
 		for j, typedExpr := range typedSubExprs {
 			tupleIdx := sameTypeExprsIndices[j]

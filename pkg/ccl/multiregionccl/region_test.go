@@ -245,7 +245,7 @@ func TestRegionAddDropEnclosingRegionalByRowOps(t *testing.T) {
 		{
 			name:            "create-rbr-table",
 			op:              `DROP TABLE IF EXISTS db.rbr; CREATE TABLE db.rbr() LOCALITY REGIONAL BY ROW`,
-			expectedIndexes: []string{"rbr@rbr_pkey"},
+			expectedIndexes: []string{"rbr@primary"},
 		},
 	}
 
@@ -266,7 +266,7 @@ func TestRegionAddDropEnclosingRegionalByRowOps(t *testing.T) {
 							<-rbrOpFinished
 							if !regionAlterCmd.shouldSucceed {
 								// Trigger a roll-back.
-								return jobs.MarkAsPermanentJobError(errors.New("boom"))
+								return errors.New("boom")
 							}
 							// Trod on.
 							return nil
@@ -544,7 +544,7 @@ func TestDroppingPrimaryRegionAsyncJobFailure(t *testing.T) {
 	knobs := base.TestingKnobs{
 		SQLTypeSchemaChanger: &sql.TypeSchemaChangerTestingKnobs{
 			RunBeforeExec: func() error {
-				return jobs.MarkAsPermanentJobError(errors.New("yikes"))
+				return errors.New("yikes")
 			},
 			RunAfterOnFailOrCancel: func() error {
 				mu.Lock()
@@ -609,7 +609,7 @@ func TestRollbackDuringAddDropRegionAsyncJobFailure(t *testing.T) {
 	knobs := base.TestingKnobs{
 		SQLTypeSchemaChanger: &sql.TypeSchemaChangerTestingKnobs{
 			RunBeforeMultiRegionUpdates: func() error {
-				return jobs.MarkAsPermanentJobError(errors.New("boom"))
+				return errors.New("boom")
 			},
 		},
 		// Decrease the adopt loop interval so that retries happen quickly.
@@ -692,7 +692,7 @@ func TestRollbackDuringAddDropRegionPlacementRestricted(t *testing.T) {
 	knobs := base.TestingKnobs{
 		SQLTypeSchemaChanger: &sql.TypeSchemaChangerTestingKnobs{
 			RunBeforeMultiRegionUpdates: func() error {
-				return jobs.MarkAsPermanentJobError(errors.New("boom"))
+				return errors.New("boom")
 			},
 		},
 		// Decrease the adopt loop interval so that retries happen quickly.
@@ -982,7 +982,7 @@ INSERT INTO db.rbr VALUES (1,1),(2,2),(3,3);
 						sqlDBRestore,
 						"db",
 						"rbr",
-						[]string{"rbr@rbr_pkey"},
+						[]string{"rbr@primary"},
 					)
 				})
 			})

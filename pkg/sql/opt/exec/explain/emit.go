@@ -179,9 +179,6 @@ func (e *emitter) nodeName(n *Node) (string, error) {
 	switch n.op {
 	case scanOp:
 		a := n.args.(*scanArgs)
-		if a.Table == nil {
-			return "unknown table", nil
-		}
 		if a.Table.IsVirtualTable() {
 			return "virtual table", nil
 		}
@@ -199,19 +196,6 @@ func (e *emitter) nodeName(n *Node) (string, error) {
 			return "emptyrow", nil
 		default:
 			return "values", nil
-		}
-
-	case groupByOp:
-		a := n.args.(*groupByArgs)
-		switch a.groupingOrderType {
-		case exec.Streaming:
-			return "group (streaming)", nil
-		case exec.PartialStreaming:
-			return "group (partial streaming)", nil
-		case exec.NoStreaming:
-			return "group (hash)", nil
-		default:
-			return "", errors.AssertionFailedf("unhandled group by order type %d", a.groupingOrderType)
 		}
 
 	case hashJoinOp:
@@ -258,9 +242,6 @@ func (e *emitter) nodeName(n *Node) (string, error) {
 
 	case opaqueOp:
 		a := n.args.(*opaqueArgs)
-		if a.Metadata == nil {
-			return "<unknown>", nil
-		}
 		return strings.ToLower(a.Metadata.String()), nil
 	}
 
@@ -293,7 +274,7 @@ var nodeNames = [...]string{
 	explainOptOp:           "explain",
 	exportOp:               "export",
 	filterOp:               "filter",
-	groupByOp:              "", // This node does not have a fixed name.
+	groupByOp:              "group",
 	hashJoinOp:             "", // This node does not have a fixed name.
 	indexJoinOp:            "index join",
 	insertFastPathOp:       "insert fast path",
@@ -321,7 +302,6 @@ var nodeNames = [...]string{
 	simpleProjectOp:        "project",
 	serializingProjectOp:   "project",
 	sortOp:                 "sort",
-	topKOp:                 "top-k",
 	updateOp:               "update",
 	upsertOp:               "upsert",
 	valuesOp:               "", // This node does not have a fixed name.
@@ -369,62 +349,34 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 			e.ob.AddRedactableField(RedactNodes, "regions", strings.Join(s.Regions, ", "))
 		}
 		if s.RowCount.HasValue() {
-			e.ob.AddField("actual row count", string(humanizeutil.Count(s.RowCount.Value())))
+			e.ob.AddField("actual row count", humanizeutil.Count(s.RowCount.Value()))
 		}
 		// Omit vectorized batches in non-verbose mode.
 		if e.ob.flags.Verbose {
 			if s.VectorizedBatchCount.HasValue() {
-				e.ob.AddField("vectorized batch count",
-					string(humanizeutil.Count(s.VectorizedBatchCount.Value())))
+				e.ob.AddField("vectorized batch count", humanizeutil.Count(s.VectorizedBatchCount.Value()))
 			}
 		}
 		if s.KVTime.HasValue() {
-			e.ob.AddField("KV time", string(humanizeutil.Duration(s.KVTime.Value())))
+			e.ob.AddField("KV time", humanizeutil.Duration(s.KVTime.Value()))
 		}
 		if s.KVContentionTime.HasValue() {
-			e.ob.AddField("KV contention time", string(humanizeutil.Duration(s.KVContentionTime.Value())))
+			e.ob.AddField("KV contention time", humanizeutil.Duration(s.KVContentionTime.Value()))
 		}
 		if s.KVRowsRead.HasValue() {
-			e.ob.AddField("KV rows read", string(humanizeutil.Count(s.KVRowsRead.Value())))
+			e.ob.AddField("KV rows read", humanizeutil.Count(s.KVRowsRead.Value()))
 		}
 		if s.KVBytesRead.HasValue() {
 			e.ob.AddField("KV bytes read", humanize.IBytes(s.KVBytesRead.Value()))
-		}
-		if s.MaxAllocatedMem.HasValue() {
-			e.ob.AddField("estimated max memory allocated", humanize.IBytes(s.MaxAllocatedMem.Value()))
-		}
-		if s.MaxAllocatedDisk.HasValue() {
-			e.ob.AddField("estimated max sql temp disk usage", humanize.IBytes(s.MaxAllocatedDisk.Value()))
-		}
-		if e.ob.flags.Verbose {
-			if s.StepCount.HasValue() {
-				e.ob.AddField("MVCC step count (ext/int)", fmt.Sprintf("%s/%s",
-					humanizeutil.Count(s.StepCount.Value()), humanizeutil.Count(s.InternalStepCount.Value()),
-				))
-			}
-			if s.SeekCount.HasValue() {
-				e.ob.AddField("MVCC seek count (ext/int)", fmt.Sprintf("%s/%s",
-					humanizeutil.Count(s.SeekCount.Value()), humanizeutil.Count(s.InternalSeekCount.Value()),
-				))
-			}
 		}
 	}
 
 	if stats, ok := n.annotations[exec.EstimatedStatsID]; ok {
 		s := stats.(*exec.EstimatedStats)
 
-		var estimatedRowCountString string
-		if s.LimitHint > 0 && s.LimitHint != s.RowCount {
-			maxEstimatedRowCount := uint64(math.Ceil(math.Max(s.LimitHint, s.RowCount)))
-			minEstimatedRowCount := uint64(math.Ceil(math.Min(s.LimitHint, s.RowCount)))
-			estimatedRowCountString = fmt.Sprintf("%s - %s", humanizeutil.Count(minEstimatedRowCount), humanizeutil.Count(maxEstimatedRowCount))
-		} else {
-			estimatedRowCount := uint64(math.Round(s.RowCount))
-			estimatedRowCountString = string(humanizeutil.Count(estimatedRowCount))
-		}
-
 		// Show the estimated row count (except Values, where it is redundant).
 		if n.op != valuesOp && !e.ob.flags.OnlyShape {
+			count := uint64(math.Round(s.RowCount))
 			if s.TableStatsAvailable {
 				if n.op == scanOp && s.TableStatsRowCount != 0 {
 					percentage := s.RowCount / float64(s.TableStatsRowCount) * 100
@@ -450,20 +402,20 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 						if timeSinceStats < 0 {
 							timeSinceStats = 0
 						}
-						duration = string(humanizeutil.LongDuration(timeSinceStats))
+						duration = humanizeutil.LongDuration(timeSinceStats)
 					}
 					e.ob.AddField("estimated row count", fmt.Sprintf(
 						"%s (%s%% of the table; stats collected %s ago)",
-						estimatedRowCountString, percentageStr,
+						humanizeutil.Count(count), percentageStr,
 						duration,
 					))
 				} else {
-					e.ob.AddField("estimated row count", estimatedRowCountString)
+					e.ob.AddField("estimated row count", humanizeutil.Count(count))
 				}
 			} else {
 				// No stats available.
 				if e.ob.flags.Verbose {
-					e.ob.Attrf("estimated row count", "%s (missing stats)", estimatedRowCountString)
+					e.ob.Attrf("estimated row count", "%s (missing stats)", humanizeutil.Count(count))
 				} else if n.op == scanOp {
 					// In non-verbose mode, don't show the row count (which is not based
 					// on reality); only show a "missing stats" field for scans. Don't
@@ -483,7 +435,7 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 		a := n.args.(*scanArgs)
 		e.emitTableAndIndex("table", a.Table, a.Index)
 		// Omit spans for virtual tables, unless we actually have a constraint.
-		if a.Table != nil && !(a.Table.IsVirtualTable() && a.Params.IndexConstraint == nil) {
+		if !(a.Table.IsVirtualTable() && a.Params.IndexConstraint == nil) {
 			e.emitSpans("spans", a.Table, a.Index, a.Params)
 		}
 
@@ -530,13 +482,6 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 			ob.Attr("already ordered", colinfo.ColumnOrdering(a.Ordering[:p]).String(n.Columns()))
 		}
 
-	case topKOp:
-		a := n.args.(*topKArgs)
-		ob.Attr("order", colinfo.ColumnOrdering(a.Ordering).String(n.Columns()))
-		if a.K > 0 {
-			ob.Attr("k", a.K)
-		}
-
 	case unionAllOp:
 		a := n.args.(*unionAllArgs)
 		if a.HardLimit > 0 {
@@ -549,11 +494,7 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 		cols := make([]string, len(a.KeyCols))
 		inputCols := a.Input.Columns()
 		for i, c := range a.KeyCols {
-			if len(inputCols) > int(c) {
-				cols[i] = inputCols[c].Name
-			} else {
-				cols[i] = "_"
-			}
+			cols[i] = inputCols[c].Name
 		}
 		ob.VAttr("key columns", strings.Join(cols, ", "))
 
@@ -821,12 +762,6 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 		}
 		e.emitSpans("spans", a.Table, a.Table.Index(cat.PrimaryIndex), params)
 
-	case recursiveCTEOp:
-		a := n.args.(*recursiveCTEArgs)
-		if e.ob.flags.Verbose && a.Deduplicate {
-			ob.Attrf("deduplicate", "")
-		}
-
 	case simpleProjectOp,
 		serializingProjectOp,
 		ordinalityOp,
@@ -847,6 +782,7 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 		alterTableUnsplitOp,
 		alterTableUnsplitAllOp,
 		alterTableRelocateOp,
+		recursiveCTEOp,
 		controlJobsOp,
 		controlSchedulesOp,
 		cancelQueriesOp,
@@ -861,10 +797,6 @@ func (e *emitter) emitNodeAttributes(n *Node) error {
 }
 
 func (e *emitter) emitTableAndIndex(field string, table cat.Table, index cat.Index) {
-	if table == nil || index == nil {
-		e.ob.Attr(field, "?@?")
-		return
-	}
 	partial := ""
 	if _, isPartial := index.Predicate(); isPartial {
 		partial = " (partial index)"
@@ -1011,11 +943,7 @@ func printColumnList(inputCols colinfo.ResultColumns, cols []exec.NodeColumnOrdi
 		if i > 0 {
 			buf.WriteString(", ")
 		}
-		if len(inputCols) > 0 && len(inputCols[col].Name) > 0 {
-			buf.WriteString(inputCols[col].Name)
-		} else {
-			buf.WriteString("_")
-		}
+		buf.WriteString(inputCols[col].Name)
 	}
 	return buf.String()
 }

@@ -49,7 +49,7 @@ import (
 	"github.com/cockroachdb/pebble/bloom"
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/cockroachdb/redact"
-	humanize "github.com/dustin/go-humanize"
+	"github.com/dustin/go-humanize"
 )
 
 const maxSyncDurationFatalOnExceededDefault = true
@@ -351,6 +351,13 @@ func DefaultPebbleOptions() *pebble.Options {
 	// SSDs, that kick off an expensive GC if a lot of files are deleted at
 	// once.
 	opts.Experimental.MinDeletionRate = 128 << 20 // 128 MB
+	// Disable read sampling and by extension read-triggered compactions. Read-
+	// triggered compactions are known to cause excessively high write
+	// amplification on some read heavy workloads. See:
+	// https://github.com/cockroachdb/pebble/issues/1143
+	//
+	// TODO(bilal): Remove this line when the above issue is addressed.
+	opts.Experimental.ReadSamplingMultiplier = -1
 	// Validate min/max keys in each SSTable when performing a compaction. This
 	// serves as a simple protection against corruption or programmer-error in
 	// Pebble.
@@ -397,6 +404,10 @@ func DefaultPebbleOptions() *pebble.Options {
 	if diskHealthCheckInterval.Seconds() > maxSyncDurationDefault.Seconds() {
 		diskHealthCheckInterval = maxSyncDurationDefault
 	}
+	// If we encounter ENOSPC, exit with an informative exit code.
+	opts.FS = vfs.OnDiskFull(opts.FS, func() {
+		exit.WithCode(exit.DiskFull())
+	})
 	// Instantiate a file system with disk health checking enabled. This FS wraps
 	// vfs.Default, and can be wrapped for encryption-at-rest.
 	opts.FS = vfs.WithDiskHealthChecks(vfs.Default, diskHealthCheckInterval,
@@ -406,10 +417,6 @@ func DefaultPebbleOptions() *pebble.Options {
 				Duration: duration,
 			})
 		})
-	// If we encounter ENOSPC, exit with an informative exit code.
-	opts.FS = vfs.OnDiskFull(opts.FS, func() {
-		exit.WithCode(exit.DiskFull())
-	})
 	return opts
 }
 
@@ -463,7 +470,6 @@ type Pebble struct {
 	ballastSize int64
 	maxSize     int64
 	attrs       roachpb.Attributes
-	properties  roachpb.StoreProperties
 	// settings must be non-nil if this Pebble instance will be used to write
 	// intents.
 	settings     *cluster.Settings
@@ -604,7 +610,7 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (*Pebble, error) {
 	}
 	ballastPath := base.EmergencyBallastFile(cfg.Opts.FS.PathJoin, cfg.Dir)
 
-	// For some purposes, we want to always use an unencrypted
+	// For some purposes, we want to always use an unecrypted
 	// filesystem. The call below to ResolveEncryptedEnvOptions will
 	// replace cfg.Opts.FS with a VFS wrapped with encryption-at-rest if
 	// necessary. Before we do that, save a handle on the unencrypted
@@ -655,8 +661,6 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (*Pebble, error) {
 		}
 	}
 
-	storeProps := computeStoreProperties(ctx, cfg.Dir, cfg.Opts.ReadOnly, env != nil /* encryptionEnabled */)
-
 	p := &Pebble{
 		readOnly:                cfg.Opts.ReadOnly,
 		path:                    cfg.Dir,
@@ -665,7 +669,6 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (*Pebble, error) {
 		ballastSize:             cfg.BallastSize,
 		maxSize:                 cfg.MaxSize,
 		attrs:                   cfg.Attrs,
-		properties:              storeProps,
 		settings:                cfg.Settings,
 		encryption:              env,
 		fileRegistry:            fileRegistry,
@@ -787,11 +790,21 @@ func (p *Pebble) Closed() bool {
 
 // ExportMVCCToSst is part of the engine.Reader interface.
 func (p *Pebble) ExportMVCCToSst(
-	ctx context.Context, exportOptions ExportOptions, dest io.Writer,
+	ctx context.Context,
+	startKey, endKey roachpb.Key,
+	startTS, endTS hlc.Timestamp,
+	firstKeyTS hlc.Timestamp,
+	exportAllRevisions bool,
+	targetSize, maxSize uint64,
+	stopMidKey bool,
+	useTBI bool,
+	dest io.Writer,
 ) (roachpb.BulkOpSummary, roachpb.Key, hlc.Timestamp, error) {
 	r := wrapReader(p)
 	// Doing defer r.Free() does not inline.
-	summary, k, err := pebbleExportToSst(ctx, r, exportOptions, dest)
+	maxIntentCount := MaxIntentsPerWriteIntentError.Get(&p.settings.SV)
+	summary, k, err := pebbleExportToSst(ctx, r, MVCCKey{Key: startKey, Timestamp: firstKeyTS}, endKey, startTS, endTS,
+		exportAllRevisions, targetSize, maxSize, stopMidKey, useTBI, dest, maxIntentCount)
 	r.Free()
 	return summary, k.Key, k.Timestamp, err
 }
@@ -855,13 +868,12 @@ func (p *Pebble) NewMVCCIterator(iterKind MVCCIterKind, opts IterOptions) MVCCIt
 		}
 		return iter
 	}
-
-	iter := newPebbleIterator(p.db, nil, opts)
+	iter := MVCCIterator(newPebbleIterator(p.db, nil, opts))
 	if iter == nil {
 		panic("couldn't create a new iterator")
 	}
 	if util.RaceEnabled {
-		return wrapInUnsafeIter(iter)
+		iter = wrapInUnsafeIter(iter)
 	}
 	return iter
 }
@@ -1058,11 +1070,6 @@ func (p *Pebble) LogLogicalOp(op MVCCLogicalOpType, details MVCCLogicalOpDetails
 // Attrs implements the Engine interface.
 func (p *Pebble) Attrs() roachpb.Attributes {
 	return p.attrs
-}
-
-// Properties implements the Engine interface.
-func (p *Pebble) Properties() roachpb.StoreProperties {
-	return p.properties
 }
 
 // Capacity implements the Engine interface.
@@ -1598,11 +1605,21 @@ func (p *pebbleReadOnly) Closed() bool {
 
 // ExportMVCCToSst is part of the engine.Reader interface.
 func (p *pebbleReadOnly) ExportMVCCToSst(
-	ctx context.Context, exportOptions ExportOptions, dest io.Writer,
+	ctx context.Context,
+	startKey, endKey roachpb.Key,
+	startTS, endTS hlc.Timestamp,
+	firstKeyTS hlc.Timestamp,
+	exportAllRevisions bool,
+	targetSize, maxSize uint64,
+	stopMidKey bool,
+	useTBI bool,
+	dest io.Writer,
 ) (roachpb.BulkOpSummary, roachpb.Key, hlc.Timestamp, error) {
 	r := wrapReader(p)
 	// Doing defer r.Free() does not inline.
-	summary, k, err := pebbleExportToSst(ctx, r, exportOptions, dest)
+	maxIntentCount := MaxIntentsPerWriteIntentError.Get(&p.parent.settings.SV)
+	summary, k, err := pebbleExportToSst(ctx, r, MVCCKey{Key: startKey, Timestamp: firstKeyTS}, endKey, startTS, endTS,
+		exportAllRevisions, targetSize, maxSize, stopMidKey, useTBI, dest, maxIntentCount)
 	r.Free()
 	return summary, k.Key, k.Timestamp, err
 }
@@ -1864,11 +1881,21 @@ func (p *pebbleSnapshot) Closed() bool {
 
 // ExportMVCCToSst is part of the engine.Reader interface.
 func (p *pebbleSnapshot) ExportMVCCToSst(
-	ctx context.Context, exportOptions ExportOptions, dest io.Writer,
+	ctx context.Context,
+	startKey, endKey roachpb.Key,
+	startTS, endTS hlc.Timestamp,
+	firstKeyTS hlc.Timestamp,
+	exportAllRevisions bool,
+	targetSize, maxSize uint64,
+	stopMidKey bool,
+	useTBI bool,
+	dest io.Writer,
 ) (roachpb.BulkOpSummary, roachpb.Key, hlc.Timestamp, error) {
 	r := wrapReader(p)
 	// Doing defer r.Free() does not inline.
-	summary, k, err := pebbleExportToSst(ctx, r, exportOptions, dest)
+	maxIntentCount := MaxIntentsPerWriteIntentError.Get(&p.settings.SV)
+	summary, k, err := pebbleExportToSst(ctx, r, MVCCKey{Key: startKey, Timestamp: firstKeyTS}, endKey, startTS, endTS,
+		exportAllRevisions, targetSize, maxSize, stopMidKey, useTBI, dest, maxIntentCount)
 	r.Free()
 	return summary, k.Key, k.Timestamp, err
 }
@@ -1989,7 +2016,17 @@ func (e *ExceedMaxSizeError) Error() string {
 }
 
 func pebbleExportToSst(
-	ctx context.Context, reader Reader, options ExportOptions, dest io.Writer,
+	ctx context.Context,
+	reader Reader,
+	startKey MVCCKey,
+	endKey roachpb.Key,
+	startTS, endTS hlc.Timestamp,
+	exportAllRevisions bool,
+	targetSize, maxSize uint64,
+	stopMidKey bool,
+	useTBI bool,
+	dest io.Writer,
+	maxIntentCount int64,
 ) (roachpb.BulkOpSummary, MVCCKey, error) {
 	var span *tracing.Span
 	ctx, span = tracing.ChildSpan(ctx, "pebbleExportToSst")
@@ -2002,29 +2039,29 @@ func pebbleExportToSst(
 	iter := NewMVCCIncrementalIterator(
 		reader,
 		MVCCIncrementalIterOptions{
-			EndKey:                              options.EndKey,
-			EnableTimeBoundIteratorOptimization: options.UseTBI,
-			StartTime:                           options.StartTS,
-			EndTime:                             options.EndTS,
+			EndKey:                              endKey,
+			EnableTimeBoundIteratorOptimization: useTBI,
+			StartTime:                           startTS,
+			EndTime:                             endTS,
 			IntentPolicy:                        MVCCIncrementalIterIntentPolicyAggregate,
 		})
 	defer iter.Close()
 	var curKey roachpb.Key // only used if exportAllRevisions
 	var resumeKey roachpb.Key
 	var resumeTS hlc.Timestamp
-	paginated := options.TargetSize > 0
-	trackKeyBoundary := paginated || options.ResourceLimiter != nil
-	firstIteration := true
-	for iter.SeekGE(options.StartKey); ; {
+	paginated := targetSize > 0
+	for iter.SeekGE(startKey); ; {
 		ok, err := iter.Valid()
 		if err != nil {
+			// This is an underlying iterator error, return it to the caller to deal
+			// with.
 			return roachpb.BulkOpSummary{}, MVCCKey{}, err
 		}
 		if !ok {
 			break
 		}
 		unsafeKey := iter.UnsafeKey()
-		if unsafeKey.Key.Compare(options.EndKey) >= 0 {
+		if unsafeKey.Key.Compare(endKey) >= 0 {
 			break
 		}
 
@@ -2033,62 +2070,35 @@ func pebbleExportToSst(
 		}
 
 		unsafeValue := iter.UnsafeValue()
-		isNewKey := !options.ExportAllRevisions || !unsafeKey.Key.Equal(curKey)
-		if trackKeyBoundary && options.ExportAllRevisions && isNewKey {
+		isNewKey := !exportAllRevisions || !unsafeKey.Key.Equal(curKey)
+		if paginated && exportAllRevisions && isNewKey {
 			curKey = append(curKey[:0], unsafeKey.Key...)
-		}
-
-		if options.ResourceLimiter != nil {
-			// Don't check resources on first iteration to ensure we can make some progress regardless
-			// of starvation. Otherwise operations could spin indefinitely.
-			if firstIteration {
-				firstIteration = false
-			} else {
-				// In happy day case we want to only stop at key boundaries as it allows callers to use
-				// produced sst's directly. But if we can't find key boundary within reasonable number of
-				// iterations we would split mid key.
-				// To achieve that we use soft and hard thresholds in limiter. Once soft limit is reached
-				// we would start searching for key boundary and return as soon as it is reached. If we
-				// can't find it before hard limit is reached and caller requested mid key stop we would
-				// immediately return.
-				limit := options.ResourceLimiter.IsExhausted()
-				// We can stop at key once any threshold is reached or force stop at hard limit if midkey
-				// split is allowed.
-				if limit >= ResourceLimitReachedSoft && isNewKey || limit == ResourceLimitReachedHard && options.StopMidKey {
-					// Reached iteration limit, stop with resume span
-					resumeKey = append(make(roachpb.Key, 0, len(unsafeKey.Key)), unsafeKey.Key...)
-					if !isNewKey {
-						resumeTS = unsafeKey.Timestamp
-					}
-					break
-				}
-			}
 		}
 
 		// Skip tombstone (len=0) records when start time is zero (non-incremental)
 		// and we are not exporting all versions.
-		skipTombstones := !options.ExportAllRevisions && options.StartTS.IsEmpty()
+		skipTombstones := !exportAllRevisions && startTS.IsEmpty()
 		if len(unsafeValue) > 0 || !skipTombstones {
 			if err := rows.Count(unsafeKey.Key); err != nil {
 				return roachpb.BulkOpSummary{}, MVCCKey{}, errors.Wrapf(err, "decoding %s", unsafeKey)
 			}
 			curSize := rows.BulkOpSummary.DataSize
-			reachedTargetSize := curSize > 0 && uint64(curSize) >= options.TargetSize
+			reachedTargetSize := curSize > 0 && uint64(curSize) >= targetSize
 			newSize := curSize + int64(len(unsafeKey.Key)+len(unsafeValue))
-			reachedMaxSize := options.MaxSize > 0 && newSize > int64(options.MaxSize)
+			reachedMaxSize := maxSize > 0 && newSize > int64(maxSize)
 			// When paginating we stop writing in two cases:
 			// - target size is reached and we wrote all versions of a key
 			// - maximum size reached and we are allowed to stop mid key
-			if paginated && (isNewKey && reachedTargetSize || options.StopMidKey && reachedMaxSize) {
+			if paginated && (isNewKey && reachedTargetSize || stopMidKey && reachedMaxSize) {
 				// Allocate the right size for resumeKey rather than using curKey.
 				resumeKey = append(make(roachpb.Key, 0, len(unsafeKey.Key)), unsafeKey.Key...)
-				if options.StopMidKey && !isNewKey {
+				if stopMidKey && !isNewKey {
 					resumeTS = unsafeKey.Timestamp
 				}
 				break
 			}
 			if reachedMaxSize {
-				return roachpb.BulkOpSummary{}, MVCCKey{}, &ExceedMaxSizeError{reached: newSize, maxSize: options.MaxSize}
+				return roachpb.BulkOpSummary{}, MVCCKey{}, &ExceedMaxSizeError{reached: newSize, maxSize: maxSize}
 			}
 			if unsafeKey.Timestamp.IsEmpty() {
 				// This should never be an intent since the incremental iterator returns
@@ -2104,7 +2114,7 @@ func pebbleExportToSst(
 			rows.BulkOpSummary.DataSize = newSize
 		}
 
-		if options.ExportAllRevisions {
+		if exportAllRevisions {
 			iter.Next()
 		} else {
 			iter.NextKey()
@@ -2115,7 +2125,7 @@ func pebbleExportToSst(
 	// If we do it means this export can't complete and is aborted. We need to loop over remaining data
 	// to collect all matching intents before returning them in an error to the caller.
 	if iter.NumCollectedIntents() > 0 {
-		for uint64(iter.NumCollectedIntents()) < options.MaxIntents {
+		for int64(iter.NumCollectedIntents()) < maxIntentCount {
 			iter.NextKey()
 			// If we encounter other errors during intent collection, we return our original write intent failure.
 			// We would find this new error again upon retry.

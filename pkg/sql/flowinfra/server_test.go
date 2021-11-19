@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/distsql"
@@ -62,7 +61,7 @@ func TestServer(t *testing.T) {
 		Table:         *td.TableDesc(),
 		IndexIdx:      0,
 		Reverse:       false,
-		Spans:         []roachpb.Span{td.PrimaryIndexSpan(keys.SystemSQLCodec)},
+		Spans:         []execinfrapb.TableReaderSpan{{Span: td.PrimaryIndexSpan(keys.SystemSQLCodec)}},
 		NeededColumns: []uint32{0, 1},
 	}
 	post := execinfrapb.PostProcessSpec{

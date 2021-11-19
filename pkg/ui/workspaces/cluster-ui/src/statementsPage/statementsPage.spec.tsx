@@ -37,10 +37,10 @@ describe("StatementsPage", () => {
       const statementsPageInstance = statementsPageWrapper.instance();
 
       assert.equal(
-        statementsPageInstance.props.sortSetting.columnTitle,
+        statementsPageInstance.state.sortSetting.columnTitle,
         "executionCount",
       );
-      assert.equal(statementsPageInstance.props.sortSetting.ascending, false);
+      assert.equal(statementsPageInstance.state.sortSetting.ascending, false);
     });
   });
 });

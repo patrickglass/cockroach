@@ -28,7 +28,6 @@ crdb_internal  cluster_queries              table  NULL  NULL  NULL
 crdb_internal  cluster_sessions             table  NULL  NULL  NULL
 crdb_internal  cluster_settings             table  NULL  NULL  NULL
 crdb_internal  cluster_transactions         table  NULL  NULL  NULL
-crdb_internal  create_schema_statements     table  NULL  NULL  NULL
 crdb_internal  create_statements            table  NULL  NULL  NULL
 crdb_internal  create_type_statements       table  NULL  NULL  NULL
 crdb_internal  cross_db_references          table  NULL  NULL  NULL
@@ -42,6 +41,7 @@ crdb_internal  gossip_network               table  NULL  NULL  NULL
 crdb_internal  gossip_nodes                 table  NULL  NULL  NULL
 crdb_internal  index_columns                table  NULL  NULL  NULL
 crdb_internal  index_usage_statistics       table  NULL  NULL  NULL
+crdb_internal  interleaved                  table  NULL  NULL  NULL
 crdb_internal  invalid_objects              table  NULL  NULL  NULL
 crdb_internal  jobs                         table  NULL  NULL  NULL
 crdb_internal  kv_node_liveness             table  NULL  NULL  NULL
@@ -806,7 +806,6 @@ SELECT * FROM crdb_internal.cluster_database_privileges
 ----
 database_name  grantee  privilege_type
 other_db       admin    ALL
-other_db       public   CONNECT
 other_db       root     ALL
 
 statement ok
@@ -818,7 +817,6 @@ SELECT * FROM crdb_internal.cluster_database_privileges
 ----
 database_name  grantee   privilege_type
 other_db       admin     ALL
-other_db       public    CONNECT
 other_db       root      ALL
 other_db       testuser  DROP
 
@@ -834,24 +832,19 @@ SELECT * FROM "".crdb_internal.cluster_database_privileges ORDER BY 1,2,3
 ----
 database_name  grantee   privilege_type
 defaultdb      admin     ALL
-defaultdb      public    CONNECT
 defaultdb      root      ALL
 other_db       admin     ALL
-other_db       public    CONNECT
 other_db       root      ALL
 other_db       testuser  DROP
 postgres       admin     ALL
-postgres       public    CONNECT
 postgres       root      ALL
 system         admin     GRANT
 system         admin     SELECT
 system         root      GRANT
 system         root      SELECT
 test           admin     ALL
-test           public    CONNECT
 test           root      ALL
 testdb         admin     ALL
-testdb         public    CONNECT
 testdb         root      ALL
 
 statement ok
@@ -862,24 +855,19 @@ SELECT * FROM crdb_internal.cluster_database_privileges ORDER BY 1,2,3
 ----
 database_name  grantee   privilege_type
 defaultdb      admin     ALL
-defaultdb      public    CONNECT
 defaultdb      root      ALL
 other_db       admin     ALL
-other_db       public    CONNECT
 other_db       root      ALL
 other_db       testuser  DROP
 postgres       admin     ALL
-postgres       public    CONNECT
 postgres       root      ALL
 system         admin     GRANT
 system         admin     SELECT
 system         root      GRANT
 system         root      SELECT
 test           admin     ALL
-test           public    CONNECT
 test           root      ALL
 testdb         admin     ALL
-testdb         public    CONNECT
 testdb         root      ALL
 
 statement ok

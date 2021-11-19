@@ -29,19 +29,17 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
-	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/cockroachdb/logtags"
 )
 
 const putValue = "thekvproberwrotethis"
 
 // Prober sends queries to KV in a loop. See package docstring for more.
 type Prober struct {
-	db       *kv.DB
-	settings *cluster.Settings
+	ambientCtx log.AmbientContext
+	db         *kv.DB
+	settings   *cluster.Settings
 	// planner is an interface for selecting a range to probe. There are
 	// separate planners for the read & write probe loops, so as to achieve
 	// a balanced probing of the keyspace, regardless of differences in the rate
@@ -52,14 +50,13 @@ type Prober struct {
 	// metrics wraps up the set of prometheus metrics that the prober sets; the
 	// goal of the prober IS to populate these metrics.
 	metrics Metrics
-	tracer  *tracing.Tracer
 }
 
 // Opts provides knobs to control kvprober.Prober.
 type Opts struct {
-	DB       *kv.DB
-	Settings *cluster.Settings
-	Tracer   *tracing.Tracer
+	AmbientCtx log.AmbientContext
+	DB         *kv.DB
+	Settings   *cluster.Settings
 	// The windowed portion of the latency histogram retains values for
 	// approximately histogramWindow. See metrics library for more.
 	HistogramWindowInterval time.Duration
@@ -140,8 +137,9 @@ type Metrics struct {
 // NewProber creates a Prober from Opts.
 func NewProber(opts Opts) *Prober {
 	return &Prober{
-		db:       opts.DB,
-		settings: opts.Settings,
+		ambientCtx: opts.AmbientCtx,
+		db:         opts.DB,
+		settings:   opts.Settings,
 
 		readPlanner:  newMeta2Planner(opts.DB, opts.Settings, func() time.Duration { return readInterval.Get(&opts.Settings.SV) }),
 		writePlanner: newMeta2Planner(opts.DB, opts.Settings, func() time.Duration { return writeInterval.Get(&opts.Settings.SV) }),
@@ -156,7 +154,6 @@ func NewProber(opts Opts) *Prober {
 			ProbePlanAttempts:  metric.NewCounter(metaProbePlanAttempts),
 			ProbePlanFailures:  metric.NewCounter(metaProbePlanFailures),
 		},
-		tracer: opts.Tracer,
 	}
 }
 
@@ -168,18 +165,22 @@ func (p *Prober) Metrics() Metrics {
 // Start causes kvprober to start probing KV. Start returns immediately. Start
 // returns an error only if stopper.RunAsyncTask returns an error.
 func (p *Prober) Start(ctx context.Context, stopper *stop.Stopper) error {
-	ctx = logtags.AddTag(ctx, "kvprober", nil /* value */)
-	startLoop := func(ctx context.Context, opName string, probe func(context.Context, *kv.DB, planner), pl planner, interval *settings.DurationSetting) error {
-		return stopper.RunAsyncTaskEx(ctx, stop.TaskOpts{TaskName: opName, SpanOpt: stop.SterileRootSpan}, func(ctx context.Context) {
+	ambient := p.ambientCtx
+	ambient.AddLogTag("kvprober", nil)
+
+	startLoop := func(ctx context.Context, desc string, pf func(context.Context, *kv.DB, planner), pl planner, interval *settings.DurationSetting) error {
+		return stopper.RunAsyncTask(ctx, desc, func(ctx context.Context) {
 			defer logcrash.RecoverAndReportNonfatalPanic(ctx, &p.settings.SV)
 
-			rnd, _ /* seed */ := randutil.NewPseudoRand()
 			d := func() time.Duration {
-				return withJitter(interval.Get(&p.settings.SV), rnd)
+				return withJitter(interval.Get(&p.settings.SV), rand.Int63n)
 			}
 			t := timeutil.NewTimer()
 			defer t.Stop()
 			t.Reset(d())
+
+			ctx, sp := ambient.AnnotateCtxWithSpan(ctx, desc)
+			defer sp.Finish()
 
 			ctx, cancel := stopper.WithCancelOnQuiesce(ctx)
 			defer cancel()
@@ -194,9 +195,7 @@ func (p *Prober) Start(ctx context.Context, stopper *stop.Stopper) error {
 					return
 				}
 
-				probeCtx, sp := tracing.EnsureChildSpan(ctx, p.tracer, opName+" - probe")
-				probe(probeCtx, p.db, pl)
-				sp.Finish()
+				pf(ctx, p.db, pl)
 			}
 		})
 	}
@@ -326,8 +325,11 @@ func (p *Prober) writeProbeImpl(ctx context.Context, db dbTxner, pl planner) {
 }
 
 // Returns a random duration pulled from the uniform distribution given below:
-// [d - 0.25*d, d + 0.25*d).
-func withJitter(d time.Duration, rnd *rand.Rand) time.Duration {
-	amplitudeNanos := d.Nanoseconds() / 4
-	return d + time.Duration(randutil.RandInt63InRange(rnd, -amplitudeNanos, amplitudeNanos))
+// [d - 0.2*d, d + 0.2*d]
+func withJitter(d time.Duration, intn func(n int64) int64) time.Duration {
+	jitter := time.Duration(intn(d.Milliseconds()/5)) * time.Millisecond
+	if intn(2) == 1 {
+		return d + jitter
+	}
+	return d - jitter
 }

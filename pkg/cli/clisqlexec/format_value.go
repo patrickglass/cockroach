@@ -45,8 +45,7 @@ func FormatVal(
 			return formatArray(b, colType[1:], showPrintableUnicode, showNewLinesAndTabs)
 		}
 
-		// Names, records, and user-defined types should all be displayed as strings.
-		if colType == "NAME" || colType == "RECORD" || colType == "" {
+		if colType == "NAME" {
 			val = string(b)
 			colType = "VARCHAR"
 		}
@@ -152,7 +151,7 @@ func formatArray(
 		intArray := []int64{}
 		backingArray = &intArray
 		parsingArray = (*pq.Int64Array)(&intArray)
-	case "TEXT", "VARCHAR", "NAME", "CHAR", "BPCHAR", "RECORD":
+	case "TEXT", "VARCHAR", "NAME", "CHAR", "BPCHAR":
 		stringArray := []string{}
 		backingArray = &stringArray
 		parsingArray = (*pq.StringArray)(&stringArray)

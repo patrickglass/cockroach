@@ -39,7 +39,6 @@ go_library(
         "//pkg/sql/sem/tree",
         "//pkg/sql/types",
         "//pkg/storage",
-        "//pkg/util/ctxgroup",
         "//pkg/util/hlc",
         "//pkg/util/log",
         "//pkg/util/metric",
@@ -51,6 +50,7 @@ go_library(
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_cockroachdb_logtags//:logtags",
         "@com_github_cockroachdb_redact//:redact",
+        "@org_golang_x_sync//errgroup",
     ],
 )
 

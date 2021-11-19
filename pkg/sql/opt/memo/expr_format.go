@@ -216,17 +216,6 @@ func (f *ExprFmtCtx) formatRelational(e RelExpr, tp treeprinter.Node) {
 		fmt.Fprintf(f.Buffer, "%v", e.Op())
 		FormatPrivate(f, e.Private(), required)
 
-	case *GroupByExpr:
-		fmt.Fprintf(f.Buffer, "%v ", e.Op())
-		groupingColOrderType := e.Private().(*GroupingPrivate).GroupingOrderType(&required.Ordering)
-		if groupingColOrderType == Streaming {
-			fmt.Fprintf(f.Buffer, "(streaming)")
-		} else if groupingColOrderType == PartialStreaming {
-			fmt.Fprintf(f.Buffer, "(partial streaming)")
-		} else {
-			fmt.Fprintf(f.Buffer, "(hash)")
-		}
-
 	case *SortExpr:
 		if t.InputOrdering.Any() {
 			fmt.Fprintf(f.Buffer, "%v", e.Op())
@@ -318,12 +307,6 @@ func (f *ExprFmtCtx) formatRelational(e RelExpr, tp treeprinter.Node) {
 		if !f.HasFlags(ExprFmtHideMiscProps) && private.ErrorOnDup != "" {
 			tp.Childf("error: \"%s\"", private.ErrorOnDup)
 		}
-
-	case *TopKExpr:
-		if !f.HasFlags(ExprFmtHidePhysProps) && !t.Ordering.Any() {
-			tp.Childf("internal-ordering: %s", t.Ordering)
-		}
-		tp.Childf("k: %d", t.K)
 
 	case *LimitExpr:
 		if !f.HasFlags(ExprFmtHidePhysProps) && !t.Ordering.Any() {
@@ -441,23 +424,6 @@ func (f *ExprFmtCtx) formatRelational(e RelExpr, tp treeprinter.Node) {
 			}
 			if private.Flags.NoFullScan {
 				b.WriteString(" no-full-scan")
-			}
-			if private.Flags.ForceZigzag {
-				if private.Flags.ZigzagIndexes.Empty() {
-					b.WriteString(" force-zigzag")
-				} else {
-					b.WriteString(" force-zigzag=")
-					s := private.Flags.ZigzagIndexes
-					needComma := false
-					for i, ok := s.Next(0); ok; i, ok = s.Next(i + 1) {
-						idx := md.Table(private.Table).Index(i)
-						if needComma {
-							b.WriteByte(',')
-						}
-						b.WriteString(string(idx.Name()))
-						needComma = true
-					}
-				}
 			}
 			tp.Child(b.String())
 		}
@@ -712,9 +678,6 @@ func (f *ExprFmtCtx) formatRelational(e RelExpr, tp treeprinter.Node) {
 
 	case *RecursiveCTEExpr:
 		if !f.HasFlags(ExprFmtHideColumns) {
-			if t.Deduplicate {
-				tp.Childf("deduplicate")
-			}
 			tp.Childf("working table binding: &%d", t.WithID)
 			f.formatColList(e, tp, "initial columns:", t.InitialCols)
 			f.formatColList(e, tp, "recursive columns:", t.RecursiveCols)
@@ -1091,9 +1054,8 @@ func (f *ExprFmtCtx) formatScalarPrivate(scalar opt.ScalarExpr) {
 		// We don't want to show the OriginalExpr.
 		private = nil
 
-	case *CastExpr, *AssignmentCastExpr:
-		typ := scalar.Private().(*types.T)
-		private = typ.SQLString()
+	case *CastExpr:
+		private = t.Typ.SQLString()
 
 	case *KVOptionsItem:
 		fmt.Fprintf(f.Buffer, " %s", t.Key)

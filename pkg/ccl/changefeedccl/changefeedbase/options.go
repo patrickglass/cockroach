@@ -38,7 +38,6 @@ const (
 	OptKeyInValue               = `key_in_value`
 	OptTopicInValue             = `topic_in_value`
 	OptResolvedTimestamps       = `resolved`
-	OptMinCheckpointFrequency   = `min_checkpoint_frequency`
 	OptUpdatedTimestamps        = `updated`
 	OptMVCCTimestamps           = `mvcc_timestamp`
 	OptDiff                     = `diff`
@@ -113,7 +112,6 @@ const (
 	SinkParamClientCert             = `client_cert`
 	SinkParamClientKey              = `client_key`
 	SinkParamFileSize               = `file_size`
-	SinkParamPartitionFormat        = `partition_format`
 	SinkParamSchemaTopic            = `schema_topic`
 	SinkParamTLSEnabled             = `tls_enabled`
 	SinkParamSkipTLSVerify          = `insecure_tls_skip_verify`
@@ -153,7 +151,6 @@ var ChangefeedOptionExpectValues = map[string]sql.KVStringOptValidate{
 	OptKeyInValue:               sql.KVStringOptRequireNoValue,
 	OptTopicInValue:             sql.KVStringOptRequireNoValue,
 	OptResolvedTimestamps:       sql.KVStringOptAny,
-	OptMinCheckpointFrequency:   sql.KVStringOptRequireValue,
 	OptUpdatedTimestamps:        sql.KVStringOptRequireNoValue,
 	OptMVCCTimestamps:           sql.KVStringOptRequireNoValue,
 	OptDiff:                     sql.KVStringOptRequireNoValue,
@@ -186,8 +183,7 @@ var CommonOptions = makeStringSet(OptCursor, OptEnvelope,
 	OptMVCCTimestamps, OptDiff,
 	OptSchemaChangeEvents, OptSchemaChangePolicy,
 	OptProtectDataFromGCOnPause, OptOnError,
-	OptInitialScan, OptNoInitialScan,
-	OptMinCheckpointFrequency)
+	OptInitialScan, OptNoInitialScan)
 
 // SQLValidOptions is options exclusive to SQL sink
 var SQLValidOptions map[string]struct{} = nil

@@ -132,6 +132,7 @@ func TestOpenReadOnlyStore(t *testing.T) {
 
 func TestRemoveDeadReplicas(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	skip.WithIssue(t, 50977, "flaky test")
 	defer log.Scope(t).Close(t)
 
 	// This test is pretty slow under race (200+ cpu-seconds) because it
@@ -234,7 +235,7 @@ func TestRemoveDeadReplicas(t *testing.T) {
 						t.Fatal(err)
 					}
 
-					// At this point the intent has been written to Pebble but this
+					// At this point the intent has been written to rocksdb but this
 					// write was not synced (only the raft log append was synced). We
 					// need to force another sync, but we're far from the storage
 					// layer here so the easiest thing to do is simply perform a

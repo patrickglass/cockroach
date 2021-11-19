@@ -13,7 +13,6 @@ package optbuilder
 import (
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
@@ -88,6 +87,34 @@ func (b *Builder) buildDataSource(
 				newCol.table = *tn
 				inCols[i] = id
 				outCols[i] = newCol.id
+			}
+
+			if b.evalCtx.SessionData().PropagateInputOrdering && len(inScope.ordering) > 0 {
+				var oldToNew opt.ColMap
+				for i := range inCols {
+					oldToNew.Set(int(inCols[i]), int(outCols[i]))
+				}
+				outScope.ordering = make(opt.Ordering, len(inScope.ordering))
+				for i, col := range inScope.ordering {
+					var newID int
+					var ok bool
+					if newID, ok = oldToNew.Get(int(col.ID())); !ok {
+						c := b.factory.Metadata().ColumnMeta(col.ID())
+						outScope.extraCols = append(outScope.extraCols,
+							scopeColumn{
+								name: scopeColName(tree.Name("order_" + c.Alias)),
+								typ:  c.Type,
+							},
+						)
+						newCol := &outScope.extraCols[len(outScope.extraCols)-1]
+						b.populateSynthesizedColumn(newCol, nil)
+						newCol.table = *tn
+						newID = int(newCol.id)
+						inCols = append(inCols, col.ID())
+						outCols = append(outCols, newCol.id)
+					}
+					outScope.ordering[i] = opt.MakeOrderingColumn(opt.ColumnID(newID), col.Descending())
+				}
 			}
 
 			outScope.expr = b.factory.ConstructWithScan(&memo.WithScanPrivate{
@@ -522,11 +549,6 @@ func (b *Builder) buildScan(
 					break
 				}
 			}
-			// Fallback to referencing @primary as the PRIMARY KEY.
-			// Note that indexes with "primary" as their name takes precedence above.
-			if idx == -1 && indexFlags.Index == tabledesc.LegacyPrimaryKeyIndexName {
-				idx = 0
-			}
 			if idx == -1 {
 				var err error
 				if indexFlags.Index != "" {
@@ -541,45 +563,6 @@ func (b *Builder) buildScan(
 			private.Flags.ForceIndex = true
 			private.Flags.Index = idx
 			private.Flags.Direction = indexFlags.Direction
-		}
-		private.Flags.ForceZigzag = indexFlags.ForceZigzag
-		if len(indexFlags.ZigzagIndexes) > 0 {
-			private.Flags.ForceZigzag = true
-			for _, name := range indexFlags.ZigzagIndexes {
-				var found bool
-				for i := 0; i < tab.IndexCount(); i++ {
-					if tab.Index(i).Name() == tree.Name(name) {
-						if private.Flags.ZigzagIndexes.Contains(i) {
-							panic(pgerror.New(pgcode.DuplicateObject, "FORCE_ZIGZAG index duplicated"))
-						}
-						private.Flags.ZigzagIndexes.Add(i)
-						found = true
-						break
-					}
-				}
-				if !found {
-					panic(pgerror.Newf(pgcode.UndefinedObject, "index %q not found", tree.ErrString(&name)))
-				}
-			}
-		}
-		if len(indexFlags.ZigzagIndexIDs) > 0 {
-			private.Flags.ForceZigzag = true
-			for _, id := range indexFlags.ZigzagIndexIDs {
-				var found bool
-				for i := 0; i < tab.IndexCount(); i++ {
-					if tab.Index(i).ID() == cat.StableID(id) {
-						if private.Flags.ZigzagIndexes.Contains(i) {
-							panic(pgerror.New(pgcode.DuplicateObject, "FORCE_ZIGZAG index duplicated"))
-						}
-						private.Flags.ZigzagIndexes.Add(i)
-						found = true
-						break
-					}
-				}
-				if !found {
-					panic(pgerror.Newf(pgcode.UndefinedObject, "index [%d] not found", id))
-				}
-			}
 		}
 	}
 	if locking.isSet() {
@@ -814,7 +797,7 @@ func (b *Builder) buildWithOrdinality(inScope *scope) (outScope *scope) {
 	// See https://www.cockroachlabs.com/docs/stable/query-order.html#order-preservation
 	// for the semantics around WITH ORDINALITY and ordering.
 
-	input := inScope.expr
+	input := inScope.expr.(memo.RelExpr)
 	inScope.expr = b.factory.ConstructOrdinality(input, &memo.OrdinalityPrivate{
 		Ordering: inScope.makeOrderingChoice(),
 		ColID:    col.id,
@@ -1110,7 +1093,7 @@ func (b *Builder) buildWhere(where *tree.Where, inScope *scope) {
 
 	// Wrap the filter in a FiltersOp.
 	inScope.expr = b.factory.ConstructSelect(
-		inScope.expr,
+		inScope.expr.(memo.RelExpr),
 		memo.FiltersExpr{b.factory.ConstructFiltersItem(filter)},
 	)
 }
@@ -1168,8 +1151,8 @@ func (b *Builder) buildFromTablesRightDeep(
 
 	outScope.appendColumnsFromScope(tableScope)
 
-	left := outScope.expr
-	right := tableScope.expr
+	left := outScope.expr.(memo.RelExpr)
+	right := tableScope.expr.(memo.RelExpr)
 	outScope.expr = b.factory.ConstructInnerJoin(left, right, memo.TrueFilter, memo.EmptyJoinPrivate)
 	return outScope
 }
@@ -1220,8 +1203,8 @@ func (b *Builder) buildFromWithLateral(
 
 		outScope.appendColumnsFromScope(tableScope)
 
-		left := outScope.expr
-		right := tableScope.expr
+		left := outScope.expr.(memo.RelExpr)
+		right := tableScope.expr.(memo.RelExpr)
 		outScope.expr = b.factory.ConstructInnerJoinApply(left, right, memo.TrueFilter, memo.EmptyJoinPrivate)
 	}
 

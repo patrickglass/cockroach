@@ -445,7 +445,7 @@ func (sb *statisticsBuilder) colStatLeaf(
 			if nullableCols.Equals(colSet) {
 				// No column statistics on this colSet - use the unknown
 				// null count ratio.
-				colStat.NullCount = s.RowCount * UnknownNullCountRatio
+				colStat.NullCount = s.RowCount * unknownNullCountRatio
 			} else {
 				colStatLeaf := sb.colStatLeaf(nullableCols, s, fd, notNullCols)
 				// Fetch the colStat again since it may now have a different address.
@@ -460,8 +460,8 @@ func (sb *statisticsBuilder) colStatLeaf(
 
 	if colSet.Len() == 1 {
 		col, _ := colSet.Next(0)
-		colStat.DistinctCount = UnknownDistinctCountRatio * s.RowCount
-		colStat.NullCount = UnknownNullCountRatio * s.RowCount
+		colStat.DistinctCount = unknownDistinctCountRatio * s.RowCount
+		colStat.NullCount = unknownNullCountRatio * s.RowCount
 		if notNullCols.Contains(col) {
 			colStat.NullCount = 0
 		}
@@ -2008,28 +2008,6 @@ func (sb *statisticsBuilder) buildLimit(limit *LimitExpr, relProps *props.Relati
 	sb.finalizeFromCardinality(relProps)
 }
 
-func (sb *statisticsBuilder) buildTopK(topK *TopKExpr, relProps *props.Relational) {
-	s := &relProps.Stats
-	if zeroCardinality := s.Init(relProps); zeroCardinality {
-		// Short cut if cardinality is 0.
-		return
-	}
-	s.Available = sb.availabilityFromInput(topK)
-
-	inputStats := &topK.Input.Relational().Stats
-
-	// Copy row count from input.
-	s.RowCount = inputStats.RowCount
-
-	// Update row count if row count and k are non-zero.
-	if inputStats.RowCount > 0 && topK.K > 0 {
-		s.RowCount = min(float64(topK.K), inputStats.RowCount)
-		s.Selectivity = props.MakeSelectivity(s.RowCount / inputStats.RowCount)
-	}
-
-	sb.finalizeFromCardinality(relProps)
-}
-
 func (sb *statisticsBuilder) colStatLimit(
 	colSet opt.ColSet, limit *LimitExpr,
 ) *props.ColumnStatistic {
@@ -2121,7 +2099,7 @@ func (sb *statisticsBuilder) colStatMax1Row(
 	s := &max1Row.Relational().Stats
 	colStat, _ := s.ColStats.Add(colSet)
 	colStat.DistinctCount = 1
-	colStat.NullCount = s.RowCount * UnknownNullCountRatio
+	colStat.NullCount = s.RowCount * unknownNullCountRatio
 	if colSet.Intersects(max1Row.Relational().NotNullCols) {
 		colStat.NullCount = 0
 	}
@@ -2257,7 +2235,7 @@ func (sb *statisticsBuilder) buildProjectSet(
 	var zipRowCount float64
 	for i := range projectSet.Zip {
 		if fn, ok := projectSet.Zip[i].Fn.(*FunctionExpr); ok {
-			if fn.Overload.IsGenerator() {
+			if fn.Overload.Generator != nil {
 				// TODO(rytaft): We may want to estimate the number of rows based on
 				// the type of generator function and its parameters.
 				zipRowCount = unknownGeneratorRowCount
@@ -2313,13 +2291,13 @@ func (sb *statisticsBuilder) colStatProjectSet(
 		for i := range projectSet.Zip {
 			item := &projectSet.Zip[i]
 			if item.Cols.ToSet().Intersects(reqZipCols) {
-				if fn, ok := item.Fn.(*FunctionExpr); ok && fn.Overload.IsGenerator() {
+				if fn, ok := item.Fn.(*FunctionExpr); ok && fn.Overload.Generator != nil {
 					// The columns(s) contain a generator function.
 					// TODO(rytaft): We may want to determine which generator function the
 					// requested columns correspond to, and estimate the distinct count and
 					// null count based on the type of generator function and its parameters.
 					zipColsDistinctCount *= unknownGeneratorRowCount * unknownGeneratorDistinctCountRatio
-					zipColsNullCount *= UnknownNullCountRatio
+					zipColsNullCount *= unknownNullCountRatio
 				} else {
 					// The columns(s) contain a scalar function or expression.
 					// These columns can contain many null values if the zip also
@@ -2346,7 +2324,7 @@ func (sb *statisticsBuilder) colStatProjectSet(
 				if item.ScalarProps().OuterCols.Intersects(inputProps.OutputCols) {
 					// The column(s) are correlated with the input, so they may have a
 					// distinct value for each distinct row of the input.
-					zipColsDistinctCount *= inputStats.RowCount * UnknownDistinctCountRatio
+					zipColsDistinctCount *= inputStats.RowCount * unknownDistinctCountRatio
 				}
 			}
 		}
@@ -2788,19 +2766,14 @@ const (
 	// This is an arbitrary row count used in the absence of any real statistics.
 	unknownRowCount = 1000
 
-	// UnknownDistinctCountRatio is the ratio of distinct column values to number
-	// of rows, which is used in the absence of any real statistics for non-key
-	// columns.  TODO(rytaft): See if there is an industry standard value for
-	// this.
-	UnknownDistinctCountRatio = 0.1
+	// This is the ratio of distinct column values to number of rows, which is
+	// used in the absence of any real statistics for non-key columns.
+	// TODO(rytaft): See if there is an industry standard value for this.
+	unknownDistinctCountRatio = 0.1
 
-	// UnknownNullCountRatio is the ratio of null column values to number of rows
-	// for nullable columns, which is used in the absence of any real statistics.
-	UnknownNullCountRatio = 0.01
-
-	// UnknownAvgRowSize is the average size of a row in bytes, which is used in
-	// the absence of any real statistics.
-	UnknownAvgRowSize = 8
+	// This is the ratio of null column values to number of rows for nullable
+	// columns, which is used in the absence of any real statistics.
+	unknownNullCountRatio = 0.01
 
 	// Use a small row count for generator functions; this allows use of lookup
 	// join in cases like using json_array_elements with a small constant array.
@@ -3203,7 +3176,7 @@ func (sb *statisticsBuilder) applyIndexConstraint(
 		numConjuncts := sb.numConjunctsInConstraint(c, i)
 
 		// Set the distinct count for the current column of the constraint
-		// according to UnknownDistinctCountRatio.
+		// according to unknownDistinctCountRatio.
 		var lowerBound float64
 		if i == applied {
 			lowerBound = lastColMinDistinct
@@ -3255,7 +3228,7 @@ func (sb *statisticsBuilder) applyConstraintSet(
 			numConjuncts := sb.numConjunctsInConstraint(c, 0 /* nth */)
 
 			// Set the distinct count for the first column of the constraint
-			// according to UnknownDistinctCountRatio.
+			// according to unknownDistinctCountRatio.
 			sb.updateDistinctCountFromUnappliedConjuncts(col, e, s, numConjuncts, lastColMinDistinct)
 		}
 

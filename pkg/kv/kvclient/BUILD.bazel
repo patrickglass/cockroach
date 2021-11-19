@@ -4,7 +4,6 @@ go_library(
     name = "kvclient",
     srcs = [
         "placeholder.go",
-        "revision_reader.go",
         "scan_meta.go",
     ],
     importpath = "github.com/cockroachdb/cockroach/pkg/kv/kvclient",
@@ -13,7 +12,5 @@ go_library(
         "//pkg/keys",
         "//pkg/kv",
         "//pkg/roachpb:with-mocks",
-        "//pkg/storage",
-        "//pkg/util/hlc",
     ],
 )

@@ -14,31 +14,31 @@ import (
 	model "github.com/prometheus/common/model"
 )
 
-// MockPromClient is a mock of PromClient interface.
-type MockPromClient struct {
+// MockpromClient is a mock of promClient interface.
+type MockpromClient struct {
 	ctrl     *gomock.Controller
-	recorder *MockPromClientMockRecorder
+	recorder *MockpromClientMockRecorder
 }
 
-// MockPromClientMockRecorder is the mock recorder for MockPromClient.
-type MockPromClientMockRecorder struct {
-	mock *MockPromClient
+// MockpromClientMockRecorder is the mock recorder for MockpromClient.
+type MockpromClientMockRecorder struct {
+	mock *MockpromClient
 }
 
-// NewMockPromClient creates a new mock instance.
-func NewMockPromClient(ctrl *gomock.Controller) *MockPromClient {
-	mock := &MockPromClient{ctrl: ctrl}
-	mock.recorder = &MockPromClientMockRecorder{mock}
+// NewMockpromClient creates a new mock instance.
+func NewMockpromClient(ctrl *gomock.Controller) *MockpromClient {
+	mock := &MockpromClient{ctrl: ctrl}
+	mock.recorder = &MockpromClientMockRecorder{mock}
 	return mock
 }
 
 // EXPECT returns an object that allows the caller to indicate expected use.
-func (m *MockPromClient) EXPECT() *MockPromClientMockRecorder {
+func (m *MockpromClient) EXPECT() *MockpromClientMockRecorder {
 	return m.recorder
 }
 
 // Query mocks base method.
-func (m *MockPromClient) Query(ctx context.Context, query string, ts time.Time) (model.Value, v1.Warnings, error) {
+func (m *MockpromClient) Query(ctx context.Context, query string, ts time.Time) (model.Value, v1.Warnings, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Query", ctx, query, ts)
 	ret0, _ := ret[0].(model.Value)
@@ -48,7 +48,7 @@ func (m *MockPromClient) Query(ctx context.Context, query string, ts time.Time) 
 }
 
 // Query indicates an expected call of Query.
-func (mr *MockPromClientMockRecorder) Query(ctx, query, ts interface{}) *gomock.Call {
+func (mr *MockpromClientMockRecorder) Query(ctx, query, ts interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Query", reflect.TypeOf((*MockPromClient)(nil).Query), ctx, query, ts)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Query", reflect.TypeOf((*MockpromClient)(nil).Query), ctx, query, ts)
 }

@@ -12,7 +12,7 @@ package tree
 
 // DropOwnedBy represents a DROP OWNED BY command.
 type DropOwnedBy struct {
-	Roles        RoleSpecList
+	Roles        NameList
 	DropBehavior DropBehavior
 }
 
@@ -25,7 +25,7 @@ func (node *DropOwnedBy) Format(ctx *FmtCtx) {
 		if i > 0 {
 			ctx.WriteString(", ")
 		}
-		node.Roles[i].Format(ctx)
+		ctx.FormatUsernameN(node.Roles[i])
 	}
 	if node.DropBehavior != DropDefault {
 		ctx.WriteString(" ")

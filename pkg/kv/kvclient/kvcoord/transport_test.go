@@ -113,9 +113,9 @@ func TestSpanImport(t *testing.T) {
 	expectedErr := "my expected error"
 	server.pErr = roachpb.NewErrorf(expectedErr /* nolint:fmtsafe */)
 
-	recCtx, getRecAndFinish := tracing.ContextWithRecordingSpan(
+	recCtx, getRec, cancel := tracing.ContextWithRecordingSpan(
 		ctx, tracing.NewTracer(), "test")
-	defer getRecAndFinish()
+	defer cancel()
 
 	server.tr = tracing.SpanFromContext(recCtx).Tracer()
 
@@ -127,7 +127,7 @@ func TestSpanImport(t *testing.T) {
 		t.Fatalf("expected err: %s, got: %q", expectedErr, br.Error)
 	}
 	expectedMsg := "mockInternalClient processing batch"
-	if tracing.FindMsgInRecording(getRecAndFinish(), expectedMsg) == -1 {
+	if tracing.FindMsgInRecording(getRec(), expectedMsg) == -1 {
 		t.Fatalf("didn't find expected message in trace: %s", expectedMsg)
 	}
 }
@@ -151,14 +151,15 @@ func (*mockInternalClient) ResetQuorum(
 func (m *mockInternalClient) Batch(
 	ctx context.Context, in *roachpb.BatchRequest, opts ...grpc.CallOption,
 ) (*roachpb.BatchResponse, error) {
-	sp := m.tr.StartSpan("mock", tracing.WithRecording(tracing.RecordingVerbose))
+	sp := m.tr.StartSpan("mock", tracing.WithForceRealSpan())
 	defer sp.Finish()
+	sp.SetVerbose(true)
 	ctx = tracing.ContextWithSpan(ctx, sp)
 
 	log.Eventf(ctx, "mockInternalClient processing batch")
 	br := &roachpb.BatchResponse{}
 	br.Error = m.pErr
-	if rec := sp.GetRecording(tracing.RecordingVerbose); rec != nil {
+	if rec := sp.GetRecording(); rec != nil {
 		br.CollectedSpans = append(br.CollectedSpans, rec...)
 	}
 	return br, nil

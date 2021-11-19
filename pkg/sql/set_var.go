@@ -27,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/redact"
 )
 
 // setVarNode represents a SET {SESSION | LOCAL} statement.
@@ -77,7 +76,7 @@ func (p *planner) SetVar(ctx context.Context, n *tree.SetVar) (planNode, error) 
 				typedValue, err := p.analyzeExpr(
 					ctx, expr, nil, dummyHelper, types.String, false, "SET SESSION "+name)
 				if err != nil {
-					return nil, wrapSetVarError(err, name, expr.String())
+					return nil, wrapSetVarError(name, expr.String(), "%v", err)
 				}
 				typedValues[i] = typedValue
 			}
@@ -224,13 +223,14 @@ func timeZoneVarGetStringVal(
 			timeutil.TimeZoneStringToLocationISO8601Standard,
 		)
 		if err != nil {
-			return "", wrapSetVarError(errors.Wrapf(err, "cannot find time zone %q", location), "timezone", values[0].String())
+			return "", wrapSetVarError("timezone", values[0].String(),
+				"cannot find time zone %q: %v", location, err)
 		}
 
 	case *tree.DInterval:
 		offset, _, _, err = v.Duration.Encode()
 		if err != nil {
-			return "", wrapSetVarError(err, "timezone", values[0].String())
+			return "", wrapSetVarError("timezone", values[0].String(), "%v", err)
 		}
 		offset /= int64(time.Second)
 
@@ -247,14 +247,15 @@ func timeZoneVarGetStringVal(
 		ed.Mul(sixty, sixty, &v.Decimal)
 		offset = ed.Int64(sixty)
 		if ed.Err() != nil {
-			return "", wrapSetVarError(errors.Newf("time zone value %s would overflow an int64", sixty), "timezone", values[0].String())
+			return "", wrapSetVarError("timezone", values[0].String(),
+				"time zone value %s would overflow an int64", sixty)
 		}
 
 	default:
 		return "", newVarValueError("timezone", values[0].String())
 	}
 	if loc == nil {
-		loc = timeutil.TimeZoneOffsetToLocation(int(offset))
+		loc = timeutil.FixedOffsetTimeZoneToLocation(int(offset), d.String())
 	}
 
 	return loc.String(), nil
@@ -266,7 +267,7 @@ func timeZoneVarSet(_ context.Context, m sessionDataMutator, s string) error {
 		timeutil.TimeZoneStringToLocationISO8601Standard,
 	)
 	if err != nil {
-		return wrapSetVarError(err, "TimeZone", s)
+		return wrapSetVarError("TimeZone", s, "%v", err)
 	}
 
 	m.SetLocation(loc)
@@ -295,7 +296,7 @@ func makeTimeoutVarGetter(
 		case *tree.DInterval:
 			timeout, err = intervalToDuration(v)
 			if err != nil {
-				return "", wrapSetVarError(err, varName, values[0].String())
+				return "", wrapSetVarError(varName, values[0].String(), "%v", err)
 			}
 		case *tree.DInt:
 			timeout = time.Duration(*v) * time.Millisecond
@@ -317,15 +318,16 @@ func validateTimeoutVar(
 		},
 	)
 	if err != nil {
-		return 0, wrapSetVarError(err, varName, timeString)
+		return 0, wrapSetVarError(varName, timeString, "%v", err)
 	}
 	timeout, err := intervalToDuration(interval)
 	if err != nil {
-		return 0, wrapSetVarError(err, varName, timeString)
+		return 0, wrapSetVarError(varName, timeString, "%v", err)
 	}
 
 	if timeout < 0 {
-		return 0, wrapSetVarError(errors.Newf("%v cannot have a negative duration", redact.SafeString(varName)), varName, timeString)
+		return 0, wrapSetVarError(varName, timeString,
+			"%v cannot have a negative duration", varName)
 	}
 
 	return timeout, nil
@@ -402,14 +404,10 @@ func newSingleArgVarError(varName string) error {
 		"SET %s takes only one argument", varName)
 }
 
-func wrapSetVarError(cause error, varName, actualValue string) error {
-	return pgerror.Wrapf(
-		cause,
-		pgcode.InvalidParameterValue,
-		"invalid value for parameter %q: %q",
-		redact.SafeString(varName),
-		actualValue,
-	)
+func wrapSetVarError(varName, actualValue string, fmt string, args ...interface{}) error {
+	err := pgerror.Newf(pgcode.InvalidParameterValue,
+		"invalid value for parameter %q: %q", varName, actualValue)
+	return errors.WithDetailf(err, fmt, args...)
 }
 
 func newVarValueError(varName, actualVal string, allowedVals ...string) (err error) {

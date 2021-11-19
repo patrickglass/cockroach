@@ -187,7 +187,7 @@ func TestPerformAppend(t *testing.T) {
 	const resetChance = 0.5
 
 	ctx := context.Background()
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	st := cluster.MakeTestingClusterSettings()
 	testMemMonitor := execinfra.NewTestMemMonitor(ctx, st)
 	defer testMemMonitor.Stop(ctx)
@@ -260,7 +260,7 @@ func TestSetAccountingHelper(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	st := cluster.MakeTestingClusterSettings()
 	testMemMonitor := execinfra.NewTestMemMonitor(ctx, st)
 	defer testMemMonitor.Stop(ctx)
@@ -277,7 +277,11 @@ func TestSetAccountingHelper(t *testing.T) {
 	}
 
 	var helper colmem.SetAccountingHelper
-	helper.Init(testAllocator, typs)
+	// We don't use notNeededVecIdxs because it is difficult to calculate
+	// expected value for the memory used (the vectors are appropriately
+	// allocated when creating a new batch but then aren't modified - and, thus,
+	// ignored by the helper.
+	helper.Init(testAllocator, typs, nil /* notNeededVecIdxs */)
 
 	numIterations := rng.Intn(10) + 1
 	numRows := rng.Intn(coldata.BatchSize()) + 1

@@ -96,7 +96,6 @@ const (
 	CrdbInternalClusterTransactionsTableID
 	CrdbInternalClusterSessionsTableID
 	CrdbInternalClusterSettingsTableID
-	CrdbInternalCreateSchemaStmtsTableID
 	CrdbInternalCreateStmtsTableID
 	CrdbInternalCreateTypeStmtsTableID
 	CrdbInternalDatabasesTableID
@@ -140,6 +139,7 @@ const (
 	CrdbInternalZonesTableID
 	CrdbInternalInvalidDescriptorsTableID
 	CrdbInternalClusterDatabasePrivilegesTableID
+	CrdbInternalInterleaved
 	CrdbInternalCrossDbRefrences
 	CrdbInternalLostTableDescriptors
 	CrdbInternalClusterInflightTracesTable
@@ -341,11 +341,7 @@ const (
 	PgCatalogStatioUserIndexesTableID
 	PgCatalogStatioUserSequencesTableID
 	PgCatalogStatioUserTablesTableID
-	PgCatalogStatisticExtDataTableID
 	PgCatalogStatisticExtTableID
-	PgCatalogStatisticTableID
-	PgCatalogStatsExtTableID
-	PgCatalogStatsTableID
 	PgCatalogSubscriptionRelTableID
 	PgCatalogSubscriptionTableID
 	PgCatalogTablesTableID

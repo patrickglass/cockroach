@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/geo/geoindex"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
@@ -225,11 +224,6 @@ func (tc *Catalog) FullyQualifiedName(
 	ctx context.Context, ds cat.DataSource,
 ) (cat.DataSourceName, error) {
 	return ds.(dataSource).fqName(), nil
-}
-
-// RoleExists is part of the cat.Catalog interface.
-func (tc *Catalog) RoleExists(ctx context.Context, role security.SQLUsername) (bool, error) {
-	return true, nil
 }
 
 func (tc *Catalog) resolveSchema(toResolve *cat.SchemaName) (cat.Schema, cat.SchemaName, error) {
@@ -602,6 +596,10 @@ type Table struct {
 	writeOnlyIdxCount  int
 	deleteOnlyIdxCount int
 
+	// interleaved is true if the table's rows are interleaved with rows from
+	// other table(s).
+	interleaved bool
+
 	outboundFKs []ForeignKeyConstraint
 	inboundFKs  []ForeignKeyConstraint
 
@@ -946,6 +944,26 @@ func (ti *Index) Predicate() (string, bool) {
 // ImplicitPartitioningColumnCount is part of the cat.Index interface.
 func (ti *Index) ImplicitPartitioningColumnCount() int {
 	return 0
+}
+
+// InterleaveAncestorCount is part of the cat.Index interface.
+func (ti *Index) InterleaveAncestorCount() int {
+	return 0
+}
+
+// InterleaveAncestor is part of the cat.Index interface.
+func (ti *Index) InterleaveAncestor(i int) (table, index cat.StableID, numKeyCols int) {
+	panic("no interleavings")
+}
+
+// InterleavedByCount is part of the cat.Index interface.
+func (ti *Index) InterleavedByCount() int {
+	return 0
+}
+
+// InterleavedBy is part of the cat.Index interface.
+func (ti *Index) InterleavedBy(i int) (table, index cat.StableID) {
+	panic("no interleavings")
 }
 
 // GeoConfig is part of the cat.Index interface.

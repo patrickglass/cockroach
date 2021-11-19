@@ -28,24 +28,31 @@ import (
 // last distinct operator in that chain as well as its output column.
 func OrderedDistinctColsToOperators(
 	input colexecop.Operator, distinctCols []uint32, typs []*types.T, nullsAreDistinct bool,
-) (colexecop.ResettableOperator, []bool) {
+) (colexecop.ResettableOperator, []bool, error) {
 	distinctCol := make([]bool, coldata.BatchSize())
 	// zero the boolean column on every iteration.
 	input = &fnOp{
 		OneInputHelper: colexecop.MakeOneInputHelper(input),
 		fn:             func() { copy(distinctCol, colexecutils.ZeroBoolColumn) },
 	}
+	var (
+		err error
+		r   colexecop.ResettableOperator
+		ok  bool
+	)
 	for i := range distinctCols {
-		input = newSingleDistinct(input, int(distinctCols[i]), distinctCol, typs[distinctCols[i]], nullsAreDistinct)
+		input, err = newSingleDistinct(input, int(distinctCols[i]), distinctCol, typs[distinctCols[i]], nullsAreDistinct)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
-	r, ok := input.(colexecop.ResettableOperator)
-	if !ok {
+	if r, ok = input.(colexecop.ResettableOperator); !ok {
 		colexecerror.InternalError(errors.AssertionFailedf("unexpectedly an ordered distinct is not a Resetter"))
 	}
 	distinctChain := &distinctChainOps{
 		ResettableOperator: r,
 	}
-	return distinctChain, distinctCol
+	return distinctChain, distinctCol, nil
 }
 
 type distinctChainOps struct {
@@ -63,12 +70,15 @@ func NewOrderedDistinct(
 	typs []*types.T,
 	nullsAreDistinct bool,
 	errorOnDup string,
-) colexecop.ResettableOperator {
+) (colexecop.ResettableOperator, error) {
 	od := &orderedDistinct{
 		OneInputNode:         colexecop.NewOneInputNode(input),
 		UpsertDistinctHelper: UpsertDistinctHelper{ErrorOnDup: errorOnDup},
 	}
-	op, outputCol := OrderedDistinctColsToOperators(&od.distinctChainInput, distinctCols, typs, nullsAreDistinct)
+	op, outputCol, err := OrderedDistinctColsToOperators(&od.distinctChainInput, distinctCols, typs, nullsAreDistinct)
+	if err != nil {
+		return nil, err
+	}
 	op = &colexecutils.BoolVecToSelOp{
 		OneInputHelper: colexecop.MakeOneInputHelper(op),
 		OutputCol:      outputCol,
@@ -80,7 +90,7 @@ func NewOrderedDistinct(
 		ProcessOnlyOneBatch: true,
 	}
 	od.distinctChain = op
-	return od
+	return od, nil
 }
 
 type orderedDistinct struct {

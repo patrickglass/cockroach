@@ -71,7 +71,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	_ "github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigjob" // register jobs declared outside of pkg/sql
 	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigkvaccessor"
-	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigkvsubscriber"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/contention"
@@ -178,8 +177,6 @@ type Server struct {
 	protectedtsProvider   protectedts.Provider
 	protectedtsReconciler *ptreconcile.Reconciler
 
-	spanConfigSubscriber *spanconfigkvsubscriber.KVSubscriber
-
 	sqlServer    *SQLServer
 	drainSleepFn func(time.Duration)
 
@@ -271,7 +268,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		clock = hlc.NewClock(hlc.UnixNano, time.Duration(cfg.MaxOffset))
 	}
 	registry := metric.NewRegistry()
-	stopper.SetTracer(cfg.AmbientCtx.Tracer)
+	// If the tracer has a Close function, call it after the server stops.
 	stopper.AddCloser(cfg.AmbientCtx.Tracer)
 
 	// Add a dynamic log tag value for the node ID.
@@ -391,14 +388,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		cfg.Locality,
 		&cfg.DefaultZoneConfig,
 	)
-
-	var dialerKnobs nodedialer.DialerTestingKnobs
-	if dk := cfg.TestingKnobs.DialerKnobs; dk != nil {
-		dialerKnobs = dk.(nodedialer.DialerTestingKnobs)
-	}
-
-	nodeDialer := nodedialer.NewWithOpt(rpcContext, gossip.AddressResolver(g),
-		nodedialer.DialerOpt{TestingKnobs: dialerKnobs})
+	nodeDialer := nodedialer.New(rpcContext, gossip.AddressResolver(g))
 
 	runtimeSampler := status.NewRuntimeStatSampler(ctx, clock)
 	registry.AddMetricStruct(runtimeSampler)
@@ -450,17 +440,15 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	}
 	tcsFactory := kvcoord.NewTxnCoordSenderFactory(txnCoordSenderFactoryCfg, distSender)
 
-	gcoords, metrics := admission.NewGrantCoordinators(
-		cfg.AmbientCtx,
-		admission.Options{
-			MinCPUSlots:                    1,
-			MaxCPUSlots:                    100000, /* TODO(sumeer): add cluster setting */
-			SQLKVResponseBurstTokens:       100000, /* TODO(sumeer): add cluster setting */
-			SQLSQLResponseBurstTokens:      100000, /* arbitrary, and unused */
-			SQLStatementLeafStartWorkSlots: 100,    /* arbitrary, and unused */
-			SQLStatementRootStartWorkSlots: 100,    /* arbitrary, and unused */
-			Settings:                       st,
-		})
+	gcoords, metrics := admission.NewGrantCoordinators(admission.Options{
+		MinCPUSlots:                    1,
+		MaxCPUSlots:                    100000, /* TODO(sumeer): add cluster setting */
+		SQLKVResponseBurstTokens:       100000, /* TODO(sumeer): add cluster setting */
+		SQLSQLResponseBurstTokens:      100000, /* arbitrary, and unused */
+		SQLStatementLeafStartWorkSlots: 100,    /* arbitrary, and unused */
+		SQLStatementRootStartWorkSlots: 100,    /* arbitrary, and unused */
+		Settings:                       st,
+	})
 	for i := range metrics {
 		registry.AddMetricStruct(metrics[i])
 	}
@@ -617,26 +605,8 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	}
 
 	var spanConfigAccessor spanconfig.KVAccessor
-	var spanConfigSubscriber *spanconfigkvsubscriber.KVSubscriber
 	if cfg.SpanConfigsEnabled {
 		storeCfg.SpanConfigsEnabled = true
-		spanConfigKnobs, _ := cfg.TestingKnobs.SpanConfig.(*spanconfig.TestingKnobs)
-		if spanConfigKnobs != nil && spanConfigKnobs.StoreKVSubscriberOverride != nil {
-			storeCfg.SpanConfigSubscriber = spanConfigKnobs.StoreKVSubscriberOverride
-		} else {
-			spanConfigSubscriber = spanconfigkvsubscriber.New(
-				stopper,
-				db,
-				clock,
-				rangeFeedFactory,
-				keys.SpanConfigurationsTableID,
-				1<<20, /* 1 MB */
-				storeCfg.DefaultSpanConfig,
-				spanConfigKnobs,
-			)
-			storeCfg.SpanConfigSubscriber = spanConfigSubscriber
-		}
-
 		spanConfigAccessor = spanconfigkvaccessor.New(
 			db, internalExecutor, cfg.Settings,
 			systemschema.SpanConfigurationsTableName.FQString(),
@@ -744,7 +714,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	}
 
 	kvProber := kvprober.NewProber(kvprober.Opts{
-		Tracer:                  cfg.AmbientCtx.Tracer,
+		AmbientCtx:              cfg.AmbientCtx,
 		DB:                      db,
 		Settings:                st,
 		HistogramWindowInterval: cfg.HistogramWindowInterval(),
@@ -795,7 +765,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	}
 	sStatus.setStmtDiagnosticsRequester(sqlServer.execCfg.StmtDiagnosticsRecorder)
 	sStatus.baseStatusServer.sqlServer = sqlServer
-	debugServer := debug.NewServer(st, sqlServer.pgServer.HBADebugFn(), sStatus)
+	debugServer := debug.NewServer(st, sqlServer.pgServer.HBADebugFn())
 	node.InitLogger(sqlServer.execCfg)
 
 	*lateBoundServer = Server{
@@ -831,7 +801,6 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		replicationReporter:    replicationReporter,
 		protectedtsProvider:    protectedtsProvider,
 		protectedtsReconciler:  protectedtsReconciler,
-		spanConfigSubscriber:   spanConfigSubscriber,
 		sqlServer:              sqlServer,
 		drainSleepFn:           drainSleepFn,
 		externalStorageBuilder: externalStorageBuilder,
@@ -1024,7 +993,7 @@ func (s *Server) startMonitoringForwardClockJumps(ctx context.Context) error {
 // successfully persisted timestamp greater then any wall time used by the
 // server.
 //
-// If prevHLCUpperBound is 0, the function sleeps up to max offset.
+// If prevHLCUpperBound is 0, the function sleeps up to max offset
 func ensureClockMonotonicity(
 	ctx context.Context,
 	clock *hlc.Clock,
@@ -1288,8 +1257,8 @@ func (s *Server) PreStart(ctx context.Context) error {
 		blobs.NewBlobClientFactory(s.nodeIDContainer.Get(),
 			s.nodeDialer, s.st.ExternalIODir), &fileTableInternalExecutor, s.db)
 
-	// Filter out self from the gossip bootstrap addresses.
-	filtered := s.cfg.FilterGossipBootstrapAddresses(ctx)
+	// Filter out self from the gossip bootstrap resolvers.
+	filtered := s.cfg.FilterGossipBootstrapResolvers(ctx)
 
 	// Set up the init server. We have to do this relatively early because we
 	// can't call RegisterInitServer() after `grpc.Serve`, which is called in
@@ -1301,7 +1270,7 @@ func (s *Server) PreStart(ctx context.Context) error {
 			return err
 		}
 
-		initConfig := newInitServerConfig(ctx, s.cfg, dialOpts)
+		initConfig := newInitServerConfig(s.cfg, dialOpts)
 		inspectedDiskState, err := inspectEngines(
 			ctx,
 			s.engines,
@@ -1590,17 +1559,14 @@ func (s *Server) PreStart(ctx context.Context) error {
 		}
 	})
 
-	// If the server is being restarted, sleep to ensure monotonicity of the HLC
-	// clock. This can be skipped on server bootstrap because the server has never
-	// been used before.
-	var hlcUpperBoundExists bool
-	if !initialStart {
-		hlcUpperBound, err := kvserver.ReadMaxHLCUpperBound(ctx, s.engines)
-		if err != nil {
-			return errors.Wrap(err, "reading max HLC upper bound")
-		}
-		hlcUpperBoundExists = hlcUpperBound > 0
+	// NB: if this store is freshly initialized (or no upper bound was
+	// persisted), hlcUpperBound will be zero.
+	hlcUpperBound, err := kvserver.ReadMaxHLCUpperBound(ctx, s.engines)
+	if err != nil {
+		return errors.Wrap(err, "reading max HLC upper bound")
+	}
 
+	if hlcUpperBound > 0 {
 		ensureClockMonotonicity(
 			ctx,
 			s.clock,
@@ -1642,12 +1608,12 @@ func (s *Server) PreStart(ctx context.Context) error {
 		return err
 	}
 	// Stores have been initialized, so Node can now provide Pebble metrics.
-	s.storeGrantCoords.SetPebbleMetricsProvider(ctx, s.node)
+	s.storeGrantCoords.SetPebbleMetricsProvider(s.node)
 
 	log.Event(ctx, "started node")
 	if err := s.startPersistingHLCUpperBound(
 		ctx,
-		hlcUpperBoundExists,
+		hlcUpperBound > 0,
 		func(t int64) error { /* function to persist upper bound of HLC to all stores */
 			return s.node.SetHLCUpperBound(context.Background(), t)
 		},
@@ -1753,11 +1719,6 @@ func (s *Server) PreStart(ctx context.Context) error {
 		return err
 	}
 
-	if s.cfg.SpanConfigsEnabled && s.spanConfigSubscriber != nil {
-		if err := s.spanConfigSubscriber.Start(ctx); err != nil {
-			return err
-		}
-	}
 	// Start garbage collecting system events.
 	//
 	// NB: As written, this falls awkwardly between SQL and KV. KV is used only
@@ -2382,19 +2343,16 @@ func (s *SQLServer) startServeSQL(
 		tcpKeepAlive: envutil.EnvOrDefaultDuration("COCKROACH_SQL_TCP_KEEP_ALIVE", time.Minute),
 	}
 
-	_ = stopper.RunAsyncTaskEx(pgCtx,
-		stop.TaskOpts{TaskName: "pgwire-listener", SpanOpt: stop.SterileRootSpan},
-		func(ctx context.Context) {
-			err := connManager.ServeWith(ctx, stopper, pgL, func(ctx context.Context, conn net.Conn) {
-				connCtx := s.pgServer.AnnotateCtxForIncomingConn(ctx, conn)
-				tcpKeepAlive.configure(connCtx, conn)
+	_ = stopper.RunAsyncTask(pgCtx, "serve-conn", func(pgCtx context.Context) {
+		netutil.FatalIfUnexpected(connManager.ServeWith(pgCtx, stopper, pgL, func(conn net.Conn) {
+			connCtx := s.pgServer.AnnotateCtxForIncomingConn(pgCtx, conn)
+			tcpKeepAlive.configure(connCtx, conn)
 
-				if err := s.pgServer.ServeConn(connCtx, conn, pgwire.SocketTCP); err != nil {
-					log.Ops.Errorf(connCtx, "serving SQL client conn: %v", err)
-				}
-			})
-			netutil.FatalIfUnexpected(err)
-		})
+			if err := s.pgServer.ServeConn(connCtx, conn, pgwire.SocketTCP); err != nil {
+				log.Ops.Errorf(connCtx, "serving SQL client conn: %v", err)
+			}
+		}))
+	})
 
 	// If a unix socket was requested, start serving there too.
 	if len(socketFile) != 0 {
@@ -2416,26 +2374,21 @@ func (s *SQLServer) startServeSQL(
 				log.Ops.Fatalf(ctx, "%v", err)
 			}
 		}
-		if err := stopper.RunAsyncTaskEx(ctx,
-			stop.TaskOpts{TaskName: "unix-ln-close", SpanOpt: stop.SterileRootSpan},
-			func(ctx context.Context) {
-				waitQuiesce(ctx)
-			}); err != nil {
+		if err := stopper.RunAsyncTask(ctx, "unix-ln-close", func(ctx context.Context) {
+			waitQuiesce(ctx)
+		}); err != nil {
 			waitQuiesce(ctx)
 			return err
 		}
 
-		if err := stopper.RunAsyncTaskEx(pgCtx,
-			stop.TaskOpts{TaskName: "unix-listener", SpanOpt: stop.SterileRootSpan},
-			func(ctx context.Context) {
-				err := connManager.ServeWith(ctx, stopper, unixLn, func(ctx context.Context, conn net.Conn) {
-					connCtx := s.pgServer.AnnotateCtxForIncomingConn(ctx, conn)
-					if err := s.pgServer.ServeConn(connCtx, conn, pgwire.SocketUnix); err != nil {
-						log.Ops.Errorf(connCtx, "%v", err)
-					}
-				})
-				netutil.FatalIfUnexpected(err)
-			}); err != nil {
+		if err := stopper.RunAsyncTask(pgCtx, "unix-ln-serve", func(pgCtx context.Context) {
+			netutil.FatalIfUnexpected(connManager.ServeWith(pgCtx, stopper, unixLn, func(conn net.Conn) {
+				connCtx := s.pgServer.AnnotateCtxForIncomingConn(pgCtx, conn)
+				if err := s.pgServer.ServeConn(connCtx, conn, pgwire.SocketUnix); err != nil {
+					log.Ops.Errorf(connCtx, "%v", err)
+				}
+			}))
+		}); err != nil {
 			return err
 		}
 	}
@@ -2607,73 +2560,69 @@ func startSampleEnvironment(ctx context.Context, cfg sampleEnvironmentCfg) error
 		}
 	}
 
-	return cfg.stopper.RunAsyncTaskEx(ctx,
-		stop.TaskOpts{TaskName: "mem-logger", SpanOpt: stop.SterileRootSpan},
-		func(ctx context.Context) {
-			var goMemStats atomic.Value // *status.GoMemStats
-			goMemStats.Store(&status.GoMemStats{})
-			var collectingMemStats int32 // atomic, 1 when stats call is ongoing
+	return cfg.stopper.RunAsyncTask(ctx, "mem-logger", func(ctx context.Context) {
+		var goMemStats atomic.Value // *status.GoMemStats
+		goMemStats.Store(&status.GoMemStats{})
+		var collectingMemStats int32 // atomic, 1 when stats call is ongoing
 
-			timer := timeutil.NewTimer()
-			defer timer.Stop()
-			timer.Reset(cfg.minSampleInterval)
+		timer := timeutil.NewTimer()
+		defer timer.Stop()
+		timer.Reset(cfg.minSampleInterval)
 
-			for {
-				select {
-				case <-cfg.stopper.ShouldQuiesce():
-					return
-				case <-timer.C:
-					timer.Read = true
-					timer.Reset(cfg.minSampleInterval)
+		for {
+			select {
+			case <-cfg.stopper.ShouldQuiesce():
+				return
+			case <-timer.C:
+				timer.Read = true
+				timer.Reset(cfg.minSampleInterval)
 
-					// We read the heap stats on another goroutine and give up after 1s.
-					// This is necessary because as of Go 1.12, runtime.ReadMemStats()
-					// "stops the world" and that requires first waiting for any current GC
-					// run to finish. With a large heap and under extreme conditions, a
-					// single GC run may take longer than the default sampling period of
-					// 10s. Under normal operations and with more recent versions of Go,
-					// this hasn't been observed to be a problem.
-					statsCollected := make(chan struct{})
-					if atomic.CompareAndSwapInt32(&collectingMemStats, 0, 1) {
-						if err := cfg.stopper.RunAsyncTaskEx(ctx,
-							stop.TaskOpts{TaskName: "get-mem-stats"},
-							func(ctx context.Context) {
-								var ms status.GoMemStats
-								runtime.ReadMemStats(&ms.MemStats)
-								ms.Collected = timeutil.Now()
-								log.VEventf(ctx, 2, "memstats: %+v", ms)
+				// We read the heap stats on another goroutine and give up after 1s.
+				// This is necessary because as of Go 1.12, runtime.ReadMemStats()
+				// "stops the world" and that requires first waiting for any current GC
+				// run to finish. With a large heap and under extreme conditions, a
+				// single GC run may take longer than the default sampling period of
+				// 10s. Under normal operations and with more recent versions of Go,
+				// this hasn't been observed to be a problem.
+				statsCollected := make(chan struct{})
+				if atomic.CompareAndSwapInt32(&collectingMemStats, 0, 1) {
+					if err := cfg.stopper.RunAsyncTask(ctx, "get-mem-stats", func(ctx context.Context) {
+						var ms status.GoMemStats
+						runtime.ReadMemStats(&ms.MemStats)
+						ms.Collected = timeutil.Now()
+						log.VEventf(ctx, 2, "memstats: %+v", ms)
 
-								goMemStats.Store(&ms)
-								atomic.StoreInt32(&collectingMemStats, 0)
-								close(statsCollected)
-							}); err != nil {
-							close(statsCollected)
-						}
-					}
-
-					select {
-					case <-statsCollected:
-						// Good; we managed to read the Go memory stats quickly enough.
-					case <-time.After(time.Second):
-					}
-
-					curStats := goMemStats.Load().(*status.GoMemStats)
-					cgoStats := status.GetCGoMemStats(ctx)
-					cfg.runtime.SampleEnvironment(ctx, curStats, cgoStats)
-					if goroutineDumper != nil {
-						goroutineDumper.MaybeDump(ctx, cfg.st, cfg.runtime.Goroutines.Value())
-					}
-					if heapProfiler != nil {
-						heapProfiler.MaybeTakeProfile(ctx, cfg.runtime.GoAllocBytes.Value())
-						nonGoAllocProfiler.MaybeTakeProfile(ctx, cfg.runtime.CgoTotalBytes.Value())
-						statsProfiler.MaybeTakeProfile(ctx, cfg.runtime.RSSBytes.Value(), curStats, cgoStats)
-					}
-					if queryProfiler != nil {
-						queryProfiler.MaybeDumpQueries(ctx, cfg.sessionRegistry, cfg.st)
+						goMemStats.Store(&ms)
+						atomic.StoreInt32(&collectingMemStats, 0)
+						close(statsCollected)
+					}); err != nil {
+						close(statsCollected)
 					}
 				}
+
+				select {
+				case <-statsCollected:
+					// Good; we managed to read the Go memory stats quickly enough.
+				case <-time.After(time.Second):
+				}
+
+				curStats := goMemStats.Load().(*status.GoMemStats)
+				cgoStats := status.GetCGoMemStats(ctx)
+				cfg.runtime.SampleEnvironment(ctx, curStats, cgoStats)
+				if goroutineDumper != nil {
+					goroutineDumper.MaybeDump(ctx, cfg.st, cfg.runtime.Goroutines.Value())
+				}
+				if heapProfiler != nil {
+					heapProfiler.MaybeTakeProfile(ctx, cfg.runtime.GoAllocBytes.Value())
+					nonGoAllocProfiler.MaybeTakeProfile(ctx, cfg.runtime.CgoTotalBytes.Value())
+					statsProfiler.MaybeTakeProfile(ctx, cfg.runtime.RSSBytes.Value(), curStats, cgoStats)
+				}
+				if queryProfiler != nil {
+					queryProfiler.MaybeDumpQueries(ctx, cfg.sessionRegistry, cfg.st)
+				}
 			}
-		})
+		}
+	})
 }
 
 // Stop stops the server.

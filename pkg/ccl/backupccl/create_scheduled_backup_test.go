@@ -66,8 +66,7 @@ func newTestHelper(t *testing.T) (*testHelper, func()) {
 	dir, dirCleanupFn := testutils.TempDir(t)
 
 	th := &testHelper{
-		env: jobstest.NewJobSchedulerTestEnv(
-			jobstest.UseSystemTables, timeutil.Now(), tree.ScheduledBackupExecutor),
+		env:   jobstest.NewJobSchedulerTestEnv(jobstest.UseSystemTables, timeutil.Now()),
 		iodir: dir,
 	}
 
@@ -404,6 +403,19 @@ func TestSerializesScheduledBackupExecutionArgs(t *testing.T) {
 					backupStmt: "BACKUP INTO 'nodelocal://0/backup' WITH detached",
 					period:     24 * time.Hour,
 					runsNow:    true,
+				},
+			},
+		},
+		{
+			name:  "full-cluster-with-interleaved-table",
+			query: "CREATE SCHEDULE FOR BACKUP INTO 'nodelocal://0/backup?AWS_SECRET_ACCESS_KEY=neverappears' WITH INCLUDE_DEPRECATED_INTERLEAVES RECURRING '@hourly'",
+			user:  freeUser,
+			expectedSchedules: []expectedSchedule{
+				{
+					nameRe:     "BACKUP .+",
+					backupStmt: "BACKUP INTO 'nodelocal://0/backup?AWS_SECRET_ACCESS_KEY=neverappears' WITH detached, include_deprecated_interleaves",
+					shownStmt:  "BACKUP INTO 'nodelocal://0/backup?AWS_SECRET_ACCESS_KEY=redacted' WITH detached, include_deprecated_interleaves",
+					period:     time.Hour,
 				},
 			},
 		},

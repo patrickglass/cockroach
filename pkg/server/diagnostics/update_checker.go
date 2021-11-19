@@ -72,10 +72,7 @@ type UpdateChecker struct {
 // PeriodicallyCheckForUpdates starts a background worker that periodically
 // phones home to check for updates.
 func (u *UpdateChecker) PeriodicallyCheckForUpdates(ctx context.Context, stopper *stop.Stopper) {
-	_ = stopper.RunAsyncTaskEx(ctx, stop.TaskOpts{
-		TaskName: "update-checker",
-		SpanOpt:  stop.SterileRootSpan,
-	}, func(ctx context.Context) {
+	_ = stopper.RunAsyncTask(ctx, "update-checker", func(ctx context.Context) {
 		defer logcrash.RecoverAndReportNonfatalPanic(ctx, &u.Settings.SV)
 		nextUpdateCheck := u.StartTime
 
@@ -103,7 +100,7 @@ func (u *UpdateChecker) PeriodicallyCheckForUpdates(ctx context.Context, stopper
 // The returned boolean indicates if the check succeeded (and thus does not need
 // to be re-attempted by the scheduler after a retry-interval).
 func (u *UpdateChecker) CheckForUpdates(ctx context.Context) bool {
-	ctx, span := u.AmbientCtx.AnnotateCtxWithSpan(ctx, "version update check")
+	ctx, span := u.AmbientCtx.AnnotateCtxWithSpan(ctx, "usageReport")
 	defer span.Finish()
 
 	url := u.buildUpdatesURL(ctx)
@@ -198,7 +195,7 @@ func (u *UpdateChecker) buildUpdatesURL(ctx context.Context) *url.URL {
 
 	sqlInfo := diagnosticspb.SQLInstanceInfo{
 		SQLInstanceID: u.SQLInstanceID(),
-		Uptime:        int64(timeutil.Since(u.StartTime).Seconds()),
+		Uptime:        int64(timeutil.Now().Sub(u.StartTime).Seconds()),
 	}
 
 	url := updatesURL

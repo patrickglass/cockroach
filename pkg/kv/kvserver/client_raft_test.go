@@ -643,8 +643,9 @@ func TestRaftLogSizeAfterTruncation(t *testing.T) {
 	assert.NoError(t, assertCorrectRaftLogSize())
 }
 
-// TestSnapshotAfterTruncation tests that Raft will properly send a snapshot
-// when a node is brought up and the log has been truncated.
+// TestSnapshotAfterTruncation tests that Raft will properly send a
+// non-preemptive snapshot when a node is brought up and the log has been
+// truncated.
 func TestSnapshotAfterTruncation(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -707,8 +708,8 @@ func TestSnapshotAfterTruncation(t *testing.T) {
 			tc.WaitForValues(t, key, []int64{incA, incA, incA})
 
 			// Now kill one store, increment the key on the other stores and truncate
-			// their logs to make sure that when store 1 comes back up it will require
-			// a snapshot from Raft.
+			// their logs to make sure that when store 1 comes back up it will require a
+			// non-preemptive snapshot from Raft.
 			tc.StopServer(stoppedStore)
 
 			incArgs = incrementArgs(key, incB)
@@ -1295,6 +1296,11 @@ func (c fakeSnapshotStream) Send(request *kvserver.SnapshotResponse) error {
 	return nil
 }
 
+// Context implements the SnapshotResponseStream interface.
+func (c fakeSnapshotStream) Context() context.Context {
+	return context.Background()
+}
+
 // TestFailedSnapshotFillsReservation tests that failing to finish applying an
 // incoming snapshot still cleans up the outstanding reservation that was made.
 func TestFailedSnapshotFillsReservation(t *testing.T) {
@@ -1321,8 +1327,9 @@ func TestFailedSnapshotFillsReservation(t *testing.T) {
 	rep2Desc, found := desc.GetReplicaDescriptor(2)
 	require.True(t, found)
 	header := kvserver.SnapshotRequest_Header{
-		RangeSize: 100,
-		State:     kvserverpb.ReplicaState{Desc: desc},
+		CanDecline: true,
+		RangeSize:  100,
+		State:      kvserverpb.ReplicaState{Desc: desc},
 		RaftMessageRequest: kvserver.RaftMessageRequest{
 			RangeID:     rep.RangeID,
 			FromReplica: repDesc,
@@ -1335,7 +1342,7 @@ func TestFailedSnapshotFillsReservation(t *testing.T) {
 	// "snapshot accepted" message.
 	expectedErr := errors.Errorf("")
 	stream := fakeSnapshotStream{nil, expectedErr}
-	if err := store1.HandleSnapshot(ctx, &header, stream); !errors.Is(err, expectedErr) {
+	if err := store1.HandleSnapshot(&header, stream); !errors.Is(err, expectedErr) {
 		t.Fatalf("expected error %s, but found %v", expectedErr, err)
 	}
 	if n := store1.ReservationCount(); n != 0 {
@@ -1344,8 +1351,8 @@ func TestFailedSnapshotFillsReservation(t *testing.T) {
 }
 
 // TestConcurrentRaftSnapshots tests that snapshots still work correctly when
-// Raft requests multiple snapshots at the same time. This situation occurs when
-// two replicas need snapshots at the same time.
+// Raft requests multiple non-preemptive snapshots at the same time. This
+// situation occurs when two replicas need snapshots at the same time.
 func TestConcurrentRaftSnapshots(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -1403,7 +1410,7 @@ func TestConcurrentRaftSnapshots(t *testing.T) {
 
 	// Now kill stores 1 + 2, increment the key on the other stores and
 	// truncate their logs to make sure that when store 1 + 2 comes back up
-	// they will require a snapshot from Raft.
+	// they will require a non-preemptive snapshot from Raft.
 	tc.StopServer(1)
 	tc.StopServer(2)
 
@@ -2492,7 +2499,7 @@ func TestReportUnreachableRemoveRace(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	rng, seed := randutil.NewTestRand()
+	rng, seed := randutil.NewTestPseudoRand()
 	t.Logf("seed is %d", seed)
 
 	ctx := context.Background()
@@ -2794,11 +2801,13 @@ func TestRaftRemoveRace(t *testing.T) {
 
 	numServers := 10
 	if util.RaceEnabled {
-		// In race builds, running 10 nodes needs more than 1 full CPU (due to
-		// background gossip and heartbeat overhead), so it can't keep up when run
-		// under stress with one process per CPU. Run a reduced version of this test
-		// in race builds. This isn't as likely to reproduce the races but will
-		// still have a chance to do so.
+		// In race builds, running 10 nodes needs more than 1 full CPU
+		// (due to background gossip and heartbeat overhead), so it can't
+		// keep up when run under stress with one process per CPU. Run a
+		// reduced version of this test in race builds. This isn't as
+		// likely to reproduce the preemptive-snapshot race described in
+		// the previous comment, but will still have a chance to do so, or
+		// to find other races.
 		numServers = 3
 	}
 
@@ -2811,9 +2820,10 @@ func TestRaftRemoveRace(t *testing.T) {
 
 	key := tc.ScratchRange(t)
 	desc := tc.LookupRangeOrFatal(t, key)
-	// Cyclically up-replicate to a bunch of nodes which stresses a condition
-	// where replicas receive messages for a previous or later incarnation of the
-	// replica.
+	// Up-replicate to a bunch of nodes which stresses a condition where a
+	// replica created via a preemptive snapshot receives a message for a
+	// previous incarnation of the replica (i.e. has a smaller replica ID) that
+	// existed on the same store.
 	targets := make([]roachpb.ReplicationTarget, len(tc.Servers)-1)
 	for i := 1; i < len(tc.Servers); i++ {
 		targets[i-1] = tc.Target(i)
@@ -3419,7 +3429,7 @@ func (d errorChannelTestHandler) HandleRaftResponse(
 }
 
 func (errorChannelTestHandler) HandleSnapshot(
-	_ context.Context, _ *kvserver.SnapshotRequest_Header, _ kvserver.SnapshotResponseStream,
+	_ *kvserver.SnapshotRequest_Header, _ kvserver.SnapshotResponseStream,
 ) error {
 	panic("unimplemented")
 }
@@ -5415,7 +5425,7 @@ func TestReplicaRemovalClosesProposalQuota(t *testing.T) {
 		FromReplica:   fromReplDesc,
 		ToReplica:     newReplDesc,
 		Message:       raftpb.Message{Type: raftpb.MsgVote, Term: 2},
-	}, noopRaftMessageResponseStream{}))
+	}, noopRaftMessageResponseSteam{}))
 	ts := waitForTombstone(t, store.Engine(), desc.RangeID)
 	require.Equal(t, ts.NextReplicaID, desc.NextReplicaID)
 	wg.Wait()
@@ -5423,13 +5433,17 @@ func TestReplicaRemovalClosesProposalQuota(t *testing.T) {
 	require.Regexp(t, "closed.*destroyed", err)
 }
 
-type noopRaftMessageResponseStream struct{}
+type noopRaftMessageResponseSteam struct{}
 
-func (n noopRaftMessageResponseStream) Send(*kvserver.RaftMessageResponse) error {
+func (n noopRaftMessageResponseSteam) Context() context.Context {
+	return context.Background()
+}
+
+func (n noopRaftMessageResponseSteam) Send(*kvserver.RaftMessageResponse) error {
 	return nil
 }
 
-var _ kvserver.RaftMessageResponseStream = noopRaftMessageResponseStream{}
+var _ kvserver.RaftMessageResponseStream = noopRaftMessageResponseSteam{}
 
 // TestElectionAfterRestart is an end-to-end test for shouldCampaignOnWakeLocked
 // (see TestReplicaShouldCampaignOnWake for the corresponding unit test). It sets

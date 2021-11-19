@@ -218,9 +218,8 @@ func TestAverageRefreshTime(t *testing.T) {
 					  "createdAt",
 					  "rowCount",
 					  "distinctCount",
-					  "nullCount",
-					  "avgSize"
-				  ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+					  "nullCount"
+				  ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 			table.GetID(),
 			name,
 			columnIDs,
@@ -228,7 +227,6 @@ func TestAverageRefreshTime(t *testing.T) {
 			1, /* rowCount */
 			1, /* distinctCount */
 			0, /* nullCount */
-			4, /* avgSize */
 		)
 		return err
 	}

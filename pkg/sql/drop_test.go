@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
@@ -37,7 +38,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/gcjob"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/startupmigrations"
@@ -570,6 +570,43 @@ func TestDropIndexWithZoneConfigOSS(t *testing.T) {
 	}
 }
 
+func TestDropIndexInterleaved(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	const chunkSize = 200
+	params, _ := tests.CreateTestServerParams()
+	params.Knobs = base.TestingKnobs{
+		Server: &server.TestingKnobs{
+			DisableAutomaticVersionUpgrade: 1,
+			BinaryVersionOverride:          clusterversion.ByKey(clusterversion.PreventNewInterleavedTables - 1),
+		},
+		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
+			BackfillChunkSize: chunkSize,
+		},
+	}
+	s, sqlDB, kvDB := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(context.Background())
+
+	numRows := 2*chunkSize + 1
+	tests.CreateKVInterleavedTable(t, sqlDB, numRows)
+
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableSpan := tableDesc.TableSpan(keys.SystemSQLCodec)
+
+	tests.CheckKeyCount(t, kvDB, tableSpan, 3*numRows)
+
+	if _, err := sqlDB.Exec(`DROP INDEX t.intlv@intlv_idx`); err != nil {
+		t.Fatal(err)
+	}
+	tests.CheckKeyCount(t, kvDB, tableSpan, 2*numRows)
+
+	// Ensure that index is not active.
+	tableDesc = catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "intlv")
+	if _, err := tableDesc.FindIndexWithName("intlv_idx"); err == nil {
+		t.Fatalf("table descriptor still contains index after index is dropped")
+	}
+}
+
 // Tests DROP TABLE and also checks that the table data is not deleted
 // via the synchronous path.
 func TestDropTable(t *testing.T) {
@@ -879,6 +916,54 @@ func TestDropTableWhileUpgradingFormat(t *testing.T) {
 	tests.CheckKeyCount(t, kvDB, tableSpan, 0)
 }
 
+// Tests dropping a table that is interleaved within
+// another table.
+func TestDropTableInterleavedDeleteData(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	params, _ := tests.CreateTestServerParams()
+	params.Knobs = base.TestingKnobs{
+		Server: &server.TestingKnobs{
+			DisableAutomaticVersionUpgrade: 1,
+			BinaryVersionOverride:          clusterversion.ByKey(clusterversion.PreventNewInterleavedTables - 1),
+		},
+	}
+	defer gcjob.SetSmallMaxGCIntervalForTest()()
+
+	s, sqlDB, kvDB := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(context.Background())
+
+	numRows := 2*row.TableTruncateChunkSize + 1
+	tests.CreateKVInterleavedTable(t, sqlDB, numRows)
+
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDescInterleaved := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "intlv")
+	tableSpan := tableDesc.TableSpan(keys.SystemSQLCodec)
+
+	tests.CheckKeyCount(t, kvDB, tableSpan, 3*numRows)
+	if _, err := sqlDB.Exec(`DROP TABLE t.intlv`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Test that deleted table cannot be used. This prevents regressions where
+	// name -> descriptor ID caches might make this statement erronously work.
+	if _, err := sqlDB.Exec(`SELECT * FROM t.intlv`); !testutils.IsError(
+		err, `relation "t.intlv" does not exist`,
+	) {
+		t.Fatalf("different error than expected: %v", err)
+	}
+
+	if _, err := sqltestutils.AddImmediateGCZoneConfig(sqlDB, tableDescInterleaved.GetID()); err != nil {
+		t.Fatal(err)
+	}
+
+	testutils.SucceedsSoon(t, func() error {
+		return descExists(sqlDB, false, tableDescInterleaved.GetID())
+	})
+
+	tests.CheckKeyCount(t, kvDB, tableSpan, numRows)
+}
+
 func TestDropTableInTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -1049,6 +1134,11 @@ CREATE TABLE test.t(a INT PRIMARY KEY);
 		t.Fatal("table should be invisible through SHOW TABLES")
 	}
 
+	// Check that CREATE TABLE with the same name returns a proper error.
+	if _, err := db.Exec(`CREATE TABLE test.t(a INT PRIMARY KEY)`); !testutils.IsError(err, `table "t" is being dropped, try again later`) {
+		t.Fatal(err)
+	}
+
 	// Check that DROP TABLE with the same name returns a proper error.
 	if _, err := db.Exec(`DROP TABLE test.t`); !testutils.IsError(err, `relation "test.t" does not exist`) {
 		t.Fatal(err)
@@ -1202,7 +1292,7 @@ WHERE
 	tdb.Exec(t, "INSERT INTO foo VALUES (1)")
 	var afterInsertStr string
 	tdb.QueryRow(t, "SELECT cluster_logical_timestamp()").Scan(&afterInsertStr)
-	afterInsert, err := tree.ParseHLC(afterInsertStr)
+	afterInsert, err := sql.ParseHLC(afterInsertStr)
 	require.NoError(t, err)
 
 	// Now set up a filter to detect when the DROP INDEX execution will begin and
@@ -1275,25 +1365,27 @@ CREATE TABLE t.child(k INT PRIMARY KEY REFERENCES t.parent);
 	_, err = sqltestutils.AddImmediateGCZoneConfig(sqlDB, parentDesc.GetParentID())
 	require.NoError(t, err)
 
+	// Ensure the main GC job for the whole database succeeds.
 	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
-	// Ensure the main and the extra GC jobs both succeed.
-	sqlRun.CheckQueryResultsRetry(t, `
-SELECT
-	description
-FROM
-	[SHOW JOBS]
-WHERE
-	description LIKE 'GC for %' AND job_type = 'SCHEMA CHANGE GC' AND status = 'succeeded'
-ORDER BY
-	description;`,
-		[][]string{{
-			// Main GC job:
-			`GC for DROP DATABASE t CASCADE`,
-		}, {
-			// Extra GC job:
-			`GC for updating table "parent" after removing constraint "child_k_fkey" from table "t.public.child"`,
-		}},
-	)
+	testutils.SucceedsSoon(t, func() error {
+		var count int
+		sqlRun.QueryRow(t, `SELECT count(*) FROM [SHOW JOBS] WHERE description = 'GC for DROP DATABASE t CASCADE' AND status = 'succeeded'`).Scan(&count)
+		if count != 1 {
+			return errors.Newf("expected 1 result, got %d", count)
+		}
+		return nil
+	})
+	// Ensure the extra GC job that also gets queued succeeds. Currently this job
+	// has a nonsensical description due to the fact that the original job queued
+	// for updating the referenced table has an empty description.
+	testutils.SucceedsSoon(t, func() error {
+		var count int
+		sqlRun.QueryRow(t, `SELECT count(*) FROM [SHOW JOBS] WHERE description = 'GC for ' AND status = 'succeeded'`).Scan(&count)
+		if count != 1 {
+			return errors.Newf("expected 1 result, got %d", count)
+		}
+		return nil
+	})
 
 	// Check that the data was cleaned up.
 	tests.CheckKeyCount(t, kvDB, parentDesc.TableSpan(keys.SystemSQLCodec), 0)

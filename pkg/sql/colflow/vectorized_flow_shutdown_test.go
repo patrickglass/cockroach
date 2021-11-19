@@ -151,7 +151,7 @@ func TestVectorizedFlowShutdown(t *testing.T) {
 					EvalCtx: &evalCtx,
 					Cfg:     &execinfra.ServerConfig{Settings: st},
 				}
-				rng, _ := randutil.NewTestRand()
+				rng, _ := randutil.NewPseudoRand()
 				var (
 					err             error
 					wg              sync.WaitGroup

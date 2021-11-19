@@ -17,17 +17,11 @@ import (
 )
 
 func TestOutputOfBinaryRule(t *testing.T) {
-	require.Equal(t, OutputOfBinaryRule("//pkg/cmd/cockroach-short"),
-		"pkg/cmd/cockroach-short/cockroach-short_/cockroach-short")
-	require.Equal(t, OutputOfBinaryRule("//pkg/cmd/cockroach-short:cockroach-short"),
-		"pkg/cmd/cockroach-short/cockroach-short_/cockroach-short")
-	require.Equal(t, OutputOfBinaryRule("pkg/cmd/cockroach-short"),
-		"pkg/cmd/cockroach-short/cockroach-short_/cockroach-short")
+	require.Equal(t, OutputOfBinaryRule("//pkg/cmd/cockroach-short"), "pkg/cmd/cockroach-short/cockroach-short_/cockroach-short")
+	require.Equal(t, OutputOfBinaryRule("//pkg/cmd/cockroach-short:cockroach-short"), "pkg/cmd/cockroach-short/cockroach-short_/cockroach-short")
+	require.Equal(t, OutputOfBinaryRule("pkg/cmd/cockroach-short"), "pkg/cmd/cockroach-short/cockroach-short_/cockroach-short")
 
-	require.Equal(t, OutputOfBinaryRule("@com_github_cockroachdb_stress//:stress"),
-		"external/com_github_cockroachdb_stress/stress_/stress")
-	require.Equal(t, OutputOfBinaryRule("@com_github_bazelbuild_buildtools//buildifier:buildifier"),
-		"external/com_github_bazelbuild_buildtools/buildifier/buildifier_/buildifier")
+	require.Equal(t, OutputOfBinaryRule("@com_github_cockroachdb_stress//:stress"), "external/com_github_cockroachdb_stress/stress_/stress")
 }
 
 func TestOutputsOfGenrule(t *testing.T) {

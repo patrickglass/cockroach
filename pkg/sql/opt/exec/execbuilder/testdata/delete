@@ -85,7 +85,7 @@ vectorized: true
         │
         └── • scan
               missing stats
-              table: unindexed@unindexed_pkey
+              table: unindexed@primary
               spans: FULL SCAN
 
 # Check DELETE with LIMIT clause (MySQL extension)
@@ -107,7 +107,7 @@ vectorized: true
         │
         └── • scan
               missing stats
-              table: unindexed@unindexed_pkey
+              table: unindexed@primary
               spans: FULL SCAN
 
 # Check fast DELETE.
@@ -138,7 +138,7 @@ vectorized: true
 │
 └── • scan
       missing stats
-      table: unindexed@unindexed_pkey
+      table: unindexed@primary
       spans: [/1 - ]
       limit: 1
 
@@ -248,7 +248,7 @@ query TT
 SELECT operation, message FROM [SHOW KV TRACE FOR SESSION]
 WHERE message LIKE '%DelRange%' OR message LIKE '%sending batch%'
 ----
-batch flow coordinator  DelRange /Table/57/1/5 - /Table/57/1/6
+batch flow coordinator  DelRange /Table/57/1/5 - /Table/57/1/5/#
 dist sender send        r43: sending batch 1 DelRng, 1 EndTxn to (n1,s1):1
 
 statement ok
@@ -286,7 +286,7 @@ vectorized: true
         └── • scan
               columns: (x, y, z)
               estimated row count: 1,000 (missing stats)
-              table: xyz@xyz_pkey
+              table: xyz@primary
               spans: FULL SCAN
 
 # With the hint, we use a constrained scan.
@@ -309,7 +309,7 @@ vectorized: true
     └── • index join
         │ columns: (x, y, z)
         │ estimated row count: 990 (missing stats)
-        │ table: xyz@xyz_pkey
+        │ table: xyz@primary
         │ key columns: x
         │
         └── • scan

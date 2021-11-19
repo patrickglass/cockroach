@@ -49,7 +49,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/errors"
 	"github.com/jackc/pgtype"
 	"github.com/stretchr/testify/assert"
@@ -330,28 +329,26 @@ INSERT INTO t.t VALUES (1);
 		t.Fatal(err)
 	}
 
-	txn, err := sqlDB.Begin()
-	require.NoError(t, err)
-	defer func() {
-		_ = txn.Rollback()
-	}()
+	if _, err := sqlDB.Exec(`BEGIN`); err != nil {
+		t.Fatal(err)
+	}
 
 	// Look up the schema first so only the read txn is recorded in
 	// kv trace logs. We explicitly specify the schema to avoid an extra failed
 	// lease acquisition, which occurs in a separate transaction, to work around
 	// a current limitation in schema resolution. See #53301.
-	if _, err := txn.Exec(`SELECT * FROM t.public.t`); err != nil {
+	if _, err := sqlDB.Exec(`SELECT * FROM t.public.t`); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := txn.Exec(
+	if _, err := sqlDB.Exec(
 		`SET tracing=on,kv; SELECT * FROM t.public.t; SET TRACING=off`); err != nil {
 		t.Fatal(err)
 	}
 
 	// The log messages we are looking for are structured like
 	// [....,txn=<txnID>], so search for those and extract the id.
-	row := txn.QueryRow(`
+	row := sqlDB.QueryRow(`
 SELECT
 	string_to_array(regexp_extract(tag, 'txn=[a-zA-Z0-9]*'), '=')[2]
 FROM
@@ -366,7 +363,7 @@ WHERE
 	// Now, run a SHOW QUERIES statement, in the same transaction.
 	// The txn_id we find there should be the same as the one we parsed,
 	// and the txn_start time should be before the start time of the statement.
-	row = txn.QueryRow(`
+	row = sqlDB.QueryRow(`
 SELECT
 	txn_id, start
 FROM
@@ -387,7 +384,7 @@ WHERE
 	}
 
 	// Find the transaction start time and ensure that the query started after it.
-	row = txn.QueryRow(`SELECT start FROM crdb_internal.node_transactions WHERE id = $1`, foundTxnID)
+	row = sqlDB.QueryRow(`SELECT start FROM crdb_internal.node_transactions WHERE id = $1`, foundTxnID)
 	if err := row.Scan(&txnStart); err != nil {
 		t.Fatal(err)
 	}
@@ -710,9 +707,10 @@ func TestDistSQLFlowsVirtualTables(t *testing.T) {
 // root.child.remotechilddone		<-- traceID1
 // root2												<-- traceID2
 // 		root2.child								<-- traceID2
-func setupTraces(t1, t2 *tracing.Tracer) (tracingpb.TraceID, func()) {
+func setupTraces(t1, t2 *tracing.Tracer) (uint64, func()) {
 	// Start a root span on "node 1".
-	root := t1.StartSpan("root", tracing.WithRecording(tracing.RecordingVerbose))
+	root := t1.StartSpan("root", tracing.WithForceRealSpan())
+	root.SetVerbose(true)
 
 	time.Sleep(10 * time.Millisecond)
 
@@ -733,11 +731,13 @@ func setupTraces(t1, t2 *tracing.Tracer) (tracingpb.TraceID, func()) {
 
 	// Start another remote child span on "node 2" that we finish.
 	childRemoteChildFinished := t2.StartSpan("root.child.remotechilddone", tracing.WithParentAndManualCollection(child.Meta()))
-	child.ImportRemoteSpans(childRemoteChildFinished.FinishAndGetRecording(tracing.RecordingVerbose))
+	childRemoteChildFinished.Finish()
+	child.ImportRemoteSpans(childRemoteChildFinished.GetRecording())
 
 	// Start another remote child span on "node 2" that we finish. This will have
 	// a different trace_id from the spans created above.
-	root2 := t2.StartSpan("root2", tracing.WithRecording(tracing.RecordingVerbose))
+	root2 := t2.StartSpan("root2", tracing.WithForceRealSpan())
+	root2.SetVerbose(true)
 
 	// Start a child span on "node 2".
 	child2 := t2.StartSpan("root2.child", tracing.WithParentAndAutoCollection(root2))
@@ -760,8 +760,8 @@ func TestClusterInflightTracesVirtualTable(t *testing.T) {
 	defer tc.Stopper().Stop(ctx)
 	sqlDB := sqlutils.MakeSQLRunner(tc.ServerConn(0))
 
-	node1Tracer := tc.Server(0).TracerI().(*tracing.Tracer)
-	node2Tracer := tc.Server(1).TracerI().(*tracing.Tracer)
+	node1Tracer := tc.Server(0).Tracer().(*tracing.Tracer)
+	node2Tracer := tc.Server(1).Tracer().(*tracing.Tracer)
 
 	traceID, cleanup := setupTraces(node1Tracer, node2Tracer)
 	defer cleanup()

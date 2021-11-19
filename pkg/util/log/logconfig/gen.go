@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//go:build bazel
 // +build bazel
 
 package main
@@ -88,7 +87,7 @@ func run() error {
 	sort.Strings(keys)
 	var sortedSinkInfos []*sinkInfo
 	for _, k := range keys {
-		if strings.HasPrefix(k, "Common") || strings.HasSuffix(k, "Defaults") {
+		if k == "CommonSinkConfig" || strings.HasSuffix(k, "Defaults") {
 			// We don't want the common configuration to appear as a sink in
 			// the output doc.
 			continue
@@ -99,9 +98,8 @@ func run() error {
 	// Render the template.
 	var src bytes.Buffer
 	if err := tmpl.Execute(&src, struct {
-		Sinks     []*sinkInfo
-		Buffering *sinkInfo
-	}{sortedSinkInfos, info["CommonBufferSinkConfig"]}); err != nil {
+		Sinks []*sinkInfo
+	}{sortedSinkInfos}); err != nil {
 		return err
 	}
 
@@ -317,7 +315,7 @@ Configuration options shared across all sink types:
 | Field | Description |
 |--|--|
 {{range .CommonFields -}}
-| ` + "`" + `{{- .FieldName -}}` + "`" + ` | {{ .Comment | tableCell }}{{- if eq .FieldName "buffering" }} See the [common buffering configuration](#buffering-config) section for details. {{end}} |
+| ` + "`" + `{{- .FieldName -}}` + "`" + ` | {{ .Comment | tableCell }} |
 {{end}}
 {{- end}}
 
@@ -398,21 +396,4 @@ Likewise:
     channels: {INFO: all except ops,health}
 
 etc.
-
-{{if .Buffering}}
-
-<a name="buffering-config">
-
-## {{ .Buffering.Name }}
-
-{{ .Buffering.Comment }}
-
-{{if .Buffering.Fields -}}
-| Field | Description |
-|--|--|
-{{range .Buffering.Fields -}}
-| ` + "`" + `{{- .FieldName -}}` + "`" + ` | {{ .Comment | tableCell }} |
-{{end}}
-{{- end}}
-{{end}}
 `

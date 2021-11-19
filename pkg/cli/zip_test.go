@@ -79,6 +79,7 @@ table_name NOT IN (
 	'interleaved',
 	'lost_descriptors_with_data',
 	'table_columns',
+	'table_indexes',
 	'table_row_statistics',
 	'ranges',
 	'ranges_no_leases',
@@ -105,7 +106,6 @@ ORDER BY name ASC`)
 		"system.descriptor",
 		"system.namespace",
 		"system.scheduled_jobs",
-		"system.settings",
 	)
 	sort.Strings(tables)
 

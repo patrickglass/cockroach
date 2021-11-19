@@ -12,7 +12,6 @@ package optbuilder
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
@@ -678,6 +677,10 @@ func (cb *onUpdateCascadeBuilder) Build(
 			updateExprs[i] = &tree.UpdateExpr{}
 			switch cb.action {
 			case tree.Cascade:
+				// TODO(radu): This requires special code in addUpdateCols to
+				// prevent this scopeColumn from being duplicated in mb.outScope
+				// (see the addCol anonymous function in addUpdateCols). Find a
+				// cleaner way to handle this.
 				updateExprs[i].Expr = &newValScopeCols[i]
 			case tree.SetNull:
 				updateExprs[i].Expr = tree.DNull
@@ -775,12 +778,13 @@ func (b *Builder) buildUpdateCascadeMutationInput(
 	outCols := make(opt.ColList, numFKCols*2)
 	outColsOld := outCols[:numFKCols]
 	outColsNew := outCols[numFKCols:]
-	for i := 0; i < numFKCols; i++ {
-		c := childTable.Column(fk.OriginColumnOrdinal(childTable, i))
-		oldName := fmt.Sprintf("%s_old", c.ColName())
-		newName := fmt.Sprintf("%s_new", c.ColName())
-		outColsOld[i] = md.AddColumn(oldName, c.DatumType())
-		outColsNew[i] = md.AddColumn(newName, c.DatumType())
+	for i := range outColsOld {
+		c := md.ColumnMeta(oldValues[i])
+		outColsOld[i] = md.AddColumn(c.Alias, c.Type)
+	}
+	for i := range outColsNew {
+		c := md.ColumnMeta(newValues[i])
+		outColsNew[i] = md.AddColumn(c.Alias, c.Type)
 	}
 
 	md.AddWithBinding(binding, b.factory.ConstructFakeRel(&memo.FakeRelPrivate{
@@ -867,17 +871,12 @@ func (b *Builder) buildUpdateCascadeMutationInput(
 		outScope.expr, mutationInput, on, memo.EmptyJoinPrivate,
 	)
 	// Append the columns from the right-hand side to the scope.
-	//
-	// These columns can only be referenced if they are update columns. In that
-	// case, they are given distinct names in mutationBuilder.addUpdateCol, so
-	// we make them anonymous here. This prevents column name ambiguity in
-	// outScope. There is no need to attach a metadata name here because these
-	// columns have already been added to the metadata with a name in the calls
-	// to md.AddColumn above.
-	for _, col := range outCols {
+	for i, col := range outCols {
 		colMeta := md.ColumnMeta(col)
+		ord := fk.OriginColumnOrdinal(childTable, i%numFKCols)
+		c := childTable.Column(ord)
 		outScope.cols = append(outScope.cols, scopeColumn{
-			name: scopeColName(""),
+			name: scopeColName(c.ColName()),
 			id:   col,
 			typ:  colMeta.Type,
 		})

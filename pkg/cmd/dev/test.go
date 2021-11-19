@@ -11,15 +11,11 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/alessio/shellescape"
+	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
 )
 
@@ -32,8 +28,12 @@ const (
 	stressArgsFlag  = "stress-args"
 	raceFlag        = "race"
 	ignoreCacheFlag = "ignore-cache"
-	rewriteFlag     = "rewrite"
-	rewriteArgFlag  = "rewrite-arg"
+
+	// Logic test related flags.
+	logicFlag    = "logic"
+	filesFlag    = "files"
+	subtestsFlag = "subtests"
+	configFlag   = "config"
 )
 
 func makeTestCmd(runE func(cmd *cobra.Command, args []string) error) *cobra.Command {
@@ -45,69 +45,74 @@ func makeTestCmd(runE func(cmd *cobra.Command, args []string) error) *cobra.Comm
 		Example: `
 	dev test
 	dev test pkg/kv/kvserver --filter=TestReplicaGC* -v --timeout=1m
-	dev test --stress --race ...`,
+	dev test --stress --race ...
+	dev test --logic --files=prepare|fk --subtests=20042 --config=local`,
 		Args: cobra.MinimumNArgs(0),
 		RunE: runE,
 	}
 	// Attach flags for the test sub-command.
-	addCommonBuildFlags(testCmd)
 	addCommonTestFlags(testCmd)
 	testCmd.Flags().BoolP(vFlag, "v", false, "enable logging during test runs")
 	testCmd.Flags().Bool(stressFlag, false, "run tests under stress")
-	testCmd.Flags().String(stressArgsFlag, "", "additional arguments to pass to stress")
+	testCmd.Flags().String(stressArgsFlag, "", "Additional arguments to pass to stress")
 	testCmd.Flags().Bool(raceFlag, false, "run tests using race builds")
 	testCmd.Flags().Bool(ignoreCacheFlag, false, "ignore cached test runs")
-	testCmd.Flags().String(rewriteFlag, "", "argument to pass to underlying (only applicable for certain tests, e.g. logic and datadriven tests). If unspecified, -rewrite will be passed to the test binary.")
-	testCmd.Flags().String(rewriteArgFlag, "", "additional argument to pass to -rewrite (implies --rewrite)")
-	testCmd.Flags().Lookup(rewriteFlag).NoOptDefVal = "-rewrite"
+
+	// Logic test related flags.
+	testCmd.Flags().Bool(logicFlag, false, "run logic tests")
+	testCmd.Flags().String(filesFlag, "", "run logic tests for files matching this regex")
+	testCmd.Flags().String(subtestsFlag, "", "run logic test subtests matching this regex")
+	testCmd.Flags().String(configFlag, "", "run logic tests under the specified config")
 	return testCmd
 }
 
 // TODO(irfansharif): Add tests for the various bazel commands that get
 // generated from the set of provided user flags.
 
-func (d *dev) test(cmd *cobra.Command, commandLine []string) error {
-	pkgs, additionalBazelArgs := splitArgsAtDash(cmd, commandLine)
-	ctx := cmd.Context()
-	var (
-		filter      = mustGetFlagString(cmd, filterFlag)
-		ignoreCache = mustGetFlagBool(cmd, ignoreCacheFlag)
-		race        = mustGetFlagBool(cmd, raceFlag)
-		rewrite     = mustGetFlagString(cmd, rewriteFlag)
-		rewriteArg  = mustGetFlagString(cmd, rewriteArgFlag)
-		short       = mustGetFlagBool(cmd, shortFlag)
-		stress      = mustGetFlagBool(cmd, stressFlag)
-		stressArgs  = mustGetFlagString(cmd, stressArgsFlag)
-		timeout     = mustGetFlagDuration(cmd, timeoutFlag)
-		verbose     = mustGetFlagBool(cmd, vFlag)
-	)
-	if rewriteArg != "" && rewrite == "" {
-		rewrite = "-rewrite"
+func (d *dev) test(cmd *cobra.Command, pkgs []string) error {
+	if logicTest := mustGetFlagBool(cmd, logicFlag); logicTest {
+		return d.runLogicTest(cmd)
 	}
+
+	return d.runUnitTest(cmd, pkgs)
+}
+
+func (d *dev) runUnitTest(cmd *cobra.Command, pkgs []string) error {
+	ctx := cmd.Context()
+	stress := mustGetFlagBool(cmd, stressFlag)
+	stressArgs := mustGetFlagString(cmd, stressArgsFlag)
+	race := mustGetFlagBool(cmd, raceFlag)
+	filter := mustGetFlagString(cmd, filterFlag)
+	timeout := mustGetFlagDuration(cmd, timeoutFlag)
+	short := mustGetFlagBool(cmd, shortFlag)
+	ignoreCache := mustGetFlagBool(cmd, ignoreCacheFlag)
+	verbose := mustGetFlagBool(cmd, vFlag)
+
+	d.log.Printf("unit test args: stress=%t  race=%t  filter=%s  timeout=%s  ignore-cache=%t  pkgs=%s",
+		stress, race, filter, timeout, ignoreCache, pkgs)
 
 	var args []string
 	args = append(args, "test")
+	args = append(args, "--color=yes")
+	args = append(args, "--experimental_convenience_symlinks=ignore")
+	args = append(args, getConfigFlags()...)
 	args = append(args, mustGetRemoteCacheArgs(remoteCacheAddr)...)
 	if numCPUs != 0 {
 		args = append(args, fmt.Sprintf("--local_cpu_resources=%d", numCPUs))
 	}
 	if race {
 		args = append(args, "--config=race")
-	} else if stress {
-		args = append(args, "--test_sharding_strategy=disabled")
 	}
 
-	var testTargets []string
 	for _, pkg := range pkgs {
 		pkg = strings.TrimPrefix(pkg, "//")
-		pkg = strings.TrimPrefix(pkg, "./")
 		pkg = strings.TrimRight(pkg, "/")
 
 		if !strings.HasPrefix(pkg, "pkg/") {
-			return fmt.Errorf("malformed package %q, expecting %q", pkg, "pkg/{...}")
+			return errors.Newf("malformed package %q, expecting %q", pkg, "pkg/{...}")
 		}
 
-		if strings.HasSuffix(pkg, "/...") {
+		if strings.HasSuffix(pkg, "...") {
 			// Similar to `go test`, we implement `...` expansion to allow
 			// callers to use the following pattern to test all packages under a
 			// named one:
@@ -133,128 +138,55 @@ func (d *dev) test(cmd *cobra.Command, commandLine []string) error {
 			// where we define `Stringer` separately for the `RemoteOffset`
 			// type.
 			{
-				queryArgs := []string{fmt.Sprintf("kind(go_test,  //%s)", pkg)}
-				out, err := d.getQueryOutput(ctx, queryArgs...)
+				out, err := d.exec.CommandContextSilent(ctx, "bazel", "query", fmt.Sprintf("kind(go_test,  //%s)", pkg))
 				if err != nil {
 					return err
 				}
-				targets := strings.Split(strings.TrimSpace(string(out)), "\n")
-				testTargets = append(testTargets, targets...)
+				targets := strings.TrimSpace(string(out))
+				args = append(args, strings.Split(targets, "\n")...)
 			}
-		} else if strings.Contains(pkg, ":") {
-			testTargets = append(testTargets, pkg)
 		} else {
-			queryArgs := []string{fmt.Sprintf("kind(go_test, //%s:all)", pkg)}
-			out, err := d.getQueryOutput(ctx, queryArgs...)
-			if err != nil {
-				return err
-			}
-			tests := strings.Split(strings.TrimSpace(string(out)), "\n")
-			testTargets = append(testTargets, tests...)
+			components := strings.Split(pkg, "/")
+			pkgName := components[len(components)-1]
+			args = append(args, fmt.Sprintf("//%s:%s_test", pkg, pkgName))
 		}
 	}
-
-	args = append(args, testTargets...)
 
 	if ignoreCache {
 		args = append(args, "--nocache_test_results")
 	}
-	args = append(args, "--test_env=GOTRACEBACK=all")
-	if rewrite != "" {
-		if stress {
-			return fmt.Errorf("cannot combine --%s and --%s", stressFlag, rewriteFlag)
-		}
-		workspace, err := d.getWorkspace(ctx)
-		if err != nil {
-			return err
-		}
-		args = append(args, fmt.Sprintf("--test_env=COCKROACH_WORKSPACE=%s", workspace))
-		args = append(args, "--test_arg", rewrite)
-		if rewriteArg != "" {
-			args = append(args, "--test_arg", rewriteArg)
-		}
-		for _, testTarget := range testTargets {
-			dir := getDirectoryFromTarget(testTarget)
-			args = append(args, fmt.Sprintf("--sandbox_writable_path=%s", filepath.Join(workspace, dir)))
-		}
-	}
-	if timeout > 0 && !stress {
+	if stress && timeout > 0 {
+		args = append(args, "--run_under", fmt.Sprintf("%s -maxtime=%s %s", stressTarget, timeout, stressArgs))
+		// The timeout should be a bit higher than the stress duration.
+		// Bazel will probably think the timeout for this test isn't so
+		// long.
+		args = append(args, fmt.Sprintf("--test_timeout=%d", int((timeout+1*time.Second).Seconds())))
+	} else if stress {
+		args = append(args, "--run_under", fmt.Sprintf("%s %s", stressTarget, stressArgs))
+	} else if timeout > 0 {
 		args = append(args, fmt.Sprintf("--test_timeout=%d", int(timeout.Seconds())))
-
-		// If stress is specified, we'll pad the timeout below.
 	}
-
-	if stress {
-		var stressCmdArgs []string
-		if timeout > 0 {
-			stressCmdArgs = append(stressCmdArgs, fmt.Sprintf("-maxtime=%s", timeout))
-			// The bazel timeout should be higher than the stress duration, lets
-			// generously give it an extra minute.
-			args = append(args, fmt.Sprintf("--test_timeout=%d", int((timeout+time.Minute).Seconds())))
-		} else {
-			// We're running under stress and no timeout is specified. We want
-			// to respect the timeout passed down to stress[1]. Similar to above
-			// we want the bazel timeout to be longer, so lets just set it to
-			// 24h.
-			//
-			// [1]: Through --stress-arg=-maxtime or if nothing is specified,
-			//      -maxtime=0 is taken as "run forever".
-			args = append(args, fmt.Sprintf("--test_timeout=%.0f", 24*time.Hour.Seconds()))
-		}
-		if numCPUs > 0 {
-			stressCmdArgs = append(stressCmdArgs, fmt.Sprintf("-p=%d", numCPUs))
-		}
-		stressCmdArgs = append(stressCmdArgs, stressArgs)
-		args = append(args, "--run_under",
-			fmt.Sprintf("%s %s", stressTarget, strings.Join(stressCmdArgs, " ")))
-	}
-
 	if filter != "" {
 		args = append(args, fmt.Sprintf("--test_filter=%s", filter))
 	}
 	if short {
 		args = append(args, "--test_arg", "-test.short")
 	}
-	if stress {
-		args = append(args, "--test_output", "streamed")
-	} else if verbose {
+	if verbose {
 		args = append(args, "--test_output", "all", "--test_arg", "-test.v")
 	} else {
 		args = append(args, "--test_output", "errors")
 	}
-	args = append(args, additionalBazelArgs...)
 
-	logCommand("bazel", args...)
 	return d.exec.CommandContextInheritingStdStreams(ctx, "bazel", args...)
 }
 
-func getDirectoryFromTarget(target string) string {
-	target = strings.TrimPrefix(target, "//")
-	colon := strings.LastIndex(target, ":")
-	if colon < 0 {
-		return target
-	}
-	return target[:colon]
-}
+func (d *dev) runLogicTest(cmd *cobra.Command) error {
+	files := mustGetFlagString(cmd, filesFlag)
+	subtests := mustGetFlagString(cmd, subtestsFlag)
+	config := mustGetFlagString(cmd, configFlag)
 
-// getQueryOutput runs `bazel query` w/ the given arguments, but returns
-// a more informative error if the query fails.
-func (d *dev) getQueryOutput(ctx context.Context, args ...string) ([]byte, error) {
-	queryArgs := []string{"query"}
-	queryArgs = append(queryArgs, args...)
-	stdoutBytes, err := d.exec.CommandContextSilent(ctx, "bazel", queryArgs...)
-	if err == nil {
-		return stdoutBytes, err
-	}
-	var cmderr *exec.ExitError
-	var stdout, stderr string
-	if len(stdoutBytes) > 0 {
-		stdout = fmt.Sprintf("stdout: \"%s\" ", string(stdoutBytes))
-	}
-	if errors.As(err, &cmderr) && len(cmderr.Stderr) > 0 {
-		stderr = fmt.Sprintf("stderr: \"%s\" ", strings.TrimSpace(string(cmderr.Stderr)))
-	}
-	return nil, fmt.Errorf("failed to run `bazel %s` %s%s(%w)",
-		shellescape.QuoteCommand(queryArgs), stdout, stderr, err)
-
+	d.log.Printf("logic test args: files=%s  subtests=%s  config=%s",
+		files, subtests, config)
+	return errors.New("--logic unimplemented")
 }

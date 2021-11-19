@@ -93,7 +93,7 @@ type Reporter struct {
 // PeriodicallyReportDiagnostics starts a background worker that periodically
 // phones home to report usage and diagnostics.
 func (r *Reporter) PeriodicallyReportDiagnostics(ctx context.Context, stopper *stop.Stopper) {
-	_ = stopper.RunAsyncTaskEx(ctx, stop.TaskOpts{TaskName: "diagnostics", SpanOpt: stop.SterileRootSpan}, func(ctx context.Context) {
+	_ = stopper.RunAsyncTask(ctx, "diagnostics", func(ctx context.Context) {
 		defer logcrash.RecoverAndReportNonfatalPanic(ctx, &r.Settings.SV)
 		nextReport := r.StartTime
 
@@ -169,7 +169,7 @@ func (r *Reporter) CreateReport(
 ) *diagnosticspb.DiagnosticReport {
 	info := diagnosticspb.DiagnosticReport{}
 	secret := sql.ClusterSecret.Get(&r.Settings.SV)
-	uptime := int64(timeutil.Since(r.StartTime).Seconds())
+	uptime := int64(timeutil.Now().Sub(r.StartTime).Seconds())
 
 	// Populate the hardware, OS, binary, and location of the CRDB node or SQL
 	// instance.

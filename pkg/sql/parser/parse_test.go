@@ -478,6 +478,8 @@ func TestUnimplementedSyntax(t *testing.T) {
 		{`CREATE TEMP TABLE IF NOT EXISTS b AS SELECT a FROM a ON COMMIT DROP`, 46556, `drop`, ``},
 		{`CREATE TEMP TABLE IF NOT EXISTS b AS SELECT a FROM a ON COMMIT DELETE ROWS`, 46556, `delete rows`, ``},
 
+		{`CREATE SEQUENCE a AS DOUBLE PRECISION`, 25110, `FLOAT8`, ``},
+
 		{`CREATE RECURSIVE VIEW a AS SELECT b`, 0, `create recursive view`, ``},
 
 		{`CREATE TYPE a AS (b)`, 27792, ``, ``},
@@ -528,6 +530,10 @@ func TestUnimplementedSyntax(t *testing.T) {
 		{`SELECT 1 FROM t GROUP BY a, ROLLUP (b)`, 46280, `rollup`, ``},
 		{`SELECT 1 FROM t GROUP BY CUBE (b)`, 46280, `cube`, ``},
 		{`SELECT 1 FROM t GROUP BY GROUPING SETS (b)`, 46280, `grouping sets`, ``},
+
+		{`SELECT a FROM t ORDER BY a NULLS LAST`, 6224, ``, ``},
+		{`SELECT a FROM t ORDER BY a ASC NULLS LAST`, 6224, ``, ``},
+		{`SELECT a FROM t ORDER BY a DESC NULLS FIRST`, 6224, ``, ``},
 
 		{`CREATE TABLE a(b BOX)`, 21286, `box`, ``},
 		{`CREATE TABLE a(b CIDR)`, 18846, `cidr`, ``},

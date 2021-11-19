@@ -24,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
@@ -31,9 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/pebble"
 )
 
 const (
@@ -46,7 +45,8 @@ const (
 	// MinimumMaxOpenFiles is the minimum value that RocksDB's max_open_files
 	// option can be set to. While this should be set as high as possible, the
 	// minimum total for a single store node must be under 2048 for Windows
-	// compatibility.
+	// compatibility. See:
+	// https://wpdev.uservoice.com/forums/266908-command-prompt-console-bash-on-ubuntu-on-windo/suggestions/17310124-add-ability-to-change-max-number-of-open-files-for
 	MinimumMaxOpenFiles = 1700
 	// Default value for maximum number of intents reported by ExportToSST
 	// and Scan operations in WriteIntentError is set to half of the maximum
@@ -897,10 +897,6 @@ func mvccGet(
 	mvccScanner.init(opts.Txn, opts.LocalUncertaintyLimit)
 	mvccScanner.get(ctx)
 
-	// If we have a trace, emit the scan stats that we produced.
-	traceSpan := tracing.SpanFromContext(ctx)
-	recordIteratorStats(traceSpan, mvccScanner.stats())
-
 	if mvccScanner.err != nil {
 		return optionalValue{}, nil, mvccScanner.err
 	}
@@ -1206,7 +1202,7 @@ func MVCCPut(
 // existence in updating the stats.
 //
 // Note that, when writing transactionally, the txn's timestamps
-// dictate the timestamp of the operation, and the timestamp parameter is
+// dictate the timestamp of the operation, and the timestamp paramater is
 // confusing and redundant. See the comment on mvccPutInternal for details.
 func MVCCBlindPut(
 	ctx context.Context,
@@ -1224,7 +1220,7 @@ func MVCCBlindPut(
 // future get responses.
 //
 // Note that, when writing transactionally, the txn's timestamps
-// dictate the timestamp of the operation, and the timestamp parameter is
+// dictate the timestamp of the operation, and the timestamp paramater is
 // confusing and redundant. See the comment on mvccPutInternal for details.
 func MVCCDelete(
 	ctx context.Context,
@@ -1855,7 +1851,7 @@ func mvccPutInternal(
 // timestamp as we use to write a value.
 //
 // Note that, when writing transactionally, the txn's timestamps
-// dictate the timestamp of the operation, and the timestamp parameter is
+// dictate the timestamp of the operation, and the timestamp paramater is
 // confusing and redundant. See the comment on mvccPutInternal for details.
 func MVCCIncrement(
 	ctx context.Context,
@@ -1921,7 +1917,7 @@ const (
 // timestamp as we use to write a value.
 //
 // Note that, when writing transactionally, the txn's timestamps
-// dictate the timestamp of the operation, and the timestamp parameter is
+// dictate the timestamp of the operation, and the timestamp paramater is
 // confusing and redundant. See the comment on mvccPutInternal for details.
 //
 // An empty expVal means that the key is expected to not exist. If not empty,
@@ -1951,7 +1947,7 @@ func MVCCConditionalPut(
 // currently exist.
 //
 // Note that, when writing transactionally, the txn's timestamps
-// dictate the timestamp of the operation, and the timestamp parameter is
+// dictate the timestamp of the operation, and the timestamp paramater is
 // confusing and redundant. See the comment on mvccPutInternal for details.
 func MVCCBlindConditionalPut(
 	ctx context.Context,
@@ -2004,7 +2000,7 @@ func mvccConditionalPutUsingIter(
 // will cause a ConditionFailedError.
 //
 // Note that, when writing transactionally, the txn's timestamps
-// dictate the timestamp of the operation, and the timestamp parameter is
+// dictate the timestamp of the operation, and the timestamp paramater is
 // confusing and redundant. See the comment on mvccPutInternal for details.
 func MVCCInitPut(
 	ctx context.Context,
@@ -2409,22 +2405,6 @@ func MVCCDeleteRange(
 	return keys, res.ResumeSpan, res.NumKeys, nil
 }
 
-func recordIteratorStats(traceSpan *tracing.Span, iteratorStats IteratorStats) {
-	stats := iteratorStats.Stats
-	if traceSpan != nil {
-		steps := stats.ReverseStepCount[pebble.InterfaceCall] + stats.ForwardStepCount[pebble.InterfaceCall]
-		seeks := stats.ReverseSeekCount[pebble.InterfaceCall] + stats.ForwardSeekCount[pebble.InterfaceCall]
-		internalSteps := stats.ReverseStepCount[pebble.InternalIterCall] + stats.ForwardStepCount[pebble.InternalIterCall]
-		internalSeeks := stats.ReverseSeekCount[pebble.InternalIterCall] + stats.ForwardSeekCount[pebble.InternalIterCall]
-		traceSpan.RecordStructured(&roachpb.ScanStats{
-			NumInterfaceSeeks: uint64(seeks),
-			NumInternalSeeks:  uint64(internalSeeks),
-			NumInterfaceSteps: uint64(steps),
-			NumInternalSteps:  uint64(internalSteps),
-		})
-	}
-}
-
 func mvccScanToBytes(
 	ctx context.Context,
 	iter MVCCIterator,
@@ -2438,45 +2418,35 @@ func mvccScanToBytes(
 	if err := opts.validate(); err != nil {
 		return MVCCScanResult{}, err
 	}
-	if opts.MaxKeys < 0 {
-		return MVCCScanResult{
-			ResumeSpan:   &roachpb.Span{Key: key, EndKey: endKey},
-			ResumeReason: roachpb.RESUME_KEY_LIMIT,
-		}, nil
-	}
-	if opts.TargetBytes < 0 {
-		return MVCCScanResult{
-			ResumeSpan:   &roachpb.Span{Key: key, EndKey: endKey},
-			ResumeReason: roachpb.RESUME_BYTE_LIMIT,
-		}, nil
+	if opts.MaxKeys < 0 || opts.TargetBytes < 0 {
+		resumeSpan := &roachpb.Span{Key: key, EndKey: endKey}
+		return MVCCScanResult{ResumeSpan: resumeSpan}, nil
 	}
 
 	mvccScanner := pebbleMVCCScannerPool.Get().(*pebbleMVCCScanner)
 	defer mvccScanner.release()
 
 	*mvccScanner = pebbleMVCCScanner{
-		parent:                 iter,
-		memAccount:             opts.MemoryAccount,
-		reverse:                opts.Reverse,
-		start:                  key,
-		end:                    endKey,
-		ts:                     timestamp,
-		maxKeys:                opts.MaxKeys,
-		targetBytes:            opts.TargetBytes,
-		targetBytesAvoidExcess: opts.TargetBytesAvoidExcess,
-		targetBytesAllowEmpty:  opts.TargetBytesAllowEmpty,
-		maxIntents:             opts.MaxIntents,
-		inconsistent:           opts.Inconsistent,
-		tombstones:             opts.Tombstones,
-		failOnMoreRecent:       opts.FailOnMoreRecent,
-		keyBuf:                 mvccScanner.keyBuf,
+		parent:           iter,
+		memAccount:       opts.MemoryAccount,
+		reverse:          opts.Reverse,
+		start:            key,
+		end:              endKey,
+		ts:               timestamp,
+		maxKeys:          opts.MaxKeys,
+		targetBytes:      opts.TargetBytes,
+		maxIntents:       opts.MaxIntents,
+		inconsistent:     opts.Inconsistent,
+		tombstones:       opts.Tombstones,
+		failOnMoreRecent: opts.FailOnMoreRecent,
+		keyBuf:           mvccScanner.keyBuf,
 	}
 
 	mvccScanner.init(opts.Txn, opts.LocalUncertaintyLimit)
 
 	var res MVCCScanResult
 	var err error
-	res.ResumeSpan, res.ResumeReason, res.ResumeNextBytes, err = mvccScanner.scan(ctx)
+	res.ResumeSpan, err = mvccScanner.scan(ctx)
 
 	if err != nil {
 		return MVCCScanResult{}, err
@@ -2485,11 +2455,6 @@ func mvccScanToBytes(
 	res.KVData = mvccScanner.results.finish()
 	res.NumKeys = mvccScanner.results.count
 	res.NumBytes = mvccScanner.results.bytes
-
-	// If we have a trace, emit the scan stats that we produced.
-	traceSpan := tracing.SpanFromContext(ctx)
-
-	recordIteratorStats(traceSpan, mvccScanner.stats())
 
 	res.Intents, err = buildScanIntents(mvccScanner.intentsRepr())
 	if err != nil {
@@ -2599,7 +2564,7 @@ type MVCCScanOptions struct {
 	// memory during a Scan operation. Once the target is satisfied (i.e. met or
 	// exceeded) by the emitted KV pairs, iteration stops (with a ResumeSpan as
 	// appropriate). In particular, at least one kv pair is returned (when one
-	// exists), unless TargetBytesAllowEmpty is set.
+	// exists).
 	//
 	// The number of bytes a particular kv pair accrues depends on internal data
 	// structures, but it is guaranteed to exceed that of the bytes stored in
@@ -2607,15 +2572,6 @@ type MVCCScanOptions struct {
 	//
 	// The zero value indicates no limit.
 	TargetBytes int64
-	// TargetBytesAvoidExcess will prevent TargetBytes from being exceeded
-	// unless only a single key/value pair is returned.
-	//
-	// TODO(erikgrinaker): This option exists for backwards compatibility with
-	// 21.2 RPC clients, in 22.2 it should always be enabled.
-	TargetBytesAvoidExcess bool
-	// TargetBytesAllowEmpty will return an empty result if the first kv pair
-	// exceeds the TargetBytes limit and TargetBytesAvoidExcess is set.
-	TargetBytesAllowEmpty bool
 	// MaxIntents is a maximum number of intents collected by scanner in
 	// consistent mode before returning WriteIntentError.
 	//
@@ -2647,10 +2603,8 @@ type MVCCScanResult struct {
 	// used for encoding the uncompressed kv pairs contained in the result.
 	NumBytes int64
 
-	ResumeSpan      *roachpb.Span
-	ResumeReason    roachpb.ResumeReason
-	ResumeNextBytes int64 // populated if TargetBytes != 0, size of next resume kv
-	Intents         []roachpb.Intent
+	ResumeSpan *roachpb.Span
+	Intents    []roachpb.Intent
 }
 
 // MVCCScan scans the key range [key, endKey) in the provided reader up to some
@@ -3200,7 +3154,6 @@ func mvccResolveWriteIntent(
 	// remains, the rolledBackVal is set to a non-nil value.
 	var rolledBackVal []byte
 	if len(intent.IgnoredSeqNums) > 0 {
-		// NOTE: mvccMaybeRewriteIntentHistory mutates its meta argument.
 		var removeIntent bool
 		removeIntent, rolledBackVal, err = mvccMaybeRewriteIntentHistory(ctx, rw, intent.IgnoredSeqNums, meta, latestKey)
 		if err != nil {
@@ -3210,19 +3163,10 @@ func mvccResolveWriteIntent(
 		if removeIntent {
 			// This intent should be cleared. Set commit, pushed, and inProgress to
 			// false so that this intent isn't updated, gets cleared, and committed
-			// values are left untouched. Also ensure that rolledBackVal is set to nil
-			// or we could end up trying to update the intent instead of removing it.
+			// values are left untouched.
 			commit = false
 			pushed = false
 			inProgress = false
-			rolledBackVal = nil
-		}
-
-		if rolledBackVal != nil {
-			// If we need to update the intent to roll back part of its intent
-			// history, make sure that we don't regress its timestamp, even if the
-			// caller provided an outdated timestamp.
-			intent.Txn.WriteTimestamp.Forward(metaTimestamp)
 		}
 	}
 
@@ -3248,14 +3192,6 @@ func mvccResolveWriteIntent(
 		// The intent might be committing at a higher timestamp, or it might be
 		// getting pushed.
 		newTimestamp := intent.Txn.WriteTimestamp
-
-		// Assert that the intent timestamp never regresses. The logic above should
-		// not allow this, regardless of the input to this function.
-		if newTimestamp.Less(metaTimestamp) {
-			return false, errors.AssertionFailedf("timestamp regression (%s -> %s) "+
-				"during intent resolution, commit=%t pushed=%t rolledBackVal=%t",
-				metaTimestamp, newTimestamp, commit, pushed, rolledBackVal != nil)
-		}
 
 		buf.newMeta = *meta
 		// Set the timestamp for upcoming write (or at least the stats update).
@@ -3911,7 +3847,8 @@ func MVCCFindSplitKey(
 	//
 	// In addition, we must never return a split key that falls within a table
 	// row. (Rows in tables with multiple column families are comprised of
-	// multiple keys, one key per column family.)
+	// multiple keys, one key per column family.) However, we do allow a split
+	// key that falls between a row and its interleaved rows.
 	//
 	// Managing this is complicated: the logic for picking a split key that
 	// creates ranges of the right size lives in C++, while the logic for
@@ -3962,8 +3899,9 @@ func MVCCFindSplitKey(
 			if err != nil {
 				return nil, err
 			}
-			// Allow a split key before other rows in the same table.
-			minSplitKey = firstRowKey.PrefixEnd()
+			// Allow a split key before other rows in the same table or before any
+			// rows in interleaved tables.
+			minSplitKey = encoding.EncodeInterleavedSentinel(firstRowKey)
 		}
 	}
 	if minSplitKey == nil {

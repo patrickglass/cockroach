@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	_ "github.com/cockroachdb/cockroach/pkg/ccl/partitionccl"
@@ -33,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
@@ -146,10 +144,8 @@ CREATE TABLE data2.foo (a int);
 	sqlDB.Exec(t, `GRANT CREATE, SELECT ON DATABASE data TO system_ops;`)
 	sqlDB.Exec(t, `GRANT system_ops TO maxroach1;`)
 
-	// Populate system.scheduled_jobs table with a first run in the future to prevent immediate adoption.
-	firstRun := timeutil.Now().Add(time.Hour).Format(timeutil.TimestampWithoutTZFormat)
-	sqlDB.Exec(t, `CREATE SCHEDULE FOR BACKUP data.bank INTO $1 RECURRING '@hourly' FULL BACKUP ALWAYS WITH SCHEDULE OPTIONS first_run = $2`, LocalFoo, firstRun)
-	sqlDB.Exec(t, `PAUSE SCHEDULES SELECT id FROM [SHOW SCHEDULES FOR BACKUP]`)
+	// Populate system.scheduled_jobs table.
+	sqlDB.Exec(t, `CREATE SCHEDULE FOR BACKUP data.bank INTO $1 RECURRING '@hourly' FULL BACKUP ALWAYS`, LocalFoo)
 
 	injectStats(t, sqlDB, "data.bank", "id")
 	sqlDB.Exec(t, `BACKUP TO $1`, LocalFoo)
@@ -181,14 +177,11 @@ CREATE TABLE data2.foo (a int);
 	// Check that zones are restored during pre-restore.
 	t.Run("ensure zones are restored during pre-restore", func(t *testing.T) {
 		<-restoredZones
-		// Not specifying the schema makes the query search using defaultdb first.
-		// which ends up returning the error
-		// pq: database "defaultdb" is offline: restoring
-		checkZones := "SELECT * FROM system.public.zones"
+		checkZones := "SELECT * FROM system.zones"
 		sqlDBRestore.CheckQueryResults(t, checkZones, sqlDB.QueryStr(t, checkZones))
 
 		// Check that the user tables are still offline.
-		sqlDBRestore.ExpectErr(t, "database \"data\" is offline: restoring", "SELECT * FROM data.public.bank")
+		sqlDBRestore.ExpectErr(t, "database \"data\" is offline: restoring", "SELECT * FROM data.bank")
 
 		// Check there is no data in the span that we expect user data to be imported.
 		store := tcRestore.GetFirstStoreFromServer(t, 0)
@@ -613,7 +606,7 @@ func TestClusterRestoreFailCleanup(t *testing.T) {
 		// Note that the system tables here correspond to the temporary tables
 		// imported, not the system tables themselves.
 		sqlDBRestore.CheckQueryResults(t,
-			`SELECT name FROM system.crdb_internal.tables WHERE state = 'DROP' ORDER BY name`,
+			`SELECT name FROM crdb_internal.tables WHERE state = 'DROP' ORDER BY name`,
 			[][]string{
 				{"bank"},
 				{"comments"},
@@ -703,7 +696,7 @@ func TestClusterRestoreFailCleanup(t *testing.T) {
 		// Note that the system tables here correspond to the temporary tables
 		// imported, not the system tables themselves.
 		sqlDBRestore.CheckQueryResults(t,
-			`SELECT name FROM system.crdb_internal.tables WHERE state = 'DROP' ORDER BY name`,
+			`SELECT name FROM crdb_internal.tables WHERE state = 'DROP' ORDER BY name`,
 			[][]string{
 				{"bank"},
 				{"comments"},
@@ -1031,76 +1024,4 @@ BACKUP TO 'nodelocal://1/foo' WITH revision_history;
 CREATE TABLE bar (id INT);
 BACKUP TO 'nodelocal://1/foo' WITH revision_history;
 `)
-}
-
-func TestRestoreWithRecreatedDefaultDB(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	sqlDB, tempDir, cleanupFn := createEmptyCluster(t, singleNode)
-	_, _, sqlDBRestore, cleanupEmptyCluster := backupRestoreTestSetupEmpty(t, singleNode, tempDir, InitManualReplication, base.TestClusterArgs{})
-	defer cleanupFn()
-	defer cleanupEmptyCluster()
-
-	sqlDB.Exec(t, `
-DROP DATABASE defaultdb;
-CREATE DATABASE defaultdb; 
-`)
-	sqlDB.Exec(t, `BACKUP TO $1`, LocalFoo)
-
-	sqlDBRestore.Exec(t, `RESTORE FROM $1`, LocalFoo)
-
-	// Since we dropped and recreated defaultdb, defaultdb has the next available
-	// id which is 52.
-	expectedDefaultDBID := "52"
-
-	sqlDBRestore.CheckQueryResults(t, `SELECT * FROM system.namespace WHERE name = 'defaultdb'`, [][]string{
-		{"0", "0", "defaultdb", expectedDefaultDBID},
-	})
-}
-
-func TestRestoreWithDroppedDefaultDB(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	sqlDB, tempDir, cleanupFn := createEmptyCluster(t, singleNode)
-	_, _, sqlDBRestore, cleanupEmptyCluster := backupRestoreTestSetupEmpty(t, singleNode, tempDir, InitManualReplication, base.TestClusterArgs{})
-	defer cleanupFn()
-	defer cleanupEmptyCluster()
-
-	sqlDB.Exec(t, `
-DROP DATABASE defaultdb;
-`)
-	sqlDB.Exec(t, `BACKUP TO $1`, LocalFoo)
-
-	sqlDBRestore.Exec(t, `RESTORE FROM $1`, LocalFoo)
-
-	sqlDBRestore.CheckQueryResults(t, `SELECT count(*) FROM system.namespace WHERE name = 'defaultdb'`, [][]string{
-		{"0"},
-	})
-}
-
-func TestRestoreToClusterWithDroppedDefaultDB(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	sqlDB, tempDir, cleanupFn := createEmptyCluster(t, singleNode)
-	_, _, sqlDBRestore, cleanupEmptyCluster := backupRestoreTestSetupEmpty(t, singleNode, tempDir, InitManualReplication, base.TestClusterArgs{})
-	defer cleanupFn()
-	defer cleanupEmptyCluster()
-
-	expectedRow := sqlDB.QueryRow(t, `SELECT * FROM system.namespace WHERE name = 'defaultdb'`)
-	var parentID, parentSchemaID, ID int
-	var name string
-	expectedRow.Scan(&parentID, &parentSchemaID, &name, &ID)
-
-	sqlDB.Exec(t, `BACKUP TO $1`, LocalFoo)
-
-	sqlDBRestore.Exec(t, `
-DROP DATABASE defaultdb;
-`)
-	sqlDBRestore.Exec(t, `RESTORE FROM $1`, LocalFoo)
-	sqlDBRestore.CheckQueryResults(t, `SELECT * FROM system.namespace WHERE name = 'defaultdb'`, [][]string{
-		{fmt.Sprint(parentID), fmt.Sprint(parentSchemaID), name, fmt.Sprint(ID)},
-	})
 }

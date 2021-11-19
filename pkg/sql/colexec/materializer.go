@@ -35,7 +35,7 @@ type Materializer struct {
 	input colexecop.Operator
 	typs  []*types.T
 
-	drainHelper drainHelper
+	drainHelper *drainHelper
 
 	// runtime fields --
 
@@ -77,6 +77,22 @@ type drainHelper struct {
 }
 
 var _ execinfra.RowSource = &drainHelper{}
+var _ execinfra.Releasable = &drainHelper{}
+
+var drainHelperPool = sync.Pool{
+	New: func() interface{} {
+		return &drainHelper{}
+	},
+}
+
+func newDrainHelper(
+	statsCollectors []colexecop.VectorizedStatsCollector, sources colexecop.MetadataSources,
+) *drainHelper {
+	d := drainHelperPool.Get().(*drainHelper)
+	d.statsCollectors = statsCollectors
+	d.sources = sources
+	return d
+}
 
 // OutputTypes implements the execinfra.RowSource interface.
 func (d *drainHelper) OutputTypes() []*types.T {
@@ -131,6 +147,12 @@ func (d *drainHelper) ConsumerDone() {}
 // ConsumerClosed implements the execinfra.RowSource interface.
 func (d *drainHelper) ConsumerClosed() {}
 
+// Release implements the execinfra.Releasable interface.
+func (d *drainHelper) Release() {
+	*d = drainHelper{}
+	drainHelperPool.Put(d)
+}
+
 var materializerPool = sync.Pool{
 	New: func() interface{} {
 		return &Materializer{}
@@ -153,6 +175,7 @@ func NewMaterializer(
 		ProcessorBaseNoHelper: m.ProcessorBaseNoHelper,
 		input:                 input.Root,
 		typs:                  typs,
+		drainHelper:           newDrainHelper(input.StatsCollectors, input.MetadataSources),
 		converter:             colconv.NewAllVecToDatumConverter(len(typs)),
 		row:                   make(rowenc.EncDatumRow, len(typs)),
 		// We have to perform a deep copy of closers because the input object
@@ -162,8 +185,6 @@ func NewMaterializer(
 		// rowSourceToPlanNode wrappers.
 		closers: append(m.closers[:0], input.ToClose...),
 	}
-	m.drainHelper.statsCollectors = input.StatsCollectors
-	m.drainHelper.sources = input.MetadataSources
 
 	m.Init(
 		m,
@@ -184,7 +205,7 @@ func NewMaterializer(
 			},
 		},
 	)
-	m.AddInputToDrain(&m.drainHelper)
+	m.AddInputToDrain(m.drainHelper)
 	return m
 }
 
@@ -304,6 +325,7 @@ func (m *Materializer) ConsumerClosed() {
 
 // Release implements the execinfra.Releasable interface.
 func (m *Materializer) Release() {
+	m.drainHelper.Release()
 	m.ProcessorBaseNoHelper.Reset()
 	m.converter.Release()
 	for i := range m.closers {
