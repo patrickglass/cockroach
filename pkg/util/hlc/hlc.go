@@ -8,10 +8,15 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
+// Package hlc implements the Hybrid Logical Clock outlined in
+// "Logical Physical Clocks and Consistent Snapshots in Globally
+// Distributed Databases", available online at
+// http://www.cse.buffalo.edu/tech-reports/2014-04.pdf.
 package hlc
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -124,56 +129,38 @@ func (m *ManualClock) Set(nanos int64) {
 // ticks with the wall clock, but that can be moved arbitrarily
 // into the future or paused. HybridManualClock is thread safe.
 type HybridManualClock struct {
-	mu struct {
-		syncutil.RWMutex
-		// nanos, if not 0, is the amount of time the clock was manually incremented
-		// by; it is added to physicalClock.
-		nanos int64
-		// nanosAtPause records the timestamp of the physical clock when it gets
-		// paused. 0 means that the clock is not paused.
-		nanosAtPause int64
-	}
+	nanos         int64
+	physicalClock func() int64
+	// nanosAtPause records the timestamp of the clock if it was paused. A 0 value
+	// indicates the clock was never paused.
+	nanosAtPause int64
 }
 
 // NewHybridManualClock returns a new instance, initialized with
 // specified timestamp.
 func NewHybridManualClock() *HybridManualClock {
-	return &HybridManualClock{}
+	return &HybridManualClock{nanos: 0, physicalClock: UnixNano, nanosAtPause: 0}
 }
 
 // UnixNano returns the underlying hybrid manual clock's timestamp.
 func (m *HybridManualClock) UnixNano() int64 {
-	m.mu.RLock()
-	nanosAtPause := m.mu.nanosAtPause
-	nanos := m.mu.nanos
-	m.mu.RUnlock()
+	nanosAtPause := atomic.LoadInt64(&m.nanosAtPause)
+	nanos := atomic.LoadInt64(&m.nanos)
 	if nanosAtPause > 0 {
 		return nanos + nanosAtPause
 	}
-	return nanos + UnixNano()
+	return nanos + m.physicalClock()
 }
 
-// Increment increments the hybrid manual clock's timestamp.
-func (m *HybridManualClock) Increment(nanos int64) {
-	m.mu.Lock()
-	m.mu.nanos += nanos
-	m.mu.Unlock()
+// Increment atomically increments the hybrid manual clock's timestamp.
+func (m *HybridManualClock) Increment(incr int64) {
+	atomic.AddInt64(&m.nanos, incr)
 }
 
-// Pause pauses the hybrid manual clock; the passage of time no longer causes
-// the clock to tick. Increment can still be used, though.
+// Pause pauses the hybrid manual clock and forces it to always return the
+// current timestamp.
 func (m *HybridManualClock) Pause() {
-	m.mu.Lock()
-	m.mu.nanosAtPause = UnixNano()
-	m.mu.Unlock()
-}
-
-// Resume resumes the hybrid manual clock; the passage of time continues to
-// cause clock to tick.
-func (m *HybridManualClock) Resume() {
-	m.mu.Lock()
-	m.mu.nanosAtPause = 0
-	m.mu.Unlock()
+	atomic.StoreInt64(&m.nanosAtPause, m.physicalClock())
 }
 
 // UnixNano returns the local machine's physical nanosecond
@@ -423,32 +410,17 @@ func (c *Clock) Update(rt ClockTimestamp) {
 	c.enforceWallTimeWithinBoundLocked()
 }
 
-// NB: don't change the string here; this will cause cross-version issues
-// since this singleton is used as a marker.
-var errUntrustworthyRemoteWallTimeErr = errors.New("remote wall time is too far ahead to be trustworthy")
-
-// IsUntrustworthyRemoteWallTimeError returns true if the error came resulted
-// from a call to Clock.UpdateAndCheckMaxOffset due to the passed ClockTimestamp
-// being too far in the future.
-func IsUntrustworthyRemoteWallTimeError(err error) bool {
-	return errors.Is(err, errUntrustworthyRemoteWallTimeErr)
-}
-
 // UpdateAndCheckMaxOffset is like Update, but also takes the wall time into account and
 // returns an error in the event that the supplied remote timestamp exceeds
 // the wall clock time by more than the maximum clock offset.
-//
-// If an error is returned, it will be detectable with
-// IsUntrustworthyRemoteWallTimeError.
 func (c *Clock) UpdateAndCheckMaxOffset(ctx context.Context, rt ClockTimestamp) error {
+	var err error
 	physicalClock := c.getPhysicalClockAndCheck(ctx)
 
 	offset := time.Duration(rt.WallTime - physicalClock)
 	if c.maxOffset > 0 && offset > c.maxOffset {
-		return errors.Mark(
-			errors.Errorf("remote wall time is too far ahead (%s) to be trustworthy", offset),
-			errUntrustworthyRemoteWallTimeErr,
-		)
+		err = fmt.Errorf("remote wall time is too far ahead (%s) to be trustworthy", offset)
+		return err
 	}
 
 	if physicalClock > rt.WallTime {

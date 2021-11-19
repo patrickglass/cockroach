@@ -229,7 +229,7 @@ func TestIsNullSelOp(t *testing.T) {
 
 	for _, c := range testCases {
 		log.Infof(ctx, "%s", c.desc)
-		opConstructor := func(sources []colexecop.Operator) (colexecop.Operator, error) {
+		opConstructor := func(input []colexecop.Operator) (colexecop.Operator, error) {
 			typs := []*types.T{types.Int}
 			spec := &execinfrapb.ProcessorSpec{
 				Input: []execinfrapb.InputSyncSpec{{ColumnTypes: typs}},
@@ -242,14 +242,14 @@ func TestIsNullSelOp(t *testing.T) {
 			}
 			args := &colexecargs.NewColOperatorArgs{
 				Spec:                spec,
-				Inputs:              colexectestutils.MakeInputs(sources),
+				Inputs:              input,
 				StreamingMemAccount: testMemAcc,
 			}
 			result, err := colexecargs.TestNewColOperator(ctx, flowCtx, args)
 			if err != nil {
 				return nil, err
 			}
-			return result.Root, nil
+			return result.Op, nil
 		}
 		colexectestutils.RunTests(t, testAllocator, []colexectestutils.Tuples{c.inputTuples}, c.outputTuples, colexectestutils.OrderedVerifier, opConstructor)
 	}

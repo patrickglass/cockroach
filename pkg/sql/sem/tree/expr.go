@@ -57,7 +57,7 @@ type TypedExpr interface {
 	// encountered: Placeholder, VarName (and related UnqualifiedStar,
 	// UnresolvedName and AllColumnsSelector) or Subquery. These nodes
 	// should be replaced prior to expression evaluation by an
-	// appropriate WalkExpr. For example, Placeholder should be replaced
+	// appropriate WalkExpr. For example, Placeholder should be replace
 	// by the argument passed from the client.
 	Eval(*EvalContext) (Datum, error)
 	// ResolvedType provides the type of the TypedExpr, which is the type of Datum
@@ -103,9 +103,9 @@ type Operator interface {
 	operator()
 }
 
-var _ Operator = (*UnaryOperator)(nil)
-var _ Operator = (*BinaryOperator)(nil)
-var _ Operator = (*ComparisonOperator)(nil)
+var _ Operator = UnaryOperator(0)
+var _ Operator = BinaryOperator(0)
+var _ Operator = ComparisonOperator(0)
 
 // SubqueryExpr is an interface used to identify an expression as a subquery.
 // It is implemented by both tree.Subquery and optbuilder.subquery, and is
@@ -352,33 +352,14 @@ func StripParens(expr Expr) Expr {
 	return expr
 }
 
-// ComparisonOperator represents a binary operator which returns a bool.
-type ComparisonOperator struct {
-	Symbol ComparisonOperatorSymbol
-	// IsExplicitOperator is true if OPERATOR(symbol) is used.
-	IsExplicitOperator bool
-}
-
-// MakeComparisonOperator creates a ComparisonOperator given a symbol.
-func MakeComparisonOperator(symbol ComparisonOperatorSymbol) ComparisonOperator {
-	return ComparisonOperator{Symbol: symbol}
-}
-
-func (o ComparisonOperator) String() string {
-	if o.IsExplicitOperator {
-		return fmt.Sprintf("OPERATOR(%s)", o.Symbol.String())
-	}
-	return o.Symbol.String()
-}
+// ComparisonOperator represents a binary operator.
+type ComparisonOperator int
 
 func (ComparisonOperator) operator() {}
 
-// ComparisonOperatorSymbol represents a comparison operator symbol.
-type ComparisonOperatorSymbol int
-
 // ComparisonExpr.Operator
 const (
-	EQ ComparisonOperatorSymbol = iota
+	EQ ComparisonOperator = iota
 	LT
 	GT
 	LE
@@ -422,10 +403,10 @@ const (
 	Some
 	All
 
-	NumComparisonOperatorSymbols
+	NumComparisonOperators
 )
 
-var _ = NumComparisonOperatorSymbols
+var _ = NumComparisonOperators
 
 var comparisonOpName = [...]string{
 	EQ:           "=",
@@ -460,8 +441,8 @@ var comparisonOpName = [...]string{
 	All:               "ALL",
 }
 
-func (i ComparisonOperatorSymbol) String() string {
-	if i < 0 || i > ComparisonOperatorSymbol(len(comparisonOpName)-1) {
+func (i ComparisonOperator) String() string {
+	if i < 0 || i > ComparisonOperator(len(comparisonOpName)-1) {
 		return fmt.Sprintf("ComparisonOp(%d)", i)
 	}
 	return comparisonOpName[i]
@@ -469,13 +450,13 @@ func (i ComparisonOperatorSymbol) String() string {
 
 // Inverse returns the inverse of this comparison operator if it exists. The
 // second return value is true if it exists, and false otherwise.
-func (i ComparisonOperatorSymbol) Inverse() (ComparisonOperatorSymbol, bool) {
+func (i ComparisonOperator) Inverse() (ComparisonOperator, bool) {
 	inverse, ok := cmpOpsInverse[i]
 	return inverse, ok
 }
 
 // HasSubOperator returns if the ComparisonOperator is used with a sub-operator.
-func (i ComparisonOperatorSymbol) HasSubOperator() bool {
+func (i ComparisonOperator) HasSubOperator() bool {
 	switch i {
 	case Any:
 	case Some:
@@ -503,17 +484,13 @@ func (node *ComparisonExpr) Format(ctx *FmtCtx) {
 	opStr := node.Operator.String()
 	// IS and IS NOT are equivalent to IS NOT DISTINCT FROM and IS DISTINCT
 	// FROM, respectively, when the RHS is true or false. We prefer the less
-	// verbose IS and IS NOT in those cases, unless we are in FmtHideConstants
-	// mode. In that mode we need the more verbose form in order to be able
-	// to re-parse the statement when reporting telemetry.
-	if !ctx.HasFlags(FmtHideConstants) {
-		if node.Operator.Symbol == IsDistinctFrom && (node.Right == DBoolTrue || node.Right == DBoolFalse) {
-			opStr = "IS NOT"
-		} else if node.Operator.Symbol == IsNotDistinctFrom && (node.Right == DBoolTrue || node.Right == DBoolFalse) {
-			opStr = "IS"
-		}
+	// verbose IS and IS NOT in those cases.
+	if node.Operator == IsDistinctFrom && (node.Right == DBoolTrue || node.Right == DBoolFalse) {
+		opStr = "IS NOT"
+	} else if node.Operator == IsNotDistinctFrom && (node.Right == DBoolTrue || node.Right == DBoolFalse) {
+		opStr = "IS"
 	}
-	if node.Operator.Symbol.HasSubOperator() {
+	if node.Operator.HasSubOperator() {
 		binExprFmtWithParenAndSubOp(ctx, node.Left, node.SubOperator.String(), opStr, node.Right)
 	} else {
 		binExprFmtWithParen(ctx, node.Left, opStr, node.Right, true)
@@ -586,7 +563,7 @@ func NewTypedIfErrExpr(cond, orElse, errCode TypedExpr) *IfErrExpr {
 func (node *ComparisonExpr) memoizeFn() {
 	fOp, fLeft, fRight, _, _ := FoldComparisonExpr(node.Operator, node.Left, node.Right)
 	leftRet, rightRet := fLeft.(TypedExpr).ResolvedType(), fRight.(TypedExpr).ResolvedType()
-	switch node.Operator.Symbol {
+	switch node.Operator {
 	case Any, Some, All:
 		// Array operators memoize the SubOperator's CmpOp.
 		fOp, _, _, _, _ = FoldComparisonExpr(node.SubOperator, nil, nil)
@@ -608,7 +585,7 @@ func (node *ComparisonExpr) memoizeFn() {
 		}
 	}
 
-	fn, ok := CmpOps[fOp.Symbol].LookupImpl(leftRet, rightRet)
+	fn, ok := CmpOps[fOp].LookupImpl(leftRet, rightRet)
 	if !ok {
 		panic(errors.AssertionFailedf("lookup for ComparisonExpr %s's CmpOp failed",
 			AsStringWithFlags(node, FmtShowTypes)))
@@ -986,7 +963,7 @@ func (node *Array) Format(ctx *FmtCtx) {
 	if ctx.HasFlags(FmtParsable) && node.typ != nil {
 		if node.typ.ArrayContents().Family() != types.UnknownFamily {
 			ctx.WriteString(":::")
-			ctx.FormatTypeReference(node.typ)
+			ctx.Buffer.WriteString(node.typ.SQLString())
 		}
 	}
 }
@@ -1122,33 +1099,14 @@ func (node *TypedDummy) Eval(*EvalContext) (Datum, error) {
 	return nil, errors.AssertionFailedf("should not eval typed dummy")
 }
 
-// BinaryOperator represents a unary operator used in a BinaryExpr.
-type BinaryOperator struct {
-	Symbol BinaryOperatorSymbol
-	// IsExplicitOperator is true if OPERATOR(symbol) is used.
-	IsExplicitOperator bool
-}
-
-// MakeBinaryOperator creates a BinaryOperator given a symbol.
-func MakeBinaryOperator(symbol BinaryOperatorSymbol) BinaryOperator {
-	return BinaryOperator{Symbol: symbol}
-}
-
-func (o BinaryOperator) String() string {
-	if o.IsExplicitOperator {
-		return fmt.Sprintf("OPERATOR(%s)", o.Symbol.String())
-	}
-	return o.Symbol.String()
-}
+// BinaryOperator represents a binary operator.
+type BinaryOperator int
 
 func (BinaryOperator) operator() {}
 
-// BinaryOperatorSymbol is a symbol for a binary operator.
-type BinaryOperatorSymbol uint8
-
 // BinaryExpr.Operator
 const (
-	Bitand BinaryOperatorSymbol = iota
+	Bitand BinaryOperator = iota
 	Bitor
 	Bitxor
 	Plus
@@ -1166,10 +1124,10 @@ const (
 	JSONFetchValPath
 	JSONFetchTextPath
 
-	NumBinaryOperatorSymbols
+	NumBinaryOperators
 )
 
-var _ = NumBinaryOperatorSymbols
+var _ = NumBinaryOperators
 
 var binaryOpName = [...]string{
 	Bitand:            "&",
@@ -1216,12 +1174,12 @@ var binaryOpFullyAssoc = [...]bool{
 	Concat: true, JSONFetchVal: false, JSONFetchText: false, JSONFetchValPath: false, JSONFetchTextPath: false,
 }
 
-func (i BinaryOperatorSymbol) isPadded() bool {
+func (i BinaryOperator) isPadded() bool {
 	return !(i == JSONFetchVal || i == JSONFetchText || i == JSONFetchValPath || i == JSONFetchTextPath)
 }
 
-func (i BinaryOperatorSymbol) String() string {
-	if i > BinaryOperatorSymbol(len(binaryOpName)-1) {
+func (i BinaryOperator) String() string {
+	if i < 0 || i > BinaryOperator(len(binaryOpName)-1) {
 		return fmt.Sprintf("BinaryOp(%d)", i)
 	}
 	return binaryOpName[i]
@@ -1264,7 +1222,7 @@ func (*BinaryExpr) operatorExpr() {}
 
 func (node *BinaryExpr) memoizeFn() {
 	leftRet, rightRet := node.Left.(TypedExpr).ResolvedType(), node.Right.(TypedExpr).ResolvedType()
-	fn, ok := BinOps[node.Operator.Symbol].lookupImpl(leftRet, rightRet)
+	fn, ok := BinOps[node.Operator].lookupImpl(leftRet, rightRet)
 	if !ok {
 		panic(errors.AssertionFailedf("lookup for BinaryExpr %s's BinOp failed",
 			AsStringWithFlags(node, FmtShowTypes)))
@@ -1277,7 +1235,7 @@ func (node *BinaryExpr) memoizeFn() {
 // BinaryOperator.
 func newBinExprIfValidOverload(op BinaryOperator, left TypedExpr, right TypedExpr) *BinaryExpr {
 	leftRet, rightRet := left.ResolvedType(), right.ResolvedType()
-	fn, ok := BinOps[op.Symbol].lookupImpl(leftRet, rightRet)
+	fn, ok := BinOps[op].lookupImpl(leftRet, rightRet)
 	if ok {
 		expr := &BinaryExpr{
 			Operator: op,
@@ -1293,56 +1251,35 @@ func newBinExprIfValidOverload(op BinaryOperator, left TypedExpr, right TypedExp
 
 // Format implements the NodeFormatter interface.
 func (node *BinaryExpr) Format(ctx *FmtCtx) {
-	binExprFmtWithParen(ctx, node.Left, node.Operator.String(), node.Right, node.Operator.Symbol.isPadded())
+	binExprFmtWithParen(ctx, node.Left, node.Operator.String(), node.Right, node.Operator.isPadded())
 }
 
-// UnaryOperator represents a unary operator used in a UnaryExpr.
-type UnaryOperator struct {
-	Symbol UnaryOperatorSymbol
-	// IsExplicitOperator is true if OPERATOR(symbol) is used.
-	IsExplicitOperator bool
-}
-
-// MakeUnaryOperator creates a UnaryOperator given a symbol.
-func MakeUnaryOperator(symbol UnaryOperatorSymbol) UnaryOperator {
-	return UnaryOperator{Symbol: symbol}
-}
-
-func (o UnaryOperator) String() string {
-	if o.IsExplicitOperator {
-		return fmt.Sprintf("OPERATOR(%s)", o.Symbol.String())
-	}
-	return o.Symbol.String()
-}
+// UnaryOperator represents a unary operator.
+type UnaryOperator int
 
 func (UnaryOperator) operator() {}
 
-// UnaryOperatorSymbol represents a unary operator.
-type UnaryOperatorSymbol uint8
-
-// UnaryExpr.Operator.Symbol
+// UnaryExpr.Operator
 const (
-	UnaryMinus UnaryOperatorSymbol = iota
+	UnaryMinus UnaryOperator = iota
 	UnaryComplement
 	UnarySqrt
 	UnaryCbrt
-	UnaryPlus
 
-	NumUnaryOperatorSymbols
+	NumUnaryOperators
 )
 
-var _ = NumUnaryOperatorSymbols
+var _ = NumUnaryOperators
 
 var unaryOpName = [...]string{
 	UnaryMinus:      "-",
-	UnaryPlus:       "+",
 	UnaryComplement: "~",
 	UnarySqrt:       "|/",
 	UnaryCbrt:       "||/",
 }
 
-func (i UnaryOperatorSymbol) String() string {
-	if i > UnaryOperatorSymbol(len(unaryOpName)-1) {
+func (i UnaryOperator) String() string {
+	if i < 0 || i > UnaryOperator(len(unaryOpName)-1) {
 		return fmt.Sprintf("UnaryOp(%d)", i)
 	}
 	return unaryOpName[i]
@@ -1366,7 +1303,7 @@ func (node *UnaryExpr) Format(ctx *FmtCtx) {
 	_, isOp := e.(operatorExpr)
 	_, isDatum := e.(Datum)
 	_, isConstant := e.(Constant)
-	if isOp || (node.Operator.Symbol == UnaryMinus && (isDatum || isConstant)) {
+	if isOp || (node.Operator == UnaryMinus && (isDatum || isConstant)) {
 		ctx.WriteByte('(')
 		ctx.FormatNode(e)
 		ctx.WriteByte(')')
@@ -1385,14 +1322,14 @@ func NewTypedUnaryExpr(op UnaryOperator, expr TypedExpr, typ *types.T) *UnaryExp
 	node := &UnaryExpr{Operator: op, Expr: expr}
 	node.typ = typ
 	innerType := expr.ResolvedType()
-	for _, o := range UnaryOps[op.Symbol] {
+	for _, o := range UnaryOps[op] {
 		o := o.(*UnaryOp)
 		if innerType.Equivalent(o.Typ) && node.typ.Equivalent(o.ReturnType) {
 			node.fn = o
 			return node
 		}
 	}
-	panic(errors.AssertionFailedf("invalid TypedExpr with unary op %d: %s", op.Symbol, expr))
+	panic(errors.AssertionFailedf("invalid TypedExpr with unary op %d: %s", op, expr))
 }
 
 // FuncExpr represents a function call.
@@ -1450,7 +1387,7 @@ func (node *FuncExpr) ResolvedOverload() *Overload {
 
 // IsGeneratorApplication returns true iff the function applied is a generator (SRF).
 func (node *FuncExpr) IsGeneratorApplication() bool {
-	return node.fn != nil && (node.fn.Generator != nil || node.fn.GeneratorWithExprs != nil)
+	return node.fn != nil && node.fn.Generator != nil
 }
 
 // IsWindowFunctionApplication returns true iff the function is being applied as a window function.
@@ -1460,7 +1397,7 @@ func (node *FuncExpr) IsWindowFunctionApplication() bool {
 
 // IsDistSQLBlocklist returns whether the function is not supported by DistSQL.
 func (node *FuncExpr) IsDistSQLBlocklist() bool {
-	return (node.fn != nil && node.fn.DistsqlBlocklist) || (node.fnProps != nil && node.fnProps.DistsqlBlocklist)
+	return node.fnProps != nil && node.fnProps.DistsqlBlocklist
 }
 
 // CanHandleNulls returns whether or not the function can handle null
@@ -1504,11 +1441,9 @@ func (node *FuncExpr) Format(ctx *FmtCtx) {
 		typ = funcTypeName[node.Type] + " "
 	}
 
-	// We need to remove name anonymization/redaction for the function name in
+	// We need to remove name anonymization for the function name in
 	// particular. Do this by overriding the flags.
-	// TODO(thomas): when function names are correctly typed as FunctionDefinition
-	// remove FmtMarkRedactionNode from being overridden.
-	ctx.WithFlags(ctx.flags&^FmtAnonymize&^FmtMarkRedactionNode, func() {
+	ctx.WithFlags(ctx.flags&^FmtAnonymize, func() {
 		ctx.FormatNode(&node.Func)
 	})
 
@@ -1630,14 +1565,7 @@ func (node *CastExpr) Format(ctx *FmtCtx) {
 		if _, ok := node.Expr.(*StrVal); ok {
 			ctx.FormatTypeReference(node.Type)
 			ctx.WriteByte(' ')
-			// We need to replace this with a quoted string constants in certain
-			// cases because the grammar requires a string constant rather than an
-			// expression for this form of casting in the typed_literal rule
-			if ctx.HasFlags(FmtHideConstants) {
-				ctx.WriteString("'_'")
-			} else {
-				ctx.FormatNode(node.Expr)
-			}
+			ctx.FormatNode(node.Expr)
 			break
 		}
 		fallthrough

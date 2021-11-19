@@ -1,2 +1,0 @@
-reset_csetting_stmt ::=
-	'RESET' 'CLUSTER' 'SETTING' var_name

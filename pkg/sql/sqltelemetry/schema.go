@@ -31,6 +31,10 @@ func SchemaNewTypeCounter(t string) telemetry.Counter {
 }
 
 var (
+	// CreateInterleavedTableCounter is to be incremented every time an
+	// interleaved table is being created.
+	CreateInterleavedTableCounter = telemetry.GetCounterOnce("sql.schema.create_interleaved_table")
+
 	// CreateTempTableCounter is to be incremented every time a TEMP TABLE
 	// has been created.
 	CreateTempTableCounter = telemetry.GetCounterOnce("sql.schema.create_temp_table")
@@ -80,11 +84,6 @@ var (
 	// PartitionedInvertedIndexCounter is to be incremented every time a
 	// partitioned inverted index is created.
 	PartitionedInvertedIndexCounter = telemetry.GetCounterOnce("sql.schema.partitioned_inverted_index")
-
-	// ExpressionIndexCounter is to be incremented every time an expression
-	// index is created. This includes both regular and inverted expression
-	// indexes.
-	ExpressionIndexCounter = telemetry.GetCounterOnce("sql.schema.expression_index")
 )
 
 var (

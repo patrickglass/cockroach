@@ -75,46 +75,54 @@ func (t *TypeName) FQString() string {
 func (t *TypeName) objectName() {}
 
 // NewUnqualifiedTypeName returns a new base type name.
-func NewUnqualifiedTypeName(typ string) *TypeName {
-	tn := MakeUnqualifiedTypeName(typ)
-	return &tn
+func NewUnqualifiedTypeName(typ Name) *TypeName {
+	return &TypeName{objName{
+		ObjectName: typ,
+	}}
 }
 
 // MakeUnqualifiedTypeName returns a new type name.
-func MakeUnqualifiedTypeName(typ string) TypeName {
-	return MakeTypeNameWithPrefix(ObjectNamePrefix{}, typ)
+func MakeUnqualifiedTypeName(typ Name) TypeName {
+	return TypeName{objName{
+		ObjectName: typ,
+	}}
 }
 
 // MakeSchemaQualifiedTypeName returns a new type name.
 func MakeSchemaQualifiedTypeName(schema, typ string) TypeName {
-	return MakeTypeNameWithPrefix(ObjectNamePrefix{
-		ExplicitSchema: true,
-		SchemaName:     Name(schema),
-	}, typ)
-}
-
-// MakeTypeNameWithPrefix creates a type name with the provided prefix.
-func MakeTypeNameWithPrefix(prefix ObjectNamePrefix, typ string) TypeName {
 	return TypeName{objName{
-		ObjectNamePrefix: prefix,
-		ObjectName:       Name(typ),
+		ObjectNamePrefix: ObjectNamePrefix{
+			ExplicitSchema: true,
+			SchemaName:     Name(schema),
+		},
+		ObjectName: Name(typ),
 	}}
 }
 
-// MakeQualifiedTypeName creates a fully qualified type name.
-func MakeQualifiedTypeName(db, schema, typ string) TypeName {
-	return MakeTypeNameWithPrefix(ObjectNamePrefix{
-		ExplicitCatalog: true,
-		CatalogName:     Name(db),
-		ExplicitSchema:  true,
-		SchemaName:      Name(schema),
-	}, typ)
+// MakeNewQualifiedTypeName creates a fully qualified type name.
+func MakeNewQualifiedTypeName(db, schema, typ string) TypeName {
+	return TypeName{objName{
+		ObjectNamePrefix: ObjectNamePrefix{
+			ExplicitCatalog: true,
+			ExplicitSchema:  true,
+			CatalogName:     Name(db),
+			SchemaName:      Name(schema),
+		},
+		ObjectName: Name(typ),
+	}}
 }
 
 // NewQualifiedTypeName returns a fully qualified type name.
 func NewQualifiedTypeName(db, schema, typ string) *TypeName {
-	tn := MakeQualifiedTypeName(db, schema, typ)
-	return &tn
+	return &TypeName{objName{
+		ObjectNamePrefix: ObjectNamePrefix{
+			ExplicitCatalog: true,
+			ExplicitSchema:  true,
+			CatalogName:     Name(db),
+			SchemaName:      Name(schema),
+		},
+		ObjectName: Name(typ),
+	}}
 }
 
 // TypeReferenceResolver is the interface that will provide the ability
@@ -164,7 +172,7 @@ func ResolveType(
 		return resolver.ResolveType(ctx, t)
 	case *OIDTypeReference:
 		if resolver == nil {
-			return nil, pgerror.Newf(pgcode.UndefinedObject, "type resolver unavailable to resolve type OID %d", t.OID)
+			return nil, pgerror.Newf(pgcode.UndefinedObject, "type OID %d does not exist", t.OID)
 		}
 		return resolver.ResolveTypeByOID(ctx, t.OID)
 	default:

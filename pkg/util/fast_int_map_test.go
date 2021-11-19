@@ -15,7 +15,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
-	"github.com/stretchr/testify/require"
 )
 
 func TestFastIntMap(t *testing.T) {
@@ -31,7 +30,7 @@ func TestFastIntMap(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%d-%d", tc.keyRange, tc.valRange), func(t *testing.T) {
 			t.Parallel() // SAFE FOR TESTING (this comment is for the linter)
-			rng, _ := randutil.NewTestRand()
+			rng, _ := randutil.NewPseudoRand()
 			var fm FastIntMap
 			m := make(map[int]int)
 			for i := 0; i < 1000; i++ {
@@ -44,9 +43,6 @@ func TestFastIntMap(t *testing.T) {
 							"incorrect result for key %d: (%d, %t), expected (%d, %t)",
 							k, v, ok, expV, expOk,
 						)
-					}
-					if !ok {
-						require.Equal(t, -1, v)
 					}
 				}
 
@@ -119,7 +115,7 @@ func BenchmarkFastIntMap(b *testing.B) {
 	}
 	for _, tc := range cases {
 		b.Run(fmt.Sprintf("%dx%d-%d", tc.keyRange, tc.valRange, tc.ops), func(b *testing.B) {
-			rng, _ := randutil.NewTestRand()
+			rng, _ := randutil.NewPseudoRand()
 			inserts := make([][2]int, tc.ops)
 			for i := range inserts {
 				inserts[i] = [2]int{rng.Intn(tc.keyRange), rng.Intn(tc.valRange)}

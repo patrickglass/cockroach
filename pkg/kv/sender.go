@@ -170,12 +170,11 @@ type TxnSender interface {
 	// such that the transaction can't be pushed to a different
 	// timestamp.
 	//
-	// This is used to support historical queries (AS OF SYSTEM TIME queries
-	// and backups). This method must be called on every transaction retry
-	// (but note that retries should be rare for read-only queries with no
-	// clock uncertainty). The method must not be called after the
-	// transaction has been used in the current epoch to read or write.
-	SetFixedTimestamp(ctx context.Context, ts hlc.Timestamp) error
+	// This is used to support historical queries (AS OF SYSTEM TIME
+	// queries and backups). This method must be called on every
+	// transaction retry (but note that retries should be rare for
+	// read-only queries with no clock uncertainty).
+	SetFixedTimestamp(ctx context.Context, ts hlc.Timestamp)
 
 	// ManualRestart bumps the transactions epoch, and can upgrade the
 	// timestamp and priority.
@@ -259,9 +258,6 @@ type TxnSender interface {
 
 	// Epoch returns the txn's epoch.
 	Epoch() enginepb.TxnEpoch
-
-	// IsLocking returns whether the transaction has begun acquiring locks.
-	IsLocking() bool
 
 	// PrepareRetryableError generates a
 	// TransactionRetryWithProtoRefreshError with a payload initialized
@@ -429,23 +425,8 @@ func (f NonTransactionalFactoryFunc) NonTransactionalSender() Sender {
 func SendWrappedWith(
 	ctx context.Context, sender Sender, h roachpb.Header, args roachpb.Request,
 ) (roachpb.Response, *roachpb.Error) {
-	return SendWrappedWithAdmission(ctx, sender, h, roachpb.AdmissionHeader{}, args)
-}
-
-// SendWrappedWithAdmission is a convenience function which wraps the request
-// in a batch and sends it via the provided Sender and headers. It returns the
-// unwrapped response or an error. It's valid to pass a `nil` context; an
-// empty one is used in that case.
-func SendWrappedWithAdmission(
-	ctx context.Context,
-	sender Sender,
-	h roachpb.Header,
-	ah roachpb.AdmissionHeader,
-	args roachpb.Request,
-) (roachpb.Response, *roachpb.Error) {
 	ba := roachpb.BatchRequest{}
 	ba.Header = h
-	ba.AdmissionHeader = ah
 	ba.Add(args)
 
 	br, pErr := sender.Send(ctx, ba)

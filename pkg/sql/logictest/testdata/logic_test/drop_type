@@ -41,6 +41,17 @@ CREATE TYPE t AS ENUM ('hello')
 statement error pq: \"_t\" is an implicit array type and cannot be modified
 DROP TYPE _t
 
+# The dropped type name should be draining in the dropping transaction.
+statement ok
+BEGIN;
+DROP TYPE t
+
+statement error pq: type \"test.public.t\" already exists
+CREATE TYPE t AS ENUM ()
+
+statement ok
+ROLLBACK
+
 # Now check all of the fun cases around object dependencies.
 # Test a simple column dependency.
 statement ok
@@ -316,17 +327,17 @@ SELECT * FROM system.descriptor WHERE id = $t_id OR id = $t_id + 1
 # Create a database with a large number of types.
 statement ok
 CREATE DATABASE d;
-CREATE TYPE d.d_type_1 AS ENUM ('hello');
-CREATE TYPE d.d_type_2 AS ENUM ('hello');
-CREATE TYPE d.d_type_3 AS ENUM ('hello');
-CREATE TYPE d.d_type_4 AS ENUM ('hello');
-CREATE TYPE d.d_type_5 AS ENUM ('hello')
+CREATE TYPE d.d_t_1 AS ENUM ('hello');
+CREATE TYPE d.d_t_2 AS ENUM ('hello');
+CREATE TYPE d.d_t_3 AS ENUM ('hello');
+CREATE TYPE d.d_t_4 AS ENUM ('hello');
+CREATE TYPE d.d_t_5 AS ENUM ('hello')
 
 statement ok
 DROP DATABASE d
 
 query I
-SELECT id FROM system.namespace WHERE name LIKE 'd_type%'
+SELECT id FROM system.namespace WHERE name LIKE 'd_t%'
 
 subtest regression_57187
 

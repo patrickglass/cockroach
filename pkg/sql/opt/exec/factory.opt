@@ -138,10 +138,6 @@ define GroupBy {
     # If set, the output must have this ordering, but it is guaranteed that
     # ReqOrdering is a prefix of GroupColOrdering.
     ReqOrdering exec.OutputOrdering
-
-    # The grouping column order type (Streaming, PartialStreaming, or
-    # NoStreaming).
-    groupingOrderType exec.GroupingOrderType
 }
 
 # ScalarGroupBy runs a scalar aggregation, i.e.  one which performs a set of
@@ -168,57 +164,20 @@ define Distinct {
     ErrorOnDup string
 }
 
-# HashSetOp performs a UNION / INTERSECT / EXCEPT operation (either the ALL or
-# the DISTINCT version). The left and right nodes must have the same number of
-# columns. Note that UNION ALL is special and is implemented by UnionAll.
+# SetOp performs a UNION / INTERSECT / EXCEPT operation (either the ALL or the
+# DISTINCT version). The left and right nodes must have the same number of
+# columns.
 #
-# HashSetOp uses a hash table to execute the set operation, and therefore is not
-# guaranteed to maintain any ordering. StreamingSetOp should be used instead if
-# the set operation must maintain an ordering.
-define HashSetOp {
+# HardLimit can only be set for UNION ALL operations. It is used to implement
+# locality optimized search, and instructs the execution engine that it should
+# execute the left node to completion and possibly short-circuit if the limit is
+# reached before executing the right node. The limit is guaranteed but the
+# short-circuit behavior is not.
+define SetOp {
     Typ tree.UnionType
     All bool
     Left exec.Node
     Right exec.Node
-}
-
-# StreamingSetOp performs a UNION / INTERSECT / EXCEPT operation (either the ALL
-# or the DISTINCT version). The left and right nodes must have the same number
-# of columns. Note that UNION ALL is special and is implemented by UnionAll.
-#
-# ReqOrdering specifies the required output ordering, and it is guaranteed to be
-# a prefix of StreamingOrdering. Both inputs are already ordered according to
-# StreamingOrdering. StreamingOrdering is guaranteed to include all columns
-# produced by this StreamingSetOp. The execution engine is then guaranteed to
-# use a merge join (or streaming DISTINCT for UNION), which is a streaming
-# operation that maintains ordering.
-#
-# HashSetOp should be used instead if both inputs are not ordered.
-define StreamingSetOp {
-    Typ tree.UnionType
-    All bool
-    Left exec.Node
-    Right exec.Node
-    StreamingOrdering colinfo.ColumnOrdering
-    ReqOrdering exec.OutputOrdering
-}
-
-# UnionAll performs a UNION ALL. The left and right nodes must have the same
-# number of columns.
-#
-# ReqOrdering specifies the required output ordering, and if not empty, both
-# inputs are already ordered according to it. If ReqOrdering is set, the
-# execution engine will use an ordered synchronizer to maintain ordering.
-#
-# If non-zero, HardLimit indicates that this UNION ALL represents a locality
-# optimized search. It instructs the execution engine that it should execute the
-# left node to completion and possibly short-circuit if the limit is reached
-# before executing the right node. The limit is guaranteed but the short-circuit
-# behavior is not.
-define UnionAll {
-    Left exec.Node
-    Right exec.Node
-    ReqOrdering exec.OutputOrdering
     HardLimit uint64
 }
 
@@ -259,12 +218,8 @@ define IndexJoin {
 # lookupExpr is used instead of eqCols when the lookup condition is more
 # complicated than a simple equality between input columns and index columns
 # (eqColsAreKey will be true in this case if the columns that are part of the
-# simple equality join conditions form a key in the table); if remoteLookupExpr
-# is non-nil, this is a locality optimized lookup join. In this case, lookupExpr
-# contains the lookup join conditions targeting ranges located on local nodes
-# (relative to the gateway region), and remoteLookupExpr contains the lookup
-# join conditions targeting remote nodes; lookupCols are ordinals for the table
-# columns we are retrieving.
+# simple equality join conditions form a key in the table); lookupCols are
+# ordinals for the table columns we are retrieving.
 #
 # The node produces the columns in the input and (unless join type is
 # LeftSemiJoin or LeftAntiJoin) the lookupCols, ordered by ordinal. The ON
@@ -277,7 +232,6 @@ define LookupJoin {
     EqCols []exec.NodeColumnOrdinal
     EqColsAreKey bool
     LookupExpr tree.TypedExpr
-    RemoteLookupExpr tree.TypedExpr
     LookupCols exec.TableColumnOrdinalSet
     OnCond tree.TypedExpr
     IsSecondJoinInPairedJoiner bool
@@ -358,15 +312,6 @@ define Limit {
     Input exec.Node
     Limit tree.TypedExpr
     Offset tree.TypedExpr
-}
-
-# TopK implements a TopK sorter that outputs the top K rows from the input
-# according to the ordering.
-define TopK {
-    Input exec.Node
-    K int64
-    Ordering exec.OutputOrdering
-    AlreadyOrderedPrefix int
 }
 
 # Max1Row permits at most one row from the given input node, causing an error
@@ -563,15 +508,23 @@ define Delete {
 # true:
 #  - there are no secondary indexes;
 #  - the input to the delete is a scan (without limits);
-#  - there are no inbound FKs to the table.
+#  - the table is not involved in interleaving, or it is at the root of an
+#    interleaving hierarchy with cascading FKs such that a delete of a row
+#    cascades and deletes all interleaved rows corresponding to that row;
+#  - there are no inbound FKs to the table (other than within the
+#    interleaving as described above).
 #
 # See the comment for ConstructScan for descriptions of the needed and
 # indexConstraint parameters, since DeleteRange combines Delete + Scan into a
 # single operator.
+#
+# If any interleavedTables are passed, they are all the descendant tables in
+# an interleaving hierarchy we are deleting from.
 define DeleteRange {
     Table cat.Table
     Needed exec.TableColumnOrdinalSet
     IndexConstraint *constraint.Constraint
+    InterleavedTables []cat.Table
 
     # If set, the operator will commit the transaction as part of its execution.
     # This is false when executing inside an explicit transaction, or there are
@@ -605,7 +558,6 @@ define CreateView {
     ViewQuery string
     Columns colinfo.ResultColumns
     deps opt.ViewDeps
-    typeDeps opt.ViewTypeDeps
 }
 
 # SequenceSelect implements a scan of a sequence as a data source.
@@ -685,20 +637,17 @@ define ScanBuffer {
 #       function. The returned plan uses this reference with a
 #       ConstructScanBuffer call.
 #     - the plan is executed; the results are emitted and also saved in a new
-#       buffer for the next iteration. If Deduplicate is true, only rows that
-#       haven't been returned yet are emitted and saved.
+#       buffer for the next iteration.
 define RecursiveCTE {
     Initial exec.Node
     Fn exec.RecursiveCTEIterationFn
     Label string
-    Deduplicate bool
 }
 
 # ControlJobs implements PAUSE/CANCEL/RESUME JOBS.
 define ControlJobs {
     Command tree.JobCommand
     input exec.Node
-    Reason tree.TypedExpr
 }
 
 # ControlSchedules implements PAUSE/CANCEL/DROP SCHEDULES.

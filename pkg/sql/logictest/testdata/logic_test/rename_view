@@ -142,8 +142,6 @@ ALTER VIEW test.v2 RENAME TO test2.v2
 query TTTTIT
 SHOW TABLES FROM test
 ----
-public  kv  table  root  0  NULL
-public  t   table  root  0  NULL
 
 query TTTTIT
 SHOW TABLES FROM test2

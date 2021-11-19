@@ -197,7 +197,7 @@ func hashTableInitialData(
 	var scratch [8]byte
 	b := coldata.NewMemBatchWithCapacity(nil /* typs */, 0 /* capacity */, coldata.StandardColumnFactory)
 	for batchIdx := 0; batchIdx < data.NumBatches; batchIdx++ {
-		*a = a.Truncate()
+		*a = (*a)[:0]
 		data.FillBatch(batchIdx, b, a)
 		for _, col := range b.ColVecs() {
 			switch t := col.Type(); col.CanonicalTypeFamily() {
@@ -263,7 +263,7 @@ func TestDeterministicInitialData(t *testing.T) {
 		`intro`:      0x81c6a8cfd9c3452a,
 		`json`:       0xcbf29ce484222325,
 		`ledger`:     0xebe27d872d980271,
-		`movr`:       0x79940f4ba5d5e6a3,
+		`movr`:       0x4c0da49085e0bc5c,
 		`queue`:      0xcbf29ce484222325,
 		`rand`:       0xcbf29ce484222325,
 		`roachmart`:  0xda5e73423dbdb2d9,

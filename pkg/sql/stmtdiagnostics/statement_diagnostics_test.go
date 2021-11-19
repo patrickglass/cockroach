@@ -21,10 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
-	"github.com/cockroachdb/cockroach/pkg/sql/stmtdiagnostics"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -164,10 +161,9 @@ func TestDiagnosticsRequestDifferentNode(t *testing.T) {
 // TestChangePollInterval ensures that changing the polling interval takes effect.
 func TestChangePollInterval(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	ctx := context.Background()
 
 	// We'll inject a request filter to detect scans due to the polling.
-	tableStart := keys.SystemSQLCodec.TablePrefix(uint32(systemschema.StatementDiagnosticsRequestsTable.GetID()))
+	tableStart := keys.SystemSQLCodec.TablePrefix(keys.StatementDiagnosticsRequestsTableID)
 	tableSpan := roachpb.Span{
 		Key:    tableStart,
 		EndKey: tableStart.PrefixEnd(),
@@ -197,13 +193,7 @@ func TestChangePollInterval(t *testing.T) {
 		})
 		return seen
 	}
-	settings := cluster.MakeTestingClusterSettings()
-
-	// Set an extremely long initial polling interval to not hit flakes due to
-	// server startup taking more than 10s.
-	stmtdiagnostics.PollingInterval.Override(ctx, &settings.SV, time.Hour)
 	args := base.TestServerArgs{
-		Settings: settings,
 		Knobs: base.TestingKnobs{
 			Store: &kvserver.StoreTestingKnobs{
 				TestingRequestFilter: func(ctx context.Context, request roachpb.BatchRequest) *roachpb.Error {
@@ -222,6 +212,7 @@ func TestChangePollInterval(t *testing.T) {
 		},
 	}
 	s, db, _ := serverutils.StartServer(t, args)
+	ctx := context.Background()
 	defer s.Stopper().Stop(ctx)
 
 	require.Equal(t, 1, waitForScans(1))

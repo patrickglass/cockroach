@@ -72,7 +72,7 @@ vectorized: true
 • scan
   columns: (p, d, c)
   estimated row count: 1,000 (missing stats)
-  table: num_ref@num_ref_pkey
+  table: num_ref@primary
   spans: FULL SCAN
 
 query T
@@ -84,7 +84,7 @@ vectorized: true
 • scan
   columns: (c)
   estimated row count: 1,000 (missing stats)
-  table: num_ref@num_ref_pkey
+  table: num_ref@primary
   spans: FULL SCAN
 
 query T
@@ -96,7 +96,7 @@ vectorized: true
 • scan
   columns: (p, c)
   estimated row count: 1,000 (missing stats)
-  table: num_ref@num_ref_pkey
+  table: num_ref@primary
   spans: FULL SCAN
 
 query T
@@ -108,7 +108,7 @@ vectorized: true
 • scan
   columns: (p, d, c)
   estimated row count: 1,000 (missing stats)
-  table: num_ref@num_ref_pkey
+  table: num_ref@primary
   spans: FULL SCAN
 
 query T
@@ -120,7 +120,7 @@ vectorized: true
 • scan
   columns: (c, d, p)
   estimated row count: 1,000 (missing stats)
-  table: num_ref@num_ref_pkey
+  table: num_ref@primary
   spans: FULL SCAN
 
 query T
@@ -132,7 +132,7 @@ vectorized: true
 • scan
   columns: (col1, col2, col3)
   estimated row count: 1,000 (missing stats)
-  table: num_ref@num_ref_pkey
+  table: num_ref@primary
   spans: FULL SCAN
 
 query T
@@ -192,7 +192,7 @@ vectorized: true
 • scan
   columns: (p)
   estimated row count: 1,000 (missing stats)
-  table: num_ref@num_ref_pkey
+  table: num_ref@primary
   spans: FULL SCAN
 
 query T
@@ -216,7 +216,7 @@ vectorized: true
 • scan
   columns: (d)
   estimated row count: 1,000 (missing stats)
-  table: num_ref@num_ref_pkey
+  table: num_ref@primary
   spans: FULL SCAN
 
 query T
@@ -240,7 +240,7 @@ vectorized: true
 • scan
   columns: (c)
   estimated row count: 1,000 (missing stats)
-  table: num_ref@num_ref_pkey
+  table: num_ref@primary
   spans: FULL SCAN
 
 query T
@@ -264,7 +264,7 @@ vectorized: true
 • scan
   columns: (a)
   estimated row count: 1,000 (missing stats)
-  table: num_ref_hidden@num_ref_hidden_pkey
+  table: num_ref_hidden@primary
   spans: FULL SCAN
 
 query T
@@ -276,7 +276,7 @@ vectorized: true
 • scan
   columns: ()
   estimated row count: 1,000 (missing stats)
-  table: num_ref_hidden@num_ref_hidden_pkey
+  table: num_ref_hidden@primary
   spans: FULL SCAN
 
 query T
@@ -288,7 +288,7 @@ vectorized: true
 • scan
   columns: (rowid)
   estimated row count: 1,000 (missing stats)
-  table: num_ref_hidden@num_ref_hidden_pkey
+  table: num_ref_hidden@primary
   spans: FULL SCAN
 
 query error pq: \[666\(1\) AS num_ref_alias\]: relation \"\[666\]\" does not exist
@@ -327,7 +327,7 @@ vectorized: true
 • scan
   columns: (x, y)
   estimated row count: 333 (missing stats)
-  table: a@a_pkey
+  table: a@primary
   spans: /2-
 
 query T
@@ -344,7 +344,7 @@ vectorized: true
 └── • scan
       columns: (x, y)
       estimated row count: 1,000 (missing stats)
-      table: a@a_pkey
+      table: a@primary
       spans: FULL SCAN
 
 query T
@@ -356,8 +356,8 @@ vectorized: true
 • scan
   columns: (x, y)
   estimated row count: 1 (missing stats)
-  table: a@a_pkey
-  spans: /2/0
+  table: a@primary
+  spans: /2-/2/#
 
 query T
 EXPLAIN (VERBOSE) SELECT * FROM a WHERE x > 1 AND y < 30
@@ -373,7 +373,7 @@ vectorized: true
 └── • scan
       columns: (x, y)
       estimated row count: 333 (missing stats)
-      table: a@a_pkey
+      table: a@primary
       spans: /2-
 
 query T
@@ -390,7 +390,7 @@ vectorized: true
 └── • scan
       columns: (x)
       estimated row count: 1,000 (missing stats)
-      table: a@a_pkey
+      table: a@primary
       spans: FULL SCAN
 
 query T
@@ -411,7 +411,7 @@ vectorized: true
 └── • scan
       columns: (x, y)
       estimated row count: 1,000 (missing stats)
-      table: a@a_pkey
+      table: a@primary
       spans: FULL SCAN
 
 query T
@@ -434,7 +434,7 @@ vectorized: true
     └── • scan
           columns: (x, y)
           estimated row count: 1,000 (missing stats)
-          table: a@a_pkey
+          table: a@primary
           spans: FULL SCAN
 
 query T
@@ -449,7 +449,7 @@ vectorized: true
 └── • scan
       columns: (x, y)
       estimated row count: 1,000 (missing stats)
-      table: a@a_pkey
+      table: a@primary
       spans: FULL SCAN
 
 query T
@@ -472,7 +472,7 @@ vectorized: true
     └── • scan
           columns: (x, y)
           estimated row count: 1,000 (missing stats)
-          table: a@a_pkey
+          table: a@primary
           spans: FULL SCAN
 
 statement ok
@@ -493,7 +493,7 @@ vectorized: true
 • scan
   columns: (x, y)
   estimated row count: 1,000 (missing stats)
-  table: b@b_pkey
+  table: b@primary
   spans: FULL SCAN
 
 query T
@@ -505,7 +505,7 @@ vectorized: true
 • scan
   columns: (x, y, rowid)
   estimated row count: 333 (missing stats)
-  table: b@b_pkey
+  table: b@primary
   spans: /1-
 
 statement ok
@@ -537,10 +537,7 @@ t           c_idx       false       1             c            ASC        false 
 t           c_idx       false       2             b            N/A        true     false
 t           c_idx       false       3             d            N/A        true     false
 t           c_idx       false       4             a            ASC        false    true
-t           t_pkey      false       1             a            ASC        false    false
-t           t_pkey      false       2             b            N/A        true     false
-t           t_pkey      false       3             c            N/A        true     false
-t           t_pkey      false       4             d            N/A        true     false
+t           primary     false       1             a            ASC        false    false
 
 statement ok
 INSERT INTO t VALUES (1, 2, 3, 4)
@@ -725,7 +722,7 @@ vectorized: true
 └── • scan
       columns: ()
       estimated row count: 1,000 (missing stats)
-      table: nocols@nocols_pkey
+      table: nocols@primary
       spans: FULL SCAN
 
 statement ok
@@ -753,7 +750,7 @@ vectorized: true
   columns: (a collatedstring{da}, b int)
   ordering: +a,+b
   estimated row count: 1,000 (missing stats)
-  table: coll@coll_pkey
+  table: coll@primary
   spans: FULL SCAN
 
 query T
@@ -829,9 +826,9 @@ SELECT message FROM [SHOW KV TRACE FOR SESSION] WITH ORDINALITY
  WHERE message LIKE 'fetched:%' OR message LIKE 'output row%'
  ORDER BY message LIKE 'fetched:%' DESC, ordinality ASC
 ----
-fetched: /dt/dt_pkey/'2015-08-25 04:45:45.53453' -> NULL
-fetched: /dt/dt_pkey/'2015-08-25 04:45:45.53453'/b -> '2015-08-25'
-fetched: /dt/dt_pkey/'2015-08-25 04:45:45.53453'/c -> '02:45:02.234'
+fetched: /dt/primary/'2015-08-25 04:45:45.53453' -> NULL
+fetched: /dt/primary/'2015-08-25 04:45:45.53453'/b -> '2015-08-25'
+fetched: /dt/primary/'2015-08-25 04:45:45.53453'/c -> '02:45:02.234'
 output row: ['2015-08-25 04:45:45.53453' '2015-08-25' '02:45:02.234']
 
 statement ok
@@ -865,7 +862,7 @@ DROP TABLE dt
 # Ensure that decimal values result in correct scan spans.
 # ------------------------------------------------------------------------------
 statement ok
-CREATE TABLE dec (d decimal, v decimal(3, 1), primary key (d, v), family(d, v))
+CREATE TABLE dec (d decimal, v decimal(3, 1), primary key (d, v))
 
 query T
 EXPLAIN (TYPES) SELECT * FROM dec WHERE d IS NaN and v IS NaN
@@ -876,25 +873,8 @@ vectorized: true
 • scan
   columns: (d decimal, v decimal)
   estimated row count: 1 (missing stats)
-  table: dec@dec_pkey
-  spans: /NaN/NaN/0
-
-# Test again with separate column families.
-
-statement ok
-CREATE TABLE decfam (d decimal, v decimal(3, 1), primary key (d, v), family(d), family(v))
-
-query T
-EXPLAIN (TYPES) SELECT * FROM decfam WHERE d IS NaN and v IS NaN
-----
-distribution: local
-vectorized: true
-·
-• scan
-  columns: (d decimal, v decimal)
-  estimated row count: 1 (missing stats)
-  table: decfam@decfam_pkey
-  spans: /NaN/NaN-/NaN/-Infinity
+  table: dec@primary
+  spans: /NaN/NaN-/NaN/NaN/#
 
 # The NaN suffix is decimalNaNDesc, not decimalNaN(Asc).
 query T
@@ -906,8 +886,8 @@ vectorized: true
 • scan
   columns: (d decimal, v decimal)
   estimated row count: 1 (missing stats)
-  table: dec@dec_pkey
-  spans: /Infinity/Infinity/0
+  table: dec@primary
+  spans: /Infinity/Infinity-/Infinity/Infinity/#
 
 query T
 EXPLAIN (TYPES) SELECT * FROM dec WHERE d = '-Infinity' and v = '-Infinity'
@@ -918,8 +898,8 @@ vectorized: true
 • scan
   columns: (d decimal, v decimal)
   estimated row count: 1 (missing stats)
-  table: dec@dec_pkey
-  spans: /-Infinity/-Infinity/0
+  table: dec@primary
+  spans: /-Infinity/-Infinity-/-Infinity/-Infinity/#
 
 statement ok
 DROP TABLE dec
@@ -1004,7 +984,7 @@ vectorized: true
 └── • scan
       columns: (d decimal)
       estimated row count: 1,000 (missing stats)
-      table: dec2@dec2_pkey
+      table: dec2@primary
       spans: FULL SCAN
 
 statement ok
@@ -1057,7 +1037,7 @@ vectorized: true
 └── • scan
       columns: (f float)
       estimated row count: 1,000 (missing stats)
-      table: flt@flt_pkey
+      table: flt@primary
       spans: FULL SCAN
 
 statement ok
@@ -1344,7 +1324,7 @@ vectorized: true
           columns: (a, b, c)
           ordering: +a
           estimated row count: 1,000 (missing stats)
-          table: abcd@abcd_pkey
+          table: abcd@primary
           spans: FULL SCAN
 
 query T
@@ -1371,7 +1351,7 @@ vectorized: true
         └── • scan
               columns: (a, b, c)
               estimated row count: 1,000 (missing stats)
-              table: abcd@abcd_pkey
+              table: abcd@primary
               spans: FULL SCAN
 
 
@@ -1396,7 +1376,7 @@ vectorized: true
           columns: (a, b, c)
           ordering: -a,-b
           estimated row count: 1,000 (missing stats)
-          table: abcd@abcd_pkey
+          table: abcd@primary
           spans: FULL SCAN
 
 # Ensure that filter nodes (and filtered scan nodes) get populated with the correct ordering.
@@ -1416,7 +1396,7 @@ vectorized: true
       columns: (a, b, c, d)
       ordering: +a
       estimated row count: 1,000 (missing stats)
-      table: abcd@abcd_pkey
+      table: abcd@primary
       spans: FULL SCAN
 
 query T
@@ -1439,7 +1419,7 @@ vectorized: true
     └── • scan
           columns: (a, b, c, d)
           estimated row count: 1,000 (missing stats)
-          table: abcd@abcd_pkey
+          table: abcd@primary
           spans: FULL SCAN
 
 query T
@@ -1458,7 +1438,7 @@ vectorized: true
       columns: (a, b)
       ordering: +a
       estimated row count: 10 (missing stats)
-      table: abcd@abcd_pkey
+      table: abcd@primary
       spans: LIMITED SCAN
       limit: 10
 
@@ -1485,7 +1465,7 @@ vectorized: true
           columns: (a, b, c)
           ordering: +a
           estimated row count: 10 (missing stats)
-          table: abcd@abcd_pkey
+          table: abcd@primary
           spans: LIMITED SCAN
           limit: 10
 
@@ -1531,7 +1511,7 @@ vectorized: true
 ·
 • scan
   missing stats
-  table: a@a_pkey
+  table: a@primary
   spans: [/10 - /10]
 
 query T
@@ -1542,7 +1522,7 @@ vectorized: true
 ·
 • scan
   missing stats
-  table: a@a_pkey
+  table: a@primary
   spans: [/10 - /10] [/20 - /20]
 
 query T
@@ -1553,7 +1533,7 @@ vectorized: true
 ·
 • scan
   missing stats
-  table: a@a_pkey
+  table: a@primary
   spans: [/10 - /10] [/20 - /20]
 
 # Verify that consolidated point spans are still parallelized.
@@ -1565,7 +1545,7 @@ vectorized: true
 ·
 • scan
   missing stats
-  table: a@a_pkey
+  table: a@primary
   spans: [/10 - /11]
 
 query T
@@ -1576,7 +1556,7 @@ vectorized: true
 ·
 • scan
   missing stats
-  table: a@a_pkey
+  table: a@primary
   spans: [/11 - /19]
 
 # This ticks all the boxes for parallelization apart from the fact that there
@@ -1589,7 +1569,7 @@ vectorized: true
 ·
 • scan
   missing stats
-  table: a@a_pkey
+  table: a@primary
   spans: [/11 - ]
 
 # Test non-int types.
@@ -1602,7 +1582,7 @@ distribution: local
 vectorized: true
 ·
 • index join
-│ table: a@a_pkey
+│ table: a@primary
 │
 └── • scan
       missing stats
@@ -1618,7 +1598,7 @@ distribution: local
 vectorized: true
 ·
 • index join
-│ table: a@a_pkey
+│ table: a@primary
 │
 └── • scan
       missing stats
@@ -1633,7 +1613,7 @@ vectorized: true
 ·
 • scan
   missing stats
-  table: b@b_pkey
+  table: b@primary
   spans: [/10/10 - /10/10] [/20/20 - /20/20]
 
 # This one isn't parallelizable because it's not a point lookup - only part of
@@ -1646,7 +1626,7 @@ vectorized: true
 ·
 • scan
   missing stats
-  table: b@b_pkey
+  table: b@primary
   spans: [/10 - /10] [/20 - /20]
 
 # This one isn't parallelizable because it has a LIMIT clause.
@@ -1658,7 +1638,7 @@ vectorized: true
 ·
 • scan
   missing stats
-  table: a@a_pkey
+  table: a@primary
   spans: [/10 - /10] [/20 - /20]
   limit: 1
 
@@ -1765,24 +1745,21 @@ SELECT * FROM a
 statement ok
 SET tracing = on; SELECT * FROM a WHERE a = 0 OR a = 10; SET tracing = off
 
-# The span "sending partial batch" means that the scan was parallelized. We're
-# seeing duplicate "querying next range" entries because we first use the range
-# cache to try to partition the spans in order to have parallel TableReaders (we
-# end up with a single partition though), and then we have a single TableReader
-# performing the scan of two spans in parallel.
+# The span "sending partial batch" means that the scan was parallelized.
 # If this test is failing and doesn't have that span, it means that the scanNode
 # was improperly configured to add a limit to the ScanRequest batch.
 # See #30943 for more details.
 query T
 SELECT message FROM [SHOW TRACE FOR SESSION]
-WHERE message LIKE 'querying next range at /Table/74/1%' OR
-      message = '=== SPAN START: kv.DistSender: sending partial batch ==='
+WHERE message IN
+    ('querying next range at /Table/73/1/0',
+     'querying next range at /Table/73/1/10',
+     '=== SPAN START: kv.DistSender: sending partial batch ==='
+    )
 ----
-querying next range at /Table/74/1/0/0
-querying next range at /Table/74/1/10/0
-querying next range at /Table/74/1/0/0
+querying next range at /Table/73/1/0
 === SPAN START: kv.DistSender: sending partial batch ===
-querying next range at /Table/74/1/10/0
+querying next range at /Table/73/1/10
 
 # Test for 42202 -- ensure filters can get pushed down through project-set.
 statement ok
@@ -1795,24 +1772,218 @@ EXPLAIN SELECT e.z, s.z, n FROM e, s, generate_series(0, s.z, 1000) as n WHERE e
 distribution: local
 vectorized: true
 ·
-• top-k
-│ order: +z
-│ k: 10
+• limit
+│ count: 10
 │
-└── • project set
+└── • sort
+    │ order: +z
     │
-    └── • hash join
-        │ equality: (y) = (y)
+    └── • project set
         │
-        ├── • scan
-        │     missing stats
-        │     table: e@e_pkey
-        │     spans: FULL SCAN
+        └── • hash join
+            │ equality: (y) = (y)
+            │
+            ├── • scan
+            │     missing stats
+            │     table: e@primary
+            │     spans: FULL SCAN
+            │
+            └── • scan
+                  missing stats
+                  table: s@primary
+                  spans: FULL SCAN
+
+statement ok
+CREATE TABLE disjunction (
+  k INT PRIMARY KEY,
+  a STRING,
+  b STRING,
+  c STRING,
+  INDEX a_idx (a),
+  INDEX b_idx (b),
+  INDEX c_idx (c)
+)
+
+statement ok
+ALTER TABLE disjunction INJECT STATISTICS '[
+  {
+    "columns": ["a"],
+    "created_at": "2018-01-01 1:00:00.00000+00:00",
+    "row_count": 10000,
+    "distinct_count": 5010,
+    "histo_col_type": "string",
+    "histo_buckets": [
+      {"num_eq": 0, "num_range": 0, "distinct_range": 0, "upper_bound": "aaa"},
+      {"num_eq": 10, "num_range": 990, "distinct_range": 999, "upper_bound": "foo"},
+      {"num_eq": 990, "num_range": 10, "distinct_range": 9, "upper_bound": "fop"},
+      {"num_eq": 0, "num_range": 8000, "distinct_range": 4000, "upper_bound": "zoo"}
+    ]
+  },
+  {
+    "columns": ["b"],
+    "created_at": "2018-01-01 1:00:00.00000+00:00",
+    "row_count": 10000,
+    "distinct_count": 5010,
+    "histo_col_type": "string",
+    "histo_buckets": [
+      {"num_eq": 0, "num_range": 0, "distinct_range": 0, "upper_bound": "aaa"},
+      {"num_eq": 10, "num_range": 990, "distinct_range": 999, "upper_bound": "foo"},
+      {"num_eq": 990, "num_range": 10, "distinct_range": 9, "upper_bound": "fop"},
+      {"num_eq": 0, "num_range": 8000, "distinct_range": 4000, "upper_bound": "zoo"}
+    ]
+  },
+  {
+    "columns": ["c"],
+    "created_at": "2018-01-01 1:00:00.00000+00:00",
+    "row_count": 10000,
+    "distinct_count": 5010,
+    "histo_col_type": "string",
+    "histo_buckets": [
+      {"num_eq": 0, "num_range": 0, "distinct_range": 0, "upper_bound": "aaa"},
+      {"num_eq": 10, "num_range": 990, "distinct_range": 999, "upper_bound": "foo"},
+      {"num_eq": 990, "num_range": 10, "distinct_range": 9, "upper_bound": "fop"},
+      {"num_eq": 0, "num_range": 8000, "distinct_range": 4000, "upper_bound": "zoo"}
+    ]
+  }
+]'
+
+# Single disjunction. A plan with a UNION of two constrained scans is not selected
+# because the selectivity of the disjunction is not accurately estimated.
+query T
+EXPLAIN SELECT * FROM disjunction WHERE a LIKE 'foo%' OR b LIKE 'foo%' LIMIT 5
+----
+distribution: local
+vectorized: true
+·
+• limit
+│ estimated row count: 5
+│ count: 5
+│
+└── • filter
+    │ estimated row count: 3,333
+    │ filter: (a LIKE 'foo%') OR (b LIKE 'foo%')
+    │
+    └── • scan
+          estimated row count: 10,000 (100% of the table; stats collected <hidden> ago)
+          table: disjunction@primary
+          spans: FULL SCAN
+
+# More accurate estimation of the disjunction's selectivity leads to a plan with
+# a union of constrained scans. See #58744.
+statement ok
+SET optimizer_improve_disjunction_selectivity = true
+
+# Single disjunction.
+query T
+EXPLAIN SELECT * FROM disjunction WHERE a LIKE 'foo%' OR b LIKE 'foo%' LIMIT 5
+----
+distribution: local
+vectorized: true
+·
+• limit
+│ estimated row count: 5
+│ count: 5
+│
+└── • distinct
+    │ estimated row count: 40
+    │ distinct on: k
+    │
+    └── • union all
+        │ estimated row count: 40
         │
-        └── • scan
-              missing stats
-              table: s@s_pkey
-              spans: FULL SCAN
+        ├── • index join
+        │   │ estimated row count: 20
+        │   │ table: disjunction@primary
+        │   │
+        │   └── • scan
+        │         estimated row count: 20 (0.20% of the table; stats collected <hidden> ago)
+        │         table: disjunction@a_idx
+        │         spans: [/'foo' - /'fop')
+        │
+        └── • index join
+            │ estimated row count: 20
+            │ table: disjunction@primary
+            │
+            └── • scan
+                  estimated row count: 20 (0.20% of the table; stats collected <hidden> ago)
+                  table: disjunction@b_idx
+                  spans: [/'foo' - /'fop')
+
+# Multiple disjunctions.
+query T
+EXPLAIN SELECT * FROM disjunction WHERE a LIKE 'foo%' OR b LIKE 'foo%' OR c LIKE 'foo%' LIMIT 5
+----
+distribution: local
+vectorized: true
+·
+• limit
+│ estimated row count: 5
+│ count: 5
+│
+└── • distinct
+    │ estimated row count: 60
+    │ distinct on: k
+    │
+    └── • union all
+        │ estimated row count: 60
+        │
+        ├── • index join
+        │   │ estimated row count: 20
+        │   │ table: disjunction@primary
+        │   │
+        │   └── • scan
+        │         estimated row count: 20 (0.20% of the table; stats collected <hidden> ago)
+        │         table: disjunction@a_idx
+        │         spans: [/'foo' - /'fop')
+        │
+        └── • distinct
+            │ estimated row count: 40
+            │ distinct on: k
+            │
+            └── • union all
+                │ estimated row count: 40
+                │
+                ├── • index join
+                │   │ estimated row count: 20
+                │   │ table: disjunction@primary
+                │   │
+                │   └── • scan
+                │         estimated row count: 20 (0.20% of the table; stats collected <hidden> ago)
+                │         table: disjunction@c_idx
+                │         spans: [/'foo' - /'fop')
+                │
+                └── • index join
+                    │ estimated row count: 20
+                    │ table: disjunction@primary
+                    │
+                    └── • scan
+                          estimated row count: 20 (0.20% of the table; stats collected <hidden> ago)
+                          table: disjunction@b_idx
+                          spans: [/'foo' - /'fop')
+
+# The row count should not exceed the number of rows in the table when
+# disjunctions have high selectivity values.
+query T
+EXPLAIN SELECT * FROM disjunction WHERE a > 'fop' OR b > 'fop' OR c > 'fop' LIMIT 5
+----
+distribution: local
+vectorized: true
+·
+• limit
+│ estimated row count: 5
+│ count: 5
+│
+└── • filter
+    │ estimated row count: 10,000
+    │ filter: ((a > 'fop') OR (b > 'fop')) OR (c > 'fop')
+    │
+    └── • scan
+          estimated row count: 10,000 (100% of the table; stats collected <hidden> ago)
+          table: disjunction@primary
+          spans: FULL SCAN
+
+statement ok
+SET optimizer_improve_disjunction_selectivity = false
 
 # Check that we have a sane row count estimate when there are a lot of null
 # values.
@@ -1860,51 +2031,5 @@ vectorized: true
 └── • scan
       columns: (x, y)
       estimated row count: 11,110,000 (100% of the table; stats collected <hidden> ago)
-      table: nulls@nulls_pkey
+      table: nulls@primary
       spans: FULL SCAN
-
-# Test resolution of @primary index hint.
-statement ok
-CREATE TABLE tbl_with_no_primary_constraint (
-  id INT PRIMARY KEY,
-  b INT
-)
-
-statement ok
-CREATE TABLE tbl_with_primary_named_index (
-  id INT PRIMARY KEY,
-  b INT,
-  INDEX "primary" (b)
-)
-
-query T
-EXPLAIN (VERBOSE) SELECT * FROM tbl_with_no_primary_constraint@primary ORDER BY id
-----
-distribution: local
-vectorized: true
-·
-• scan
-  columns: (id, b)
-  ordering: +id
-  estimated row count: 1,000 (missing stats)
-  table: tbl_with_no_primary_constraint@tbl_with_no_primary_constraint_pkey
-  spans: FULL SCAN
-
-statement ok
-SHOW PARTITIONS FROM INDEX tbl_with_no_primary_constraint@primary
-
-query T
-EXPLAIN (VERBOSE) SELECT b FROM tbl_with_primary_named_index@primary ORDER BY b
-----
-distribution: local
-vectorized: true
-·
-• scan
-  columns: (b)
-  ordering: +b
-  estimated row count: 1,000 (missing stats)
-  table: tbl_with_primary_named_index@primary
-  spans: FULL SCAN
-
-statement ok
-SELECT index_name FROM [SHOW PARTITIONS FROM INDEX tbl_with_primary_named_index@primary]

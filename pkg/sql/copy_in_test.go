@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -215,7 +215,7 @@ func TestCopyRandom(t *testing.T) {
 				// Special handling for ID field
 				ds = strconv.Itoa(i)
 			} else {
-				d := randgen.RandDatum(rng, t, false)
+				d := rowenc.RandDatum(rng, t, false)
 				ds = tree.AsStringWithFlags(d, tree.FmtBareStrings)
 				switch t {
 				case types.Float:
@@ -511,11 +511,10 @@ func TestCopyInReleasesLeases(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	ctx := context.Background()
 	params, _ := tests.CreateTestServerParams()
 	s, db, _ := serverutils.StartServer(t, params)
 	tdb := sqlutils.MakeSQLRunner(db)
-	defer s.Stopper().Stop(ctx)
+	defer s.Stopper().Stop(context.Background())
 	tdb.Exec(t, `CREATE TABLE t (k INT8 PRIMARY KEY)`)
 	tdb.Exec(t, `CREATE USER foo WITH PASSWORD 'testabc'`)
 	tdb.Exec(t, `GRANT admin TO foo`)
@@ -527,14 +526,10 @@ func TestCopyInReleasesLeases(t *testing.T) {
 	conn, err := pgxConn(t, userURL)
 	require.NoError(t, err)
 
-	rowsAffected, err := conn.CopyFrom(
-		ctx,
-		pgx.Identifier{"t"},
-		[]string{"k"},
-		pgx.CopyFromRows([][]interface{}{{1}, {2}}),
-	)
+	tag, err := conn.CopyFromReader(strings.NewReader("1\n2\n"),
+		"copy t(k) from stdin")
 	require.NoError(t, err)
-	require.Equal(t, int64(2), rowsAffected)
+	require.Equal(t, int64(2), tag.RowsAffected())
 
 	// Prior to the bug fix which prompted this test, the below schema change
 	// would hang until the leases expire. Let's make sure it finishes "soon".
@@ -549,5 +544,5 @@ func TestCopyInReleasesLeases(t *testing.T) {
 	case <-time.After(testutils.DefaultSucceedsSoonDuration):
 		t.Fatal("alter did not complete")
 	}
-	require.NoError(t, conn.Close(ctx))
+	require.NoError(t, conn.Close())
 }

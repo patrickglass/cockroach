@@ -9,37 +9,37 @@ CREATE TABLE uniontest (
 query T
 EXPLAIN SELECT v FROM uniontest UNION SELECT k FROM uniontest
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • union
 │
 ├── • scan
 │     missing stats
-│     table: uniontest@uniontest_pkey
+│     table: uniontest@primary
 │     spans: FULL SCAN
 │
 └── • scan
       missing stats
-      table: uniontest@uniontest_pkey
+      table: uniontest@primary
       spans: FULL SCAN
 
 query T
 EXPLAIN SELECT v FROM uniontest UNION ALL SELECT k FROM uniontest
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • union all
 │
 ├── • scan
 │     missing stats
-│     table: uniontest@uniontest_pkey
+│     table: uniontest@primary
 │     spans: FULL SCAN
 │
 └── • scan
       missing stats
-      table: uniontest@uniontest_pkey
+      table: uniontest@primary
       spans: FULL SCAN
 
 # Check that EXPLAIN properly releases memory for virtual tables.
@@ -63,7 +63,7 @@ CREATE TABLE abc (a INT, b INT, c INT)
 query T
 EXPLAIN (VERBOSE) (SELECT a FROM abc ORDER BY b) INTERSECT (SELECT a FROM abc ORDER BY c) ORDER BY a
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • sort
@@ -82,7 +82,7 @@ vectorized: true
     │   └── • scan
     │         columns: (a, b)
     │         estimated row count: 1,000 (missing stats)
-    │         table: abc@abc_pkey
+    │         table: abc@primary
     │         spans: FULL SCAN
     │
     └── • project
@@ -91,19 +91,18 @@ vectorized: true
         └── • scan
               columns: (a, c)
               estimated row count: 1,000 (missing stats)
-              table: abc@abc_pkey
+              table: abc@primary
               spans: FULL SCAN
 
 # Regression test for #32723.
 query T
 EXPLAIN (VERBOSE) SELECT a FROM ((SELECT '' AS a , '') EXCEPT ALL (SELECT '', ''))
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • project
 │ columns: (a)
-│ estimated row count: 1
 │
 └── • except all
     │ columns: (a, a)
@@ -127,31 +126,30 @@ vectorized: true
 
 query T
 EXPLAIN (VERBOSE) ((SELECT '', '', 'x' WHERE false))
-UNION ALL ((SELECT * FROM (VALUES ('', '', 'x'), ('', '', 'x'))) EXCEPT (VALUES ('', '', 'x')))
+UNION ALL ((SELECT '', '', 'x') EXCEPT (VALUES ('', '', 'x')))
 ----
-distribution: local
+distribution: full
 vectorized: true
 ·
 • render
 │ columns: ("?column?", "?column?", "?column?")
 │ estimated row count: 1
-│ render ?column?: column1
-│ render ?column?: column2
-│ render ?column?: column3
+│ render ?column?: "?column?"
+│ render ?column?: "?column?"
+│ render ?column?: "?column?"
 │
 └── • except
-    │ columns: (column1, column2, column3)
+    │ columns: ("?column?", "?column?", "?column?")
     │ estimated row count: 1
     │
-    ├── • values
-    │     columns: (column1, column2, column3)
-    │     size: 3 columns, 2 rows
-    │     row 0, expr 0: ''
-    │     row 0, expr 1: ''
-    │     row 0, expr 2: 'x'
-    │     row 1, expr 0: ''
-    │     row 1, expr 1: ''
-    │     row 1, expr 2: 'x'
+    ├── • project
+    │   │ columns: ("?column?", "?column?", "?column?")
+    │   │
+    │   └── • values
+    │         columns: ("?column?", "?column?")
+    │         size: 2 columns, 1 row
+    │         row 0, expr 0: ''
+    │         row 0, expr 1: 'x'
     │
     └── • values
           columns: (column1, column2, column3)

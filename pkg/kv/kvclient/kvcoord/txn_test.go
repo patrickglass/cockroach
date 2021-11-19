@@ -20,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/lock"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/tscache"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -203,17 +202,7 @@ func TestLostUpdate(t *testing.T) {
 func TestPriorityRatchetOnAbortOrPush(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	s := createTestDBWithKnobs(t, &kvserver.StoreTestingKnobs{
-		TestingRequestFilter: func(_ context.Context, ba roachpb.BatchRequest) *roachpb.Error {
-			// Reject transaction heartbeats, which can make the test flaky when they
-			// detect an aborted transaction before the Get operation does. See #68584
-			// for an explanation.
-			if ba.IsSingleHeartbeatTxnRequest() {
-				return roachpb.NewErrorf("rejected")
-			}
-			return nil
-		},
-	})
+	s := createTestDB(t)
 	defer s.Stop()
 
 	pushByReading := func(key roachpb.Key) {
@@ -736,31 +725,6 @@ func TestTxnContinueAfterCputError(t *testing.T) {
 	require.NoError(t, txn.Commit(ctx))
 }
 
-// Test that a transaction can be used after a locking request returns a
-// WriteIntentError. This is not generally allowed for other errors, but
-// WriteIntentError is special.
-func TestTxnContinueAfterWriteIntentError(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-	s := createTestDB(t)
-	defer s.Stop()
-
-	otherTxn := s.DB.NewTxn(ctx, "lock holder txn")
-	require.NoError(t, otherTxn.Put(ctx, "a", "b"))
-
-	txn := s.DB.NewTxn(ctx, "test txn")
-
-	b := txn.NewBatch()
-	b.Header.WaitPolicy = lock.WaitPolicy_Error
-	b.Put("a", "c")
-	err := txn.Run(ctx, b)
-	require.IsType(t, &roachpb.WriteIntentError{}, err)
-
-	require.NoError(t, txn.Put(ctx, "a'", "c"))
-	require.NoError(t, txn.Commit(ctx))
-}
-
 func TestTxnWaitPolicies(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -814,9 +778,7 @@ func TestTxnWaitPolicies(t *testing.T) {
 		// Priority does not matter.
 		err := <-errorC
 		require.NotNil(t, err)
-		wiErr := new(roachpb.WriteIntentError)
-		require.True(t, errors.As(err, &wiErr))
-		require.Equal(t, roachpb.WriteIntentError_REASON_WAIT_POLICY, wiErr.Reason)
+		require.IsType(t, &roachpb.WriteIntentError{}, err)
 
 		// Let blocked requests proceed.
 		require.NoError(t, txn.Commit(ctx))
@@ -824,27 +786,6 @@ func TestTxnWaitPolicies(t *testing.T) {
 			require.NoError(t, <-blockC)
 		}
 	})
-}
-
-func TestTxnLockTimeout(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-	s := createTestDB(t)
-	defer s.Stop()
-
-	key := []byte("b")
-	txn := s.DB.NewTxn(ctx, "test txn")
-	require.NoError(t, txn.Put(ctx, key, "new value"))
-
-	var b kv.Batch
-	b.Header.LockTimeout = 25 * time.Millisecond
-	b.Get(key)
-	err := s.DB.Run(ctx, &b)
-	require.NotNil(t, err)
-	wiErr := new(roachpb.WriteIntentError)
-	require.True(t, errors.As(err, &wiErr))
-	require.Equal(t, roachpb.WriteIntentError_REASON_LOCK_TIMEOUT, wiErr.Reason)
 }
 
 // TestTxnReturnsWriteTooOldErrorOnConflictingDeleteRange tests that if two
@@ -896,54 +837,4 @@ func TestTxnReturnsWriteTooOldErrorOnConflictingDeleteRange(t *testing.T) {
 	require.NotNil(t, err)
 	require.Regexp(t, "TransactionRetryWithProtoRefreshError: WriteTooOldError", err)
 	require.Len(t, b.Results[0].Keys, 0)
-}
-
-// TestRetrySerializableBumpsToNow verifies that transaction read time is forwarded to the
-// current HLC time rather than closed timestamp to give it enough time to retry.
-// To achieve that, test fixes transaction time to prevent refresh from succeeding first
-// then waits for closed timestamp to advance sufficiently and commits. Since write
-// can't succeed below closed timestamp and commit timestamp has leaked and can't be bumped
-// txn is restarted. Test then verifies that it can proceed even if closed timestamp
-// is again updated.
-func TestRetrySerializableBumpsToNow(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	s := createTestDB(t)
-	defer s.Stop()
-	ctx := context.Background()
-
-	bumpClosedTimestamp := func(delay time.Duration) {
-		s.Manual.Increment(delay.Nanoseconds())
-		// We need to bump closed timestamp for clock increment to have effect
-		// on further kv writes. Putting anything into proposal buffer will
-		// trigger achieve this.
-		// We write a value to a non-overlapping key to ensure we are not
-		// bumping test transaction. We can't use reads because they could
-		// only bump tscache directly which we try not to do in this test case.
-		require.NoError(t, s.DB.Put(ctx, roachpb.Key("z"), []byte{0}))
-	}
-
-	attempt := 0
-	require.NoError(t, s.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		require.Less(t, attempt, 2, "Transaction can't recover after initial retry error, too many retries")
-		closedTsTargetDuration := closedts.TargetDuration.Get(&s.Cfg.Settings.SV)
-		delay := closedTsTargetDuration / 2
-		if attempt == 0 {
-			delay = closedTsTargetDuration * 2
-		}
-		bumpClosedTimestamp(delay)
-		attempt++
-		// Fixing transaction commit timestamp to disallow read refresh.
-		_ = txn.CommitTimestamp()
-		// Perform a scan to populate the transaction's read spans and mandate a refresh
-		// if the transaction's write timestamp is ever bumped. Because we fixed the
-		// transaction's commit timestamp, it will be forced to retry.
-		_, err := txn.Scan(ctx, roachpb.Key("a"), roachpb.Key("p"), 1000)
-		require.NoError(t, err, "Failed Scan request")
-		// Perform a write, which will run into the closed timestamp and get pushed.
-		require.NoError(t, txn.Put(ctx, roachpb.Key("b"), []byte(fmt.Sprintf("value-%d", attempt))))
-		return nil
-	}))
-	require.Greater(t, attempt, 1, "Transaction is expected to retry once")
 }

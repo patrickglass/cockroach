@@ -21,38 +21,19 @@ package tree
 
 // SetVar represents a SET or RESET statement.
 type SetVar struct {
-	Name     string
-	Local    bool
-	Values   Exprs
-	Reset    bool
-	ResetAll bool
+	Name   string
+	Values Exprs
 }
 
 // Format implements the NodeFormatter interface.
 func (node *SetVar) Format(ctx *FmtCtx) {
-	if node.ResetAll {
-		ctx.WriteString("RESET ALL")
-		return
-	}
-	if node.Reset {
-		ctx.WriteString("RESET ")
-		ctx.WithFlags(ctx.flags & ^FmtAnonymize & ^FmtMarkRedactionNode, func() {
-			// Session var names never contain PII and should be distinguished
-			// for feature tracking purposes.
-			ctx.FormatNameP(&node.Name)
-		})
-		return
-	}
 	ctx.WriteString("SET ")
-	if node.Local {
-		ctx.WriteString("LOCAL ")
-	}
 	if node.Name == "" {
 		ctx.WriteString("ROW (")
 		ctx.FormatNode(&node.Values)
 		ctx.WriteString(")")
 	} else {
-		ctx.WithFlags(ctx.flags & ^FmtAnonymize & ^FmtMarkRedactionNode, func() {
+		ctx.WithFlags(ctx.flags & ^FmtAnonymize, func() {
 			// Session var names never contain PII and should be distinguished
 			// for feature tracking purposes.
 			ctx.FormatNameP(&node.Name)
@@ -74,20 +55,12 @@ func (node *SetClusterSetting) Format(ctx *FmtCtx) {
 	ctx.WriteString("SET CLUSTER SETTING ")
 	// Cluster setting names never contain PII and should be distinguished
 	// for feature tracking purposes.
-	ctx.WithFlags(ctx.flags & ^FmtAnonymize & ^FmtMarkRedactionNode, func() {
+	ctx.WithFlags(ctx.flags & ^FmtAnonymize, func() {
 		ctx.FormatNameP(&node.Name)
 	})
 
 	ctx.WriteString(" = ")
-
-	switch v := node.Value.(type) {
-	case *DBool, *DInt:
-		ctx.WithFlags(ctx.flags & ^FmtAnonymize & ^FmtMarkRedactionNode, func() {
-			ctx.FormatNode(v)
-		})
-	default:
-		ctx.FormatNode(v)
-	}
+	ctx.FormatNode(node.Value)
 }
 
 // SetTransaction represents a SET TRANSACTION statement.
@@ -130,9 +103,5 @@ type SetTracing struct {
 // Format implements the NodeFormatter interface.
 func (node *SetTracing) Format(ctx *FmtCtx) {
 	ctx.WriteString("SET TRACING = ")
-	// Set tracing values never contain PII and should be distinguished
-	// for feature tracking purposes.
-	ctx.WithFlags(ctx.flags&^FmtMarkRedactionNode, func() {
-		ctx.FormatNode(&node.Values)
-	})
+	ctx.FormatNode(&node.Values)
 }

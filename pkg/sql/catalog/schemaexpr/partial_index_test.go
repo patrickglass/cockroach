@@ -30,13 +30,15 @@ func TestIndexPredicateValidator_Validate(t *testing.T) {
 
 	database := tree.Name("foo")
 	table := tree.Name("bar")
-	tn := tree.MakeTableNameWithSchema(database, tree.PublicSchemaName, table)
+	tn := tree.MakeTableName(database, table)
 
 	desc := testTableDesc(
 		string(table),
 		[]testCol{{"a", types.Bool}, {"b", types.Int}},
 		[]testCol{{"c", types.String}},
 	)
+
+	validator := schemaexpr.MakeIndexPredicateValidator(ctx, tn, desc, &semaCtx)
 
 	testData := []struct {
 		expr          string
@@ -89,9 +91,7 @@ func TestIndexPredicateValidator_Validate(t *testing.T) {
 				t.Fatalf("%s: unexpected error: %s", d.expr, err)
 			}
 
-			deqExpr, err := schemaexpr.ValidatePartialIndexPredicate(
-				ctx, desc, expr, &tn, &semaCtx,
-			)
+			deqExpr, err := validator.Validate(expr)
 
 			if !d.expectedValid {
 				if err == nil {

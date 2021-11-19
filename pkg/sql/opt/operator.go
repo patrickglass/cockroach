@@ -83,19 +83,18 @@ type Expr interface {
 	String() string
 }
 
-// ScalarRank is the type of the sort order given to every scalar
+// ScalarID is the type of the memo-unique identifier given to every scalar
 // expression.
-type ScalarRank int
+type ScalarID int
 
 // ScalarExpr is a scalar expression, which is an expression that returns a
 // primitive-typed value like boolean or string rather than rows and columns.
 type ScalarExpr interface {
 	Expr
 
-	// Rank is a value that defines how the scalar expression should be ordered
-	// among a collection of scalar expressions. It defines a total order over
-	// ScalarExprs within the context of a memo.
-	Rank() ScalarRank
+	// ID is a unique (within the context of a memo) ID that can be
+	// used to define a total order over ScalarExprs.
+	ID() ScalarID
 
 	// DataType is the SQL type of the expression.
 	DataType() *types.T
@@ -111,11 +110,11 @@ type MutableExpr interface {
 
 // ComparisonOpMap maps from a semantic tree comparison operator type to an
 // optimizer operator type.
-var ComparisonOpMap [tree.NumComparisonOperatorSymbols]Operator
+var ComparisonOpMap [tree.NumComparisonOperators]Operator
 
 // ComparisonOpReverseMap maps from an optimizer operator type to a semantic
 // tree comparison operator type.
-var ComparisonOpReverseMap = map[Operator]tree.ComparisonOperatorSymbol{
+var ComparisonOpReverseMap = map[Operator]tree.ComparisonOperator{
 	EqOp:             tree.EQ,
 	LtOp:             tree.LT,
 	GtOp:             tree.GT,
@@ -137,7 +136,6 @@ var ComparisonOpReverseMap = map[Operator]tree.ComparisonOperatorSymbol{
 	IsOp:             tree.IsNotDistinctFrom,
 	IsNotOp:          tree.IsDistinctFrom,
 	ContainsOp:       tree.Contains,
-	ContainedByOp:    tree.ContainedBy,
 	JsonExistsOp:     tree.JSONExists,
 	JsonSomeExistsOp: tree.JSONSomeExists,
 	JsonAllExistsOp:  tree.JSONAllExists,
@@ -148,7 +146,7 @@ var ComparisonOpReverseMap = map[Operator]tree.ComparisonOperatorSymbol{
 
 // BinaryOpReverseMap maps from an optimizer operator type to a semantic tree
 // binary operator type.
-var BinaryOpReverseMap = map[Operator]tree.BinaryOperatorSymbol{
+var BinaryOpReverseMap = map[Operator]tree.BinaryOperator{
 	BitandOp:        tree.Bitand,
 	BitorOp:         tree.Bitor,
 	BitxorOp:        tree.Bitxor,
@@ -170,12 +168,11 @@ var BinaryOpReverseMap = map[Operator]tree.BinaryOperatorSymbol{
 
 // UnaryOpReverseMap maps from an optimizer operator type to a semantic tree
 // unary operator type.
-var UnaryOpReverseMap = map[Operator]tree.UnaryOperatorSymbol{
+var UnaryOpReverseMap = map[Operator]tree.UnaryOperator{
 	UnaryMinusOp:      tree.UnaryMinus,
 	UnaryComplementOp: tree.UnaryComplement,
 	UnarySqrtOp:       tree.UnarySqrt,
 	UnaryCbrtOp:       tree.UnaryCbrt,
-	UnaryPlusOp:       tree.UnaryPlus,
 }
 
 // AggregateOpReverseMap maps from an optimizer operator type to the name of an

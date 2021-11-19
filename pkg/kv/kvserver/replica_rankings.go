@@ -17,17 +17,19 @@ import (
 )
 
 const (
-	// TODO(aayush): Scale this up based on the number of replicas on a store?
+	// TODO(a-robinson): Scale this up based on the number of replicas on a store?
 	numTopReplicasToTrack = 128
 )
 
 type replicaWithStats struct {
 	repl *Replica
 	qps  float64
-	// TODO(aayush): Include writes-per-second and logicalBytes of storage?
+	// TODO(a-robinson): Include writes-per-second and logicalBytes of storage?
 }
 
-// replicaRankings maintains top-k orderings of the replicas in a store by QPS.
+// replicaRankings maintains top-k orderings of the replicas in a store along
+// different dimensions of concern, such as QPS, keys written per second, and
+// disk used.
 type replicaRankings struct {
 	mu struct {
 		syncutil.Mutex

@@ -258,7 +258,6 @@ func (b *Builder) buildInsert(ins *tree.Insert, inScope *scope) (outScope *scope
 	//
 	//   INSERT INTO <table> DEFAULT VALUES
 	//
-	isUpsert := ins.OnConflict != nil && !ins.OnConflict.DoNothing
 	if !ins.DefaultValues() {
 		// Replace any DEFAULT expressions in the VALUES clause, if a VALUES clause
 		// exists:
@@ -267,15 +266,15 @@ func (b *Builder) buildInsert(ins *tree.Insert, inScope *scope) (outScope *scope
 		//
 		rows := mb.replaceDefaultExprs(ins.Rows)
 
-		mb.buildInputForInsert(inScope, rows, isUpsert)
+		mb.buildInputForInsert(inScope, rows)
 	} else {
-		mb.buildInputForInsert(inScope, nil /* rows */, isUpsert)
+		mb.buildInputForInsert(inScope, nil /* rows */)
 	}
 
 	// Add default columns that were not explicitly specified by name or
 	// implicitly targeted by input columns. Also add any computed columns. In
 	// both cases, include columns undergoing mutations in the write-only state.
-	mb.addSynthesizedColsForInsert(isUpsert)
+	mb.addSynthesizedColsForInsert()
 
 	var returning tree.ReturningExprs
 	if resultsNeeded(ins.Returning) {
@@ -382,8 +381,8 @@ func (mb *mutationBuilder) needExistingRows() bool {
 			// #1: Don't consider key columns.
 			continue
 		}
-		if kind := mb.tab.Column(i).Kind(); kind == cat.System || kind == cat.Inverted {
-			// #2: Don't consider system or inverted columns.
+		if kind := mb.tab.Column(i).Kind(); kind == cat.System || kind == cat.VirtualInverted {
+			// #2: Don't consider system or virtual inverted columns.
 			continue
 		}
 		insertColID := mb.insertColIDs[i]
@@ -557,9 +556,7 @@ func (mb *mutationBuilder) addTargetTableColsForInsert(maxCols int) {
 
 // buildInputForInsert constructs the memo group for the input expression and
 // constructs a new output scope containing that expression's output columns.
-func (mb *mutationBuilder) buildInputForInsert(
-	inScope *scope, inputRows *tree.Select, isUpsert bool,
-) {
+func (mb *mutationBuilder) buildInputForInsert(inScope *scope, inputRows *tree.Select) {
 	// Handle DEFAULT VALUES case by creating a single empty row as input.
 	if inputRows == nil {
 		mb.outScope = inScope.push()
@@ -609,32 +606,19 @@ func (mb *mutationBuilder) buildInputForInsert(
 		mb.addTargetTableColsForInsert(len(mb.outScope.cols))
 	}
 
-	if !isUpsert {
-		mb.outScope = mb.addAssignmentCasts(mb.outScope, desiredTypes)
-	}
-
 	// Loop over input columns and:
 	//   1. Type check each column
-	//   2. Check if the INSERT violates a GENERATED ALWAYS AS IDENTITY column.
 	//   2. Assign name to each column
 	//   3. Add column ID to the insertColIDs list.
 	for i := range mb.outScope.cols {
 		inCol := &mb.outScope.cols[i]
 		ord := mb.tabID.ColumnOrdinal(mb.targetColList[i])
 
-		if isUpsert {
-			// Type check the input column against the corresponding table column.
-			checkDatumTypeFitsColumnType(mb.tab.Column(ord), inCol.typ)
-		}
-
-		// Check if the input column is created with `GENERATED ALWAYS AS IDENTITY`
-		// syntax. If yes, and user does not specify the `OVERRIDING SYSTEM VALUE`
-		// syntax in the `INSERT` statement,
-		// checkColumnIsNotGeneratedAlwaysAsIdentity will raise an error.
-		checkColumnIsNotGeneratedAlwaysAsIdentity(mb.tab.Column(ord))
+		// Type check the input column against the corresponding table column.
+		checkDatumTypeFitsColumnType(mb.tab.Column(ord), inCol.typ)
 
 		// Assign name of input column.
-		inCol.name = scopeColName(tree.Name(mb.md.ColumnMeta(mb.targetColList[i]).Alias))
+		inCol.name = tree.Name(mb.md.ColumnMeta(mb.targetColList[i]).Alias)
 
 		// Record the ID of the column that contains the value to be inserted
 		// into the corresponding target table column.
@@ -647,29 +631,21 @@ func (mb *mutationBuilder) buildInputForInsert(
 // columns that are not yet part of the target column list. This includes all
 // write-only mutation columns, since they must always have default or computed
 // values.
-func (mb *mutationBuilder) addSynthesizedColsForInsert(isUpsert bool) {
+func (mb *mutationBuilder) addSynthesizedColsForInsert() {
 	// Start by adding non-computed columns that have not already been explicitly
 	// specified in the query. Do this before adding computed columns, since those
 	// may depend on non-computed columns.
-	mb.addSynthesizedDefaultCols(
-		mb.insertColIDs,
-		true,  /* includeOrdinary */
-		false, /* applyOnUpdate */
-	)
+	mb.addSynthesizedDefaultCols(mb.insertColIDs, true /* includeOrdinary */)
 
 	// Possibly round DECIMAL-related columns containing insertion values (whether
 	// synthesized or not).
-	if isUpsert {
-		mb.roundDecimalValues(mb.insertColIDs, false /* roundComputedCols */)
-	}
+	mb.roundDecimalValues(mb.insertColIDs, false /* roundComputedCols */)
 
 	// Now add all computed columns.
 	mb.addSynthesizedComputedCols(mb.insertColIDs, false /* restrict */)
 
 	// Possibly round DECIMAL-related computed columns.
-	if isUpsert {
-		mb.roundDecimalValues(mb.insertColIDs, true /* roundComputedCols */)
-	}
+	mb.roundDecimalValues(mb.insertColIDs, true /* roundComputedCols */)
 }
 
 // buildInsert constructs an Insert operator, possibly wrapped by a Project
@@ -679,11 +655,16 @@ func (mb *mutationBuilder) buildInsert(returning tree.ReturningExprs) {
 	// check constraint, refer to the correct columns.
 	mb.disambiguateColumns()
 
+	// Keep a reference to the scope before the check constraint columns are
+	// projected. We use this scope when projecting the partial index put
+	// columns because the check columns are not in-scope for those expressions.
+	preCheckScope := mb.outScope
+
 	// Add any check constraint boolean columns to the input.
 	mb.addCheckConstraintCols(false /* isUpdate */)
 
 	// Project partial index PUT boolean columns.
-	mb.projectPartialIndexPutCols()
+	mb.projectPartialIndexPutCols(preCheckScope)
 
 	mb.buildUniqueChecksForInsert()
 
@@ -816,7 +797,7 @@ func (mb *mutationBuilder) buildInputForUpsert(
 			Type: whereClause.Type,
 			Expr: &tree.OrExpr{
 				Left: &tree.ComparisonExpr{
-					Operator: tree.MakeComparisonOperator(tree.IsNotDistinctFrom),
+					Operator: tree.IsNotDistinctFrom,
 					Left:     canaryCol,
 					Right:    tree.DNull,
 				},
@@ -891,6 +872,11 @@ func (mb *mutationBuilder) buildUpsert(returning tree.ReturningExprs) {
 	// check constraint, refer to the correct columns.
 	mb.disambiguateColumns()
 
+	// Keep a reference to the scope before the check constraint columns are
+	// projected. We use this scope when projecting the partial index put
+	// columns because the check columns are not in-scope for those expressions.
+	preCheckScope := mb.outScope
+
 	// Add any check constraint boolean columns to the input.
 	mb.addCheckConstraintCols(false /* isUpdate */)
 
@@ -907,9 +893,9 @@ func (mb *mutationBuilder) buildUpsert(returning tree.ReturningExprs) {
 	// mb.fetchScope will be nil. Therefore, we only project partial index
 	// PUT columns.
 	if mb.needExistingRows() {
-		mb.projectPartialIndexPutAndDelCols()
+		mb.projectPartialIndexPutAndDelCols(preCheckScope, mb.fetchScope)
 	} else {
-		mb.projectPartialIndexPutCols()
+		mb.projectPartialIndexPutCols(preCheckScope)
 	}
 
 	mb.buildUniqueChecksForUpsert()
@@ -987,11 +973,12 @@ func (mb *mutationBuilder) projectUpsertColumns() {
 			mb.b.factory.ConstructVariable(updateColID),
 		)
 
-		name := scopeColName(col.ColName()).WithMetadataName(
-			fmt.Sprintf("upsert_%s", mb.tab.Column(i).ColName()),
-		)
+		alias := fmt.Sprintf("upsert_%s", mb.tab.Column(i).ColName())
 		typ := mb.md.ColumnMeta(insertColID).Type
-		scopeCol := mb.b.synthesizeColumn(projectionsScope, name, typ, nil /* expr */, caseExpr)
+		scopeCol := mb.b.synthesizeColumn(projectionsScope, alias, typ, nil /* expr */, caseExpr)
+
+		// Assign name to synthesized column.
+		scopeCol.name = col.ColName()
 
 		// Update the scope ordinals for the update columns that are involved in
 		// the Upsert. The new columns will be used by the Upsert operator in place

@@ -11,6 +11,7 @@ package colexec
 
 import (
 	"bytes"
+	"context"
 	"math"
 	"time"
 
@@ -26,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/errors"
 )
 
@@ -35,8 +35,7 @@ import (
 var (
 	_ apd.Context
 	_ duration.Duration
-	_ = coldataext.CompareDatum
-	_ json.JSON
+	_ coldataext.Datum
 )
 
 // Remove unused warnings.
@@ -54,7 +53,6 @@ const (
 )
 
 func GetInProjectionOperator(
-	evalCtx *tree.EvalContext,
 	allocator *colmem.Allocator,
 	t *types.T,
 	input colexecop.Operator,
@@ -70,13 +68,13 @@ func GetInProjectionOperator(
 		case -1:
 		default:
 			obj := &projectInOpBool{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				colIdx:         colIdx,
-				outputIdx:      resultIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				colIdx:       colIdx,
+				outputIdx:    resultIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowBool(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowBool(t, datumTuple)
 			return obj, nil
 		}
 	case types.BytesFamily:
@@ -84,13 +82,13 @@ func GetInProjectionOperator(
 		case -1:
 		default:
 			obj := &projectInOpBytes{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				colIdx:         colIdx,
-				outputIdx:      resultIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				colIdx:       colIdx,
+				outputIdx:    resultIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowBytes(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowBytes(t, datumTuple)
 			return obj, nil
 		}
 	case types.DecimalFamily:
@@ -98,47 +96,47 @@ func GetInProjectionOperator(
 		case -1:
 		default:
 			obj := &projectInOpDecimal{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				colIdx:         colIdx,
-				outputIdx:      resultIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				colIdx:       colIdx,
+				outputIdx:    resultIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowDecimal(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowDecimal(t, datumTuple)
 			return obj, nil
 		}
 	case types.IntFamily:
 		switch t.Width() {
 		case 16:
 			obj := &projectInOpInt16{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				colIdx:         colIdx,
-				outputIdx:      resultIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				colIdx:       colIdx,
+				outputIdx:    resultIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowInt16(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowInt16(t, datumTuple)
 			return obj, nil
 		case 32:
 			obj := &projectInOpInt32{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				colIdx:         colIdx,
-				outputIdx:      resultIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				colIdx:       colIdx,
+				outputIdx:    resultIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowInt32(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowInt32(t, datumTuple)
 			return obj, nil
 		case -1:
 		default:
 			obj := &projectInOpInt64{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				colIdx:         colIdx,
-				outputIdx:      resultIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				colIdx:       colIdx,
+				outputIdx:    resultIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowInt64(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowInt64(t, datumTuple)
 			return obj, nil
 		}
 	case types.FloatFamily:
@@ -146,13 +144,13 @@ func GetInProjectionOperator(
 		case -1:
 		default:
 			obj := &projectInOpFloat64{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				colIdx:         colIdx,
-				outputIdx:      resultIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				colIdx:       colIdx,
+				outputIdx:    resultIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowFloat64(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowFloat64(t, datumTuple)
 			return obj, nil
 		}
 	case types.TimestampTZFamily:
@@ -160,13 +158,13 @@ func GetInProjectionOperator(
 		case -1:
 		default:
 			obj := &projectInOpTimestamp{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				colIdx:         colIdx,
-				outputIdx:      resultIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				colIdx:       colIdx,
+				outputIdx:    resultIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowTimestamp(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowTimestamp(t, datumTuple)
 			return obj, nil
 		}
 	case types.IntervalFamily:
@@ -174,27 +172,13 @@ func GetInProjectionOperator(
 		case -1:
 		default:
 			obj := &projectInOpInterval{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				colIdx:         colIdx,
-				outputIdx:      resultIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				colIdx:       colIdx,
+				outputIdx:    resultIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowInterval(evalCtx, t, datumTuple)
-			return obj, nil
-		}
-	case types.JsonFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			obj := &projectInOpJSON{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				colIdx:         colIdx,
-				outputIdx:      resultIdx,
-				negate:         negate,
-			}
-			obj.filterRow, obj.hasNulls = fillDatumRowJSON(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowInterval(t, datumTuple)
 			return obj, nil
 		}
 	case typeconv.DatumVecCanonicalTypeFamily:
@@ -202,13 +186,13 @@ func GetInProjectionOperator(
 		case -1:
 		default:
 			obj := &projectInOpDatum{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				colIdx:         colIdx,
-				outputIdx:      resultIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				colIdx:       colIdx,
+				outputIdx:    resultIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowDatum(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowDatum(t, datumTuple)
 			return obj, nil
 		}
 	}
@@ -216,12 +200,7 @@ func GetInProjectionOperator(
 }
 
 func GetInOperator(
-	evalCtx *tree.EvalContext,
-	t *types.T,
-	input colexecop.Operator,
-	colIdx int,
-	datumTuple *tree.DTuple,
-	negate bool,
+	t *types.T, input colexecop.Operator, colIdx int, datumTuple *tree.DTuple, negate bool,
 ) (colexecop.Operator, error) {
 	switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
 	case types.BoolFamily:
@@ -229,11 +208,11 @@ func GetInOperator(
 		case -1:
 		default:
 			obj := &selectInOpBool{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				colIdx:         colIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				colIdx:       colIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowBool(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowBool(t, datumTuple)
 			return obj, nil
 		}
 	case types.BytesFamily:
@@ -241,11 +220,11 @@ func GetInOperator(
 		case -1:
 		default:
 			obj := &selectInOpBytes{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				colIdx:         colIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				colIdx:       colIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowBytes(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowBytes(t, datumTuple)
 			return obj, nil
 		}
 	case types.DecimalFamily:
@@ -253,39 +232,39 @@ func GetInOperator(
 		case -1:
 		default:
 			obj := &selectInOpDecimal{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				colIdx:         colIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				colIdx:       colIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowDecimal(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowDecimal(t, datumTuple)
 			return obj, nil
 		}
 	case types.IntFamily:
 		switch t.Width() {
 		case 16:
 			obj := &selectInOpInt16{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				colIdx:         colIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				colIdx:       colIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowInt16(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowInt16(t, datumTuple)
 			return obj, nil
 		case 32:
 			obj := &selectInOpInt32{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				colIdx:         colIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				colIdx:       colIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowInt32(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowInt32(t, datumTuple)
 			return obj, nil
 		case -1:
 		default:
 			obj := &selectInOpInt64{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				colIdx:         colIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				colIdx:       colIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowInt64(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowInt64(t, datumTuple)
 			return obj, nil
 		}
 	case types.FloatFamily:
@@ -293,11 +272,11 @@ func GetInOperator(
 		case -1:
 		default:
 			obj := &selectInOpFloat64{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				colIdx:         colIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				colIdx:       colIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowFloat64(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowFloat64(t, datumTuple)
 			return obj, nil
 		}
 	case types.TimestampTZFamily:
@@ -305,11 +284,11 @@ func GetInOperator(
 		case -1:
 		default:
 			obj := &selectInOpTimestamp{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				colIdx:         colIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				colIdx:       colIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowTimestamp(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowTimestamp(t, datumTuple)
 			return obj, nil
 		}
 	case types.IntervalFamily:
@@ -317,23 +296,11 @@ func GetInOperator(
 		case -1:
 		default:
 			obj := &selectInOpInterval{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				colIdx:         colIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				colIdx:       colIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowInterval(evalCtx, t, datumTuple)
-			return obj, nil
-		}
-	case types.JsonFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			obj := &selectInOpJSON{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				colIdx:         colIdx,
-				negate:         negate,
-			}
-			obj.filterRow, obj.hasNulls = fillDatumRowJSON(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowInterval(t, datumTuple)
 			return obj, nil
 		}
 	case typeconv.DatumVecCanonicalTypeFamily:
@@ -341,11 +308,11 @@ func GetInOperator(
 		case -1:
 		default:
 			obj := &selectInOpDatum{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				colIdx:         colIdx,
-				negate:         negate,
+				OneInputNode: colexecop.NewOneInputNode(input),
+				colIdx:       colIdx,
+				negate:       negate,
 			}
-			obj.filterRow, obj.hasNulls = fillDatumRowDatum(evalCtx, t, datumTuple)
+			obj.filterRow, obj.hasNulls = fillDatumRowDatum(t, datumTuple)
 			return obj, nil
 		}
 	}
@@ -353,7 +320,7 @@ func GetInOperator(
 }
 
 type selectInOpBool struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	colIdx    int
 	filterRow []bool
 	hasNulls  bool
@@ -363,7 +330,7 @@ type selectInOpBool struct {
 var _ colexecop.Operator = &selectInOpBool{}
 
 type projectInOpBool struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator *colmem.Allocator
 	colIdx    int
 	outputIdx int
@@ -374,12 +341,7 @@ type projectInOpBool struct {
 
 var _ colexecop.Operator = &projectInOpBool{}
 
-func fillDatumRowBool(
-	evalCtx *tree.EvalContext, t *types.T, datumTuple *tree.DTuple,
-) ([]bool, bool) {
-	// Sort the contents of the tuple, if they are not already sorted.
-	datumTuple.Normalize(evalCtx)
-
+func fillDatumRowBool(t *types.T, datumTuple *tree.DTuple) ([]bool, bool) {
 	conv := colconv.GetDatumToPhysicalFn(t)
 	var result []bool
 	hasNulls := false
@@ -398,8 +360,8 @@ func fillDatumRowBool(
 func cmpInBool(
 	targetElem bool, targetCol coldata.Bools, filterRow []bool, hasNulls bool,
 ) comparisonResult {
-	// Filter row input was already sorted in fillDatumRowBool, so we can
-	// perform a binary search.
+	// Filter row input is already sorted due to normalization, so we can use a
+	// binary search right away.
 	lo := 0
 	hi := len(filterRow)
 	for lo < hi {
@@ -430,9 +392,17 @@ func cmpInBool(
 	}
 }
 
-func (si *selectInOpBool) Next() coldata.Batch {
+func (si *selectInOpBool) Init() {
+	si.Input.Init()
+}
+
+func (pi *projectInOpBool) Init() {
+	pi.Input.Init()
+}
+
+func (si *selectInOpBool) Next(ctx context.Context) coldata.Batch {
 	for {
-		batch := si.Input.Next()
+		batch := si.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return coldata.ZeroBatch
 		}
@@ -503,8 +473,8 @@ func (si *selectInOpBool) Next() coldata.Batch {
 	}
 }
 
-func (pi *projectInOpBool) Next() coldata.Batch {
-	batch := pi.Input.Next()
+func (pi *projectInOpBool) Next(ctx context.Context) coldata.Batch {
+	batch := pi.Input.Next(ctx)
 	if batch.Length() == 0 {
 		return coldata.ZeroBatch
 	}
@@ -592,7 +562,7 @@ func (pi *projectInOpBool) Next() coldata.Batch {
 }
 
 type selectInOpBytes struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	colIdx    int
 	filterRow [][]byte
 	hasNulls  bool
@@ -602,7 +572,7 @@ type selectInOpBytes struct {
 var _ colexecop.Operator = &selectInOpBytes{}
 
 type projectInOpBytes struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator *colmem.Allocator
 	colIdx    int
 	outputIdx int
@@ -613,12 +583,7 @@ type projectInOpBytes struct {
 
 var _ colexecop.Operator = &projectInOpBytes{}
 
-func fillDatumRowBytes(
-	evalCtx *tree.EvalContext, t *types.T, datumTuple *tree.DTuple,
-) ([][]byte, bool) {
-	// Sort the contents of the tuple, if they are not already sorted.
-	datumTuple.Normalize(evalCtx)
-
+func fillDatumRowBytes(t *types.T, datumTuple *tree.DTuple) ([][]byte, bool) {
 	conv := colconv.GetDatumToPhysicalFn(t)
 	var result [][]byte
 	hasNulls := false
@@ -637,8 +602,8 @@ func fillDatumRowBytes(
 func cmpInBytes(
 	targetElem []byte, targetCol *coldata.Bytes, filterRow [][]byte, hasNulls bool,
 ) comparisonResult {
-	// Filter row input was already sorted in fillDatumRowBytes, so we can
-	// perform a binary search.
+	// Filter row input is already sorted due to normalization, so we can use a
+	// binary search right away.
 	lo := 0
 	hi := len(filterRow)
 	for lo < hi {
@@ -661,9 +626,17 @@ func cmpInBytes(
 	}
 }
 
-func (si *selectInOpBytes) Next() coldata.Batch {
+func (si *selectInOpBytes) Init() {
+	si.Input.Init()
+}
+
+func (pi *projectInOpBytes) Init() {
+	pi.Input.Init()
+}
+
+func (si *selectInOpBytes) Next(ctx context.Context) coldata.Batch {
 	for {
-		batch := si.Input.Next()
+		batch := si.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return coldata.ZeroBatch
 		}
@@ -732,8 +705,8 @@ func (si *selectInOpBytes) Next() coldata.Batch {
 	}
 }
 
-func (pi *projectInOpBytes) Next() coldata.Batch {
-	batch := pi.Input.Next()
+func (pi *projectInOpBytes) Next(ctx context.Context) coldata.Batch {
+	batch := pi.Input.Next(ctx)
 	if batch.Length() == 0 {
 		return coldata.ZeroBatch
 	}
@@ -819,7 +792,7 @@ func (pi *projectInOpBytes) Next() coldata.Batch {
 }
 
 type selectInOpDecimal struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	colIdx    int
 	filterRow []apd.Decimal
 	hasNulls  bool
@@ -829,7 +802,7 @@ type selectInOpDecimal struct {
 var _ colexecop.Operator = &selectInOpDecimal{}
 
 type projectInOpDecimal struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator *colmem.Allocator
 	colIdx    int
 	outputIdx int
@@ -840,12 +813,7 @@ type projectInOpDecimal struct {
 
 var _ colexecop.Operator = &projectInOpDecimal{}
 
-func fillDatumRowDecimal(
-	evalCtx *tree.EvalContext, t *types.T, datumTuple *tree.DTuple,
-) ([]apd.Decimal, bool) {
-	// Sort the contents of the tuple, if they are not already sorted.
-	datumTuple.Normalize(evalCtx)
-
+func fillDatumRowDecimal(t *types.T, datumTuple *tree.DTuple) ([]apd.Decimal, bool) {
 	conv := colconv.GetDatumToPhysicalFn(t)
 	var result []apd.Decimal
 	hasNulls := false
@@ -864,8 +832,8 @@ func fillDatumRowDecimal(
 func cmpInDecimal(
 	targetElem apd.Decimal, targetCol coldata.Decimals, filterRow []apd.Decimal, hasNulls bool,
 ) comparisonResult {
-	// Filter row input was already sorted in fillDatumRowDecimal, so we can
-	// perform a binary search.
+	// Filter row input is already sorted due to normalization, so we can use a
+	// binary search right away.
 	lo := 0
 	hi := len(filterRow)
 	for lo < hi {
@@ -888,9 +856,17 @@ func cmpInDecimal(
 	}
 }
 
-func (si *selectInOpDecimal) Next() coldata.Batch {
+func (si *selectInOpDecimal) Init() {
+	si.Input.Init()
+}
+
+func (pi *projectInOpDecimal) Init() {
+	pi.Input.Init()
+}
+
+func (si *selectInOpDecimal) Next(ctx context.Context) coldata.Batch {
 	for {
-		batch := si.Input.Next()
+		batch := si.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return coldata.ZeroBatch
 		}
@@ -961,8 +937,8 @@ func (si *selectInOpDecimal) Next() coldata.Batch {
 	}
 }
 
-func (pi *projectInOpDecimal) Next() coldata.Batch {
-	batch := pi.Input.Next()
+func (pi *projectInOpDecimal) Next(ctx context.Context) coldata.Batch {
+	batch := pi.Input.Next(ctx)
 	if batch.Length() == 0 {
 		return coldata.ZeroBatch
 	}
@@ -1050,7 +1026,7 @@ func (pi *projectInOpDecimal) Next() coldata.Batch {
 }
 
 type selectInOpInt16 struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	colIdx    int
 	filterRow []int16
 	hasNulls  bool
@@ -1060,7 +1036,7 @@ type selectInOpInt16 struct {
 var _ colexecop.Operator = &selectInOpInt16{}
 
 type projectInOpInt16 struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator *colmem.Allocator
 	colIdx    int
 	outputIdx int
@@ -1071,12 +1047,7 @@ type projectInOpInt16 struct {
 
 var _ colexecop.Operator = &projectInOpInt16{}
 
-func fillDatumRowInt16(
-	evalCtx *tree.EvalContext, t *types.T, datumTuple *tree.DTuple,
-) ([]int16, bool) {
-	// Sort the contents of the tuple, if they are not already sorted.
-	datumTuple.Normalize(evalCtx)
-
+func fillDatumRowInt16(t *types.T, datumTuple *tree.DTuple) ([]int16, bool) {
 	conv := colconv.GetDatumToPhysicalFn(t)
 	var result []int16
 	hasNulls := false
@@ -1095,8 +1066,8 @@ func fillDatumRowInt16(
 func cmpInInt16(
 	targetElem int16, targetCol coldata.Int16s, filterRow []int16, hasNulls bool,
 ) comparisonResult {
-	// Filter row input was already sorted in fillDatumRowInt16, so we can
-	// perform a binary search.
+	// Filter row input is already sorted due to normalization, so we can use a
+	// binary search right away.
 	lo := 0
 	hi := len(filterRow)
 	for lo < hi {
@@ -1130,9 +1101,17 @@ func cmpInInt16(
 	}
 }
 
-func (si *selectInOpInt16) Next() coldata.Batch {
+func (si *selectInOpInt16) Init() {
+	si.Input.Init()
+}
+
+func (pi *projectInOpInt16) Init() {
+	pi.Input.Init()
+}
+
+func (si *selectInOpInt16) Next(ctx context.Context) coldata.Batch {
 	for {
-		batch := si.Input.Next()
+		batch := si.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return coldata.ZeroBatch
 		}
@@ -1203,8 +1182,8 @@ func (si *selectInOpInt16) Next() coldata.Batch {
 	}
 }
 
-func (pi *projectInOpInt16) Next() coldata.Batch {
-	batch := pi.Input.Next()
+func (pi *projectInOpInt16) Next(ctx context.Context) coldata.Batch {
+	batch := pi.Input.Next(ctx)
 	if batch.Length() == 0 {
 		return coldata.ZeroBatch
 	}
@@ -1292,7 +1271,7 @@ func (pi *projectInOpInt16) Next() coldata.Batch {
 }
 
 type selectInOpInt32 struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	colIdx    int
 	filterRow []int32
 	hasNulls  bool
@@ -1302,7 +1281,7 @@ type selectInOpInt32 struct {
 var _ colexecop.Operator = &selectInOpInt32{}
 
 type projectInOpInt32 struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator *colmem.Allocator
 	colIdx    int
 	outputIdx int
@@ -1313,12 +1292,7 @@ type projectInOpInt32 struct {
 
 var _ colexecop.Operator = &projectInOpInt32{}
 
-func fillDatumRowInt32(
-	evalCtx *tree.EvalContext, t *types.T, datumTuple *tree.DTuple,
-) ([]int32, bool) {
-	// Sort the contents of the tuple, if they are not already sorted.
-	datumTuple.Normalize(evalCtx)
-
+func fillDatumRowInt32(t *types.T, datumTuple *tree.DTuple) ([]int32, bool) {
 	conv := colconv.GetDatumToPhysicalFn(t)
 	var result []int32
 	hasNulls := false
@@ -1337,8 +1311,8 @@ func fillDatumRowInt32(
 func cmpInInt32(
 	targetElem int32, targetCol coldata.Int32s, filterRow []int32, hasNulls bool,
 ) comparisonResult {
-	// Filter row input was already sorted in fillDatumRowInt32, so we can
-	// perform a binary search.
+	// Filter row input is already sorted due to normalization, so we can use a
+	// binary search right away.
 	lo := 0
 	hi := len(filterRow)
 	for lo < hi {
@@ -1372,9 +1346,17 @@ func cmpInInt32(
 	}
 }
 
-func (si *selectInOpInt32) Next() coldata.Batch {
+func (si *selectInOpInt32) Init() {
+	si.Input.Init()
+}
+
+func (pi *projectInOpInt32) Init() {
+	pi.Input.Init()
+}
+
+func (si *selectInOpInt32) Next(ctx context.Context) coldata.Batch {
 	for {
-		batch := si.Input.Next()
+		batch := si.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return coldata.ZeroBatch
 		}
@@ -1445,8 +1427,8 @@ func (si *selectInOpInt32) Next() coldata.Batch {
 	}
 }
 
-func (pi *projectInOpInt32) Next() coldata.Batch {
-	batch := pi.Input.Next()
+func (pi *projectInOpInt32) Next(ctx context.Context) coldata.Batch {
+	batch := pi.Input.Next(ctx)
 	if batch.Length() == 0 {
 		return coldata.ZeroBatch
 	}
@@ -1534,7 +1516,7 @@ func (pi *projectInOpInt32) Next() coldata.Batch {
 }
 
 type selectInOpInt64 struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	colIdx    int
 	filterRow []int64
 	hasNulls  bool
@@ -1544,7 +1526,7 @@ type selectInOpInt64 struct {
 var _ colexecop.Operator = &selectInOpInt64{}
 
 type projectInOpInt64 struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator *colmem.Allocator
 	colIdx    int
 	outputIdx int
@@ -1555,12 +1537,7 @@ type projectInOpInt64 struct {
 
 var _ colexecop.Operator = &projectInOpInt64{}
 
-func fillDatumRowInt64(
-	evalCtx *tree.EvalContext, t *types.T, datumTuple *tree.DTuple,
-) ([]int64, bool) {
-	// Sort the contents of the tuple, if they are not already sorted.
-	datumTuple.Normalize(evalCtx)
-
+func fillDatumRowInt64(t *types.T, datumTuple *tree.DTuple) ([]int64, bool) {
 	conv := colconv.GetDatumToPhysicalFn(t)
 	var result []int64
 	hasNulls := false
@@ -1579,8 +1556,8 @@ func fillDatumRowInt64(
 func cmpInInt64(
 	targetElem int64, targetCol coldata.Int64s, filterRow []int64, hasNulls bool,
 ) comparisonResult {
-	// Filter row input was already sorted in fillDatumRowInt64, so we can
-	// perform a binary search.
+	// Filter row input is already sorted due to normalization, so we can use a
+	// binary search right away.
 	lo := 0
 	hi := len(filterRow)
 	for lo < hi {
@@ -1614,9 +1591,17 @@ func cmpInInt64(
 	}
 }
 
-func (si *selectInOpInt64) Next() coldata.Batch {
+func (si *selectInOpInt64) Init() {
+	si.Input.Init()
+}
+
+func (pi *projectInOpInt64) Init() {
+	pi.Input.Init()
+}
+
+func (si *selectInOpInt64) Next(ctx context.Context) coldata.Batch {
 	for {
-		batch := si.Input.Next()
+		batch := si.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return coldata.ZeroBatch
 		}
@@ -1687,8 +1672,8 @@ func (si *selectInOpInt64) Next() coldata.Batch {
 	}
 }
 
-func (pi *projectInOpInt64) Next() coldata.Batch {
-	batch := pi.Input.Next()
+func (pi *projectInOpInt64) Next(ctx context.Context) coldata.Batch {
+	batch := pi.Input.Next(ctx)
 	if batch.Length() == 0 {
 		return coldata.ZeroBatch
 	}
@@ -1776,7 +1761,7 @@ func (pi *projectInOpInt64) Next() coldata.Batch {
 }
 
 type selectInOpFloat64 struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	colIdx    int
 	filterRow []float64
 	hasNulls  bool
@@ -1786,7 +1771,7 @@ type selectInOpFloat64 struct {
 var _ colexecop.Operator = &selectInOpFloat64{}
 
 type projectInOpFloat64 struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator *colmem.Allocator
 	colIdx    int
 	outputIdx int
@@ -1797,12 +1782,7 @@ type projectInOpFloat64 struct {
 
 var _ colexecop.Operator = &projectInOpFloat64{}
 
-func fillDatumRowFloat64(
-	evalCtx *tree.EvalContext, t *types.T, datumTuple *tree.DTuple,
-) ([]float64, bool) {
-	// Sort the contents of the tuple, if they are not already sorted.
-	datumTuple.Normalize(evalCtx)
-
+func fillDatumRowFloat64(t *types.T, datumTuple *tree.DTuple) ([]float64, bool) {
 	conv := colconv.GetDatumToPhysicalFn(t)
 	var result []float64
 	hasNulls := false
@@ -1821,8 +1801,8 @@ func fillDatumRowFloat64(
 func cmpInFloat64(
 	targetElem float64, targetCol coldata.Float64s, filterRow []float64, hasNulls bool,
 ) comparisonResult {
-	// Filter row input was already sorted in fillDatumRowFloat64, so we can
-	// perform a binary search.
+	// Filter row input is already sorted due to normalization, so we can use a
+	// binary search right away.
 	lo := 0
 	hi := len(filterRow)
 	for lo < hi {
@@ -1864,9 +1844,17 @@ func cmpInFloat64(
 	}
 }
 
-func (si *selectInOpFloat64) Next() coldata.Batch {
+func (si *selectInOpFloat64) Init() {
+	si.Input.Init()
+}
+
+func (pi *projectInOpFloat64) Init() {
+	pi.Input.Init()
+}
+
+func (si *selectInOpFloat64) Next(ctx context.Context) coldata.Batch {
 	for {
-		batch := si.Input.Next()
+		batch := si.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return coldata.ZeroBatch
 		}
@@ -1937,8 +1925,8 @@ func (si *selectInOpFloat64) Next() coldata.Batch {
 	}
 }
 
-func (pi *projectInOpFloat64) Next() coldata.Batch {
-	batch := pi.Input.Next()
+func (pi *projectInOpFloat64) Next(ctx context.Context) coldata.Batch {
+	batch := pi.Input.Next(ctx)
 	if batch.Length() == 0 {
 		return coldata.ZeroBatch
 	}
@@ -2026,7 +2014,7 @@ func (pi *projectInOpFloat64) Next() coldata.Batch {
 }
 
 type selectInOpTimestamp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	colIdx    int
 	filterRow []time.Time
 	hasNulls  bool
@@ -2036,7 +2024,7 @@ type selectInOpTimestamp struct {
 var _ colexecop.Operator = &selectInOpTimestamp{}
 
 type projectInOpTimestamp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator *colmem.Allocator
 	colIdx    int
 	outputIdx int
@@ -2047,12 +2035,7 @@ type projectInOpTimestamp struct {
 
 var _ colexecop.Operator = &projectInOpTimestamp{}
 
-func fillDatumRowTimestamp(
-	evalCtx *tree.EvalContext, t *types.T, datumTuple *tree.DTuple,
-) ([]time.Time, bool) {
-	// Sort the contents of the tuple, if they are not already sorted.
-	datumTuple.Normalize(evalCtx)
-
+func fillDatumRowTimestamp(t *types.T, datumTuple *tree.DTuple) ([]time.Time, bool) {
 	conv := colconv.GetDatumToPhysicalFn(t)
 	var result []time.Time
 	hasNulls := false
@@ -2071,8 +2054,8 @@ func fillDatumRowTimestamp(
 func cmpInTimestamp(
 	targetElem time.Time, targetCol coldata.Times, filterRow []time.Time, hasNulls bool,
 ) comparisonResult {
-	// Filter row input was already sorted in fillDatumRowTimestamp, so we can
-	// perform a binary search.
+	// Filter row input is already sorted due to normalization, so we can use a
+	// binary search right away.
 	lo := 0
 	hi := len(filterRow)
 	for lo < hi {
@@ -2102,9 +2085,17 @@ func cmpInTimestamp(
 	}
 }
 
-func (si *selectInOpTimestamp) Next() coldata.Batch {
+func (si *selectInOpTimestamp) Init() {
+	si.Input.Init()
+}
+
+func (pi *projectInOpTimestamp) Init() {
+	pi.Input.Init()
+}
+
+func (si *selectInOpTimestamp) Next(ctx context.Context) coldata.Batch {
 	for {
-		batch := si.Input.Next()
+		batch := si.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return coldata.ZeroBatch
 		}
@@ -2175,8 +2166,8 @@ func (si *selectInOpTimestamp) Next() coldata.Batch {
 	}
 }
 
-func (pi *projectInOpTimestamp) Next() coldata.Batch {
-	batch := pi.Input.Next()
+func (pi *projectInOpTimestamp) Next(ctx context.Context) coldata.Batch {
+	batch := pi.Input.Next(ctx)
 	if batch.Length() == 0 {
 		return coldata.ZeroBatch
 	}
@@ -2264,7 +2255,7 @@ func (pi *projectInOpTimestamp) Next() coldata.Batch {
 }
 
 type selectInOpInterval struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	colIdx    int
 	filterRow []duration.Duration
 	hasNulls  bool
@@ -2274,7 +2265,7 @@ type selectInOpInterval struct {
 var _ colexecop.Operator = &selectInOpInterval{}
 
 type projectInOpInterval struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator *colmem.Allocator
 	colIdx    int
 	outputIdx int
@@ -2285,12 +2276,7 @@ type projectInOpInterval struct {
 
 var _ colexecop.Operator = &projectInOpInterval{}
 
-func fillDatumRowInterval(
-	evalCtx *tree.EvalContext, t *types.T, datumTuple *tree.DTuple,
-) ([]duration.Duration, bool) {
-	// Sort the contents of the tuple, if they are not already sorted.
-	datumTuple.Normalize(evalCtx)
-
+func fillDatumRowInterval(t *types.T, datumTuple *tree.DTuple) ([]duration.Duration, bool) {
 	conv := colconv.GetDatumToPhysicalFn(t)
 	var result []duration.Duration
 	hasNulls := false
@@ -2309,8 +2295,8 @@ func fillDatumRowInterval(
 func cmpInInterval(
 	targetElem duration.Duration, targetCol coldata.Durations, filterRow []duration.Duration, hasNulls bool,
 ) comparisonResult {
-	// Filter row input was already sorted in fillDatumRowInterval, so we can
-	// perform a binary search.
+	// Filter row input is already sorted due to normalization, so we can use a
+	// binary search right away.
 	lo := 0
 	hi := len(filterRow)
 	for lo < hi {
@@ -2333,9 +2319,17 @@ func cmpInInterval(
 	}
 }
 
-func (si *selectInOpInterval) Next() coldata.Batch {
+func (si *selectInOpInterval) Init() {
+	si.Input.Init()
+}
+
+func (pi *projectInOpInterval) Init() {
+	pi.Input.Init()
+}
+
+func (si *selectInOpInterval) Next(ctx context.Context) coldata.Batch {
 	for {
-		batch := si.Input.Next()
+		batch := si.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return coldata.ZeroBatch
 		}
@@ -2406,8 +2400,8 @@ func (si *selectInOpInterval) Next() coldata.Batch {
 	}
 }
 
-func (pi *projectInOpInterval) Next() coldata.Batch {
-	batch := pi.Input.Next()
+func (pi *projectInOpInterval) Next(ctx context.Context) coldata.Batch {
+	batch := pi.Input.Next(ctx)
 	if batch.Length() == 0 {
 		return coldata.ZeroBatch
 	}
@@ -2494,241 +2488,8 @@ func (pi *projectInOpInterval) Next() coldata.Batch {
 	return batch
 }
 
-type selectInOpJSON struct {
-	colexecop.OneInputHelper
-	colIdx    int
-	filterRow []json.JSON
-	hasNulls  bool
-	negate    bool
-}
-
-var _ colexecop.Operator = &selectInOpJSON{}
-
-type projectInOpJSON struct {
-	colexecop.OneInputHelper
-	allocator *colmem.Allocator
-	colIdx    int
-	outputIdx int
-	filterRow []json.JSON
-	hasNulls  bool
-	negate    bool
-}
-
-var _ colexecop.Operator = &projectInOpJSON{}
-
-func fillDatumRowJSON(
-	evalCtx *tree.EvalContext, t *types.T, datumTuple *tree.DTuple,
-) ([]json.JSON, bool) {
-	// Sort the contents of the tuple, if they are not already sorted.
-	datumTuple.Normalize(evalCtx)
-
-	conv := colconv.GetDatumToPhysicalFn(t)
-	var result []json.JSON
-	hasNulls := false
-	for _, d := range datumTuple.D {
-		if d == tree.DNull {
-			hasNulls = true
-		} else {
-			convRaw := conv(d)
-			converted := convRaw.(json.JSON)
-			result = append(result, converted)
-		}
-	}
-	return result, hasNulls
-}
-
-func cmpInJSON(
-	targetElem json.JSON, targetCol *coldata.JSONs, filterRow []json.JSON, hasNulls bool,
-) comparisonResult {
-	// Filter row input was already sorted in fillDatumRowJSON, so we can
-	// perform a binary search.
-	lo := 0
-	hi := len(filterRow)
-	for lo < hi {
-		i := (lo + hi) / 2
-		var cmpResult int
-
-		var err error
-		cmpResult, err = targetElem.Compare(filterRow[i])
-		if err != nil {
-			colexecerror.ExpectedError(err)
-		}
-
-		if cmpResult == 0 {
-			return siTrue
-		} else if cmpResult > 0 {
-			lo = i + 1
-		} else {
-			hi = i
-		}
-	}
-
-	if hasNulls {
-		return siNull
-	} else {
-		return siFalse
-	}
-}
-
-func (si *selectInOpJSON) Next() coldata.Batch {
-	for {
-		batch := si.Input.Next()
-		if batch.Length() == 0 {
-			return coldata.ZeroBatch
-		}
-
-		vec := batch.ColVec(si.colIdx)
-		col := vec.JSON()
-		var idx int
-		n := batch.Length()
-
-		compVal := siTrue
-		if si.negate {
-			compVal = siFalse
-		}
-
-		if vec.MaybeHasNulls() {
-			nulls := vec.Nulls()
-			if sel := batch.Selection(); sel != nil {
-				sel = sel[:n]
-				for _, i := range sel {
-					v := col.Get(i)
-					if !nulls.NullAt(i) && cmpInJSON(v, col, si.filterRow, si.hasNulls) == compVal {
-						sel[idx] = i
-						idx++
-					}
-				}
-			} else {
-				batch.SetSelection(true)
-				sel := batch.Selection()
-				_ = col.Get(n - 1)
-				for i := 0; i < n; i++ {
-					v := col.Get(i)
-					if !nulls.NullAt(i) && cmpInJSON(v, col, si.filterRow, si.hasNulls) == compVal {
-						sel[idx] = i
-						idx++
-					}
-				}
-			}
-		} else {
-			if sel := batch.Selection(); sel != nil {
-				sel = sel[:n]
-				for _, i := range sel {
-					v := col.Get(i)
-					if cmpInJSON(v, col, si.filterRow, si.hasNulls) == compVal {
-						sel[idx] = i
-						idx++
-					}
-				}
-			} else {
-				batch.SetSelection(true)
-				sel := batch.Selection()
-				_ = col.Get(n - 1)
-				for i := 0; i < n; i++ {
-					v := col.Get(i)
-					if cmpInJSON(v, col, si.filterRow, si.hasNulls) == compVal {
-						sel[idx] = i
-						idx++
-					}
-				}
-			}
-		}
-
-		if idx > 0 {
-			batch.SetLength(idx)
-			return batch
-		}
-	}
-}
-
-func (pi *projectInOpJSON) Next() coldata.Batch {
-	batch := pi.Input.Next()
-	if batch.Length() == 0 {
-		return coldata.ZeroBatch
-	}
-
-	vec := batch.ColVec(pi.colIdx)
-	col := vec.JSON()
-
-	projVec := batch.ColVec(pi.outputIdx)
-	projCol := projVec.Bool()
-	projNulls := projVec.Nulls()
-	if projVec.MaybeHasNulls() {
-		// We need to make sure that there are no left over null values in the
-		// output vector.
-		projNulls.UnsetNulls()
-	}
-
-	n := batch.Length()
-
-	cmpVal := siTrue
-	if pi.negate {
-		cmpVal = siFalse
-	}
-
-	if vec.MaybeHasNulls() {
-		nulls := vec.Nulls()
-		if sel := batch.Selection(); sel != nil {
-			sel = sel[:n]
-			for _, i := range sel {
-				if nulls.NullAt(i) {
-					projNulls.SetNull(i)
-				} else {
-					v := col.Get(i)
-					cmpRes := cmpInJSON(v, col, pi.filterRow, pi.hasNulls)
-					if cmpRes == siNull {
-						projNulls.SetNull(i)
-					} else {
-						projCol[i] = cmpRes == cmpVal
-					}
-				}
-			}
-		} else {
-			_ = col.Get(n - 1)
-			for i := 0; i < n; i++ {
-				if nulls.NullAt(i) {
-					projNulls.SetNull(i)
-				} else {
-					v := col.Get(i)
-					cmpRes := cmpInJSON(v, col, pi.filterRow, pi.hasNulls)
-					if cmpRes == siNull {
-						projNulls.SetNull(i)
-					} else {
-						projCol[i] = cmpRes == cmpVal
-					}
-				}
-			}
-		}
-	} else {
-		if sel := batch.Selection(); sel != nil {
-			sel = sel[:n]
-			for _, i := range sel {
-				v := col.Get(i)
-				cmpRes := cmpInJSON(v, col, pi.filterRow, pi.hasNulls)
-				if cmpRes == siNull {
-					projNulls.SetNull(i)
-				} else {
-					projCol[i] = cmpRes == cmpVal
-				}
-			}
-		} else {
-			_ = col.Get(n - 1)
-			for i := 0; i < n; i++ {
-				v := col.Get(i)
-				cmpRes := cmpInJSON(v, col, pi.filterRow, pi.hasNulls)
-				if cmpRes == siNull {
-					projNulls.SetNull(i)
-				} else {
-					projCol[i] = cmpRes == cmpVal
-				}
-			}
-		}
-	}
-	return batch
-}
-
 type selectInOpDatum struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	colIdx    int
 	filterRow []interface{}
 	hasNulls  bool
@@ -2738,7 +2499,7 @@ type selectInOpDatum struct {
 var _ colexecop.Operator = &selectInOpDatum{}
 
 type projectInOpDatum struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator *colmem.Allocator
 	colIdx    int
 	outputIdx int
@@ -2749,12 +2510,7 @@ type projectInOpDatum struct {
 
 var _ colexecop.Operator = &projectInOpDatum{}
 
-func fillDatumRowDatum(
-	evalCtx *tree.EvalContext, t *types.T, datumTuple *tree.DTuple,
-) ([]interface{}, bool) {
-	// Sort the contents of the tuple, if they are not already sorted.
-	datumTuple.Normalize(evalCtx)
-
+func fillDatumRowDatum(t *types.T, datumTuple *tree.DTuple) ([]interface{}, bool) {
 	conv := colconv.GetDatumToPhysicalFn(t)
 	var result []interface{}
 	hasNulls := false
@@ -2773,15 +2529,15 @@ func fillDatumRowDatum(
 func cmpInDatum(
 	targetElem interface{}, targetCol coldata.DatumVec, filterRow []interface{}, hasNulls bool,
 ) comparisonResult {
-	// Filter row input was already sorted in fillDatumRowDatum, so we can
-	// perform a binary search.
+	// Filter row input is already sorted due to normalization, so we can use a
+	// binary search right away.
 	lo := 0
 	hi := len(filterRow)
 	for lo < hi {
 		i := (lo + hi) / 2
 		var cmpResult int
 
-		cmpResult = coldataext.CompareDatum(targetElem, targetCol, filterRow[i])
+		cmpResult = targetElem.(*coldataext.Datum).CompareDatum(targetCol, filterRow[i])
 
 		if cmpResult == 0 {
 			return siTrue
@@ -2799,9 +2555,17 @@ func cmpInDatum(
 	}
 }
 
-func (si *selectInOpDatum) Next() coldata.Batch {
+func (si *selectInOpDatum) Init() {
+	si.Input.Init()
+}
+
+func (pi *projectInOpDatum) Init() {
+	pi.Input.Init()
+}
+
+func (si *selectInOpDatum) Next(ctx context.Context) coldata.Batch {
 	for {
-		batch := si.Input.Next()
+		batch := si.Input.Next(ctx)
 		if batch.Length() == 0 {
 			return coldata.ZeroBatch
 		}
@@ -2870,8 +2634,8 @@ func (si *selectInOpDatum) Next() coldata.Batch {
 	}
 }
 
-func (pi *projectInOpDatum) Next() coldata.Batch {
-	batch := pi.Input.Next()
+func (pi *projectInOpDatum) Next(ctx context.Context) coldata.Batch {
+	batch := pi.Input.Next(ctx)
 	if batch.Length() == 0 {
 		return coldata.ZeroBatch
 	}

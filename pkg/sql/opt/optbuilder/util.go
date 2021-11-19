@@ -12,7 +12,6 @@ package optbuilder
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
@@ -21,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
@@ -120,7 +120,7 @@ func (b *Builder) expandStar(
 		}
 
 	case *tree.AllColumnsSelector:
-		src, srcMeta, err := colinfo.ResolveAllColumnsSelector(b.ctx, inScope, t)
+		src, srcMeta, err := t.Resolve(b.ctx, inScope)
 		if err != nil {
 			panic(err)
 		}
@@ -131,7 +131,7 @@ func (b *Builder) expandStar(
 			col := &refScope.cols[i]
 			if col.table == *src && (col.visibility == visible || col.visibility == accessibleByQualifiedStar) {
 				exprs = append(exprs, col)
-				aliases = append(aliases, string(col.name.ReferenceName()))
+				aliases = append(aliases, string(col.name))
 			}
 		}
 
@@ -146,7 +146,7 @@ func (b *Builder) expandStar(
 			col := &inScope.cols[i]
 			if col.visibility == visible {
 				exprs = append(exprs, col)
-				aliases = append(aliases, string(col.name.ReferenceName()))
+				aliases = append(aliases, string(col.name))
 			}
 		}
 
@@ -190,7 +190,7 @@ func (b *Builder) expandStarAndResolveType(
 //
 // scope  The scope is passed in so it can can be updated with the newly bound
 //        variable.
-// name   This is the name for the new column (e.g., if specified with
+// alias  This is an optional alias for the new column (e.g., if specified with
 //        the AS keyword).
 // typ    The type of the column.
 // expr   The expression this column refers to (if any).
@@ -198,9 +198,10 @@ func (b *Builder) expandStarAndResolveType(
 //
 // The new column is returned as a scopeColumn object.
 func (b *Builder) synthesizeColumn(
-	scope *scope, name scopeColumnName, typ *types.T, expr tree.TypedExpr, scalar opt.ScalarExpr,
+	scope *scope, alias string, typ *types.T, expr tree.TypedExpr, scalar opt.ScalarExpr,
 ) *scopeColumn {
-	colID := b.factory.Metadata().AddColumn(name.MetadataName(), typ)
+	name := tree.Name(alias)
+	colID := b.factory.Metadata().AddColumn(alias, typ)
 	scope.cols = append(scope.cols, scopeColumn{
 		name:   name,
 		typ:    typ,
@@ -214,7 +215,7 @@ func (b *Builder) synthesizeColumn(
 // populateSynthesizedColumn is similar to synthesizeColumn, but it fills in
 // the given existing column rather than allocating a new one.
 func (b *Builder) populateSynthesizedColumn(col *scopeColumn, scalar opt.ScalarExpr) {
-	colID := b.factory.Metadata().AddColumn(col.name.MetadataName(), col.typ)
+	colID := b.factory.Metadata().AddColumn(string(col.name), col.typ)
 	col.id = colID
 	col.scalar = scalar
 }
@@ -232,7 +233,7 @@ func (b *Builder) populateSynthesizedColumn(col *scopeColumn, scalar opt.ScalarE
 // - expr, exprStr and typ in dst already correspond to the expression and type
 //   of the src column.
 func (b *Builder) projectColumn(dst *scopeColumn, src *scopeColumn) {
-	if dst.name.IsAnonymous() {
+	if dst.name == "" {
 		dst.name = src.name
 	}
 	dst.id = src.id
@@ -255,7 +256,7 @@ func (b *Builder) shouldCreateDefaultColumn(texpr tree.TypedExpr) bool {
 
 func (b *Builder) synthesizeResultColumns(scope *scope, cols colinfo.ResultColumns) {
 	for i := range cols {
-		c := b.synthesizeColumn(scope, scopeColName(tree.Name(cols[i].Name)), cols[i].Typ, nil /* expr */, nil /* scalar */)
+		c := b.synthesizeColumn(scope, cols[i].Name, cols[i].Typ, nil /* expr */, nil /* scalar */)
 		if cols[i].Hidden {
 			c.visibility = accessibleByName
 		}
@@ -332,12 +333,12 @@ func colIdxByProjectionAlias(expr tree.Expr, op string, scope *scope) int {
 			target := c.ColumnName
 			for j := range scope.cols {
 				col := &scope.cols[j]
-				if !col.name.MatchesReferenceName(target) {
+				if col.name != target {
 					continue
 				}
 
 				if col.mutation {
-					panic(makeBackfillError(col.name.ReferenceName()))
+					panic(makeBackfillError(col.name))
 				}
 
 				if index != -1 {
@@ -446,10 +447,10 @@ func (b *Builder) resolveAndBuildScalar(
 func resolveTemporaryStatus(name *tree.TableName, persistence tree.Persistence) bool {
 	// An explicit schema can only be provided in the CREATE TEMP TABLE statement
 	// iff it is pg_temp.
-	if persistence.IsTemporary() && name.ExplicitSchema && name.SchemaName != catconstants.PgTempSchemaName {
+	if persistence.IsTemporary() && name.ExplicitSchema && name.SchemaName != sessiondata.PgTempSchemaName {
 		panic(pgerror.New(pgcode.InvalidTableDefinition, "cannot create temporary relation in non-temporary schema"))
 	}
-	return name.SchemaName == catconstants.PgTempSchemaName || persistence.IsTemporary()
+	return name.SchemaName == sessiondata.PgTempSchemaName || persistence.IsTemporary()
 }
 
 // resolveSchemaForCreate returns the schema that will contain a newly created
@@ -704,8 +705,8 @@ type columnKinds struct {
 	// If true, include system columns.
 	includeSystem bool
 
-	// If true, include inverted index columns.
-	includeInverted bool
+	// If true, include virtual inverted index columns.
+	includeVirtualInverted bool
 
 	// If true, include virtual computed columns.
 	includeVirtualComputed bool
@@ -716,11 +717,11 @@ type columnKinds struct {
 func tableOrdinals(tab cat.Table, k columnKinds) []int {
 	n := tab.ColumnCount()
 	shouldInclude := [...]bool{
-		cat.Ordinary:   true,
-		cat.WriteOnly:  k.includeMutations,
-		cat.DeleteOnly: k.includeMutations,
-		cat.System:     k.includeSystem,
-		cat.Inverted:   k.includeInverted,
+		cat.Ordinary:        true,
+		cat.WriteOnly:       k.includeMutations,
+		cat.DeleteOnly:      k.includeMutations,
+		cat.System:          k.includeSystem,
+		cat.VirtualInverted: k.includeVirtualInverted,
 	}
 	ordinals := make([]int, 0, n)
 	for i := 0; i < n; i++ {

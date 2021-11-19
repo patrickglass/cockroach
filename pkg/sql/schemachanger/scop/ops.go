@@ -14,6 +14,7 @@ import "github.com/cockroachdb/errors"
 
 // Op represents an action to be taken on a single descriptor.
 type Op interface {
+	op()
 	Type() Type
 }
 
@@ -88,3 +89,5 @@ var _ Ops = (backfillOps)(nil)
 var _ Ops = (validationOps)(nil)
 
 type baseOp struct{}
+
+func (baseOp) op() {}

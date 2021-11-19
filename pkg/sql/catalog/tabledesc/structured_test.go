@@ -29,7 +29,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
-	"github.com/kr/pretty"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,11 +39,10 @@ func makeIndexDescriptor(name string, columnNames []string) descpb.IndexDescript
 		dirs = append(dirs, descpb.IndexDescriptor_ASC)
 	}
 	idx := descpb.IndexDescriptor{
-		ID:                  descpb.IndexID(0),
-		Name:                name,
-		KeyColumnNames:      columnNames,
-		KeyColumnDirections: dirs,
-		Version:             descpb.EmptyArraysInInvertedIndexesVersion,
+		ID:               descpb.IndexID(0),
+		Name:             name,
+		ColumnNames:      columnNames,
+		ColumnDirections: dirs,
 	}
 	return idx
 }
@@ -62,13 +60,7 @@ func TestAllocateIDs(t *testing.T) {
 			{Name: "b", Type: types.Int},
 			{Name: "c", Type: types.Int},
 		},
-		PrimaryIndex: func() descpb.IndexDescriptor {
-			idx := makeIndexDescriptor("c", []string{"a", "b"})
-			idx.StoreColumnNames = []string{"c"}
-			idx.EncodingType = descpb.PrimaryIndexEncoding
-			idx.Version = descpb.PrimaryIndexWithStoredColumnsVersion
-			return idx
-		}(),
+		PrimaryIndex: makeIndexDescriptor("c", []string{"a", "b"}),
 		Indexes: []descpb.IndexDescriptor{
 			makeIndexDescriptor("d", []string{"b", "a"}),
 			makeIndexDescriptor("e", []string{"b"}),
@@ -78,8 +70,8 @@ func TestAllocateIDs(t *testing.T) {
 				return idx
 			}(),
 		},
-		Privileges:    descpb.NewBasePrivilegeDescriptor(security.AdminRoleName()),
-		FormatVersion: descpb.InterleavedFormatVersion,
+		Privileges:    descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName()),
+		FormatVersion: descpb.FamilyFormatVersion,
 	}).BuildCreatedMutableTable()
 	if err := desc.AllocateIDs(ctx); err != nil {
 		t.Fatal(err)
@@ -104,34 +96,27 @@ func TestAllocateIDs(t *testing.T) {
 			},
 		},
 		PrimaryIndex: descpb.IndexDescriptor{
-			ID: 1, Name: "c", KeyColumnIDs: []descpb.ColumnID{1, 2},
-			KeyColumnNames: []string{"a", "b"},
-			KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC,
-				descpb.IndexDescriptor_ASC},
-			StoreColumnIDs:   descpb.ColumnIDs{3},
-			StoreColumnNames: []string{"c"},
-			EncodingType:     descpb.PrimaryIndexEncoding,
-			Version:          descpb.PrimaryIndexWithStoredColumnsVersion},
+			ID: 1, Name: "c", ColumnIDs: []descpb.ColumnID{1, 2},
+			ColumnNames: []string{"a", "b"},
+			ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC,
+				descpb.IndexDescriptor_ASC}},
 		Indexes: []descpb.IndexDescriptor{
-			{ID: 2, Name: "d", KeyColumnIDs: []descpb.ColumnID{2, 1}, KeyColumnNames: []string{"b", "a"},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC,
-					descpb.IndexDescriptor_ASC},
-				Version: descpb.StrictIndexColumnIDGuaranteesVersion},
-			{ID: 3, Name: "e", KeyColumnIDs: []descpb.ColumnID{2}, KeyColumnNames: []string{"b"},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-				KeySuffixColumnIDs:  []descpb.ColumnID{1},
-				Version:             descpb.StrictIndexColumnIDGuaranteesVersion},
-			{ID: 4, Name: "f", KeyColumnIDs: []descpb.ColumnID{3}, KeyColumnNames: []string{"c"},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-				EncodingType:        descpb.PrimaryIndexEncoding,
-				Version:             descpb.StrictIndexColumnIDGuaranteesVersion},
+			{ID: 2, Name: "d", ColumnIDs: []descpb.ColumnID{2, 1}, ColumnNames: []string{"b", "a"},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC,
+					descpb.IndexDescriptor_ASC}},
+			{ID: 3, Name: "e", ColumnIDs: []descpb.ColumnID{2}, ColumnNames: []string{"b"},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+				ExtraColumnIDs:   []descpb.ColumnID{1}},
+			{ID: 4, Name: "f", ColumnIDs: []descpb.ColumnID{3}, ColumnNames: []string{"c"},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+				EncodingType:     descpb.PrimaryIndexEncoding},
 		},
-		Privileges:     descpb.NewBasePrivilegeDescriptor(security.AdminRoleName()),
+		Privileges:     descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName()),
 		NextColumnID:   4,
 		NextFamilyID:   1,
 		NextIndexID:    5,
 		NextMutationID: 1,
-		FormatVersion:  descpb.InterleavedFormatVersion,
+		FormatVersion:  descpb.FamilyFormatVersion,
 	}).BuildCreatedMutableTable()
 	if !reflect.DeepEqual(expected, desc) {
 		a, _ := json.MarshalIndent(expected, "", "  ")
@@ -142,7 +127,6 @@ func TestAllocateIDs(t *testing.T) {
 	if err := desc.AllocateIDs(ctx); err != nil {
 		t.Fatal(err)
 	}
-
 	if !reflect.DeepEqual(expected, desc) {
 		a, _ := json.MarshalIndent(expected, "", "  ")
 		b, _ := json.MarshalIndent(desc, "", "  ")
@@ -276,7 +260,7 @@ func TestMaybeUpgradeFormatVersion(t *testing.T) {
 				Columns: []descpb.ColumnDescriptor{
 					{ID: 1, Name: "foo"},
 				},
-				Privileges: descpb.NewBasePrivilegeDescriptor(security.RootUserName()),
+				Privileges: descpb.NewDefaultPrivilegeDescriptor(security.RootUserName()),
 			},
 			expUpgrade: true,
 			verify: func(i int, desc catalog.TableDescriptor) {
@@ -292,7 +276,7 @@ func TestMaybeUpgradeFormatVersion(t *testing.T) {
 				Columns: []descpb.ColumnDescriptor{
 					{ID: 1, Name: "foo"},
 				},
-				Privileges: descpb.NewBasePrivilegeDescriptor(security.RootUserName()),
+				Privileges: descpb.NewDefaultPrivilegeDescriptor(security.RootUserName()),
 			},
 			expUpgrade: false,
 			verify:     nil,
@@ -315,282 +299,6 @@ func TestMaybeUpgradeFormatVersion(t *testing.T) {
 	}
 }
 
-func TestMaybeUpgradeIndexFormatVersion(t *testing.T) {
-	tests := []struct {
-		desc        descpb.TableDescriptor
-		upgraded    *descpb.TableDescriptor
-		expValidErr string
-	}{
-		{ // 1
-			// In this simple case, we exercise most of the post-deserialization
-			// upgrades, in particular the primary index will have its format version
-			// properly set.
-			desc: descpb.TableDescriptor{
-				FormatVersion: descpb.BaseFormatVersion,
-				ID:            51,
-				Name:          "tbl",
-				ParentID:      52,
-				NextColumnID:  3,
-				NextIndexID:   2,
-				Columns: []descpb.ColumnDescriptor{
-					{ID: 1, Name: "foo"},
-					{ID: 2, Name: "bar"},
-				},
-				PrimaryIndex: descpb.IndexDescriptor{
-					ID:                  descpb.IndexID(1),
-					Name:                "primary",
-					KeyColumnIDs:        []descpb.ColumnID{1, 2},
-					KeyColumnNames:      []string{"foo", "bar"},
-					KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-				},
-			},
-			upgraded: &descpb.TableDescriptor{
-				FormatVersion: descpb.InterleavedFormatVersion,
-				ID:            51,
-				Name:          "tbl",
-				ParentID:      52,
-				NextColumnID:  3,
-				NextFamilyID:  1,
-				NextIndexID:   2,
-				Columns: []descpb.ColumnDescriptor{
-					{ID: 1, Name: "foo"},
-					{ID: 2, Name: "bar"},
-				},
-				Families: []descpb.ColumnFamilyDescriptor{
-					{
-						ID:          0,
-						Name:        "primary",
-						ColumnIDs:   []descpb.ColumnID{1, 2},
-						ColumnNames: []string{"foo", "bar"},
-					},
-				},
-				PrimaryIndex: descpb.IndexDescriptor{
-					ID:                  descpb.IndexID(1),
-					Name:                "primary",
-					KeyColumnIDs:        []descpb.ColumnID{1, 2},
-					KeyColumnNames:      []string{"foo", "bar"},
-					KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-					EncodingType:        descpb.PrimaryIndexEncoding,
-					Version:             descpb.PrimaryIndexWithStoredColumnsVersion,
-				},
-				Privileges: descpb.NewBasePrivilegeDescriptor(security.RootUserName()),
-			},
-		},
-		{ // 2
-			// This test case is defined to be a no-op.
-			desc: descpb.TableDescriptor{
-				FormatVersion: descpb.InterleavedFormatVersion,
-				ID:            51,
-				Name:          "tbl",
-				ParentID:      52,
-				NextColumnID:  3,
-				NextFamilyID:  1,
-				NextIndexID:   3,
-				Columns: []descpb.ColumnDescriptor{
-					{ID: 1, Name: "foo"},
-					{ID: 2, Name: "bar"},
-				},
-				Families: []descpb.ColumnFamilyDescriptor{
-					{
-						ID:          0,
-						Name:        "primary",
-						ColumnIDs:   []descpb.ColumnID{1, 2},
-						ColumnNames: []string{"foo", "bar"},
-					},
-				},
-				PrimaryIndex: descpb.IndexDescriptor{
-					ID:                  descpb.IndexID(1),
-					Name:                "primary",
-					KeyColumnIDs:        []descpb.ColumnID{1, 2},
-					KeyColumnNames:      []string{"foo", "bar"},
-					KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-					EncodingType:        descpb.PrimaryIndexEncoding,
-					Version:             descpb.PrimaryIndexWithStoredColumnsVersion,
-				},
-				Indexes: []descpb.IndexDescriptor{
-					{
-						ID:                  descpb.IndexID(2),
-						Name:                "other",
-						KeyColumnIDs:        []descpb.ColumnID{1},
-						KeyColumnNames:      []string{"foo"},
-						KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-						KeySuffixColumnIDs:  []descpb.ColumnID{1}, // This corruption is benign but prevents bumping Version.
-						Version:             descpb.SecondaryIndexFamilyFormatVersion,
-					},
-				},
-				Privileges: descpb.NewBasePrivilegeDescriptor(security.RootUserName()),
-			},
-			upgraded: nil,
-		},
-		{ // 3
-			// In this case we expect validation to fail owing to a violation of
-			// assumptions for this secondary index's descriptor format version.
-			desc: descpb.TableDescriptor{
-				FormatVersion: descpb.BaseFormatVersion,
-				ID:            51,
-				Name:          "tbl",
-				ParentID:      52,
-				NextColumnID:  3,
-				NextIndexID:   3,
-				Columns: []descpb.ColumnDescriptor{
-					{ID: 1, Name: "foo"},
-					{ID: 2, Name: "bar"},
-				},
-				PrimaryIndex: descpb.IndexDescriptor{
-					ID:                  descpb.IndexID(1),
-					Name:                "primary",
-					KeyColumnIDs:        []descpb.ColumnID{1, 2},
-					KeyColumnNames:      []string{"foo", "bar"},
-					KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-					Version:             descpb.PrimaryIndexWithStoredColumnsVersion,
-				},
-				Indexes: []descpb.IndexDescriptor{
-					{
-						ID:                  descpb.IndexID(2),
-						Name:                "other",
-						KeyColumnIDs:        []descpb.ColumnID{1},
-						KeyColumnNames:      []string{"foo"},
-						KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-						KeySuffixColumnIDs:  []descpb.ColumnID{1},
-						Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
-					},
-				},
-			},
-			expValidErr: "relation \"tbl\" (51): index \"other\" has column ID 1 present in: [KeyColumnIDs KeySuffixColumnIDs]",
-		},
-		{ // 4
-			// This test case is much like the first but more complex and with more
-			// indexes. All three should be upgraded to the latest format version.
-			desc: descpb.TableDescriptor{
-				FormatVersion: descpb.BaseFormatVersion,
-				ID:            51,
-				Name:          "tbl",
-				ParentID:      52,
-				NextColumnID:  3,
-				NextIndexID:   4,
-				Columns: []descpb.ColumnDescriptor{
-					{ID: 1, Name: "foo"},
-					{ID: 2, Name: "bar"},
-				},
-				PrimaryIndex: descpb.IndexDescriptor{
-					ID:                  descpb.IndexID(1),
-					Name:                "primary",
-					KeyColumnIDs:        []descpb.ColumnID{1, 2},
-					KeyColumnNames:      []string{"foo", "bar"},
-					KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-					Version:             descpb.PrimaryIndexWithStoredColumnsVersion,
-				},
-				Indexes: []descpb.IndexDescriptor{
-					{
-						ID:                  descpb.IndexID(2),
-						Name:                "other",
-						KeyColumnIDs:        []descpb.ColumnID{1},
-						KeyColumnNames:      []string{"foo"},
-						KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-						Version:             descpb.EmptyArraysInInvertedIndexesVersion,
-					},
-					{
-						ID:                  descpb.IndexID(3),
-						Name:                "another",
-						KeyColumnIDs:        []descpb.ColumnID{2},
-						KeyColumnNames:      []string{"bar"},
-						KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-						Version:             descpb.EmptyArraysInInvertedIndexesVersion,
-					},
-				},
-			},
-			upgraded: &descpb.TableDescriptor{
-				FormatVersion: descpb.InterleavedFormatVersion,
-				ID:            51,
-				Name:          "tbl",
-				ParentID:      52,
-				NextColumnID:  3,
-				NextFamilyID:  1,
-				NextIndexID:   4,
-				Columns: []descpb.ColumnDescriptor{
-					{ID: 1, Name: "foo"},
-					{ID: 2, Name: "bar"},
-				},
-				Families: []descpb.ColumnFamilyDescriptor{
-					{
-						ID:          0,
-						Name:        "primary",
-						ColumnIDs:   []descpb.ColumnID{1, 2},
-						ColumnNames: []string{"foo", "bar"},
-					},
-				},
-				PrimaryIndex: descpb.IndexDescriptor{
-					ID:                  descpb.IndexID(1),
-					Name:                "primary",
-					KeyColumnIDs:        []descpb.ColumnID{1, 2},
-					KeyColumnNames:      []string{"foo", "bar"},
-					KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-					EncodingType:        descpb.PrimaryIndexEncoding,
-					Version:             descpb.PrimaryIndexWithStoredColumnsVersion,
-				},
-				Indexes: []descpb.IndexDescriptor{
-					{
-						ID:                  descpb.IndexID(2),
-						Name:                "other",
-						KeyColumnIDs:        []descpb.ColumnID{1},
-						KeyColumnNames:      []string{"foo"},
-						KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-						EncodingType:        descpb.SecondaryIndexEncoding,
-						Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
-					},
-					{
-						ID:                  descpb.IndexID(3),
-						Name:                "another",
-						KeyColumnIDs:        []descpb.ColumnID{2},
-						KeyColumnNames:      []string{"bar"},
-						KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-						EncodingType:        descpb.SecondaryIndexEncoding,
-						Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
-					},
-				},
-				Privileges: descpb.NewBasePrivilegeDescriptor(security.RootUserName()),
-			},
-		},
-	}
-	for i, test := range tests {
-		t.Run(fmt.Sprintf("#%d", i+1), func(t *testing.T) {
-			b := NewBuilder(&test.desc)
-			err := b.RunPostDeserializationChanges(context.Background(), nil)
-			desc := b.BuildImmutableTable()
-			require.NoError(t, err)
-			changes, err := GetPostDeserializationChanges(desc)
-			require.NoError(t, err)
-			err = catalog.ValidateSelf(desc)
-			if test.expValidErr != "" {
-				require.EqualError(t, err, test.expValidErr)
-				return
-			}
-
-			require.NoError(t, err)
-			if test.upgraded == nil {
-				require.Equal(t, PostDeserializationTableDescriptorChanges{}, changes)
-				return
-			}
-
-			if e, a := test.upgraded, desc.TableDesc(); !reflect.DeepEqual(e, a) {
-				for _, diff := range pretty.Diff(e, a) {
-					t.Error(diff)
-				}
-			}
-
-			// Run post-deserialization changes again, descriptor should not change.
-			b2 := NewBuilder(desc.TableDesc())
-			err = b2.RunPostDeserializationChanges(context.Background(), nil)
-			require.NoError(t, err)
-			desc2 := b2.BuildImmutableTable()
-			changes2, err := GetPostDeserializationChanges(desc2)
-			require.NoError(t, err)
-			require.Equal(t, PostDeserializationTableDescriptorChanges{}, changes2)
-			require.Equal(t, desc.TableDesc(), desc2.TableDesc())
-		})
-	}
-}
-
 func TestUnvalidateConstraints(t *testing.T) {
 	ctx := context.Background()
 
@@ -601,9 +309,9 @@ func TestUnvalidateConstraints(t *testing.T) {
 			{Name: "a", Type: types.Int},
 			{Name: "b", Type: types.Int},
 			{Name: "c", Type: types.Int}},
-		FormatVersion: descpb.InterleavedFormatVersion,
+		FormatVersion: descpb.FamilyFormatVersion,
 		Indexes:       []descpb.IndexDescriptor{makeIndexDescriptor("d", []string{"b", "a"})},
-		Privileges:    descpb.NewBasePrivilegeDescriptor(security.AdminRoleName()),
+		Privileges:    descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName()),
 		OutboundFKs: []descpb.ForeignKeyConstraint{
 			{
 				Name:              "fk",
@@ -738,10 +446,10 @@ func TestColumnNeedsBackfill(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		if catalog.ColumnNeedsBackfill(TestingMakeColumn(descpb.DescriptorMutation_ADD, &tc.desc)) != tc.add {
+		if ColumnNeedsBackfill(descpb.DescriptorMutation_ADD, &tc.desc) != tc.add {
 			t.Errorf("expected ColumnNeedsBackfill to be %v for adding %s", tc.add, tc.info)
 		}
-		if catalog.ColumnNeedsBackfill(TestingMakeColumn(descpb.DescriptorMutation_DROP, &tc.desc)) != tc.drop {
+		if ColumnNeedsBackfill(descpb.DescriptorMutation_DROP, &tc.desc) != tc.drop {
 			t.Errorf("expected ColumnNeedsBackfill to be %v for dropping %s", tc.drop, tc.info)
 		}
 	}
@@ -801,4 +509,124 @@ func TestLogicalColumnID(t *testing.T) {
 		}
 	}
 
+}
+
+func TestMaybeUpgradeIndexFormatVersion(t *testing.T) {
+	tests := []struct {
+		desc        descpb.TableDescriptor
+		expUpgrade  bool
+		expValidErr string
+	}{
+		{
+			desc: descpb.TableDescriptor{
+				FormatVersion: descpb.BaseFormatVersion,
+				ID:            51,
+				Name:          "tbl",
+				ParentID:      52,
+				NextColumnID:  3,
+				NextIndexID:   2,
+				Columns: []descpb.ColumnDescriptor{
+					{ID: 1, Name: "foo"},
+					{ID: 2, Name: "bar"},
+				},
+				PrimaryIndex: descpb.IndexDescriptor{
+					ID:               descpb.IndexID(1),
+					Name:             "primary",
+					ColumnIDs:        []descpb.ColumnID{1, 2},
+					ColumnNames:      []string{"foo", "bar"},
+					ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+					Version:          descpb.EmptyArraysInInvertedIndexesVersion,
+				},
+			},
+			expUpgrade: true,
+		},
+		{
+			desc: descpb.TableDescriptor{
+				FormatVersion: descpb.BaseFormatVersion,
+				ID:            51,
+				Name:          "tbl",
+				ParentID:      52,
+				NextColumnID:  3,
+				NextIndexID:   3,
+				Columns: []descpb.ColumnDescriptor{
+					{ID: 1, Name: "foo"},
+					{ID: 2, Name: "bar"},
+				},
+				PrimaryIndex: descpb.IndexDescriptor{
+					ID:               descpb.IndexID(1),
+					Name:             "primary",
+					ColumnIDs:        []descpb.ColumnID{1, 2},
+					ColumnNames:      []string{"foo", "bar"},
+					ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+					Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
+				},
+				Indexes: []descpb.IndexDescriptor{
+					{
+						ID:               descpb.IndexID(2),
+						Name:             "other",
+						ColumnIDs:        []descpb.ColumnID{1},
+						ColumnNames:      []string{"foo"},
+						ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+						ExtraColumnIDs:   []descpb.ColumnID{1},
+						Version:          descpb.SecondaryIndexFamilyFormatVersion,
+					},
+				},
+			},
+			expUpgrade: false,
+		},
+		{
+			desc: descpb.TableDescriptor{
+				FormatVersion: descpb.BaseFormatVersion,
+				ID:            51,
+				Name:          "tbl",
+				ParentID:      52,
+				NextColumnID:  3,
+				NextIndexID:   3,
+				Columns: []descpb.ColumnDescriptor{
+					{ID: 1, Name: "foo"},
+					{ID: 2, Name: "bar"},
+				},
+				PrimaryIndex: descpb.IndexDescriptor{
+					ID:               descpb.IndexID(1),
+					Name:             "primary",
+					ColumnIDs:        []descpb.ColumnID{1, 2},
+					ColumnNames:      []string{"foo", "bar"},
+					ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+					Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
+				},
+				Indexes: []descpb.IndexDescriptor{
+					{
+						ID:               descpb.IndexID(2),
+						Name:             "other",
+						ColumnIDs:        []descpb.ColumnID{1},
+						ColumnNames:      []string{"foo"},
+						ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+						ExtraColumnIDs:   []descpb.ColumnID{1},
+						Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
+					},
+				},
+			},
+			expUpgrade:  false,
+			expValidErr: "relation \"tbl\" (51): index \"other\" has column ID 1 present in: [ColumnIDs ExtraColumnIDs]",
+		},
+	}
+	for i, test := range tests {
+		b := NewBuilder(&test.desc)
+		err := b.RunPostDeserializationChanges(context.Background(), nil)
+		desc := b.BuildImmutableTable()
+		require.NoError(t, err)
+		changes, err := GetPostDeserializationChanges(desc)
+		require.NoError(t, err)
+		err = catalog.ValidateSelf(desc)
+		if test.expValidErr == "" {
+			require.NoError(t, err)
+		} else {
+			require.EqualError(t, err, test.expValidErr)
+		}
+
+		upgraded := changes.UpgradedIndexFormatVersion
+		if upgraded != test.expUpgrade {
+			t.Fatalf("%d: expected upgraded=%t, but got upgraded=%t", i, test.expUpgrade, upgraded)
+		}
+	}
 }

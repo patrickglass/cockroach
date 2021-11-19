@@ -11,12 +11,13 @@
 package colexec
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
@@ -34,9 +35,9 @@ func NewTupleProjOp(
 ) colexecop.Operator {
 	input = colexecutils.NewVectorTypeEnforcer(allocator, input, outputType, outputIdx)
 	return &tupleProjOp{
-		OneInputHelper:    colexecop.MakeOneInputHelper(input),
+		OneInputNode:      colexecop.NewOneInputNode(input),
 		allocator:         allocator,
-		converter:         colconv.NewVecToDatumConverter(len(inputTypes), tupleContentsIdxs, true /* willRelease */),
+		converter:         colconv.NewVecToDatumConverter(len(inputTypes), tupleContentsIdxs),
 		tupleContentsIdxs: tupleContentsIdxs,
 		outputType:        outputType,
 		outputIdx:         outputIdx,
@@ -44,7 +45,7 @@ func NewTupleProjOp(
 }
 
 type tupleProjOp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator         *colmem.Allocator
 	converter         *colconv.VecToDatumConverter
@@ -54,10 +55,13 @@ type tupleProjOp struct {
 }
 
 var _ colexecop.Operator = &tupleProjOp{}
-var _ execinfra.Releasable = &tupleProjOp{}
 
-func (t *tupleProjOp) Next() coldata.Batch {
-	batch := t.Input.Next()
+func (t *tupleProjOp) Init() {
+	t.Input.Init()
+}
+
+func (t *tupleProjOp) Next(ctx context.Context) coldata.Batch {
+	batch := t.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -90,9 +94,4 @@ func (t *tupleProjOp) createTuple(convertedIdx int) tree.Datum {
 		tuple.D[i] = t.converter.GetDatumColumn(columnIdx)[convertedIdx]
 	}
 	return tuple
-}
-
-// Release is part of the execinfra.Releasable interface.
-func (t *tupleProjOp) Release() {
-	t.converter.Release()
 }

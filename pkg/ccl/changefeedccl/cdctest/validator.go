@@ -17,7 +17,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
 )
@@ -56,24 +56,8 @@ type orderValidator struct {
 	failures []string
 }
 
-// NoOpValidator is a validator that does nothing. Useful for
-// composition.
-var NoOpValidator = &noOpValidator{}
-
 var _ Validator = &orderValidator{}
-var _ Validator = &noOpValidator{}
 var _ StreamValidator = &orderValidator{}
-
-type noOpValidator struct{}
-
-// NoteRow accepts a changed row entry.
-func (v *noOpValidator) NoteRow(string, string, string, hlc.Timestamp) error { return nil }
-
-// NoteResolved accepts a resolved timestamp entry.
-func (v *noOpValidator) NoteResolved(string, hlc.Timestamp) error { return nil }
-
-// Failures returns any violations seen so far.
-func (v *noOpValidator) Failures() []string { return nil }
 
 // NewOrderValidator returns a Validator that checks the row and resolved
 // timestamp ordering guarantees. It also asserts that keys have an affinity to
@@ -384,7 +368,7 @@ func NewFingerprintValidator(
 			}
 			fmt.Fprintf(&addColumnStmt, `ADD COLUMN test%d STRING`, i)
 		}
-		if _, err := sqlDB.Exec(addColumnStmt.String()); err != nil {
+		if _, err := sqlDB.Query(addColumnStmt.String()); err != nil {
 			return nil, err
 		}
 	}
@@ -675,14 +659,14 @@ func ParseJSONValueTimestamps(v []byte) (updated, resolved hlc.Timestamp, err er
 	}
 	if valueRaw.Updated != `` {
 		var err error
-		updated, err = tree.ParseHLC(valueRaw.Updated)
+		updated, err = sql.ParseHLC(valueRaw.Updated)
 		if err != nil {
 			return hlc.Timestamp{}, hlc.Timestamp{}, err
 		}
 	}
 	if valueRaw.Resolved != `` {
 		var err error
-		resolved, err = tree.ParseHLC(valueRaw.Resolved)
+		resolved, err = sql.ParseHLC(valueRaw.Resolved)
 		if err != nil {
 			return hlc.Timestamp{}, hlc.Timestamp{}, err
 		}
@@ -708,7 +692,7 @@ func fetchPrimaryKeyCols(sqlDB *gosql.DB, tableStr string) ([]string, error) {
 		SELECT column_name
 		FROM %sinformation_schema.key_column_usage
 		WHERE table_name=$1
-			AND constraint_name=($1||'_pkey')
+			AND constraint_name='primary'
 		ORDER BY ordinal_position`, db),
 		table,
 	)
@@ -723,9 +707,6 @@ func fetchPrimaryKeyCols(sqlDB *gosql.DB, tableStr string) ([]string, error) {
 			return nil, err
 		}
 		primaryKeyCols = append(primaryKeyCols, primaryKeyCol)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	if len(primaryKeyCols) == 0 {
 		return nil, errors.Errorf("no primary key information found for %s", tableStr)

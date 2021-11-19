@@ -50,10 +50,8 @@ func TestHideNonVirtualTableNameFunc(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		f := tree.NewFmtCtx(
-			tree.FmtSimple,
-			tree.FmtReformatTableNames(tableNameFunc),
-		)
+		f := tree.NewFmtCtx(tree.FmtSimple)
+		f.SetReformatTableNames(tableNameFunc)
 		f.FormatNode(stmt.AST)
 		actual := f.CloseAndGetString()
 		require.Equal(t, test.expected, actual)

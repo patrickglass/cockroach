@@ -337,7 +337,7 @@ func dumpImpl(
 ) error {
 	names := req.Names
 	if len(names) == 0 {
-		names = catalog.AllInternalTimeseriesMetricNames()
+		names = catalog.AllMetricsNames()
 	}
 	resolutions := req.Resolutions
 	if len(resolutions) == 0 {

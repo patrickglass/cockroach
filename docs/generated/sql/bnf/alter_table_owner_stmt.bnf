@@ -1,3 +1,0 @@
-alter_table_owner_stmt ::=
-	'ALTER' 'TABLE' relation_expr 'OWNER' 'TO' role_spec
-	| 'ALTER' 'TABLE' 'IF' 'EXISTS' relation_expr 'OWNER' 'TO' role_spec

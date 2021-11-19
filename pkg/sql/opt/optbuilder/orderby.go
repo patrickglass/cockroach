@@ -11,17 +11,12 @@
 package optbuilder
 
 import (
-	"fmt"
-
-	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
@@ -94,11 +89,6 @@ func (b *Builder) findIndexByName(table cat.Table, name tree.UnrestrictedName) (
 			return idx, nil
 		}
 	}
-	// Fallback to referencing @primary as the PRIMARY KEY.
-	// Note that indexes with "primary" as their name takes precedence above.
-	if name == tabledesc.LegacyPrimaryKeyIndexName {
-		return table.Index(0), nil
-	}
 
 	return nil, pgerror.Newf(pgcode.UndefinedObject,
 		`index %q not found`, name)
@@ -124,7 +114,9 @@ func (b *Builder) addOrderByOrDistinctOnColumn(
 
 // analyzeOrderByIndex appends to the orderByScope a column for each indexed
 // column in the specified index, including the implicit primary key columns.
-func (b *Builder) analyzeOrderByIndex(order *tree.Order, inScope, orderByScope *scope) {
+func (b *Builder) analyzeOrderByIndex(
+	order *tree.Order, inScope, projectionsScope, orderByScope *scope,
+) {
 	tab, tn := b.resolveTable(&order.Table, privilege.SELECT)
 	index, err := b.findIndexByName(tab, order.Index)
 	if err != nil {
@@ -150,7 +142,7 @@ func (b *Builder) analyzeOrderByIndex(order *tree.Order, inScope, orderByScope *
 
 		colItem := tree.NewColumnItem(&tn, col.ColName())
 		expr := inScope.resolveType(colItem, types.Any)
-		outCol := orderByScope.addColumn(scopeColName(""), expr)
+		outCol := orderByScope.addColumn("" /* alias */, expr)
 		outCol.descending = desc
 	}
 }
@@ -162,24 +154,13 @@ func (b *Builder) analyzeOrderByArg(
 	order *tree.Order, inScope, projectionsScope, orderByScope *scope,
 ) {
 	if order.OrderType == tree.OrderByIndex {
-		b.analyzeOrderByIndex(order, inScope, orderByScope)
+		b.analyzeOrderByIndex(order, inScope, projectionsScope, orderByScope)
 		return
-	}
-
-	// Set NULL order. The default order in Cockroach if null_ordered_last=False
-	// is nulls first for ascending order and nulls last for descending order.
-	nullsDefaultOrder := true
-	if (b.evalCtx.SessionData().NullOrderedLast && order.NullsOrder == tree.DefaultNullsOrder) ||
-		(order.NullsOrder != tree.DefaultNullsOrder &&
-			((order.NullsOrder == tree.NullsFirst && order.Direction == tree.Descending) ||
-				(order.NullsOrder == tree.NullsLast && order.Direction != tree.Descending))) {
-		nullsDefaultOrder = false
-		telemetry.Inc(sqltelemetry.OrderByNullsNonStandardCounter)
 	}
 
 	// Analyze the ORDER BY column(s).
 	start := len(orderByScope.cols)
-	b.analyzeExtraArgument(order.Expr, inScope, projectionsScope, orderByScope, nullsDefaultOrder)
+	b.analyzeExtraArgument(order.Expr, inScope, projectionsScope, orderByScope)
 	for i := start; i < len(orderByScope.cols); i++ {
 		col := &orderByScope.cols[i]
 		col.descending = order.Direction == tree.Descending
@@ -203,12 +184,9 @@ func (b *Builder) buildOrderByArg(
 
 // analyzeExtraArgument analyzes a single ORDER BY or DISTINCT ON argument.
 // Typically this is a single column, with the exception of qualified star
-// (table.*). The resulting typed expression(s) are added to extraColsScope. The
-// nullsDefaultOrder bool determines whether an extra ordering column is
-// required to explicitly place nulls first or nulls last (when
-// nullsDefaultOrder is false).
+// (table.*). The resulting typed expression(s) are added to extraColsScope.
 func (b *Builder) analyzeExtraArgument(
-	expr tree.Expr, inScope, projectionsScope, extraColsScope *scope, nullsDefaultOrder bool,
+	expr tree.Expr, inScope, projectionsScope, extraColsScope *scope,
 ) {
 	// Unwrap parenthesized expressions like "((a))" to "a".
 	expr = tree.StripParens(expr)
@@ -270,14 +248,7 @@ func (b *Builder) analyzeExtraArgument(
 	for _, e := range exprs {
 		// Ensure we can order on the given column(s).
 		ensureColumnOrderable(e)
-		if !nullsDefaultOrder {
-			metadataName := fmt.Sprintf("nulls_ordering_%s", e.String())
-			extraColsScope.addColumn(
-				scopeColName("").WithMetadataName(metadataName),
-				tree.NewTypedIsNullExpr(e),
-			)
-		}
-		extraColsScope.addColumn(scopeColName(""), e)
+		extraColsScope.addColumn("" /* alias */, e)
 	}
 }
 

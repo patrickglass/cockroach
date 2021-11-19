@@ -16,43 +16,34 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
-// MutationSelector defines a predicate on a catalog.Mutation with no
-// side-effects.
-type MutationSelector func(mutation catalog.Mutation) (matches bool)
-
-// FindMutation returns the first mutation in table for which the selector
-// returns true.
-// Such a mutation is expected to exist, if none are found, an internal error
-// is returned.
-func FindMutation(
-	table catalog.TableDescriptor, selector MutationSelector,
-) (catalog.Mutation, error) {
-	for _, mut := range table.AllMutations() {
-		if selector(mut) {
-			return mut, nil
+// GetIndexMutation returns a reference to a specified index add/drop mutation
+// on a table.
+func GetIndexMutation(
+	table catalog.TableDescriptor, idxID descpb.IndexID,
+) (mut *descpb.DescriptorMutation, sliceIdx int, err error) {
+	mutations := table.TableDesc().Mutations
+	for i := range mutations {
+		mut := &mutations[i]
+		idx := mut.GetIndex()
+		if idx != nil && idx.ID == idxID {
+			return mut, i, nil
 		}
 	}
-	return nil, errors.AssertionFailedf("matching mutation not found in table %d", table.GetID())
+	return nil, 0, errors.AssertionFailedf("mutation not found")
 }
 
-// MakeIndexIDMutationSelector returns a MutationSelector which matches an
-// index mutation with the correct ID.
-func MakeIndexIDMutationSelector(indexID descpb.IndexID) MutationSelector {
-	return func(mut catalog.Mutation) bool {
-		if mut.AsIndex() == nil {
-			return false
+// GetColumnMutation returns a reference to a specified column add/drop mutation
+// on a table.
+func GetColumnMutation(
+	table catalog.TableDescriptor, colID descpb.ColumnID,
+) (mut *descpb.DescriptorMutation, sliceIdx int, err error) {
+	mutations := table.TableDesc().Mutations
+	for i := range mutations {
+		mut := &mutations[i]
+		col := mut.GetColumn()
+		if col != nil && col.ID == colID {
+			return mut, i, nil
 		}
-		return mut.AsIndex().GetID() == indexID
 	}
-}
-
-// MakeColumnIDMutationSelector returns a MutationSelector which matches a
-// column mutation with the correct ID.
-func MakeColumnIDMutationSelector(columnID descpb.ColumnID) MutationSelector {
-	return func(mut catalog.Mutation) bool {
-		if mut.AsColumn() == nil {
-			return false
-		}
-		return mut.AsColumn().GetID() == columnID
-	}
+	return nil, 0, errors.AssertionFailedf("mutation not found")
 }

@@ -53,20 +53,8 @@ DROP USER usER1
 statement ok
 DROP USER IF EXISTS user1
 
-statement error pgcode 42939 role name "node" is reserved
+statement error username "node" reserved
 DROP USER node
-
-statement error pgcode 42939 role name "public" is reserved
-DROP USER public
-
-statement error pgcode 42939 role name "none" is reserved
-DROP USER "none"
-
-statement error pgcode 22023 cannot use special role specifier in DROP ROLE
-DROP ROLE CURRENT_USER
-
-statement error pgcode 22023 cannot use special role specifier in DROP ROLE
-DROP ROLE user4, SESSION_USER
 
 statement error pq: "foo☂": username is invalid
 DROP USER foo☂
@@ -126,23 +114,23 @@ CREATE USER user1
 
 statement ok
 CREATE TABLE foo(x INT);
-GRANT SELECT ON foo TO user3;
-GRANT SELECT, CONNECT ON DATABASE test TO user1
+ GRANT SELECT ON foo TO user3;
+ GRANT SELECT ON DATABASE test TO user1
 
 statement error cannot drop roles/users user1, user3: grants still exist on test, test.public.foo
 DROP USER IF EXISTS user1,user3
 
 statement error cannot drop roles/users user1, user3: grants still exist on test
 REVOKE SELECT ON foo FROM user3;
-DROP USER IF EXISTS user1,user3
+  DROP USER IF EXISTS user1,user3
 
 statement ok
-REVOKE SELECT, CONNECT ON DATABASE test FROM user1;
-DROP USER IF EXISTS user1,user3
+REVOKE SELECT ON DATABASE test FROM user1;
+  DROP USER IF EXISTS user1,user3
 
 statement ok
-PREPARE du AS DROP USER user4;
-EXECUTE du
+PREPARE du AS DROP USER $1;
+ EXECUTE du('user4')
 
 query TTT colnames
 SHOW USERS

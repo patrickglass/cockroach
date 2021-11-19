@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//go:build !windows
 // +build !windows
 
 package cli
@@ -94,4 +93,8 @@ func disableOtherPermissionBits() {
 	mask := unix.Umask(0000)
 	mask |= 00007
 	_ = unix.Umask(mask)
+}
+
+func useUnixSocketsInDemo() bool {
+	return true
 }

@@ -13,6 +13,7 @@ package kvserver
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/ctpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/readsummary/rspb"
@@ -204,12 +205,16 @@ func (r *Replica) tryReproposeWithNewLeaseIndex(
 		return nil
 	}
 
+	minTS, untrack := r.store.cfg.ClosedTimestamp.Tracker.Track(ctx)
+	defer untrack(ctx, 0, 0, 0) // covers all error paths below
+
 	// We need to track the request again in order to protect its timestamp until
 	// it gets reproposed.
 	// TODO(andrei): Only track if the request consults the ts cache. Some
 	// requests (e.g. EndTxn) don't care about closed timestamps.
-	minTS, tok := r.mu.proposalBuf.TrackEvaluatingRequest(ctx, p.Request.WriteTimestamp())
+	minTS2, tok := r.mu.proposalBuf.TrackEvaluatingRequest(ctx, p.Request.WriteTimestamp())
 	defer tok.DoneIfNotMoved(ctx)
+	minTS.Forward(minTS2)
 
 	// NB: p.Request.Timestamp reflects the action of ba.SetActiveTimestamp.
 	// The IsIntentWrite condition matches the similar logic for caring
@@ -229,11 +234,15 @@ func (r *Replica) tryReproposeWithNewLeaseIndex(
 	// Some tests check for this log message in the trace.
 	log.VEventf(ctx, 2, "retry: proposalIllegalLeaseIndex")
 
-	pErr := r.propose(ctx, p, tok.Move(ctx))
+	maxLeaseIndex, pErr := r.propose(ctx, p, tok.Move(ctx))
 	if pErr != nil {
 		return pErr
 	}
-	log.VEventf(ctx, 2, "reproposed command %x", cmd.idKey)
+	// NB: The caller already promises that the lease check succeeded, meaning
+	// the sequence numbers match, implying that the lease epoch hasn't changed
+	// from what it was under the proposal-time lease.
+	untrack(ctx, ctpb.Epoch(r.mu.state.Lease.Epoch), r.RangeID, ctpb.LAI(maxLeaseIndex))
+	log.VEventf(ctx, 2, "reproposed command %x at maxLeaseIndex=%d", cmd.idKey, maxLeaseIndex)
 	return nil
 }
 
@@ -320,6 +329,12 @@ func (r *Replica) handleVersionResult(ctx context.Context, version *roachpb.Vers
 	r.mu.Unlock()
 }
 
+func (r *Replica) handleUsingAppliedStateKeyResult(ctx context.Context) {
+	r.mu.Lock()
+	r.mu.state.UsingAppliedStateKey = true
+	r.mu.Unlock()
+}
+
 func (r *Replica) handleComputeChecksumResult(ctx context.Context, cc *kvserverpb.ComputeChecksum) {
 	r.computeChecksumPostApply(ctx, *cc)
 }
@@ -349,13 +364,6 @@ func (r *Replica) handleChangeReplicasResult(
 		log.Infof(ctx, "removing replica due to ChangeReplicasTrigger: %v", chng)
 	}
 
-	if err := r.store.removeInitializedReplicaRaftMuLocked(ctx, r, chng.NextReplicaID(), RemoveOptions{
-		// We destroyed the data when the batch committed so don't destroy it again.
-		DestroyData: false,
-	}); err != nil {
-		log.Fatalf(ctx, "failed to remove replica: %v", err)
-	}
-
 	// NB: postDestroyRaftMuLocked requires that the batch which removed the data
 	// be durably synced to disk, which we have.
 	// See replicaAppBatch.ApplyToStateMachine().
@@ -363,6 +371,12 @@ func (r *Replica) handleChangeReplicasResult(
 		log.Fatalf(ctx, "failed to run Replica postDestroy: %v", err)
 	}
 
+	if err := r.store.removeInitializedReplicaRaftMuLocked(ctx, r, chng.NextReplicaID(), RemoveOptions{
+		// We destroyed the data when the batch committed so don't destroy it again.
+		DestroyData: false,
+	}); err != nil {
+		log.Fatalf(ctx, "failed to remove replica: %v", err)
+	}
 	return true
 }
 

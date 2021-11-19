@@ -12,16 +12,137 @@ package sql
 
 import (
 	"context"
+	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 )
+
+// SQL execution is separated in 3+ phases:
+// - parse/prepare
+// - plan
+// - run
+//
+// The commonly used term "execution latency" encompasses this entire
+// process. However for the purpose of analyzing / optimizing
+// individual parts of the SQL execution engine, it is useful to
+// separate the durations of these individual phases. The code below
+// does this.
+
+// sessionPhase is used to index the Session.phaseTimes array.
+type sessionPhase int
+
+const (
+	// When the session is created (pgwire). Used to compute
+	// the session age.
+	sessionInit sessionPhase = iota
+
+	// Executor phases.
+	sessionQueryReceived    // Query is received.
+	sessionStartParse       // Parse starts.
+	sessionEndParse         // Parse ends.
+	plannerStartLogicalPlan // Planning starts.
+	plannerEndLogicalPlan   // Planning ends.
+	plannerStartExecStmt    // Execution starts.
+	plannerEndExecStmt      // Execution ends.
+	// Query is serviced. Note that we compute this even for empty queries or
+	// "special" statements that have no execution, like SHOW TRANSACTION STATUS.
+	sessionQueryServiced
+
+	sessionTransactionReceived            // Transaction is received.
+	sessionFirstStartExecTransaction      // Transaction is started for the first time.
+	sessionMostRecentStartExecTransaction // Transaction is started for the most recent time.
+	sessionEndExecTransaction             // Transaction is committed/rolled back.
+	sessionStartTransactionCommit         // Transaction `COMMIT` starts.
+	sessionEndTransactionCommit           // Transaction `COMMIT` ends.
+	sessionStartPostCommitJob             // Post transaction `COMMIT` jobs start.
+	sessionEndPostCommitJob               // Post transaction `COMMIT` jobs end.
+
+	// sessionNumPhases must be listed last so that it can be used to
+	// define arrays sufficiently large to hold all the other values.
+	sessionNumPhases
+)
+
+// phaseTimes is the type of the session.phaseTimes array.
+//
+// It's important that this is an array and not a slice, as we rely on the array
+// copy behavior.
+type phaseTimes [sessionNumPhases]time.Time
+
+// getServiceLatencyNoOverhead returns the latency of serving a query excluding
+// miscellaneous sources of the overhead (e.g. internal retries). This method is
+// safe to call if sessionQueryServiced phase hasn't been set yet.
+func (p *phaseTimes) getServiceLatencyNoOverhead() time.Duration {
+	// To have an accurate representation of how long it took to service this
+	// single query, we ignore the time between when parsing ends and planning
+	// begins. This avoids the latency being inflated in a few different cases:
+	// when there are internal transaction retries, and when multiple statements
+	// are submitted together, e.g. "SELECT 1; SELECT 2".
+	//
+	// If we're executing a portal, both parsing start and end times will be
+	// zero, so subtracting the actual time at which the query was received will
+	// produce a negative value which doesn't make sense. Therefore, we "fake"
+	// the received time to be the parsing start time.
+	var queryReceivedTime time.Time
+	if p[sessionEndParse].IsZero() {
+		queryReceivedTime = p[sessionStartParse]
+	} else {
+		queryReceivedTime = p[sessionQueryReceived]
+	}
+	parseLatency := p[sessionEndParse].Sub(queryReceivedTime)
+	// If we encounter an error during the logical planning, the
+	// plannerEndExecStmt phase will not be set, so we need to use the end of
+	// planning phase in the computation of planAndExecuteLatency.
+	var queryEndExecTime time.Time
+	if p[plannerEndExecStmt].IsZero() {
+		queryEndExecTime = p[plannerEndLogicalPlan]
+	} else {
+		queryEndExecTime = p[plannerEndExecStmt]
+	}
+	planAndExecuteLatency := queryEndExecTime.Sub(p[plannerStartLogicalPlan])
+	return parseLatency + planAndExecuteLatency
+}
+
+// getServiceLatencyTotal returns the total latency of serving a query including
+// any overhead like internal retries.
+// NOTE: sessionQueryServiced phase must have been set.
+func (p *phaseTimes) getServiceLatencyTotal() time.Duration {
+	return p[sessionQueryServiced].Sub(p[sessionQueryReceived])
+}
+
+// getRunLatency returns the time between a query execution starting and ending.
+func (p *phaseTimes) getRunLatency() time.Duration {
+	return p[plannerEndExecStmt].Sub(p[plannerStartExecStmt])
+}
+
+// getPlanningLatency returns the time it takes for a query to be planned.
+func (p *phaseTimes) getPlanningLatency() time.Duration {
+	return p[plannerEndLogicalPlan].Sub(p[plannerStartLogicalPlan])
+}
+
+// getParsingLatency returns the time it takes for a query to be parsed.
+func (p *phaseTimes) getParsingLatency() time.Duration {
+	return p[sessionEndParse].Sub(p[sessionStartParse])
+}
+
+// getPostCommitJobsLatency returns the time spent running the post transaction
+// commit jobs, such as schema changes.
+func (p *phaseTimes) getPostCommitJobsLatency() time.Duration {
+	return p[sessionEndPostCommitJob].Sub(p[sessionStartPostCommitJob])
+}
+
+func (p *phaseTimes) getTransactionRetryLatency() time.Duration {
+	return p[sessionMostRecentStartExecTransaction].Sub(p[sessionFirstStartExecTransaction])
+}
+
+func (p *phaseTimes) getTransactionServiceLatency() time.Duration {
+	return p[sessionEndExecTransaction].Sub(p[sessionTransactionReceived])
+}
+
+func (p *phaseTimes) getCommitLatency() time.Duration {
+	return p[sessionEndTransactionCommit].Sub(p[sessionStartTransactionCommit])
+}
 
 // EngineMetrics groups a set of SQL metrics.
 type EngineMetrics struct {
@@ -56,33 +177,11 @@ type EngineMetrics struct {
 	FullTableOrIndexScanRejectedCount *metric.Counter
 }
 
-// EngineMetrics implements the metric.Struct interface.
+// EngineMetrics implements the metric.Struct interface
 var _ metric.Struct = EngineMetrics{}
 
 // MetricStruct is part of the metric.Struct interface.
 func (EngineMetrics) MetricStruct() {}
-
-// StatsMetrics groups metrics related to SQL Stats collection.
-type StatsMetrics struct {
-	SQLStatsMemoryMaxBytesHist  *metric.Histogram
-	SQLStatsMemoryCurBytesCount *metric.Gauge
-
-	ReportedSQLStatsMemoryMaxBytesHist  *metric.Histogram
-	ReportedSQLStatsMemoryCurBytesCount *metric.Gauge
-
-	DiscardedStatsCount *metric.Counter
-
-	SQLStatsFlushStarted  *metric.Counter
-	SQLStatsFlushFailure  *metric.Counter
-	SQLStatsFlushDuration *metric.Histogram
-	SQLStatsRemovedRows   *metric.Counter
-}
-
-// StatsMetrics is part of the metric.Struct interface.
-var _ metric.Struct = StatsMetrics{}
-
-// MetricStruct is part of the metric.Struct interface.
-func (StatsMetrics) MetricStruct() {}
 
 // GuardrailMetrics groups metrics related to different guardrails in the SQL
 // layer.
@@ -111,18 +210,18 @@ func (ex *connExecutor) recordStatementSummary(
 	planner *planner,
 	automaticRetryCount int,
 	rowsAffected int,
-	stmtErr error,
+	err error,
 	stats topLevelQueryStats,
 ) {
-	phaseTimes := ex.statsCollector.PhaseTimes()
+	phaseTimes := &ex.statsCollector.phaseTimes
 
 	// Collect the statistics.
-	runLatRaw := phaseTimes.GetRunLatency()
+	runLatRaw := phaseTimes.getRunLatency()
 	runLat := runLatRaw.Seconds()
-	parseLat := phaseTimes.GetParsingLatency().Seconds()
-	planLat := phaseTimes.GetPlanningLatency().Seconds()
+	parseLat := phaseTimes.getParsingLatency().Seconds()
+	planLat := phaseTimes.getPlanningLatency().Seconds()
 	// We want to exclude any overhead to reduce possible confusion.
-	svcLatRaw := phaseTimes.GetServiceLatencyNoOverhead()
+	svcLatRaw := phaseTimes.getServiceLatencyNoOverhead()
 	svcLat := svcLatRaw.Seconds()
 
 	// processing latency: contributing towards SQL results.
@@ -132,7 +231,6 @@ func (ex *connExecutor) recordStatementSummary(
 	execOverhead := svcLat - processingLat
 
 	stmt := &planner.stmt
-	shouldIncludeInLatencyMetrics := shouldIncludeStmtInLatencyMetrics(stmt)
 	flags := planner.curPlan.flags
 	if automaticRetryCount == 0 {
 		ex.updateOptCounters(flags)
@@ -141,102 +239,44 @@ func (ex *connExecutor) recordStatementSummary(
 			if _, ok := stmt.AST.(*tree.Select); ok {
 				m.DistSQLSelectCount.Inc(1)
 			}
-			if shouldIncludeInLatencyMetrics {
-				m.DistSQLExecLatency.RecordValue(runLatRaw.Nanoseconds())
-				m.DistSQLServiceLatency.RecordValue(svcLatRaw.Nanoseconds())
-			}
+			m.DistSQLExecLatency.RecordValue(runLatRaw.Nanoseconds())
+			m.DistSQLServiceLatency.RecordValue(svcLatRaw.Nanoseconds())
 		}
-		if shouldIncludeInLatencyMetrics {
-			m.SQLExecLatency.RecordValue(runLatRaw.Nanoseconds())
-			m.SQLServiceLatency.RecordValue(svcLatRaw.Nanoseconds())
-		}
+		m.SQLExecLatency.RecordValue(runLatRaw.Nanoseconds())
+		m.SQLServiceLatency.RecordValue(svcLatRaw.Nanoseconds())
 	}
 
-	recordedStmtStatsKey := roachpb.StatementStatisticsKey{
-		Query:        stmt.StmtNoConstants,
-		QuerySummary: stmt.StmtSummary,
-		DistSQL:      flags.IsDistributed(),
-		Vec:          flags.IsSet(planFlagVectorized),
-		ImplicitTxn:  flags.IsSet(planFlagImplicitTxn),
-		FullScan:     flags.IsSet(planFlagContainsFullIndexScan) || flags.IsSet(planFlagContainsFullTableScan),
-		Failed:       stmtErr != nil,
-		Database:     planner.SessionData().Database,
-	}
-
-	// We only populate the transaction fingerprint ID field if we are in an
-	// implicit transaction.
-	//
-	// TODO(azhng): This will require some big refactoring later, we already
-	//  compute statement's fingerprintID in RecordStatement().
-	//  However, we need to recompute the Fingerprint() here because this
-	//  is required to populate the transaction fingerprint ID field.
-	//
-	//  The reason behind it is that: for explicit transactions, we have a final
-	//  callback that will eventually invoke
-	//  statsCollector.EndExplicitTransaction() which will use the extraTxnState
-	//  stored in the connExecutor to compute the transaction fingerprintID.
-	//  Unfortunately, that callback is not invoked for implicit transactions,
-	//  because we don't create temporary stats container for the implicit
-	//  transactions. (The statement stats directly gets written to the actual
-	//  stats container). This means that, unless we populate the transaction
-	//  fingerprintID here, we will not have another chance to do so later.
-	if ex.implicitTxn() {
-		stmtFingerprintID := recordedStmtStatsKey.FingerprintID()
-		txnFingerprintHash := util.MakeFNV64()
-		txnFingerprintHash.Add(uint64(stmtFingerprintID))
-		recordedStmtStatsKey.TransactionFingerprintID =
-			roachpb.TransactionFingerprintID(txnFingerprintHash.Sum())
-	}
-
-	recordedStmtStats := sqlstats.RecordedStmtStats{
-		AutoRetryCount:  automaticRetryCount,
-		RowsAffected:    rowsAffected,
-		ParseLatency:    parseLat,
-		PlanLatency:     planLat,
-		RunLatency:      runLat,
-		ServiceLatency:  svcLat,
-		OverheadLatency: execOverhead,
-		BytesRead:       stats.bytesRead,
-		RowsRead:        stats.rowsRead,
-		RowsWritten:     stats.rowsWritten,
-		Nodes:           getNodesFromPlanner(planner),
-		StatementType:   stmt.AST.StatementType(),
-		Plan:            planner.instrumentation.PlanForStats(ctx),
-		StatementError:  stmtErr,
-	}
-
-	stmtFingerprintID, err :=
-		ex.statsCollector.RecordStatement(ctx, recordedStmtStatsKey, recordedStmtStats)
-
-	if err != nil {
-		if log.V(1) {
-			log.Warningf(ctx, "failed to record statement: %s", err)
-		}
-		ex.server.ServerMetrics.StatsMetrics.DiscardedStatsCount.Inc(1)
-	}
+	stmtID := ex.statsCollector.recordStatement(
+		stmt, planner.instrumentation.PlanForStats(ctx),
+		flags.IsDistributed(), flags.IsSet(planFlagVectorized),
+		flags.IsSet(planFlagImplicitTxn),
+		flags.IsSet(planFlagContainsFullIndexScan) || flags.IsSet(planFlagContainsFullTableScan),
+		automaticRetryCount, rowsAffected, err,
+		parseLat, planLat, runLat, svcLat, execOverhead, stats, planner,
+	)
 
 	// Do some transaction level accounting for the transaction this statement is
 	// a part of.
 
-	// We limit the number of statementFingerprintIDs stored for a transaction, as dictated
-	// by the TxnStatsNumStmtFingerprintIDsToRecord cluster setting.
-	maxStmtFingerprintIDsLen := sqlstats.TxnStatsNumStmtFingerprintIDsToRecord.Get(&ex.server.cfg.Settings.SV)
-	if int64(len(ex.extraTxnState.transactionStatementFingerprintIDs)) < maxStmtFingerprintIDsLen {
-		ex.extraTxnState.transactionStatementFingerprintIDs = append(
-			ex.extraTxnState.transactionStatementFingerprintIDs, stmtFingerprintID)
+	// We limit the number of statementIDs stored for a transaction, as dictated
+	// by the TxnStatsNumStmtIDsToRecord cluster setting.
+	maxStmtIDsLen := TxnStatsNumStmtIDsToRecord.Get(&ex.server.cfg.Settings.SV)
+	if int64(len(ex.extraTxnState.transactionStatementIDs)) < maxStmtIDsLen {
+		ex.extraTxnState.transactionStatementIDs = append(
+			ex.extraTxnState.transactionStatementIDs, stmtID)
 	}
-
 	// Add the current statement's ID to the hash. We don't track queries issued
 	// by the internal executor, in which case the hash is uninitialized, and
 	// can therefore be safely ignored.
 	if ex.extraTxnState.transactionStatementsHash.IsInitialized() {
-		ex.extraTxnState.transactionStatementsHash.Add(uint64(stmtFingerprintID))
+		ex.extraTxnState.transactionStatementsHash.Add(uint64(stmtID))
 	}
 	ex.extraTxnState.numRows += rowsAffected
 
 	if log.V(2) {
 		// ages since significant epochs
-		sessionAge := phaseTimes.GetSessionAge().Seconds()
+		sessionAge := phaseTimes[plannerEndExecStmt].
+			Sub(phaseTimes[sessionInit]).Seconds()
 
 		log.Infof(ctx,
 			"query stats: %d rows, %d retries, "+
@@ -263,23 +303,4 @@ func (ex *connExecutor) updateOptCounters(planFlags planFlags) {
 	} else if planFlags.IsSet(planFlagOptCacheMiss) {
 		m.SQLOptPlanCacheMisses.Inc(1)
 	}
-}
-
-// We only want to keep track of DML (Data Manipulation Language) statements in our latency metrics.
-func shouldIncludeStmtInLatencyMetrics(stmt *Statement) bool {
-	return stmt.AST.StatementType() == tree.TypeDML
-}
-
-func getNodesFromPlanner(planner *planner) []int64 {
-	// Retrieve the list of all nodes which the statement was executed on.
-	var nodes []int64
-	if planner.instrumentation.sp != nil {
-		trace := planner.instrumentation.sp.GetRecording(tracing.RecordingStructured)
-		// ForEach returns nodes in order.
-		execinfrapb.ExtractNodesFromSpans(planner.EvalContext().Context, trace).ForEach(func(i int) {
-			nodes = append(nodes, int64(i))
-		})
-	}
-
-	return nodes
 }

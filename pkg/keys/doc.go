@@ -185,12 +185,16 @@ var _ = [...]interface{}{
 	//   range as a whole. Though they are replicated, they are unaddressable.
 	//   Typical examples are MVCC stats and the abort span. They all share
 	//   `LocalRangeIDPrefix` and `LocalRangeIDReplicatedInfix`.
-	AbortSpanKey,             // "abc-"
-	RangeGCThresholdKey,      // "lgc-"
-	RangeAppliedStateKey,     // "rask"
-	RangeLeaseKey,            // "rll-"
-	RangePriorReadSummaryKey, // "rprs"
-	RangeVersionKey,          // "rver"
+	AbortSpanKey,                // "abc-"
+	RangeLastGCKey,              // "lgc-"
+	RangeAppliedStateKey,        // "rask"
+	RaftAppliedIndexLegacyKey,   // "rfta"
+	RaftTruncatedStateLegacyKey, // "rftt"
+	RangeLeaseKey,               // "rll-"
+	LeaseAppliedIndexLegacyKey,  // "rlla"
+	RangePriorReadSummaryKey,    // "rprs"
+	RangeVersionKey,             // "rver"
+	RangeStatsLegacyKey,         // "stat"
 
 	//   2. Unreplicated range-ID local keys: These contain metadata that
 	//   pertain to just one replica of a range. They are unreplicated and
@@ -206,7 +210,6 @@ var _ = [...]interface{}{
 	//   as a whole. They are replicated and addressable. Typical examples are
 	//   the range descriptor and transaction records. They all share
 	//   `LocalRangePrefix`.
-	RangeProbeKey,         // "prbe"
 	QueueLastProcessedKey, // "qlpt"
 	RangeDescriptorKey,    // "rdsc"
 	TransactionKey,        // "txn-"

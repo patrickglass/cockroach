@@ -11,6 +11,7 @@
 package optbuilder
 
 import (
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
@@ -23,14 +24,14 @@ import (
 // are not valid.
 func (b *Builder) buildLimit(limit *tree.Limit, parentScope, inScope *scope) {
 	if limit.Offset != nil {
-		input := inScope.expr
+		input := inScope.expr.(memo.RelExpr)
 		offset := b.resolveAndBuildScalar(
 			limit.Offset, types.Int, exprKindOffset, tree.RejectSpecial, parentScope,
 		)
 		inScope.expr = b.factory.ConstructOffset(input, offset, inScope.makeOrderingChoice())
 	}
 	if limit.Count != nil {
-		input := inScope.expr
+		input := inScope.expr.(memo.RelExpr)
 		limit := b.resolveAndBuildScalar(
 			limit.Count, types.Int, exprKindLimit, tree.RejectSpecial, parentScope,
 		)

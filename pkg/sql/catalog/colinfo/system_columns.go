@@ -13,7 +13,6 @@ package colinfo
 import (
 	"math"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
@@ -45,17 +44,6 @@ const MVCCTimestampColumnID = math.MaxUint32
 // TableOIDColumnID is the ID of the tableoid system column.
 const TableOIDColumnID = MVCCTimestampColumnID - 1
 
-func init() {
-	if len(AllSystemColumnDescs) != catalog.NumSystemColumns {
-		panic("need to update catalog.NumSystemColumns")
-	}
-	for _, desc := range AllSystemColumnDescs {
-		if desc.ID < catalog.SmallestSystemColumnColumnID {
-			panic("need to update catalog.SmallestSystemColumnColumnID")
-		}
-	}
-}
-
 // MVCCTimestampColumnDesc is a column descriptor for the MVCC system column.
 var MVCCTimestampColumnDesc = descpb.ColumnDescriptor{
 	Name:             MVCCTimestampColumnName,
@@ -74,16 +62,13 @@ var MVCCTimestampColumnType = types.Decimal
 
 // TableOIDColumnDesc is a column descriptor for the tableoid column.
 var TableOIDColumnDesc = descpb.ColumnDescriptor{
-	Name:             TableOIDColumnName,
+	Name:             "tableoid",
 	Type:             types.Oid,
 	Hidden:           true,
 	Nullable:         true,
 	SystemColumnKind: descpb.SystemColumnKind_TABLEOID,
 	ID:               TableOIDColumnID,
 }
-
-// TableOIDColumnName is the name of the tableoid system column.
-const TableOIDColumnName = "tableoid"
 
 // IsColIDSystemColumn returns whether a column ID refers to a system column.
 func IsColIDSystemColumn(colID descpb.ColumnID) bool {

@@ -11,7 +11,6 @@ package backupccl
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -20,14 +19,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 )
 
 func distBackupPlanSpecs(
-	ctx context.Context,
 	planCtx *sql.PlanningCtx,
 	execCtx sql.JobExecContext,
 	dsp *sql.DistSQLPlanner,
@@ -40,10 +38,6 @@ func distBackupPlanSpecs(
 	mvccFilter roachpb.MVCCFilter,
 	startTime, endTime hlc.Timestamp,
 ) (map[roachpb.NodeID]*execinfrapb.BackupDataSpec, error) {
-	var span *tracing.Span
-	ctx, span = tracing.ChildSpan(ctx, "backup-plan-specs")
-	_ = ctx // ctx is currently unused, but this new ctx should be used below in the future.
-	defer span.Finish()
 	user := execCtx.User()
 	execCfg := execCtx.ExecCfg()
 
@@ -126,16 +120,6 @@ func distBackupPlanSpecs(
 		}
 	}
 
-	backupPlanningTraceEvent := BackupProcessorPlanningTraceEvent{
-		NodeToNumSpans: make(map[int32]int64),
-	}
-	for node, spec := range nodeToSpec {
-		numSpans := int64(len(spec.Spans) + len(spec.IntroducedSpans))
-		backupPlanningTraceEvent.NodeToNumSpans[int32(node)] = numSpans
-		backupPlanningTraceEvent.TotalNumSpans += numSpans
-	}
-	span.RecordStructured(&backupPlanningTraceEvent)
-
 	return nodeToSpec, nil
 }
 
@@ -150,8 +134,6 @@ func distBackup(
 	progCh chan *execinfrapb.RemoteProducerMetadata_BulkProcessorProgress,
 	backupSpecs map[roachpb.NodeID]*execinfrapb.BackupDataSpec,
 ) error {
-	ctx, span := tracing.ChildSpan(ctx, "backup-distsql")
-	defer span.Finish()
 	ctx = logtags.AddTag(ctx, "backup-distsql", nil)
 	evalCtx := execCtx.ExtendedEvalContext()
 	var noTxn *kv.Txn

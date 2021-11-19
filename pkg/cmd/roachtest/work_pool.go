@@ -15,9 +15,6 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/logger"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -37,7 +34,7 @@ type workPool struct {
 	}
 }
 
-func newWorkPool(tests []registry.TestSpec, count int) *workPool {
+func newWorkPool(tests []testSpec, count int) *workPool {
 	p := &workPool{count: count}
 	for _, spec := range tests {
 		p.mu.tests = append(p.mu.tests, testWithCount{spec: spec, count: count})
@@ -52,9 +49,7 @@ type testToRunRes struct {
 	// other fields are set.
 	noWork bool
 	// spec is the selected test.
-	spec registry.TestSpec
-	// runCount is the total number of runs. 1 if --count was not used.
-	runCount int
+	spec testSpec
 	// runNum is run number. 1 if --count was not used.
 	runNum int
 
@@ -89,11 +84,11 @@ func (p *workPool) workRemaining() []testWithCount {
 // have noWork set.
 func (p *workPool) getTestToRun(
 	ctx context.Context,
-	c *clusterImpl,
+	c *cluster,
 	qp *quotapool.IntPool,
 	cr *clusterRegistry,
 	onDestroy func(),
-	l *logger.Logger,
+	l *logger,
 ) (testToRunRes, error) {
 	// If we've been given a cluster, see if we can reuse it.
 	if c != nil {
@@ -131,19 +126,19 @@ func (p *workPool) getTestToRun(
 //
 // cr is used for its information about how many clusters with a given tag currently exist.
 func (p *workPool) selectTestForCluster(
-	ctx context.Context, s spec.ClusterSpec, cr *clusterRegistry,
+	ctx context.Context, spec clusterSpec, cr *clusterRegistry,
 ) testToRunRes {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	testsWithCounts := p.findCompatibleTestsLocked(s)
+	testsWithCounts := p.findCompatibleTestsLocked(spec)
 
 	if len(testsWithCounts) == 0 {
 		return testToRunRes{noWork: true}
 	}
 
 	tag := ""
-	if p, ok := s.ReusePolicy.(spec.ReusePolicyTagged); ok {
-		tag = p.Tag
+	if p, ok := spec.ReusePolicy.(reusePolicyTagged); ok {
+		tag = p.tag
 	}
 	// Find the best test to run.
 	candidateScore := 0
@@ -160,7 +155,6 @@ func (p *workPool) selectTestForCluster(
 	runNum := p.count - candidate.count + 1
 	return testToRunRes{
 		spec:            candidate.spec,
-		runCount:        p.count,
 		runNum:          runNum,
 		canReuseCluster: true,
 	}
@@ -215,7 +209,6 @@ func (p *workPool) selectTest(ctx context.Context, qp *quotapool.IntPool) (testT
 		p.decTestLocked(ctx, tc.spec.Name)
 		ttr = testToRunRes{
 			spec:            tc.spec,
-			runCount:        p.count,
 			runNum:          runNum,
 			canReuseCluster: false,
 		}
@@ -237,15 +230,15 @@ func (p *workPool) selectTest(ctx context.Context, qp *quotapool.IntPool) (testT
 func scoreTestAgainstCluster(tc testWithCount, tag string, cr *clusterRegistry) int {
 	t := tc.spec
 	testPolicy := t.Cluster.ReusePolicy
-	if tag != "" && testPolicy != (spec.ReusePolicyTagged{Tag: tag}) {
+	if tag != "" && testPolicy != (reusePolicyTagged{tag: tag}) {
 		log.Fatalf(context.TODO(),
 			"incompatible test and cluster. Cluster tag: %s. Test policy: %+v",
 			tag, t.Cluster.ReusePolicy)
 	}
 	score := 0
-	if _, ok := testPolicy.(spec.ReusePolicyAny); ok {
+	if _, ok := testPolicy.(reusePolicyAny); ok {
 		score = 1000000
-	} else if _, ok := testPolicy.(spec.ReusePolicyTagged); ok {
+	} else if _, ok := testPolicy.(reusePolicyTagged); ok {
 		score = 500000
 		if tag == "" {
 			// We have an untagged cluster and a tagged test. Within this category of
@@ -263,13 +256,13 @@ func scoreTestAgainstCluster(tc testWithCount, tag string, cr *clusterRegistry) 
 }
 
 // findCompatibleTestsLocked returns a list of tests compatible with a cluster spec.
-func (p *workPool) findCompatibleTestsLocked(clusterSpec spec.ClusterSpec) []testWithCount {
-	if _, ok := clusterSpec.ReusePolicy.(spec.ReusePolicyNone); ok {
+func (p *workPool) findCompatibleTestsLocked(clusterSpec clusterSpec) []testWithCount {
+	if _, ok := clusterSpec.ReusePolicy.(reusePolicyNone); ok {
 		panic("can't search for tests compatible with a ReuseNone policy")
 	}
 	var tests []testWithCount
 	for _, tc := range p.mu.tests {
-		if spec.ClustersCompatible(clusterSpec, tc.spec.Cluster) {
+		if clustersCompatible(clusterSpec, tc.spec.Cluster) {
 			tests = append(tests, tc)
 		}
 	}

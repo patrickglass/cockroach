@@ -54,7 +54,7 @@ func TestDescriptorsMatchingTargets(t *testing.T) {
 			return catalogkv.NewBuilderWithMVCCTimestamp(descProto, ts1).BuildImmutable()
 		}
 		mkDB := func(id descpb.ID, name string) catalog.Descriptor {
-			return dbdesc.NewInitial(id, name, security.AdminRoleName())
+			return &dbdesc.NewInitial(id, name, security.AdminRoleName()).Immutable
 		}
 		mkTyp := func(desc typDesc) catalog.Descriptor {
 			// Set a default parent schema for the type descriptors.
@@ -171,16 +171,16 @@ func TestDescriptorsMatchingTargets(t *testing.T) {
 		err             string
 	}{
 		{"", "DATABASE system", []string{"system", "foo", "bar"}, []string{"system"}, ``},
-		{"", "DATABASE system, noexist", nil, nil, `database "noexist" does not exist`},
+		{"", "DATABASE system, noexist", nil, nil, `unknown database "noexist"`},
 		{"", "DATABASE system, system", []string{"system", "foo", "bar"}, []string{"system"}, ``},
 		{"", "DATABASE data", []string{"data", "baz"}, []string{"data"}, ``},
 		{"", "DATABASE system, data", []string{"system", "foo", "bar", "data", "baz"}, []string{"data", "system"}, ``},
-		{"", "DATABASE system, data, noexist", nil, nil, `database "noexist" does not exist`},
+		{"", "DATABASE system, data, noexist", nil, nil, `unknown database "noexist"`},
 		{"system", "DATABASE system", []string{"system", "foo", "bar"}, []string{"system"}, ``},
-		{"system", "DATABASE system, noexist", nil, nil, `database "noexist" does not exist`},
+		{"system", "DATABASE system, noexist", nil, nil, `unknown database "noexist"`},
 		{"system", "DATABASE data", []string{"data", "baz"}, []string{"data"}, ``},
 		{"system", "DATABASE system, data", []string{"system", "foo", "bar", "data", "baz"}, []string{"data", "system"}, ``},
-		{"system", "DATABASE system, data, noexist", nil, nil, `database "noexist" does not exist`},
+		{"system", "DATABASE system, data, noexist", nil, nil, `unknown database "noexist"`},
 
 		{"", "TABLE foo", nil, nil, `table "foo" does not exist`},
 		{"system", "TABLE foo", []string{"system", "foo"}, nil, ``},
@@ -256,7 +256,7 @@ func TestDescriptorsMatchingTargets(t *testing.T) {
 			targets := stmt.AST.(*tree.Grant).Targets
 
 			matched, err := DescriptorsMatchingTargets(context.Background(),
-				test.sessionDatabase, searchPath, descriptors, targets, hlc.Timestamp{})
+				test.sessionDatabase, searchPath, descriptors, targets)
 			if test.err != "" {
 				if !testutils.IsError(err, test.err) {
 					t.Fatalf("expected error matching '%v', but got '%v'", test.err, err)

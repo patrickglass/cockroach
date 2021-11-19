@@ -21,9 +21,35 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
-// ValidatePartialIndexPredicate verifies that an expression is a valid partial
-// index predicate. If the expression is valid, it returns the serialized
-// expression with the columns dequalified.
+// IndexPredicateValidator validates that an expression is a valid partial index
+// predicate. See Validate for more details.
+type IndexPredicateValidator struct {
+	ctx       context.Context
+	tableName tree.TableName
+	desc      catalog.TableDescriptor
+	semaCtx   *tree.SemaContext
+}
+
+// MakeIndexPredicateValidator returns an IndexPredicateValidator struct that
+// can be used to validate partial index predicates. See Validate for more
+// details.
+func MakeIndexPredicateValidator(
+	ctx context.Context,
+	tableName tree.TableName,
+	desc catalog.TableDescriptor,
+	semaCtx *tree.SemaContext,
+) IndexPredicateValidator {
+	return IndexPredicateValidator{
+		ctx:       ctx,
+		tableName: tableName,
+		desc:      desc,
+		semaCtx:   semaCtx,
+	}
+}
+
+// Validate verifies that an expression is a valid partial index predicate. If
+// the expression is valid, it returns the serialized expression with the
+// columns dequalified.
 //
 // A predicate expression is valid if all of the following are true:
 //
@@ -33,22 +59,16 @@ import (
 //   - It does not include non-immutable, aggregate, window, or set returning
 //     functions.
 //
-func ValidatePartialIndexPredicate(
-	ctx context.Context,
-	desc catalog.TableDescriptor,
-	e tree.Expr,
-	tn *tree.TableName,
-	semaCtx *tree.SemaContext,
-) (string, error) {
-	expr, _, _, err := DequalifyAndValidateExpr(
-		ctx,
-		desc,
+func (v *IndexPredicateValidator) Validate(e tree.Expr) (string, error) {
+	expr, _, err := DequalifyAndValidateExpr(
+		v.ctx,
+		v.desc,
 		e,
 		types.Bool,
 		"index predicate",
-		semaCtx,
+		v.semaCtx,
 		tree.VolatilityImmutable,
-		tn,
+		&v.tableName,
 	)
 	if err != nil {
 		return "", err
@@ -67,8 +87,8 @@ func ValidatePartialIndexPredicate(
 // that are added previously in the same transaction.
 func MakePartialIndexExprs(
 	ctx context.Context,
-	indexes []catalog.Index,
-	cols []catalog.Column,
+	indexes []*descpb.IndexDescriptor,
+	cols []descpb.ColumnDescriptor,
 	tableDesc catalog.TableDescriptor,
 	evalCtx *tree.EvalContext,
 	semaCtx *tree.SemaContext,
@@ -87,13 +107,13 @@ func MakePartialIndexExprs(
 	exprs := make(map[descpb.IndexID]tree.TypedExpr, partialIndexCount)
 
 	tn := tree.NewUnqualifiedTableName(tree.Name(tableDesc.GetName()))
-	nr := newNameResolver(evalCtx, tableDesc.GetID(), tn, cols)
+	nr := newNameResolver(evalCtx, tableDesc.GetID(), tn, columnDescriptorsToPtrs(cols))
 	nr.addIVarContainerToSemaCtx(semaCtx)
 
 	var txCtx transform.ExprTransformContext
 	for _, idx := range indexes {
 		if idx.IsPartial() {
-			expr, err := parser.ParseExpr(idx.GetPredicate())
+			expr, err := parser.ParseExpr(idx.Predicate)
 			if err != nil {
 				return nil, refColIDs, err
 			}
@@ -120,7 +140,7 @@ func MakePartialIndexExprs(
 				return nil, refColIDs, err
 			}
 
-			exprs[idx.GetID()] = typedExpr
+			exprs[idx.ID] = typedExpr
 		}
 	}
 

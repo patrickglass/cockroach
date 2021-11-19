@@ -15,7 +15,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -24,7 +24,7 @@ import (
 
 type commentOnDatabaseNode struct {
 	n      *tree.CommentOnDatabase
-	dbDesc catalog.DatabaseDescriptor
+	dbDesc *dbdesc.Immutable
 }
 
 // CommentOnDatabase add comment on a database.
@@ -41,7 +41,7 @@ func (p *planner) CommentOnDatabase(
 		return nil, err
 	}
 
-	dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(ctx, p.txn,
+	_, dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(ctx, p.txn,
 		string(n.Name), tree.DatabaseLookupFlags{Required: true})
 	if err != nil {
 		return nil, err

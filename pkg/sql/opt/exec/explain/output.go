@@ -147,14 +147,12 @@ func (ob *OutputBuilder) Expr(key string, expr tree.TypedExpr, varColumns colinf
 	if ob.flags.HideValues {
 		flags |= tree.FmtHideConstants
 	}
-	f := tree.NewFmtCtx(
-		flags,
-		tree.FmtIndexedVarFormat(func(ctx *tree.FmtCtx, idx int) {
-			// Ensure proper quoting.
-			n := tree.Name(varColumns[idx].Name)
-			ctx.WriteString(n.String())
-		}),
-	)
+	f := tree.NewFmtCtx(flags)
+	f.SetIndexedVarFormat(func(ctx *tree.FmtCtx, idx int) {
+		// Ensure proper quoting.
+		n := tree.Name(varColumns[idx].Name)
+		ctx.WriteString(n.String())
+	})
 	f.FormatNode(expr)
 	ob.AddField(key, f.CloseAndGetString())
 }
@@ -351,7 +349,7 @@ func (ob *OutputBuilder) AddPlanningTime(delta time.Duration) {
 	if ob.flags.Redact.Has(RedactVolatile) {
 		delta = 10 * time.Microsecond
 	}
-	ob.AddTopLevelField("planning time", string(humanizeutil.Duration(delta)))
+	ob.AddTopLevelField("planning time", humanizeutil.Duration(delta))
 }
 
 // AddExecutionTime adds a top-level execution time field. Cannot be called
@@ -360,7 +358,7 @@ func (ob *OutputBuilder) AddExecutionTime(delta time.Duration) {
 	if ob.flags.Redact.Has(RedactVolatile) {
 		delta = 100 * time.Microsecond
 	}
-	ob.AddTopLevelField("execution time", string(humanizeutil.Duration(delta)))
+	ob.AddTopLevelField("execution time", humanizeutil.Duration(delta))
 }
 
 // AddKVReadStats adds a top-level field for the bytes/rows read from KV.
@@ -372,8 +370,7 @@ func (ob *OutputBuilder) AddKVReadStats(rows, bytes int64) {
 
 // AddKVTime adds a top-level field for the cumulative time spent in KV.
 func (ob *OutputBuilder) AddKVTime(kvTime time.Duration) {
-	ob.AddRedactableTopLevelField(
-		RedactVolatile, "cumulative time spent in KV", string(humanizeutil.Duration(kvTime)))
+	ob.AddRedactableTopLevelField(RedactVolatile, "cumulative time spent in KV", humanizeutil.Duration(kvTime))
 }
 
 // AddContentionTime adds a top-level field for the cumulative contention time.
@@ -381,14 +378,14 @@ func (ob *OutputBuilder) AddContentionTime(contentionTime time.Duration) {
 	ob.AddRedactableTopLevelField(
 		RedactVolatile,
 		"cumulative time spent due to contention",
-		string(humanizeutil.Duration(contentionTime)),
+		humanizeutil.Duration(contentionTime),
 	)
 }
 
 // AddMaxMemUsage adds a top-level field for the memory used by the query.
 func (ob *OutputBuilder) AddMaxMemUsage(bytes int64) {
 	ob.AddRedactableTopLevelField(
-		RedactVolatile, "maximum memory usage", string(humanizeutil.IBytes(bytes)),
+		RedactVolatile, "maximum memory usage", humanizeutil.IBytes(bytes),
 	)
 }
 
@@ -399,19 +396,6 @@ func (ob *OutputBuilder) AddNetworkStats(messages, bytes int64) {
 		"network usage",
 		fmt.Sprintf("%s (%s messages)", humanizeutil.IBytes(bytes), humanizeutil.Count(uint64(messages))),
 	)
-}
-
-// AddMaxDiskUsage adds a top-level field for the sql temporary disk space used
-// by the query. If we're redacting leave this out to keep logic test output
-// independent of disk spilling. Disk spilling is controlled by a metamorphic
-// constant so it may or may not occur randomly so it makes sense to omit this
-// information entirely if we're redacting. Since disk spilling is rare we only
-// include this field is bytes is greater than zero.
-func (ob *OutputBuilder) AddMaxDiskUsage(bytes int64) {
-	if !ob.flags.Redact.Has(RedactVolatile) && bytes > 0 {
-		ob.AddTopLevelField("max sql temp disk usage",
-			string(humanizeutil.IBytes(bytes)))
-	}
 }
 
 // AddRegionsStats adds a top-level field for regions executed on statistics.

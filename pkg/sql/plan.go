@@ -47,7 +47,7 @@ func (r *runParams) EvalContext() *tree.EvalContext {
 
 // SessionData gives convenient access to the runParam's SessionData.
 func (r *runParams) SessionData() *sessiondata.SessionData {
-	return r.extendedEvalCtx.SessionData()
+	return r.extendedEvalCtx.SessionData
 }
 
 // ExecCfg gives convenient access to the runParam's ExecutorConfig.
@@ -212,7 +212,6 @@ var _ planNode = &showFingerprintsNode{}
 var _ planNode = &showTraceNode{}
 var _ planNode = &sortNode{}
 var _ planNode = &splitNode{}
-var _ planNode = &topKNode{}
 var _ planNode = &unsplitNode{}
 var _ planNode = &unsplitAllNode{}
 var _ planNode = &truncateNode{}
@@ -278,10 +277,6 @@ var _ planNodeSpooled = &spoolNode{}
 type flowInfo struct {
 	typ     planComponentType
 	diagram execinfrapb.FlowDiagram
-	// explainVec and explainVecVerbose are only populated when collecting a
-	// statement bundle when the plan was vectorized.
-	explainVec        []string
-	explainVecVerbose []string
 	// flowsMetadata stores metadata from flows that will be used by
 	// execstats.TraceAnalyzer.
 	flowsMetadata *execstats.FlowsMetadata
@@ -310,6 +305,9 @@ type planTop struct {
 
 	// flags is populated during planning and execution.
 	flags planFlags
+
+	// execErr retains the last execution error, if any.
+	execErr error
 
 	// avoidBuffering, when set, causes the execution to avoid buffering
 	// results.
@@ -414,10 +412,6 @@ type planComponents struct {
 
 	// plan for the main query.
 	main planMaybePhysical
-
-	// mainRowCount is the estimated number of rows that the main query will
-	// return, negative if the stats weren't available to make a good estimate.
-	mainRowCount int64
 
 	// cascades contains metadata for all cascades.
 	cascades []cascadeMetadata
@@ -594,8 +588,8 @@ const (
 	planFlagContainsFullTableScan
 
 	// planFlagContainsFullIndexScan is set if the plan involves an unconstrained
-	// non-partial secondary index scan. This could be an unconstrainted scan of
-	// any cardinality.
+	// secondary index scan. This could be an unconstrainted scan of any
+	// cardinality.
 	planFlagContainsFullIndexScan
 
 	// planFlagContainsLargeFullTableScan is set if the plan involves an
@@ -604,12 +598,9 @@ const (
 	planFlagContainsLargeFullTableScan
 
 	// planFlagContainsLargeFullIndexScan is set if the plan involves an
-	// unconstrained non-partial secondary index scan estimated to read more than
+	// unconstrained secondary index scan estimated to read more than
 	// large_full_scan_rows (or without available stats).
 	planFlagContainsLargeFullIndexScan
-
-	// planFlagContainsMutation is set if the plan has any mutations.
-	planFlagContainsMutation
 )
 
 func (pf planFlags) IsSet(flag planFlags) bool {
@@ -618,10 +609,6 @@ func (pf planFlags) IsSet(flag planFlags) bool {
 
 func (pf *planFlags) Set(flag planFlags) {
 	*pf |= flag
-}
-
-func (pf *planFlags) Unset(flag planFlags) {
-	*pf &= ^flag
 }
 
 // IsDistributed returns true if either the fully or the partially distributed

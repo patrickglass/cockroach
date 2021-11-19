@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
 
@@ -87,13 +86,11 @@ func RunWithTimeout(
 ) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	start := timeutil.Now()
 	err := fn(ctx)
 	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		err = &TimeoutError{
 			operation: op,
-			timeout:   timeout,
-			took:      timeutil.Since(start),
+			duration:  timeout,
 			cause:     err,
 		}
 	}

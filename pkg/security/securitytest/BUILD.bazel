@@ -5,7 +5,6 @@ go_library(
     name = "securitytest",
     srcs = [
         "securitytest.go",
-        "testcerts.go",
         ":embedded",  # keep
     ],
     importpath = "github.com/cockroachdb/cockroach/pkg/security/securitytest",
@@ -25,12 +24,6 @@ bindata(
             "test_certs/regenerate.sh",
         ],
     ),
-    extra_args = [
-        "-mode",
-        "0600",
-        "-modtime",
-        "1400000000",
-    ],
-    metadata = True,
+    extra_args = ["."],
     package = "securitytest",
 )

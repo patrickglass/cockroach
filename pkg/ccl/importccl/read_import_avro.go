@@ -16,7 +16,6 @@ import (
 	"io"
 	"unicode/utf8"
 
-	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
@@ -25,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/linkedin/goavro/v2"
 )
@@ -187,7 +187,7 @@ func (a *avroConsumer) convertNative(x interface{}, conv *row.DatumRowConverter)
 		typ := conv.VisibleColTypes[idx]
 		avroT, ok := familyToAvroT[typ.Family()]
 		if !ok {
-			return fmt.Errorf("cannot convert avro value %v to col %s", v, conv.VisibleCols[idx].GetType().Name())
+			return fmt.Errorf("cannot convert avro value %v to col %s", v, conv.VisibleCols[idx].Type.Name())
 		}
 
 		datum, err := nativeToDatum(v, typ, avroT, conv.EvalCtx)
@@ -212,7 +212,7 @@ func (a *avroConsumer) FillDatums(
 	for i := range conv.Datums {
 		if conv.TargetColOrds.Contains(i) && conv.Datums[i] == nil {
 			if a.strict {
-				return fmt.Errorf("field %s was not set in the avro import", conv.VisibleCols[i].GetName())
+				return fmt.Errorf("field %s was not set in the avro import", conv.VisibleCols[i].Name)
 			}
 			conv.Datums[i] = tree.DNull
 		}
@@ -453,7 +453,6 @@ type avroInputReader struct {
 var _ inputConverter = &avroInputReader{}
 
 func newAvroInputReader(
-	semaCtx *tree.SemaContext,
 	kvCh chan row.KVBatch,
 	tableDesc catalog.TableDescriptor,
 	avroOpts roachpb.AvroOptions,
@@ -464,7 +463,6 @@ func newAvroInputReader(
 
 	return &avroInputReader{
 		importContext: &parallelImportContext{
-			semaCtx:    semaCtx,
 			walltime:   walltime,
 			numWorkers: parallelism,
 			evalCtx:    evalCtx,

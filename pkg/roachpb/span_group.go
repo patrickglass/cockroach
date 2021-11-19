@@ -41,21 +41,6 @@ func (g *SpanGroup) Add(spans ...Span) bool {
 	return ret
 }
 
-// Sub will attempt to subtract the provided Spans from the SpanGroup,
-// returning whether the subtraction increased the span of the group
-// or not.
-func (g *SpanGroup) Sub(spans ...Span) bool {
-	if len(spans) == 0 {
-		return false
-	}
-	ret := false
-	g.checkInit()
-	for _, span := range spans {
-		ret = g.rg.Sub(s2r(span)) || ret
-	}
-	return ret
-}
-
 // Contains returns whether or not the provided Key is contained
 // within the group of Spans in the SpanGroup.
 func (g *SpanGroup) Contains(k Key) bool {
@@ -67,20 +52,6 @@ func (g *SpanGroup) Contains(k Key) bool {
 		// Use the next key since range-ends are exclusive.
 		End: interval.Comparable(k.Next()),
 	})
-}
-
-// Encloses returns whether the provided Span is fully conained within the group
-// of Spans in the SpanGroup
-func (g *SpanGroup) Encloses(spans ...Span) bool {
-	if g.rg == nil {
-		return false
-	}
-	for _, span := range spans {
-		if !g.rg.Encloses(s2r(span)) {
-			return false
-		}
-	}
-	return true
 }
 
 // Len returns the number of Spans currently within the SpanGroup.

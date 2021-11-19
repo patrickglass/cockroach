@@ -26,8 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -41,17 +39,16 @@ import (
 func validateCheckExpr(
 	ctx context.Context,
 	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
 	exprStr string,
 	tableDesc *tabledesc.Mutable,
 	ie *InternalExecutor,
 	txn *kv.Txn,
 ) error {
-	expr, err := schemaexpr.FormatExprForDisplay(ctx, tableDesc, exprStr, semaCtx, sessionData, tree.FmtParsable)
+	expr, err := schemaexpr.FormatExprForDisplay(ctx, tableDesc, exprStr, semaCtx, tree.FmtParsable)
 	if err != nil {
 		return err
 	}
-	colSelectors := tabledesc.ColumnsSelectors(tableDesc.AccessibleColumns())
+	colSelectors := tabledesc.ColumnsSelectors(tableDesc.PublicColumns())
 	columns := tree.AsStringWithFlags(&colSelectors, tree.FmtSerializable)
 	queryStr := fmt.Sprintf(`SELECT %s FROM [%d AS t] WHERE NOT (%s) LIMIT 1`, columns, tableDesc.GetID(), exprStr)
 	log.Infof(ctx, "validating check constraint %q with query %q", expr, queryStr)
@@ -63,7 +60,7 @@ func validateCheckExpr(
 	if rows.Len() > 0 {
 		return pgerror.Newf(pgcode.CheckViolation,
 			"validation of CHECK %q failed on row: %s",
-			expr, labeledRowValues(tableDesc.AccessibleColumns(), rows))
+			expr, labeledRowValues(tableDesc.PublicColumns(), rows))
 	}
 	return nil
 }
@@ -99,8 +96,8 @@ func matchFullUnacceptableKeyQuery(
 		srcNotNullExistsClause[i] = fmt.Sprintf("%s IS NOT NULL", srcCols[i])
 	}
 
-	for i := 0; i < srcTbl.GetPrimaryIndex().NumKeyColumns(); i++ {
-		id := srcTbl.GetPrimaryIndex().GetKeyColumnID(i)
+	for i := 0; i < srcTbl.GetPrimaryIndex().NumColumns(); i++ {
+		id := srcTbl.GetPrimaryIndex().GetColumnID(i)
 		alreadyPresent := false
 		for _, otherID := range fk.OriginColumnIDs {
 			if id == otherID {
@@ -164,8 +161,8 @@ func nonMatchingRowQuery(
 		return "", nil, err
 	}
 	// Get primary key columns not included in the FK
-	for i := 0; i < srcTbl.GetPrimaryIndex().NumKeyColumns(); i++ {
-		pkColID := srcTbl.GetPrimaryIndex().GetKeyColumnID(i)
+	for i := 0; i < srcTbl.GetPrimaryIndex().NumColumns(); i++ {
+		pkColID := srcTbl.GetPrimaryIndex().GetColumnID(i)
 		found := false
 		for _, id := range fk.OriginColumnIDs {
 			if pkColID == id {
@@ -373,7 +370,7 @@ func validateUniqueConstraint(
 	constraintName string,
 	columnIDs []descpb.ColumnID,
 	pred string,
-	ie sqlutil.InternalExecutor,
+	ie *InternalExecutor,
 	txn *kv.Txn,
 ) error {
 	query, colNames, err := duplicateRowQuery(
@@ -449,7 +446,6 @@ type checkSet = util.FastIntSet
 func checkMutationInput(
 	ctx context.Context,
 	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
 	tabDesc catalog.TableDescriptor,
 	checkOrds checkSet,
 	checkVals tree.Datums,
@@ -471,9 +467,7 @@ func checkMutationInput(
 		} else if !res && checkVals[colIdx] != tree.DNull {
 			// Failed to satisfy CHECK constraint, so unwrap the serialized
 			// check expression to display to the user.
-			expr, err := schemaexpr.FormatExprForDisplay(
-				ctx, tabDesc, checks[i].Expr, semaCtx, sessionData, tree.FmtParsable,
-			)
+			expr, err := schemaexpr.FormatExprForDisplay(ctx, tabDesc, checks[i].Expr, semaCtx, tree.FmtParsable)
 			if err != nil {
 				// If we ran into an error trying to read the check constraint, wrap it
 				// and return.

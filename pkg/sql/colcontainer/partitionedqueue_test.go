@@ -97,14 +97,7 @@ func TestPartitionedDiskQueue(t *testing.T) {
 		batch = testAllocator.NewMemBatchWithMaxCapacity(typs)
 		sem   = &colexecop.TestingSemaphore{}
 	)
-	batchSize := coldata.BatchSize()
-	if batchSize > 1024 {
-		// Use batch size not larger than the default production value (with
-		// larger batch sizes different enqueues below will be written into
-		// separate files).
-		batchSize = 1024
-	}
-	batch.SetLength(batchSize)
+	batch.SetLength(coldata.BatchSize())
 
 	queueCfg, cleanup := colcontainerutils.NewTestingDiskQueueCfg(t, true /* inMem */)
 	defer cleanup()
@@ -153,7 +146,7 @@ func TestPartitionedDiskQueueSimulatedExternal(t *testing.T) {
 		ctx    = context.Background()
 		typs   = []*types.T{types.Int}
 		batch  = testAllocator.NewMemBatchWithMaxCapacity(typs)
-		rng, _ = randutil.NewTestRand()
+		rng, _ = randutil.NewPseudoRand()
 		// maxPartitions is in [1, 10]. The maximum partitions on a single level.
 		maxPartitions = 1 + rng.Intn(10)
 		// numRepartitions is in [1, 5].
@@ -171,7 +164,8 @@ func TestPartitionedDiskQueueSimulatedExternal(t *testing.T) {
 
 	// Sort simulates the use of a PartitionedDiskQueue during an external sort.
 	t.Run(fmt.Sprintf("Sort/maxPartitions=%d/numRepartitions=%d", maxPartitions, numRepartitions), func(t *testing.T) {
-		queueCfg.SetCacheMode(colcontainer.DiskQueueCacheModeReuseCache)
+		queueCfg.CacheMode = colcontainer.DiskQueueCacheModeReuseCache
+		queueCfg.SetDefaultBufferSizeBytesForCacheMode()
 		// Creating a new testing semaphore will assert that no more than
 		// maxPartitions+1 are created. The +1 is the file descriptor of the
 		// new partition being written to when closedForWrites from maxPartitions
@@ -246,7 +240,8 @@ func TestPartitionedDiskQueueSimulatedExternal(t *testing.T) {
 	})
 
 	t.Run(fmt.Sprintf("HashJoin/maxPartitions=%d/numRepartitions=%d", maxPartitions, numRepartitions), func(t *testing.T) {
-		queueCfg.SetCacheMode(colcontainer.DiskQueueCacheModeClearAndReuseCache)
+		queueCfg.CacheMode = colcontainer.DiskQueueCacheModeClearAndReuseCache
+		queueCfg.SetDefaultBufferSizeBytesForCacheMode()
 		// Double maxPartitions to get an even number, half for the left input, half
 		// for the right input. We'll consider the even index the left side and the
 		// next partition index the right side.

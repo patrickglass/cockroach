@@ -22,7 +22,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -47,7 +46,7 @@ func TestExplainAnalyzeDebug(t *testing.T) {
 CREATE SCHEMA s;
 CREATE TABLE s.a (a INT PRIMARY KEY);`)
 
-	base := "statement.sql trace.json trace.txt trace-jaeger.json env.sql"
+	base := "statement.txt trace.json trace.txt trace-jaeger.json env.sql"
 	plans := "schema.sql opt.txt opt-v.txt opt-vv.txt plan.txt"
 
 	// Set a small chunk size to test splitting into chunks. The bundle files are
@@ -61,7 +60,7 @@ CREATE TABLE s.a (a INT PRIMARY KEY);`)
 		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) SELECT * FROM abc WHERE c=1")
 		checkBundle(
 			t, fmt.Sprint(rows), "public.abc",
-			base, plans, "stats-defaultdb.public.abc.sql", "distsql.html vec.txt vec-v.txt",
+			base, plans, "stats-defaultdb.public.abc.sql", "distsql.html",
 		)
 	})
 
@@ -70,7 +69,7 @@ CREATE TABLE s.a (a INT PRIMARY KEY);`)
 		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) SELECT EXISTS (SELECT * FROM abc WHERE c=1)")
 		checkBundle(
 			t, fmt.Sprint(rows), "public.abc",
-			base, plans, "stats-defaultdb.public.abc.sql", "distsql-2-main-query.html distsql-1-subquery.html vec-1-subquery-v.txt vec-1-subquery.txt vec-2-main-query-v.txt vec-2-main-query.txt",
+			base, plans, "stats-defaultdb.public.abc.sql", "distsql-2-main-query.html distsql-1-subquery.html",
 		)
 	})
 
@@ -78,7 +77,7 @@ CREATE TABLE s.a (a INT PRIMARY KEY);`)
 		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) SELECT * FROM s.a WHERE a=1")
 		checkBundle(
 			t, fmt.Sprint(rows), "s.a",
-			base, plans, "stats-defaultdb.s.a.sql", "distsql.html vec.txt vec-v.txt",
+			base, plans, "stats-defaultdb.s.a.sql", "distsql.html",
 		)
 	})
 
@@ -117,29 +116,8 @@ CREATE TABLE s.a (a INT PRIMARY KEY);`)
 		}
 		checkBundle(
 			t, rowsBuf.String(), "public.abc",
-			base, plans, "stats-defaultdb.public.abc.sql", "distsql.html vec.txt vec-v.txt",
+			base, plans, "stats-defaultdb.public.abc.sql", "distsql.html",
 		)
-	})
-
-	// This is a regression test for the situation where wrapped into the
-	// vectorized flow planNodes in the postqueries were messed up because the
-	// generation of EXPLAIN (VEC) diagrams modified planNodeToRowSources in
-	// place (#62261).
-	t.Run("insert with postquery", func(t *testing.T) {
-		// We need to disable the insert fast path so that postqueries are
-		// planned.
-		r.Exec(t, `SET enable_insert_fast_path = false;
-CREATE TABLE promos(id SERIAL PRIMARY KEY);
-INSERT INTO promos VALUES (642606224929619969);
-CREATE TABLE users(id UUID DEFAULT gen_random_uuid() PRIMARY KEY, promo_id INT REFERENCES promos(id));
-`)
-		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) INSERT INTO users (promo_id) VALUES (642606224929619969);")
-		checkBundle(
-			t, fmt.Sprint(rows), "public.users", base, plans,
-			"stats-defaultdb.public.users.sql", "stats-defaultdb.public.promos.sql",
-			"distsql-1-main-query.html distsql-2-postquery.html vec-1-main-query-v.txt vec-1-main-query.txt vec-2-postquery-v.txt vec-2-postquery.txt",
-		)
-		r.Exec(t, `RESET enable_insert_fast_path;`)
 	})
 
 	t.Run("basic when tracing already enabled", func(t *testing.T) {
@@ -148,7 +126,7 @@ CREATE TABLE users(id UUID DEFAULT gen_random_uuid() PRIMARY KEY, promo_id INT R
 		rows := r.QueryStr(t, "EXPLAIN ANALYZE (DEBUG) SELECT * FROM abc WHERE c=1")
 		checkBundle(
 			t, fmt.Sprint(rows), "public.abc",
-			base, plans, "stats-defaultdb.public.abc.sql", "distsql.html vec.txt vec-v.txt",
+			base, plans, "stats-defaultdb.public.abc.sql", "distsql.html",
 		)
 	})
 }
@@ -158,8 +136,6 @@ CREATE TABLE users(id UUID DEFAULT gen_random_uuid() PRIMARY KEY, promo_id INT R
 // arbitrary number of strings; each string contains one or more filenames
 // separated by a space.
 func checkBundle(t *testing.T, text, tableName string, expectedFiles ...string) {
-	httpClient := httputil.NewClientWithTimeout(30 * time.Second)
-
 	t.Helper()
 	reg := regexp.MustCompile("http://[a-zA-Z0-9.:]*/_admin/v1/stmtbundle/[0-9]*")
 	url := reg.FindString(text)
@@ -167,7 +143,7 @@ func checkBundle(t *testing.T, text, tableName string, expectedFiles ...string) 
 		t.Fatalf("couldn't find URL in response '%s'", text)
 	}
 	// Download the zip to a BytesBuffer.
-	resp, err := httpClient.Get(context.Background(), url)
+	resp, err := httputil.Get(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)
 	}

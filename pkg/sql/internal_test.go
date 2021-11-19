@@ -28,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqltestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -85,7 +84,7 @@ func TestInternalExecutor(t *testing.T) {
 	}
 
 	// Reset the sequence to a clear value. Next nextval() will return 2.
-	if _, err := db.Exec("SELECT setval('test.seq', 1, true)"); err != nil {
+	if _, err := db.Exec("SELECT setval('test.seq', 1)"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,7 +160,7 @@ func TestInternalFullTableScan(t *testing.T) {
 				Database:  "db",
 				UserProto: security.RootUserName().EncodeProto(),
 			},
-			LocalOnlySessionData: sessiondatapb.LocalOnlySessionData{
+			LocalOnlySessionData: sessiondata.LocalOnlySessionData{
 				DisallowFullTableScans: true,
 			},
 			SequenceState: &sessiondata.SequenceState{},
@@ -170,33 +169,6 @@ func TestInternalFullTableScan(t *testing.T) {
 	// Internal queries that perform full table scans shouldn't fail because of
 	// the setting above.
 	_, err = ie.Exec(ctx, "full-table-scan-select", nil, "SELECT * FROM db.t")
-	require.NoError(t, err)
-}
-
-// Test for regression https://github.com/cockroachdb/cockroach/issues/65523
-func TestInternalStmtFingerprintLimit(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	params, _ := tests.CreateTestServerParams()
-	s, db, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(ctx)
-
-	_, err := db.Exec("SET CLUSTER SETTING sql.metrics.max_mem_txn_fingerprints = 0;")
-	require.NoError(t, err)
-
-	_, err = db.Exec("SET CLUSTER SETTING sql.metrics.max_mem_stmt_fingerprints = 0;")
-	require.NoError(t, err)
-
-	ie := sql.MakeInternalExecutor(
-		ctx,
-		s.(*server.TestServer).Server.PGServer().SQLServer,
-		sql.MemoryMetrics{},
-		s.ExecutorConfig().(sql.ExecutorConfig).Settings,
-	)
-
-	_, err = ie.Exec(ctx, "stmt-exceeds-fingerprint-limit", nil, "SELECT 1")
 	require.NoError(t, err)
 }
 
@@ -498,7 +470,7 @@ func testInternalExecutorAppNameInitialization(
 	}
 	select {
 	case err := <-errChan:
-		if !sqltestutils.IsClientSideQueryCanceledErr(err) {
+		if !isClientsideQueryCanceledErr(err) {
 			t.Fatal(err)
 		}
 	case <-time.After(time.Second * 5):
@@ -527,9 +499,8 @@ func TestInternalExecutorPushDetectionInTxn(t *testing.T) {
 
 	ctx := context.Background()
 	params, _ := tests.CreateTestServerParams()
-	si, _, db := serverutils.StartServer(t, params)
-	defer si.Stopper().Stop(ctx)
-	s := si.(*server.TestServer)
+	s, _, db := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(ctx)
 
 	// Setup a pushed txn.
 	txn := db.NewTxn(ctx, "test")
@@ -545,13 +516,13 @@ func TestInternalExecutorPushDetectionInTxn(t *testing.T) {
 	txn.CommitTimestamp()
 	require.True(t, txn.IsSerializablePushAndRefreshNotPossible())
 
-	tr := s.Tracer()
-	execCtx, getRecAndFinish := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
-	defer getRecAndFinish()
+	tr := s.Tracer().(*tracing.Tracer)
+	execCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, tr, "test-recording")
+	defer cancel()
 	ie := s.InternalExecutor().(*sql.InternalExecutor)
 	_, err = ie.Exec(execCtx, "test", txn, "select 42")
 	require.NoError(t, err)
-	require.NoError(t, testutils.MatchInOrder(getRecAndFinish().String(),
+	require.NoError(t, testutils.MatchInOrder(collect().String(),
 		"push detected for non-refreshable txn but auto-retry not possible"))
 	require.NotEqual(t, txn.ReadTimestamp(), txn.ProvisionalCommitTimestamp(), "expect txn wts to be pushed")
 

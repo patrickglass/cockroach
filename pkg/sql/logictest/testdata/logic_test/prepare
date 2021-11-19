@@ -1,4 +1,4 @@
-# LogicTest: local
+# LogicTest: local !3node-tenant(52567)
 
 ## Tests for ensuring that prepared statements can't get overwritten and for
 ## deallocate and deallocate all.
@@ -1019,7 +1019,7 @@ ap35145
 statement ok
 DROP DATABASE d35145
 
-query error pgcode 3D000 database "d35145" does not exist
+query error database "d35145" does not exist
 EXECUTE display_appname
 
 statement ok
@@ -1035,7 +1035,7 @@ ap35145
 statement ok
 CREATE DATABASE d35145_2; SET database = d35145_2; DROP DATABASE d35145_2
 
-query error pgcode 3D000 database "d35145_2" does not exist
+query error database "d35145_2" does not exist
 EXECUTE display_appname
 
 # Check what happens when the stmt is executed over no db whatsoever.
@@ -1380,13 +1380,3 @@ DROP TABLE greeting_table
 # drop the type using prepared statement.
 statement ok
 EXECUTE enum_drop
-
-# Regression test for #64765.
-statement ok
-CREATE TABLE t64765 (x INT PRIMARY KEY, y INT, z INT)
-
-statement ok
-PREPARE q64765 as SELECT * FROM t64765 WHERE x = $1 AND y = $2
-
-statement ok
-EXECUTE q64765(1, 1)

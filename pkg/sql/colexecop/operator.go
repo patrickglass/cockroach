@@ -24,19 +24,23 @@ import (
 
 // Operator is a column vector operator that produces a Batch as output.
 type Operator interface {
-	// Init initializes this operator. It will be called once at operator setup
-	// time. Second, third, etc calls should be noops. If an operator has any
-	// input operators, it's responsible for calling Init on all of those input
-	// operators as well.
-	//
-	// Canceling the provided context results in forceful termination of
-	// execution. The operators are expected to hold onto the provided context
-	// (and derive a new one if needed) that is then used for Next(),
-	// DrainMeta(), and Close() calls (when applicable).
+	// Init initializes this operator. Will be called once at operator setup
+	// time. If an operator has an input operator, it's responsible for calling
+	// Init on that input operator as well.
 	//
 	// It might panic with an expected error, so there must be a "root"
 	// component that will catch that panic.
-	Init(ctx context.Context)
+	// TODO(yuzefovich): we might need to clarify whether it is ok to call
+	// Init() multiple times before the first call to Next(). It is possible to
+	// hit the memory limit during Init(), and a disk-backed operator needs to
+	// make sure that the input has been initialized. We could also in case that
+	// Init() doesn't succeed for bufferingInMemoryOperator - which should only
+	// happen when 'workmem' setting is too low - just bail, even if we have
+	// disk spilling for that operator.
+	// TODO(yuzefovich): we probably should move ctx argument from Next into
+	// Init, the operator will then capture the context and use it (or the one
+	// derived from it) in Next and DrainMeta (when applicable) calls.
+	Init()
 
 	// Next returns the next Batch from this operator. Once the operator is
 	// finished, it will return a Batch with length 0. Subsequent calls to
@@ -44,10 +48,12 @@ type Operator interface {
 	//
 	// Calling Next may invalidate the contents of the last Batch returned by
 	// Next.
+	// Canceling the provided context results in forceful termination of
+	// execution.
 	//
 	// It might panic with an expected error, so there must be a "root"
 	// component that will catch that panic.
-	Next() coldata.Batch
+	Next(context.Context) coldata.Batch
 
 	execinfra.OpNode
 }
@@ -56,7 +62,7 @@ type Operator interface {
 // DrainMeta may not be called concurrently.
 type DrainableOperator interface {
 	Operator
-	MetadataSource
+	execinfrapb.MetadataSource
 }
 
 // KVReader is an operator that performs KV reads.
@@ -72,9 +78,6 @@ type KVReader interface {
 	// GetCumulativeContentionTime returns the amount of time KV reads spent
 	// contending. It must be safe for concurrent use.
 	GetCumulativeContentionTime() time.Duration
-	// GetScanStats returns statistics about the scan that happened during the
-	// KV reads. It must be safe for concurrent use.
-	GetScanStats() execinfra.ScanStats
 }
 
 // ZeroInputNode is an execinfra.OpNode with no inputs.
@@ -131,7 +134,7 @@ type BufferingInMemoryOperator interface {
 	//
 	// Calling ExportBuffered may invalidate the contents of the last batch
 	// returned by ExportBuffered.
-	ExportBuffered(input Operator) coldata.Batch
+	ExportBuffered(ctx context.Context, input Operator) coldata.Batch
 }
 
 // Closer is an object that releases resources when Close is called. Note that
@@ -141,15 +144,7 @@ type BufferingInMemoryOperator interface {
 // project needs to implement this interface so that Close() call could be
 // propagated correctly).
 type Closer interface {
-	// Close releases the resources associated with this Closer. If this Closer
-	// is an Operator, the implementation of Close must be safe to execute even
-	// if Operator.Init wasn't called.
-	//
-	// If this Closer is an execinfra.Releasable, the implementation must be
-	// safe to execute even after Release() was called.
-	// TODO(yuzefovich): refactor this because the Release()'d objects should
-	// not be used anymore.
-	Close() error
+	Close(ctx context.Context) error
 }
 
 // Closers is a slice of Closers.
@@ -160,22 +155,19 @@ type Closers []Closer
 // Note: this method should *only* be used when returning an error doesn't make
 // sense.
 func (c Closers) CloseAndLogOnErr(ctx context.Context, prefix string) {
-	if err := colexecerror.CatchVectorizedRuntimeError(func() {
-		for _, closer := range c {
-			if err := closer.Close(); err != nil && log.V(1) {
-				log.Infof(ctx, "%s: error closing Closer: %v", prefix, err)
-			}
+	prefix += ":"
+	for _, closer := range c {
+		if err := closer.Close(ctx); err != nil && log.V(1) {
+			log.Infof(ctx, "%s error closing Closer: %v", prefix, err)
 		}
-	}); err != nil && log.V(1) {
-		log.Infof(ctx, "%s: runtime error closing the closers: %v", prefix, err)
 	}
 }
 
 // Close closes all Closers and returns the last error (if any occurs).
-func (c Closers) Close() error {
+func (c Closers) Close(ctx context.Context) error {
 	var lastErr error
 	for _, closer := range c {
-		if err := closer.Close(); err != nil {
+		if err := closer.Close(ctx); err != nil {
 			lastErr = err
 		}
 	}
@@ -209,10 +201,10 @@ func NewFeedOperator() *FeedOperator {
 }
 
 // Init implements the colexecop.Operator interface.
-func (FeedOperator) Init(context.Context) {}
+func (FeedOperator) Init() {}
 
 // Next implements the colexecop.Operator interface.
-func (o *FeedOperator) Next() coldata.Batch {
+func (o *FeedOperator) Next(context.Context) coldata.Batch {
 	return o.batch
 }
 
@@ -231,84 +223,36 @@ type NonExplainable interface {
 	nonExplainableMarker()
 }
 
-// InitHelper is a simple struct that helps Operators implement Init() method.
-type InitHelper struct {
-	// Ctx is the context passed on the first call to Init(). If it is nil, then
-	// Init() hasn't been called yet.
-	// NOTE: if a non-nil context is needed, use EnsureCtx() to retrieve it
-	// instead of accessing this field directly.
-	Ctx context.Context
-}
+// OperatorInitStatus indicates whether Init method has already been called on
+// an Operator.
+type OperatorInitStatus int
 
-// Init marks the InitHelper as initialized. If true is returned, this is the
-// first call to Init.
-func (h *InitHelper) Init(ctx context.Context) bool {
-	if h.Ctx != nil {
-		return false
-	}
-	if ctx == nil {
-		colexecerror.InternalError(errors.AssertionFailedf("nil context is passed"))
-	}
-	h.Ctx = ctx
-	return true
-}
+const (
+	// OperatorNotInitialized indicates that Init has not been called yet.
+	OperatorNotInitialized OperatorInitStatus = iota
+	// OperatorInitialized indicates that Init has already been called.
+	OperatorInitialized
+)
 
-// EnsureCtx returns the context which this helper was initialized with or the
-// background context if Init hasn't been called.
-func (h *InitHelper) EnsureCtx() context.Context {
-	if h.Ctx == nil {
-		return context.Background()
-	}
-	return h.Ctx
-}
-
-// MakeOneInputHelper returns a new OneInputHelper.
-func MakeOneInputHelper(input Operator) OneInputHelper {
-	return OneInputHelper{
-		OneInputNode: NewOneInputNode(input),
-	}
-}
-
-// OneInputHelper is an execinfra.OpNode which only needs to initialize its
-// single Operator input in Init().
-type OneInputHelper struct {
-	OneInputNode
-	InitHelper
-}
-
-// Init implements the Operator interface.
-func (h *OneInputHelper) Init(ctx context.Context) {
-	if !h.InitHelper.Init(ctx) {
-		return
-	}
-	h.Input.Init(h.Ctx)
-}
-
-// CloserHelper is a simple helper that helps Operators implement Closer. If
-// close returns true, resources may be released, if it returns false, close has
-// already been called.
+// CloserHelper is a simple helper that helps Operators implement
+// Closer. If close returns true, resources may be released, if it
+// returns false, close has already been called.
+// use.
 type CloserHelper struct {
-	closed bool
+	Closed bool
 }
 
 // Close marks the CloserHelper as closed. If true is returned, this is the
-// first call to Close.
+// first call to close.
 func (c *CloserHelper) Close() bool {
-	if c.closed {
+	if c.Closed {
 		return false
 	}
-	c.closed = true
+	c.Closed = true
 	return true
 }
 
-// Reset resets the CloserHelper so that it can be closed again.
-func (c *CloserHelper) Reset() {
-	c.closed = false
-}
-
 // ClosableOperator is an Operator that needs to be Close()'d.
-// NOTE: even if the Operator wasn't Init()'ed properly, it must still be safe
-// to Close().
 type ClosableOperator interface {
 	Operator
 	Closer
@@ -321,7 +265,7 @@ func MakeOneInputCloserHelper(input Operator) OneInputCloserHelper {
 	}
 }
 
-// OneInputCloserHelper is an execinfra.OpNode with a single Operator input
+// OneInputCloserHelper is an execinfrapb.OpNode with a single Operator input
 // that might need to be Close()'d.
 type OneInputCloserHelper struct {
 	OneInputNode
@@ -331,40 +275,18 @@ type OneInputCloserHelper struct {
 var _ Closer = &OneInputCloserHelper{}
 
 // Close implements the Closer interface.
-func (c *OneInputCloserHelper) Close() error {
+func (c *OneInputCloserHelper) Close(ctx context.Context) error {
 	if !c.CloserHelper.Close() {
 		return nil
 	}
 	if closer, ok := c.Input.(Closer); ok {
-		return closer.Close()
+		return closer.Close(ctx)
 	}
 	return nil
 }
 
-// MakeOneInputInitCloserHelper returns a new OneInputInitCloserHelper.
-func MakeOneInputInitCloserHelper(input Operator) OneInputInitCloserHelper {
-	return OneInputInitCloserHelper{
-		OneInputCloserHelper: MakeOneInputCloserHelper(input),
-	}
-}
-
-// OneInputInitCloserHelper is an execinfra.OpNode that only needs to initialize
-// its single Operator input in Init() and might need to Close() it too.
-type OneInputInitCloserHelper struct {
-	InitHelper
-	OneInputCloserHelper
-}
-
-// Init implements the Operator interface.
-func (h *OneInputInitCloserHelper) Init(ctx context.Context) {
-	if !h.InitHelper.Init(ctx) {
-		return
-	}
-	h.Input.Init(h.Ctx)
-}
-
 type noopOperator struct {
-	OneInputInitCloserHelper
+	OneInputCloserHelper
 	NonExplainable
 }
 
@@ -372,61 +294,19 @@ var _ ResettableOperator = &noopOperator{}
 
 // NewNoop returns a new noop Operator.
 func NewNoop(input Operator) ResettableOperator {
-	return &noopOperator{OneInputInitCloserHelper: MakeOneInputInitCloserHelper(input)}
+	return &noopOperator{OneInputCloserHelper: MakeOneInputCloserHelper(input)}
 }
 
-func (n *noopOperator) Next() coldata.Batch {
-	return n.Input.Next()
+func (n *noopOperator) Init() {
+	n.Input.Init()
+}
+
+func (n *noopOperator) Next(ctx context.Context) coldata.Batch {
+	return n.Input.Next(ctx)
 }
 
 func (n *noopOperator) Reset(ctx context.Context) {
 	if r, ok := n.Input.(Resetter); ok {
 		r.Reset(ctx)
 	}
-}
-
-// MetadataSource is an interface implemented by processors and columnar
-// operators that can produce metadata.
-// TODO(yuzefovich): remove this interface in favor of DrainableOperator and
-// clarify that calling DrainMeta on an uninitialized operator is illegal.
-type MetadataSource interface {
-	// DrainMeta returns all the metadata produced by the processor or operator.
-	// It will be called exactly once, usually, when the processor or operator
-	// has finished doing its computations. This is a signal that the output
-	// requires no more rows to be returned.
-	// Implementers can choose what to do on subsequent calls (if such occur).
-	// TODO(yuzefovich): modify the contract to require returning nil on all
-	// calls after the first one.
-	DrainMeta() []execinfrapb.ProducerMetadata
-}
-
-// MetadataSources is a slice of MetadataSource.
-type MetadataSources []MetadataSource
-
-// DrainMeta calls DrainMeta on all MetadataSources and returns a single slice
-// with all the accumulated metadata. Note that this method wraps the draining
-// with the panic-catcher so that the callers don't have to.
-func (s MetadataSources) DrainMeta() []execinfrapb.ProducerMetadata {
-	var result []execinfrapb.ProducerMetadata
-	if err := colexecerror.CatchVectorizedRuntimeError(func() {
-		for _, src := range s {
-			result = append(result, src.DrainMeta()...)
-		}
-	}); err != nil {
-		meta := execinfrapb.GetProducerMeta()
-		meta.Err = err
-		result = append(result, *meta)
-	}
-	return result
-}
-
-// VectorizedStatsCollector is the common interface implemented by several
-// variations of the execution statistics collectors. At the moment of writing
-// we have two variants: the "default" option (for all Operators) and the
-// "network" option (strictly for colrpc.Inboxes).
-type VectorizedStatsCollector interface {
-	Operator
-	// GetStats returns the execution statistics of a single Operator. It will
-	// always return non-nil (but possibly empty) object.
-	GetStats() *execinfrapb.ComponentStats
 }

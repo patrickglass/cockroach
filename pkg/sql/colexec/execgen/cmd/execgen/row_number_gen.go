@@ -35,11 +35,11 @@ func genRowNumberOp(inputFileContents string, wr io.Writer) error {
 		return err
 	}
 
-	rowNumberTmplInfos := []rowNumberTmplInfo{
+	rankTmplInfos := []rowNumberTmplInfo{
 		{HasPartition: false, String: "rowNumberNoPartition"},
 		{HasPartition: true, String: "rowNumberWithPartition"},
 	}
-	return tmpl.Execute(wr, rowNumberTmplInfos)
+	return tmpl.Execute(wr, rankTmplInfos)
 }
 
 func init() {

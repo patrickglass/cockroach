@@ -41,7 +41,7 @@ type dropCascadeState struct {
 }
 
 type schemaWithDbDesc struct {
-	schema catalog.SchemaDescriptor
+	schema *catalog.ResolvedSchema
 	dbDesc *dbdesc.Mutable
 }
 
@@ -55,11 +55,9 @@ func newDropCascadeState() *dropCascadeState {
 }
 
 func (d *dropCascadeState) collectObjectsInSchema(
-	ctx context.Context, p *planner, db *dbdesc.Mutable, schema catalog.SchemaDescriptor,
+	ctx context.Context, p *planner, db *dbdesc.Mutable, schema *catalog.ResolvedSchema,
 ) error {
-	names, _, err := resolver.GetObjectNamesAndIDs(
-		ctx, p.txn, p, p.ExecCfg().Codec, db, schema.GetName(), true, /* explicitPrefix */
-	)
+	names, err := resolver.GetObjectNames(ctx, p.txn, p, p.ExecCfg().Codec, db, schema.Name, true /* explicitPrefix */)
 	if err != nil {
 		return err
 	}
@@ -81,7 +79,7 @@ func (d *dropCascadeState) resolveCollectedObjects(
 	for i := range d.objectNamesToDelete {
 		objName := d.objectNamesToDelete[i]
 		// First try looking up objName as a table.
-		found, _, desc, err := p.LookupObject(
+		found, desc, err := p.LookupObject(
 			ctx,
 			tree.ObjectLookupFlags{
 				// Note we set required to be false here in order to not error out
@@ -139,7 +137,7 @@ func (d *dropCascadeState) resolveCollectedObjects(
 			d.td = append(d.td, toDelete{objName, tbDesc})
 		} else {
 			// If we couldn't resolve objName as a table, try a type.
-			found, _, desc, err := p.LookupObject(
+			found, desc, err := p.LookupObject(
 				ctx,
 				tree.ObjectLookupFlags{
 					CommonLookupFlags: tree.CommonLookupFlags{

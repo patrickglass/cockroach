@@ -74,18 +74,22 @@ var (
 	LocalAbortSpanSuffix = []byte("abc-")
 	// localRangeFrozenStatusSuffix is DEPRECATED and remains to prevent reuse.
 	localRangeFrozenStatusSuffix = []byte("fzn-")
-	// LocalRangeGCThresholdSuffix is the suffix for the GC threshold. It keeps
-	// the lgc- ("last GC") representation for backwards compatibility.
-	LocalRangeGCThresholdSuffix = []byte("lgc-")
+	// LocalRangeLastGCSuffix is the suffix for the last GC.
+	LocalRangeLastGCSuffix = []byte("lgc-")
 	// LocalRangeAppliedStateSuffix is the suffix for the range applied state
 	// key.
 	LocalRangeAppliedStateSuffix = []byte("rask")
-	// LocalRaftTruncatedStateSuffix is the suffix for the
-	// RaftTruncatedState.
+	// LocalRaftAppliedIndexLegacySuffix is the suffix for the raft applied index.
+	LocalRaftAppliedIndexLegacySuffix = []byte("rfta")
+	// LocalRaftTruncatedStateLegacySuffix is the suffix for the legacy
+	// RaftTruncatedState. See VersionUnreplicatedRaftTruncatedState.
 	// Note: This suffix is also used for unreplicated Range-ID keys.
-	LocalRaftTruncatedStateSuffix = []byte("rftt")
+	LocalRaftTruncatedStateLegacySuffix = []byte("rftt")
 	// LocalRangeLeaseSuffix is the suffix for a range lease.
 	LocalRangeLeaseSuffix = []byte("rll-")
+	// LocalLeaseAppliedIndexLegacySuffix is the suffix for the applied lease
+	// index.
+	LocalLeaseAppliedIndexLegacySuffix = []byte("rlla")
 	// LocalRangePriorReadSummarySuffix is the suffix for a range's prior read
 	// summary.
 	LocalRangePriorReadSummarySuffix = []byte("rprs")
@@ -132,8 +136,6 @@ var (
 	// key info, such as the txn ID in the case of a transaction record.
 	LocalRangePrefix = roachpb.Key(makeKey(LocalPrefix, roachpb.RKey("k")))
 	LocalRangeMax    = LocalRangePrefix.PrefixEnd()
-	// LocalRangeProbeSuffix is the suffix for keys for probing.
-	LocalRangeProbeSuffix = roachpb.RKey("prbe")
 	// LocalQueueLastProcessedSuffix is the suffix for replica queue state keys.
 	LocalQueueLastProcessedSuffix = roachpb.RKey("qlpt")
 	// LocalRangeDescriptorSuffix is the suffix for keys storing
@@ -147,6 +149,9 @@ var (
 	//
 	// LocalStorePrefix is the prefix identifying per-store data.
 	LocalStorePrefix = makeKey(LocalPrefix, roachpb.Key("s"))
+	// localStoreSuggestedCompactionSuffix stores suggested compactions to
+	// be aggregated and processed on the store.
+	localStoreSuggestedCompactionSuffix = []byte("comp")
 	// localStoreClusterVersionSuffix stores the cluster-wide version
 	// information for this store, updated any time the operator
 	// updates the minimum cluster version.
@@ -357,11 +362,10 @@ const (
 	ZonesTableConfigColumnID = 2
 	ZonesTableConfigColFamID = 2
 
-	DescriptorTablePrimaryKeyIndexID         = 1
-	DescriptorTableDescriptorColID           = 2
-	DescriptorTableDescriptorColFamID        = 2
-	TenantsTablePrimaryKeyIndexID            = 1
-	SpanConfigurationsTablePrimaryKeyIndexID = 1
+	DescriptorTablePrimaryKeyIndexID  = 1
+	DescriptorTableDescriptorColID    = 2
+	DescriptorTableDescriptorColFamID = 2
+	TenantsTablePrimaryKeyIndexID     = 1
 
 	// Reserved IDs for other system tables. Note that some of these IDs refer
 	// to "Ranges" instead of a Table - these IDs are needed to store custom
@@ -399,21 +403,12 @@ const (
 	TenantsRangesID                     = 38 // pseudo
 	SqllivenessID                       = 39
 	MigrationsID                        = 40
-	JoinTokensTableID                   = 41
-	StatementStatisticsTableID          = 42
-	TransactionStatisticsTableID        = 43
-	DatabaseRoleSettingsTableID         = 44
-	TenantUsageTableID                  = 45
-	SQLInstancesTableID                 = 46
-	SpanConfigurationsTableID           = 47
 
 	// CommentType is type for system.comments
-	DatabaseCommentType   = 0
-	TableCommentType      = 1
-	ColumnCommentType     = 2
-	IndexCommentType      = 3
-	SchemaCommentType     = 4
-	ConstraintCommentType = 5
+	DatabaseCommentType = 0
+	TableCommentType    = 1
+	ColumnCommentType   = 2
+	IndexCommentType    = 3
 )
 
 const (

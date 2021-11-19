@@ -6,39 +6,39 @@ build
 EXPLAIN SELECT * FROM xy
 ----
 explain
- ├── columns: info:5
+ ├── columns: info:4
  └── project
       ├── columns: x:1!null y:2
       └── scan xy
-           └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+           └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
 
 build
 EXPLAIN (TYPES) SELECT * FROM xy
 ----
 explain
- ├── columns: info:5
+ ├── columns: info:4
  └── project
       ├── columns: x:1!null y:2
       └── scan xy
-           └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+           └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
 
 build
 EXPLAIN (VERBOSE) SELECT * FROM xy
 ----
 explain
- ├── columns: info:5
+ ├── columns: info:4
  ├── mode: verbose
  └── project
       ├── columns: x:1!null y:2
       └── scan xy
-           └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+           └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
 
 # Verify we preserve the ordering requirement of the explained query.
 build
 EXPLAIN (VERBOSE) SELECT * FROM xy ORDER BY y
 ----
 explain
- ├── columns: info:5
+ ├── columns: info:4
  ├── mode: verbose
  └── sort
       ├── columns: x:1!null y:2
@@ -46,23 +46,23 @@ explain
       └── project
            ├── columns: x:1!null y:2
            └── scan xy
-                └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+                └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
 
 build
 EXPLAIN (VERBOSE) SELECT * FROM xy INNER JOIN (VALUES (1, 2), (3, 4)) AS t(u,v) ON x=u
 ----
 explain
- ├── columns: info:7
+ ├── columns: info:6
  ├── mode: verbose
  └── project
-      ├── columns: x:1!null y:2 u:5!null v:6!null
+      ├── columns: x:1!null y:2 u:4!null v:5!null
       └── inner-join (hash)
-           ├── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4 column1:5!null column2:6!null
+           ├── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 column1:4!null column2:5!null
            ├── scan xy
-           │    └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3 tableoid:4
+           │    └── columns: x:1!null y:2 crdb_internal_mvcc_timestamp:3
            ├── values
-           │    ├── columns: column1:5!null column2:6!null
+           │    ├── columns: column1:4!null column2:5!null
            │    ├── (1, 2)
            │    └── (3, 4)
            └── filters
-                └── x:1 = column1:5
+                └── x:1 = column1:4

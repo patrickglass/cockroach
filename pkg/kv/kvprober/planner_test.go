@@ -24,9 +24,8 @@ import (
 )
 
 func TestPlannerEnforcesRateLimit(t *testing.T) {
-	p := newMeta2Planner(nil, cluster.MakeTestingClusterSettings(),
-		func() time.Duration { return time.Duration(0) }) // irrelevant since p.GetRateLimit is set below
-	p.getRateLimit = func(_ time.Duration, _ *cluster.Settings) time.Duration {
+	p := newMeta2Planner(nil, cluster.MakeTestingClusterSettings())
+	p.getRateLimit = func(settings *cluster.Settings) time.Duration {
 		return 1 * time.Second
 	}
 
@@ -116,10 +115,11 @@ func TestPlannerEnforcesRateLimit(t *testing.T) {
 }
 
 func TestGetRateLimit(t *testing.T) {
-	ctx := context.Background()
 	s := cluster.MakeTestingClusterSettings()
-	numStepsToPlanAtOnce.Override(ctx, &s.SV, 60)
 
-	got := getRateLimitImpl(time.Second, s)
+	readInterval.Override(&s.SV, time.Second)
+	numStepsToPlanAtOnce.Override(&s.SV, 60)
+
+	got := getRateLimitImpl(s)
 	require.Equal(t, 30*time.Second, got)
 }

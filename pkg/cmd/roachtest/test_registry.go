@@ -18,56 +18,61 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
-	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/internal/team"
 	"github.com/cockroachdb/cockroach/pkg/util/version"
 	"github.com/cockroachdb/errors"
 )
 
-func ownerToAlias(o registry.Owner) team.Alias {
+// Owner is a valid entry for the Owners field of a roachtest. They should be
+// teams, not individuals.
+type Owner string
+
+// The allowable values of Owner.
+const (
+	OwnerSQLExperience Owner = `sql-experience`
+	OwnerBulkIO        Owner = `bulk-io`
+	OwnerCDC           Owner = `cdc`
+	OwnerKV            Owner = `kv`
+	OwnerServer        Owner = `server`
+	OwnerSQLQueries    Owner = `sql-queries`
+	OwnerSQLSchema     Owner = `sql-schema`
+	OwnerStorage       Owner = `storage`
+)
+
+func ownerToAlias(o Owner) team.Alias {
 	return team.Alias(fmt.Sprintf("cockroachdb/%s", o))
 }
 
-type testRegistryImpl struct {
-	m            map[string]*registry.TestSpec
-	cloud        string
-	instanceType string // optional
-	zones        string
-	preferSSD    bool
+const defaultTag = "default"
+
+type testRegistry struct {
+	m map[string]*testSpec
 	// buildVersion is the version of the Cockroach binary that tests will run against.
 	buildVersion version.Version
 }
 
-// makeTestRegistry constructs a testRegistryImpl and configures it with opts.
-func makeTestRegistry(
-	cloud string, instanceType string, zones string, preferSSD bool,
-) (testRegistryImpl, error) {
-	r := testRegistryImpl{
-		cloud:        cloud,
-		instanceType: instanceType,
-		zones:        zones,
-		preferSSD:    preferSSD,
-		m:            make(map[string]*registry.TestSpec),
+// makeTestRegistry constructs a testRegistry and configures it with opts.
+func makeTestRegistry() (testRegistry, error) {
+	r := testRegistry{
+		m: make(map[string]*testSpec),
 	}
 	v := buildTag
 	if v == "" {
 		var err error
 		v, err = loadBuildVersion()
 		if err != nil {
-			return testRegistryImpl{}, err
+			return testRegistry{}, err
 		}
 	}
 	if err := r.setBuildVersion(v); err != nil {
-		return testRegistryImpl{}, err
+		return testRegistry{}, err
 	}
 	return r, nil
 }
 
 // Add adds a test to the registry.
-func (r *testRegistryImpl) Add(spec registry.TestSpec) {
+func (r *testRegistry) Add(spec testSpec) {
 	if _, ok := r.m[spec.Name]; ok {
 		fmt.Fprintf(os.Stderr, "test %s already registered\n", spec.Name)
 		os.Exit(1)
@@ -79,36 +84,30 @@ func (r *testRegistryImpl) Add(spec registry.TestSpec) {
 	r.m[spec.Name] = &spec
 }
 
-// MakeClusterSpec makes a cluster spec. It should be used over `spec.MakeClusterSpec`
-// because this method also adds options baked into the registry.
-func (r *testRegistryImpl) MakeClusterSpec(nodeCount int, opts ...spec.Option) spec.ClusterSpec {
-	// NB: we need to make sure that `opts` is appended at the end, so that it
-	// overrides the SSD and zones settings from the registry.
-	var finalOpts []spec.Option
-	if r.preferSSD {
-		finalOpts = append(finalOpts, spec.PreferSSD())
-	}
-	if r.zones != "" {
-		finalOpts = append(finalOpts, spec.Zones(r.zones))
-	}
-	finalOpts = append(finalOpts, opts...)
-	return spec.MakeClusterSpec(r.cloud, r.instanceType, nodeCount, finalOpts...)
-}
-
-const testNameRE = "^[a-zA-Z0-9-_=/,]+$"
-
 // prepareSpec validates a spec and does minor massaging of its fields.
-func (r *testRegistryImpl) prepareSpec(spec *registry.TestSpec) error {
-	if matched, err := regexp.MatchString(testNameRE, spec.Name); err != nil || !matched {
-		return fmt.Errorf("%s: Name must match this regexp: %s", spec.Name, testNameRE)
-	}
-
+func (r *testRegistry) prepareSpec(spec *testSpec) error {
 	if spec.Run == nil {
 		return fmt.Errorf("%s: must specify Run", spec.Name)
 	}
 
 	if spec.Cluster.ReusePolicy == nil {
 		return fmt.Errorf("%s: must specify a ClusterReusePolicy", spec.Name)
+	}
+
+	if spec.MinVersion != "" {
+		v, err := version.Parse(spec.MinVersion)
+		if err != nil {
+			return fmt.Errorf("%s: unable to parse min-version: %s", spec.Name, err)
+		}
+		if v.PreRelease() != "" {
+			// Specifying a prerelease version as a MinVersion is too confusing
+			// to be useful. The comparison is not straightforward.
+			return fmt.Errorf("invalid version %s, cannot specify a prerelease (-xxx)", v)
+		}
+		// We append "-0" to the min-version spec so that we capture all
+		// prereleases of the specified version. Otherwise, "v2.1.0" would compare
+		// greater than "v2.1.0-alpha.x".
+		spec.minVersion = version.MustParse(spec.MinVersion + "-0")
 	}
 
 	// All tests must have an owner so the release team knows who signs off on
@@ -124,29 +123,9 @@ func (r *testRegistryImpl) prepareSpec(spec *registry.TestSpec) error {
 		return fmt.Errorf(`%s: unknown owner [%s]`, spec.Name, spec.Owner)
 	}
 	if len(spec.Tags) == 0 {
-		spec.Tags = []string{registry.DefaultTag}
+		spec.Tags = []string{defaultTag}
 	}
 	spec.Tags = append(spec.Tags, "owner-"+string(spec.Owner))
-
-	// At the time of writing, we expect the roachtest job to finish within 24h
-	// and have corresponding timeouts set up in CI. Since each individual test
-	// may not be scheduled until a few hours in due to the CPU quota, individual
-	// tests should expect to take "less time". Longer-running tests require the
-	// weekly tag.
-	const maxTimeout = 18 * time.Hour
-	if spec.Timeout > maxTimeout {
-		var weekly bool
-		for _, tag := range spec.Tags {
-			if tag == "weekly" {
-				weekly = true
-			}
-		}
-		if !weekly {
-			return fmt.Errorf(
-				"%s: timeout %s exceeds the maximum allowed of %s", spec.Name, spec.Timeout, maxTimeout,
-			)
-		}
-	}
 
 	return nil
 }
@@ -154,13 +133,17 @@ func (r *testRegistryImpl) prepareSpec(spec *registry.TestSpec) error {
 // GetTests returns all the tests that match the given regexp.
 // Skipped tests are included, and tests that don't match their minVersion spec
 // are also included but marked as skipped.
-func (r testRegistryImpl) GetTests(
-	ctx context.Context, filter *registry.TestFilter,
-) []registry.TestSpec {
-	var tests []registry.TestSpec
+func (r testRegistry) GetTests(ctx context.Context, filter *testFilter) []testSpec {
+	var tests []testSpec
 	for _, t := range r.m {
-		if !t.MatchOrSkip(filter) {
+		if !t.matchOrSkip(filter) {
 			continue
+		}
+		if t.Skip == "" && t.minVersion != nil {
+			if !r.buildVersion.AtLeast(t.minVersion) {
+				t.Skip = fmt.Sprintf("build-version (%s) < min-version (%s)",
+					r.buildVersion, t.minVersion)
+			}
 		}
 		tests = append(tests, *t)
 	}
@@ -171,14 +154,14 @@ func (r testRegistryImpl) GetTests(
 }
 
 // List lists tests that match one of the filters.
-func (r testRegistryImpl) List(ctx context.Context, filters []string) []registry.TestSpec {
-	filter := registry.NewTestFilter(filters)
+func (r testRegistry) List(ctx context.Context, filters []string) []testSpec {
+	filter := newFilter(filters)
 	tests := r.GetTests(ctx, filter)
 	sort.Slice(tests, func(i, j int) bool { return tests[i].Name < tests[j].Name })
 	return tests
 }
 
-func (r *testRegistryImpl) setBuildVersion(buildTag string) error {
+func (r *testRegistry) setBuildVersion(buildTag string) error {
 	v, err := version.Parse(buildTag)
 	if err != nil {
 		return err
@@ -197,4 +180,51 @@ func loadBuildVersion() (string, error) {
 			err, out)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// testFilter holds the name and tag filters for filtering tests.
+type testFilter struct {
+	name *regexp.Regexp
+	tag  *regexp.Regexp
+	// rawTag is the string representation of the regexps in tag
+	rawTag []string
+}
+
+func newFilter(filter []string) *testFilter {
+	var name []string
+	var tag []string
+	var rawTag []string
+	for _, v := range filter {
+		if strings.HasPrefix(v, "tag:") {
+			tag = append(tag, strings.TrimPrefix(v, "tag:"))
+			rawTag = append(rawTag, v)
+		} else {
+			name = append(name, v)
+		}
+	}
+
+	if len(tag) == 0 {
+		tag = []string{defaultTag}
+		rawTag = []string{"tag:" + defaultTag}
+	}
+
+	makeRE := func(strs []string) *regexp.Regexp {
+		switch len(strs) {
+		case 0:
+			return regexp.MustCompile(`.`)
+		case 1:
+			return regexp.MustCompile(strs[0])
+		default:
+			for i := range strs {
+				strs[i] = "(" + strs[i] + ")"
+			}
+			return regexp.MustCompile(strings.Join(strs, "|"))
+		}
+	}
+
+	return &testFilter{
+		name:   makeRE(name),
+		tag:    makeRE(tag),
+		rawTag: rawTag,
+	}
 }

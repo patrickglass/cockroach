@@ -646,9 +646,7 @@ func TestGeometrySpaceCurveIndex(t *testing.T) {
 		t.Run(tc.wkt, func(t *testing.T) {
 			g, err := ParseGeometry(tc.wkt)
 			require.NoError(t, err)
-			spaceCurveIndex, err := g.SpaceCurveIndex()
-			require.NoError(t, err)
-			require.Equal(t, tc.expected, spaceCurveIndex)
+			require.Equal(t, tc.expected, g.SpaceCurveIndex())
 		})
 	}
 
@@ -696,8 +694,7 @@ func TestGeometrySpaceCurveIndex(t *testing.T) {
 					require.NoError(t, err)
 					g, err = g.CloneWithSRID(tc.srid)
 					require.NoError(t, err)
-					h, err := g.SpaceCurveIndex()
-					require.NoError(t, err)
+					h := g.SpaceCurveIndex()
 					assert.GreaterOrEqual(t, h, previous)
 					previous = h
 				})

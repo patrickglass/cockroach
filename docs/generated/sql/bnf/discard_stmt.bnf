@@ -1,2 +1,0 @@
-discard_stmt ::=
-	'DISCARD' 'ALL'

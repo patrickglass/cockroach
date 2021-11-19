@@ -22,16 +22,34 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/transform"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/errors"
 )
 
-// ValidateComputedColumnExpression verifies that an expression is a valid
-// computed column expression. It returns the serialized expression and its type
-// if valid, and an error otherwise. The returned type is only useful if d has
-// type Any which indicates the expression's type is unknown and does not have
-// to match a specific type.
+// ComputedColumnValidator validates that an expression is a valid computed
+// column. See Validate for more details.
+type ComputedColumnValidator struct {
+	ctx       context.Context
+	desc      catalog.TableDescriptor
+	semaCtx   *tree.SemaContext
+	tableName *tree.TableName
+}
+
+// MakeComputedColumnValidator returns an ComputedColumnValidator struct that
+// can be used to validate computed columns. See Validate for more details.
+func MakeComputedColumnValidator(
+	ctx context.Context, desc catalog.TableDescriptor, semaCtx *tree.SemaContext, tn *tree.TableName,
+) ComputedColumnValidator {
+	return ComputedColumnValidator{
+		ctx:       ctx,
+		desc:      desc,
+		semaCtx:   semaCtx,
+		tableName: tn,
+	}
+}
+
+// Validate verifies that an expression is a valid computed column expression.
+// It returns the serialized expression if valid, and an error otherwise.
 //
 // A computed column expression is valid if all of the following are true:
 //
@@ -39,76 +57,59 @@ import (
 //   - It does not reference other computed columns.
 //
 // TODO(mgartner): Add unit tests for Validate.
-func ValidateComputedColumnExpression(
-	ctx context.Context,
-	desc catalog.TableDescriptor,
+func (v *ComputedColumnValidator) Validate(
 	d *tree.ColumnTableDef,
-	tn *tree.TableName,
-	context string,
-	semaCtx *tree.SemaContext,
-) (serializedExpr string, _ *types.T, _ error) {
+) (serializedExpr string, _ error) {
 	if d.HasDefaultExpr() {
-		return "", nil, pgerror.Newf(
+		return "", pgerror.New(
 			pgcode.InvalidTableDefinition,
-			"%s cannot have default values",
-			context,
+			"computed columns cannot have default values",
 		)
 	}
 
 	var depColIDs catalog.TableColSet
-	// First, check that no column in the expression is an inaccessible or
-	// computed column.
-	err := iterColDescriptors(desc, d.Computed.Expr, func(c catalog.Column) error {
-		if c.IsInaccessible() {
-			return pgerror.Newf(
-				pgcode.UndefinedColumn,
-				"column %q is inaccessible and cannot be referenced in a computed column expression",
-				c.GetName(),
-			)
-		}
+	// First, check that no column in the expression is a computed column.
+	err := iterColDescriptors(v.desc, d.Computed.Expr, func(c *descpb.ColumnDescriptor) error {
 		if c.IsComputed() {
-			return pgerror.Newf(
-				pgcode.InvalidTableDefinition,
-				"%s expression cannot reference computed columns",
-				context,
-			)
+			return pgerror.New(pgcode.InvalidTableDefinition,
+				"computed columns cannot reference other computed columns")
 		}
-		depColIDs.Add(c.GetID())
+		depColIDs.Add(c.ID)
 
 		return nil
 	})
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 
 	// Resolve the type of the computed column expression.
-	defType, err := tree.ResolveType(ctx, d.Type, semaCtx.GetTypeResolver())
+	defType, err := tree.ResolveType(v.ctx, d.Type, v.semaCtx.GetTypeResolver())
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 
 	// Check that the type of the expression is of type defType and that there
 	// are no variable expressions (besides dummyColumnItems) and no impure
 	// functions. In order to safely serialize user defined types and their
 	// members, we need to serialize the typed expression here.
-	expr, typ, _, err := DequalifyAndValidateExpr(
-		ctx,
-		desc,
+	expr, _, err := DequalifyAndValidateExpr(
+		v.ctx,
+		v.desc,
 		d.Computed.Expr,
 		defType,
-		context,
-		semaCtx,
+		"computed column",
+		v.semaCtx,
 		tree.VolatilityImmutable,
-		tn,
+		v.tableName,
 	)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 
 	// Virtual computed columns must not refer to mutation columns because it
-	// would not be safe in the case that the mutation column was being
-	// backfilled and the virtual computed column value needed to be computed
-	// for the purpose of writing to a secondary index.
+	// would not be safe in the case that the mutation column was being backfilled
+	// and the virtual computed column value needed to be computed for the purpose
+	// of writing to a secondary index.
 	if d.IsVirtual() {
 		var mutationColumnNames []string
 		var err error
@@ -117,7 +118,7 @@ func ValidateComputedColumnExpression(
 				return
 			}
 			var col catalog.Column
-			if col, err = desc.FindColumnWithID(colID); err != nil {
+			if col, err = v.desc.FindColumnWithID(colID); err != nil {
 				err = errors.WithAssertionFailure(err)
 				return
 			}
@@ -127,31 +128,24 @@ func ValidateComputedColumnExpression(
 			}
 		})
 		if err != nil {
-			return "", nil, err
+			return "", err
 		}
 		if len(mutationColumnNames) > 0 {
-			if context == "index element" {
-				return "", nil, unimplemented.Newf(
-					"index element expression referencing mutation columns",
-					"index element expression referencing columns (%s) added in the current transaction",
-					strings.Join(mutationColumnNames, ", "))
-			}
-			return "", nil, unimplemented.Newf(
+			return "", unimplemented.Newf(
 				"virtual computed columns referencing mutation columns",
 				"virtual computed column %q referencing columns (%s) added in the "+
 					"current transaction", d.Name, strings.Join(mutationColumnNames, ", "))
 		}
 	}
-
-	return expr, typ, nil
+	return expr, nil
 }
 
-// ValidateColumnHasNoDependents verifies that the input column has no dependent
-// computed columns. It returns an error if any existing or ADD mutation
-// computed columns reference the given column.
-// TODO(mgartner): Add unit tests.
-func ValidateColumnHasNoDependents(desc catalog.TableDescriptor, col catalog.Column) error {
-	for _, c := range desc.NonDropColumns() {
+// ValidateNoDependents verifies that the input column is not dependent on a
+// computed column. The function errs if any existing computed columns or
+// computed columns being added reference the given column.
+// TODO(mgartner): Add unit tests for ValidateNoDependents.
+func (v *ComputedColumnValidator) ValidateNoDependents(col *descpb.ColumnDescriptor) error {
+	for _, c := range v.desc.NonDropColumns() {
 		if !c.IsComputed() {
 			continue
 		}
@@ -162,12 +156,12 @@ func ValidateColumnHasNoDependents(desc catalog.TableDescriptor, col catalog.Col
 			return errors.WithAssertionFailure(err)
 		}
 
-		err = iterColDescriptors(desc, expr, func(colVar catalog.Column) error {
-			if colVar.GetID() == col.GetID() {
+		err = iterColDescriptors(v.desc, expr, func(colVar *descpb.ColumnDescriptor) error {
+			if colVar.ID == col.ID {
 				return pgerror.Newf(
 					pgcode.InvalidColumnReference,
 					"column %q is referenced by computed column %q",
-					col.GetName(),
+					col.Name,
 					c.GetName(),
 				)
 			}
@@ -193,7 +187,7 @@ func ValidateColumnHasNoDependents(desc catalog.TableDescriptor, col catalog.Col
 // columns that come after them in input.
 func MakeComputedExprs(
 	ctx context.Context,
-	input, sourceColumns []catalog.Column,
+	input, sourceColumns []descpb.ColumnDescriptor,
 	tableDesc catalog.TableDescriptor,
 	tn *tree.TableName,
 	evalCtx *tree.EvalContext,
@@ -216,9 +210,10 @@ func MakeComputedExprs(
 	// Build the computed expressions map from the parsed statement.
 	computedExprs := make([]tree.TypedExpr, 0, len(input))
 	exprStrings := make([]string, 0, len(input))
-	for _, col := range input {
+	for i := range input {
+		col := &input[i]
 		if col.IsComputed() {
-			exprStrings = append(exprStrings, col.GetComputeExpr())
+			exprStrings = append(exprStrings, *col.ComputeExpr)
 		}
 	}
 
@@ -227,12 +222,13 @@ func MakeComputedExprs(
 		return nil, catalog.TableColSet{}, err
 	}
 
-	nr := newNameResolver(evalCtx, tableDesc.GetID(), tn, sourceColumns)
+	nr := newNameResolver(evalCtx, tableDesc.GetID(), tn, columnDescriptorsToPtrs(sourceColumns))
 	nr.addIVarContainerToSemaCtx(semaCtx)
 
 	var txCtx transform.ExprTransformContext
 	compExprIdx := 0
-	for _, col := range input {
+	for i := range input {
+		col := &input[i]
 		if !col.IsComputed() {
 			computedExprs = append(computedExprs, tree.DNull)
 			nr.addColumn(col)
@@ -252,7 +248,7 @@ func MakeComputedExprs(
 			return nil, catalog.TableColSet{}, err
 		}
 
-		typedExpr, err := tree.TypeCheck(ctx, expr, semaCtx, col.GetType())
+		typedExpr, err := tree.TypeCheck(ctx, expr, semaCtx, col.Type)
 		if err != nil {
 			return nil, catalog.TableColSet{}, err
 		}

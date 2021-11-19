@@ -38,17 +38,17 @@ import (
 // (only when set by a user) and are the most specific entry in the normal
 // cluster-default/database/table/subzone config hierarchy.
 //
-// Each index and partition can be mapped to spans in the keyspace. Indexes and
-// range partitions each map to one span, while each list partition maps to one
-// or more spans. Each partition span is contained by some index span and each
-// subpartition span is contained by one of its parent partition's spans. The
-// spans for a given level of a range partitioning (corresponding to one
-// `PARTITION BY` in sql or one `PartitionDescriptor`) are disjoint, but the
-// spans for a given level of a list partitioning may overlap if DEFAULT is
-// used. A list partitioning which includes both (1, DEFAULT) and (1, 2) will
-// overlap with the latter getting precedence in the zone config hierarchy. NB:
-// In a valid PartitionDescriptor, no partitions with the same number of
-// DEFAULTs will overlap (this property is used by
+// Each non-interleaved index and partition can be mapped to spans in the
+// keyspace. Indexes and range partitions each map to one span, while each list
+// partition maps to one or more spans. Each partition span is contained by some
+// index span and each subpartition span is contained by one of its parent
+// partition's spans. The spans for a given level of a range partitioning
+// (corresponding to one `PARTITION BY` in sql or one `PartitionDescriptor`) are
+// disjoint, but the spans for a given level of a list partitioning may overlap
+// if DEFAULT is used. A list partitioning which includes both (1, DEFAULT) and
+// (1, 2) will overlap with the latter getting precedence in the zone config
+// hierarchy. NB: In a valid PartitionDescriptor, no partitions with the same
+// number of DEFAULTs will overlap (this property is used by
 // `indexCoveringsForPartitioning`).
 //
 // These subzone spans are kept denormalized to the relevant `system.zone` row
@@ -125,7 +125,7 @@ func GenerateSubzoneSpans(
 
 		var emptyPrefix []tree.Datum
 		indexPartitionCoverings, err := indexCoveringsForPartitioning(
-			a, codec, tableDesc, idx, idx.GetPartitioning(), subzoneIndexByPartition, emptyPrefix)
+			a, codec, tableDesc, idx.IndexDesc(), &idx.IndexDesc().Partitioning, subzoneIndexByPartition, emptyPrefix)
 		if err != nil {
 			return err
 		}
@@ -185,19 +185,19 @@ func indexCoveringsForPartitioning(
 	a *rowenc.DatumAlloc,
 	codec keys.SQLCodec,
 	tableDesc catalog.TableDescriptor,
-	idx catalog.Index,
-	part catalog.Partitioning,
+	idxDesc *descpb.IndexDescriptor,
+	partDesc *descpb.PartitioningDescriptor,
 	relevantPartitions map[string]int32,
 	prefixDatums []tree.Datum,
 ) ([]covering.Covering, error) {
-	if part.NumColumns() == 0 {
+	if partDesc.NumColumns == 0 {
 		return nil, nil
 	}
 
 	var coverings []covering.Covering
 	var descendentCoverings []covering.Covering
 
-	if part.NumLists() > 0 {
+	if len(partDesc.List) > 0 {
 		// The returned spans are required to be ordered with highest precedence
 		// first. The span for (1, DEFAULT) overlaps with (1, 2) and needs to be
 		// returned at a lower precedence. Luckily, because of the partitioning
@@ -205,32 +205,28 @@ func indexCoveringsForPartitioning(
 		// with the same number of DEFAULTs are non-overlapping. So, bucket the
 		// `interval.Range`s by the number of non-DEFAULT columns and return
 		// them ordered from least # of DEFAULTs to most.
-		listCoverings := make([]covering.Covering, part.NumColumns()+1)
-		err := part.ForEachList(func(name string, values [][]byte, subPartitioning catalog.Partitioning) error {
-			for _, valueEncBuf := range values {
+		listCoverings := make([]covering.Covering, int(partDesc.NumColumns)+1)
+		for _, p := range partDesc.List {
+			for _, valueEncBuf := range p.Values {
 				t, keyPrefix, err := rowenc.DecodePartitionTuple(
-					a, codec, tableDesc, idx, part, valueEncBuf, prefixDatums)
+					a, codec, tableDesc, idxDesc, partDesc, valueEncBuf, prefixDatums)
 				if err != nil {
-					return err
+					return nil, err
 				}
-				if _, ok := relevantPartitions[name]; ok {
+				if _, ok := relevantPartitions[p.Name]; ok {
 					listCoverings[len(t.Datums)] = append(listCoverings[len(t.Datums)], covering.Range{
 						Start: keyPrefix, End: roachpb.Key(keyPrefix).PrefixEnd(),
-						Payload: zonepb.Subzone{PartitionName: name},
+						Payload: zonepb.Subzone{PartitionName: p.Name},
 					})
 				}
 				newPrefixDatums := append(prefixDatums, t.Datums...)
 				subpartitionCoverings, err := indexCoveringsForPartitioning(
-					a, codec, tableDesc, idx, subPartitioning, relevantPartitions, newPrefixDatums)
+					a, codec, tableDesc, idxDesc, &p.Subpartitioning, relevantPartitions, newPrefixDatums)
 				if err != nil {
-					return err
+					return nil, err
 				}
 				descendentCoverings = append(descendentCoverings, subpartitionCoverings...)
 			}
-			return nil
-		})
-		if err != nil {
-			return nil, err
 		}
 		for i := range listCoverings {
 			if covering := listCoverings[len(listCoverings)-i-1]; len(covering) > 0 {
@@ -239,31 +235,27 @@ func indexCoveringsForPartitioning(
 		}
 	}
 
-	if part.NumRanges() > 0 {
-		err := part.ForEachRange(func(name string, from, to []byte) error {
-			if _, ok := relevantPartitions[name]; !ok {
-				return nil
+	if len(partDesc.Range) > 0 {
+		for _, p := range partDesc.Range {
+			if _, ok := relevantPartitions[p.Name]; !ok {
+				continue
 			}
 			_, fromKey, err := rowenc.DecodePartitionTuple(
-				a, codec, tableDesc, idx, part, from, prefixDatums)
+				a, codec, tableDesc, idxDesc, partDesc, p.FromInclusive, prefixDatums)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			_, toKey, err := rowenc.DecodePartitionTuple(
-				a, codec, tableDesc, idx, part, to, prefixDatums)
+				a, codec, tableDesc, idxDesc, partDesc, p.ToExclusive, prefixDatums)
 			if err != nil {
-				return err
+				return nil, err
 			}
-			if _, ok := relevantPartitions[name]; ok {
+			if _, ok := relevantPartitions[p.Name]; ok {
 				coverings = append(coverings, covering.Covering{{
 					Start: fromKey, End: toKey,
-					Payload: zonepb.Subzone{PartitionName: name},
+					Payload: zonepb.Subzone{PartitionName: p.Name},
 				}})
 			}
-			return nil
-		})
-		if err != nil {
-			return nil, err
 		}
 	}
 

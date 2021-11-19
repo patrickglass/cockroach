@@ -20,10 +20,10 @@ statement error type LineString does not match column type Point
 INSERT INTO geo_table (id, geom) VALUES
   (3, 'SRID=4004;LINESTRING(0.0 0.0, 1.0 2.0)')
 
-statement error projection for SRID 404 does not exist
+statement error unknown SRID for Geometry: 404
 SELECT 'SRID=404;POINT(1.0 2.0)'::geometry
 
-statement error projection for SRID 404 does not exist
+statement error unknown SRID for Geography: 404
 SELECT 'SRID=404;POINT(1.0 2.0)'::geography
 
 statement error pq: object type PointZ does not match column type Point
@@ -77,7 +77,7 @@ SELECT create_statement FROM [SHOW CREATE TABLE geom_table_negative_values]
 CREATE TABLE public.geom_table_negative_values (
    a GEOMETRY(GEOMETRY) NULL,
    rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT geom_table_negative_values_pkey PRIMARY KEY (rowid ASC),
+   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
    FAMILY "primary" (a, rowid)
 )
 
@@ -92,7 +92,7 @@ SELECT create_statement FROM [SHOW CREATE TABLE geog_table_negative_values]
 CREATE TABLE public.geog_table_negative_values (
    a GEOGRAPHY(GEOMETRY) NULL,
    rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
-   CONSTRAINT geog_table_negative_values_pkey PRIMARY KEY (rowid ASC),
+   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
    FAMILY "primary" (a, rowid)
 )
 
@@ -114,10 +114,10 @@ SELECT orphan FROM geo_table
 query TTBTTTB rowsort
 SHOW COLUMNS FROM geo_table
 ----
-id      INT8                      false  NULL  ·  {geo_table_geog_idx,geo_table_geom_idx,geo_table_pkey}  false
-geog    GEOGRAPHY(GEOMETRY,4326)  true   NULL  ·  {geo_table_geog_idx,geo_table_pkey}                     false
-geom    GEOMETRY(POINT)           true   NULL  ·  {geo_table_geom_idx,geo_table_pkey}                     false
-orphan  GEOGRAPHY                 true   NULL  ·  {geo_table_pkey}                                        false
+id      INT8                      false  NULL  ·  {geo_table_geog_idx,geo_table_geom_idx,primary}  false
+geog    GEOGRAPHY(GEOMETRY,4326)  true   NULL  ·  {geo_table_geog_idx}                             false
+geom    GEOMETRY(POINT)           true   NULL  ·  {geo_table_geom_idx}                             false
+orphan  GEOGRAPHY                 true   NULL  ·  {}                                               false
 
 statement error column bad_pk is of type geography and thus is not indexable
 CREATE TABLE bad_geog_table(bad_pk geography primary key)
@@ -980,16 +980,6 @@ FROM ( VALUES
 valid geom                 true   true   true   Valid Geometry                 Valid Geometry          Valid Geometry     POINT (1 2)
 invalid polygon            false  false  false  Self-intersection[1.5 1.5]     Self-intersection       Self-intersection  GEOMETRYCOLLECTION (POLYGON ((1 1, 1.5 1.5, 1.5 -1.5, 1 1)), LINESTRING (1.5 1.5, 2 2))
 self-intersecting polygon  false  false  true   Ring Self-intersection[14 20]  Ring Self-intersection  Valid Geometry     POLYGON ((14 20, 8 45, 20 35, 14 20), (14 20, 16 30, 12 30, 14 20))
-
-query TB
-SELECT
-  dsc,
-  ST_IsValidTrajectory(geom)
-FROM ( VALUES
-  ('valid trajectory', 'LINESTRINGM(0 0 1,0 1 2)'::geometry)
-) t(dsc, geom)
-----
-valid trajectory  true
 
 # Unary operators
 query TRRRRRRRT
@@ -2493,16 +2483,6 @@ Square overlapping left and right square  Point middle of Right Square          
 Square overlapping left and right square  Square (left)                             POLYGON ((0 1, 1 1, 1 0, 0 0, 0 1))
 Square overlapping left and right square  Square (right)                            POLYGON ((0 0, -0.1 0, -0.1 1, 0 1, 0 0))
 Square overlapping left and right square  Square overlapping left and right square  POLYGON EMPTY
-
-query TT
-SELECT
-  st_astext(st_shortestline(a, b)),
-  st_astext(st_longestline(a, b))
-FROM ( VALUES
-  (st_scale('multipoint (0 0, 1 1)', 0, 'NaN'::float)::geometry, 'linestring (0 0, 1 1)'::geometry)
-) regression_t65422(a, b)
-----
-LINESTRING (0 NaN, 0 0)  LINESTRING (0 NaN, 0 0)
 
 # Binary predicates
 query TTBBBBBBBBBBBB
@@ -5784,8 +5764,7 @@ select st_astext(st_linesubstring(g,star,"end"))from (VALUES
        ('LINESTRING(70 10, 10 125.6, 15.40 1.9, 4 6)'::geometry, 0.1, 0.8),
        ('LINESTRING(70 10, 10 125)'::geometry, 0.1, 0.8),
        ('LINESTRING(70 10, 10 125)'::geometry, 0.8, 0.8),
-       ('LINESTRING(0 0, 0 0)'::geometry, 0.8, 0.8),
-       ('LINESTRING EMPTY'::geometry, 0.1, 0.2)
+       ('LINESTRING(0 0, 0 0)'::geometry, 0.8, 0.8)
     ) t(g,star, "end");
 ----
 LINESTRING (0 0, 0 3.6)
@@ -5794,7 +5773,6 @@ LINESTRING (57.73791181125825 33.624956576975762, 10 125.599999999999994, 13.606
 LINESTRING (64 21.5, 22 102)
 POINT (22 102)
 POINT (0 0)
-NULL
 
 query T
 SELECT ST_AsEWKT(ST_ShiftLongitude(geom)) FROM ( VALUES
@@ -5847,18 +5825,3 @@ SELECT
   ST_EstimatedExtent('a', 'b')
 ----
 NULL  NULL  NULL
-
-query II
-SELECT ST_LineCrossingDirection(line1, line2), ST_LineCrossingDirection(line2, line1) FROM ( VALUES
-    ((ST_GeomFromText('LINESTRING(0 -20, 0 20)')), (ST_GeomFromText('LINESTRING(5 5, 5 10)'))),
-    ((ST_GeomFromText('LINESTRING(25 169,89 114,40 70,86 43)')), (ST_GeomFromText('LINESTRING(171 154,20 140,71 74,161 53)'))),
-    ((ST_GeomFromText('LINESTRING(25 169,89 114,40 70,86 43)')), (ST_GeomFromText('LINESTRING (20 140, 71 74, 161 53)'))),
-    ((ST_GeomFromText('LINESTRING(25 169,89 114,40 70,86 43)')), (ST_GeomFromText('LINESTRING (171 154, 20 140, 71 74, 2.99 90.16)'))),
-    ((ST_GeomFromText('LINESTRING(25 169,89 114,40 70,86 43)')), (ST_GeomFromText('LINESTRING(2.99 90.16,71 74,20 140,171 154)')))
-) line_crossing_direction_test(line1, line2);
-----
-0   0
-3   -3
--1  1
-2   -2
--2  2

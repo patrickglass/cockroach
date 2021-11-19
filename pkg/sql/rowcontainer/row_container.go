@@ -13,11 +13,11 @@ package rowcontainer
 import (
 	"container/heap"
 	"context"
+	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/diskmap"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/memsize"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
@@ -220,9 +220,8 @@ func (mc *MemRowContainer) AddRow(ctx context.Context, row rowenc.EncDatumRow) e
 // Sort is part of the SortableRowContainer interface.
 func (mc *MemRowContainer) Sort(ctx context.Context) {
 	mc.invertSorting = false
-	var cancelChecker cancelchecker.CancelChecker
-	cancelChecker.Reset(ctx)
-	sort.Sort(mc, &cancelChecker)
+	cancelChecker := cancelchecker.NewCancelChecker(ctx)
+	sort.Sort(mc, cancelChecker)
 }
 
 // Reorder implements ReorderableRowContainer. We don't need to create a new
@@ -421,17 +420,14 @@ func (f *DiskBackedRowContainer) Init(
 }
 
 // DoDeDuplicate causes DiskBackedRowContainer to behave as an implementation
-// of DeDupingRowContainer. It should not be mixed with calls to AddRow().
-//
-// The rows are deduplicated along the columns in the ordering (the values on
-// those columns are the key). Only the first row with a given key will be
-// stored. The index returned in AddRowWithDedup() is a dense index starting
-// from 0, representing when that key was first added. This feature does not
-// combine with Sort(), Reorder() etc., and only to be used for assignment of
-// these dense indexes.
-//
-// The main reason to add this to DiskBackedRowContainer is to avoid significant
-// code duplication in constructing another row container.
+// of DeDupingRowContainer. It should not be mixed with calls to AddRow(). It
+// de-duplicates the keys such that only the first row with the given key will
+// be stored. The index returned in AddRowWithDedup() is a dense index
+// starting from 0, representing when that key was first added. This feature
+// does not combine with Sort(), Reorder() etc., and only to be used for
+// assignment of these dense indexes. The main reason to add this to
+// DiskBackedRowContainer is to avoid significant code duplication in
+// constructing another row container.
 func (f *DiskBackedRowContainer) DoDeDuplicate() {
 	f.deDuplicate = true
 	f.keyToIndex = make(map[string]int)
@@ -835,7 +831,7 @@ func (f *DiskBackedIndexedRowContainer) GetRow(
 					} else {
 						// We choose to ignore minor details like IndexedRow overhead and
 						// the cache overhead.
-						usage := memsize.Int + int64(row.Size())
+						usage := sizeOfInt + int64(row.Size())
 						if err := f.cacheMemAcc.Grow(ctx, usage); err != nil {
 							if sqlerrors.IsOutOfMemoryError(err) {
 								// We hit the memory limit, so we need to cap the cache size
@@ -992,3 +988,5 @@ func (ir IndexedRow) GetDatums(startColIdx, endColIdx int) (tree.Datums, error) 
 	}
 	return datums, nil
 }
+
+const sizeOfInt = int64(unsafe.Sizeof(int(0)))

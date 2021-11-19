@@ -13,7 +13,18 @@ package logpb
 import (
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
+
+// Get returns the value of the Severity.
+func (s *Severity) Get() Severity {
+	return Severity(atomic.LoadInt32((*int32)(s)))
+}
+
+// SetValue sets the value of the Severity.
+func (s *Severity) SetValue(val Severity) {
+	atomic.StoreInt32((*int32)(s), int32(val))
+}
 
 // Set is part of the pflag.Value interface.
 func (s *Severity) Set(value string) error {
@@ -28,7 +39,7 @@ func (s *Severity) Set(value string) error {
 		}
 		threshold = Severity(v)
 	}
-	*s = threshold
+	s.SetValue(threshold)
 	return nil
 }
 

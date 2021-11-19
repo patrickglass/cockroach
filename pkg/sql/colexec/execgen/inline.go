@@ -122,9 +122,6 @@ func inlineFunc(inlineFuncMap map[string]funcInfo, n dst.Node) dst.Node {
 			// }
 			inlinedStatements := &dst.BlockStmt{
 				List: []dst.Stmt{retValDeclStmt},
-				Decs: dst.BlockStmtDecorations{
-					NodeDecs: n.Decs.NodeDecs,
-				},
 			}
 			body := dst.Clone(decl.Body).(*dst.BlockStmt)
 
@@ -182,9 +179,6 @@ func inlineFunc(inlineFuncMap map[string]funcInfo, n dst.Node) dst.Node {
 			// the mangled returns after the inlined function.
 			funcBlock := &dst.BlockStmt{
 				List: []dst.Stmt{reassignments},
-				Decs: dst.BlockStmtDecorations{
-					NodeDecs: n.Decs.NodeDecs,
-				},
 			}
 			body := dst.Clone(decl.Body).(*dst.BlockStmt)
 

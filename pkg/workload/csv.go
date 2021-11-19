@@ -55,7 +55,7 @@ func WriteCSVRows(
 			return 0, ctx.Err()
 		default:
 		}
-		a = a.Truncate()
+		a = a[:0]
 		table.InitialRows.FillBatch(rowBatchIdx, cb, &a)
 		if numCols := cb.Width(); cap(rowStrings) < numCols {
 			rowStrings = make([]string, numCols)
@@ -102,7 +102,7 @@ func (r *csvRowsReader) Read(p []byte) (n int, err error) {
 		if r.batchIdx == r.batchEnd {
 			return 0, io.EOF
 		}
-		r.a = r.a.Truncate()
+		r.a = r.a[:0]
 		r.t.InitialRows.FillBatch(r.batchIdx, r.cb, &r.a)
 		r.batchIdx++
 		if numCols := r.cb.Width(); cap(r.stringsBuf) < numCols {
@@ -225,7 +225,7 @@ func (w *bytesWrittenWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// CSVMux returns a mux over http handlers for csv data in all tables in the
+// CSVMux returns a mux over http handers for csv data in all tables in the
 // given generators.
 func CSVMux(metas []Meta) *http.ServeMux {
 	mux := http.NewServeMux()

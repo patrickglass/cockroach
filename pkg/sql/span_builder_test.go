@@ -47,24 +47,24 @@ func TestSpanBuilderCanSplitSpan(t *testing.T) {
 	}{
 		{
 			sql:               "a INT, b INT, c INT, d INT, PRIMARY KEY (a, b), FAMILY (a, b, c), FAMILY (d)",
-			index:             "t_pkey",
+			index:             "primary",
 			prefixLen:         2,
 			numNeededFamilies: 1,
 			canSplit:          true,
 		},
 		{
 			sql:               "a INT, b INT, c INT, d INT, PRIMARY KEY (a, b), FAMILY (a, b, c), FAMILY (d)",
-			index:             "t_pkey",
+			index:             "primary",
 			prefixLen:         1,
 			numNeededFamilies: 1,
 			canSplit:          false,
 		},
 		{
 			sql:               "a INT, b INT, c INT, d INT, PRIMARY KEY (a, b), FAMILY (a, b, c, d)",
-			index:             "t_pkey",
+			index:             "primary",
 			prefixLen:         2,
 			numNeededFamilies: 1,
-			canSplit:          true,
+			canSplit:          false,
 		},
 		{
 			sql:               "a INT, b INT, c INT, INDEX i (b) STORING (a, c), FAMILY (a), FAMILY (b), FAMILY (c)",
@@ -107,8 +107,8 @@ func TestSpanBuilderCanSplitSpan(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			builder := span.MakeBuilder(evalCtx, execCfg.Codec, desc, idx)
-			if res := builder.CanSplitSpanIntoFamilySpans(
+			builder := span.MakeBuilder(evalCtx, execCfg.Codec, desc, idx.IndexDesc())
+			if res := builder.CanSplitSpanIntoSeparateFamilies(
 				tc.numNeededFamilies, tc.prefixLen, tc.containsNull); res != tc.canSplit {
 				t.Errorf("expected result to be %v, but found %v", tc.canSplit, res)
 			}

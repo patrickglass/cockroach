@@ -30,7 +30,7 @@ func newBoolAndHashAggAlloc(
 }
 
 type boolAndHashAgg struct {
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	col    []bool
 	curAgg bool
 	// foundNonNullForCurrentGroup tracks if we have seen any non-null values
@@ -41,19 +41,19 @@ type boolAndHashAgg struct {
 var _ AggregateFunc = &boolAndHashAgg{}
 
 func (a *boolAndHashAgg) SetOutput(vec coldata.Vec) {
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	a.col = vec.Bool()
 }
 
 func (a *boolAndHashAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec.Bool(), vec.Nulls()
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -131,7 +131,7 @@ func newBoolOrHashAggAlloc(
 }
 
 type boolOrHashAgg struct {
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	col    []bool
 	curAgg bool
 	// foundNonNullForCurrentGroup tracks if we have seen any non-null values
@@ -142,19 +142,19 @@ type boolOrHashAgg struct {
 var _ AggregateFunc = &boolOrHashAgg{}
 
 func (a *boolOrHashAgg) SetOutput(vec coldata.Vec) {
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	a.col = vec.Bool()
 }
 
 func (a *boolOrHashAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec.Bool(), vec.Nulls()
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 

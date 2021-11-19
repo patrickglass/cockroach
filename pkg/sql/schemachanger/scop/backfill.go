@@ -14,7 +14,6 @@ import "github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 
 //go:generate go run ./generate_visitor.go scop Backfill backfill.go backfill_visitor_generated.go
 
-// Make sure baseOp is used for linter.
 type backfillOp struct{ baseOp }
 
 // Type implements the Op interface.
@@ -26,6 +25,3 @@ type BackfillIndex struct {
 	TableID descpb.ID
 	IndexID descpb.IndexID
 }
-
-// Make sure baseOp is used for linter.
-var _ = backfillOp{baseOp: baseOp{}}

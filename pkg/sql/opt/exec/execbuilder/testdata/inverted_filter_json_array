@@ -103,7 +103,7 @@ vectorized: true
 │ filter: (b @> '[[1, 2]]') OR (b @> '[[3, 4]]')
 │
 └── • index join
-    │ table: json_tab@json_tab_pkey
+    │ table: json_tab@primary
     │
     └── • sort
         │ order: +a
@@ -147,7 +147,7 @@ vectorized: true
 │ filter: (b @> '[3]') OR (b @> '[[1, 2]]')
 │
 └── • index join
-    │ table: json_tab@json_tab_pkey
+    │ table: json_tab@primary
     │
     └── • sort
         │ order: +a
@@ -211,23 +211,23 @@ vectorized: true
 │ distinct on: a
 │ order key: a
 │
-└── • union all
+└── • sort
+    │ order: +a
     │
-    ├── • index join
-    │   │ table: json_tab@json_tab_pkey
-    │   │
-    │   └── • sort
-    │       │ order: +a
-    │       │
-    │       └── • scan
-    │             missing stats
-    │             table: json_tab@foo_inv
-    │             spans: 1 span
-    │
-    └── • scan
-          missing stats
-          table: json_tab@json_tab_pkey
-          spans: [/44 - /44]
+    └── • union all
+        │
+        ├── • index join
+        │   │ table: json_tab@primary
+        │   │
+        │   └── • scan
+        │         missing stats
+        │         table: json_tab@foo_inv
+        │         spans: 1 span
+        │
+        └── • scan
+              missing stats
+              table: json_tab@primary
+              spans: [/44 - /44]
 
 # We cannot use the index for this query.
 query error pq: index "foo_inv" is inverted and cannot be used for this query
@@ -244,7 +244,7 @@ vectorized: true
 │
 └── • scan
       missing stats
-      table: json_tab@json_tab_pkey
+      table: json_tab@primary
       spans: FULL SCAN
 
 # Array operations.
@@ -295,23 +295,23 @@ vectorized: true
 │ distinct on: a
 │ order key: a
 │
-└── • union all
+└── • sort
+    │ order: +a
     │
-    ├── • index join
-    │   │ table: array_tab@array_tab_pkey
-    │   │
-    │   └── • sort
-    │       │ order: +a
-    │       │
-    │       └── • scan
-    │             missing stats
-    │             table: array_tab@foo_inv
-    │             spans: 1 span
-    │
-    └── • scan
-          missing stats
-          table: array_tab@array_tab_pkey
-          spans: [/1 - /1]
+    └── • union all
+        │
+        ├── • index join
+        │   │ table: array_tab@primary
+        │   │
+        │   └── • scan
+        │         missing stats
+        │         table: array_tab@foo_inv
+        │         spans: 1 span
+        │
+        └── • scan
+              missing stats
+              table: array_tab@primary
+              spans: [/1 - /1]
 
 # We cannot use the index for this query.
 query error pq: index "foo_inv" is inverted and cannot be used for this query
@@ -328,5 +328,5 @@ vectorized: true
 │
 └── • scan
       missing stats
-      table: array_tab@array_tab_pkey
+      table: array_tab@primary
       spans: FULL SCAN

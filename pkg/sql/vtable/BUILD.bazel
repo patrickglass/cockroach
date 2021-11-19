@@ -9,8 +9,3 @@ go_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/vtable",
     visibility = ["//visibility:public"],
 )
-
-exports_files([
-    "pg_catalog.go",
-    "information_schema.go",
-])

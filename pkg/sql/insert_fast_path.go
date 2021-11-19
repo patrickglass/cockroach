@@ -89,7 +89,7 @@ type insertFastPathFKCheck struct {
 	exec.InsertFastPathFKCheck
 
 	tabDesc     catalog.TableDescriptor
-	idx         catalog.Index
+	idxDesc     *descpb.IndexDescriptor
 	keyPrefix   []byte
 	colMap      catalog.TableColMap
 	spanBuilder *span.Builder
@@ -98,11 +98,11 @@ type insertFastPathFKCheck struct {
 func (c *insertFastPathFKCheck) init(params runParams) error {
 	idx := c.ReferencedIndex.(*optIndex)
 	c.tabDesc = c.ReferencedTable.(*optTable).desc
-	c.idx = idx.idx
+	c.idxDesc = idx.desc
 
 	codec := params.ExecCfg().Codec
-	c.keyPrefix = rowenc.MakeIndexKeyPrefix(codec, c.tabDesc, c.idx.GetID())
-	c.spanBuilder = span.MakeBuilder(params.EvalContext(), codec, c.tabDesc, c.idx)
+	c.keyPrefix = rowenc.MakeIndexKeyPrefix(codec, c.tabDesc, c.idxDesc.ID)
+	c.spanBuilder = span.MakeBuilder(params.EvalContext(), codec, c.tabDesc, c.idxDesc)
 
 	if len(c.InsertCols) > idx.numLaxKeyCols {
 		return errors.AssertionFailedf(
@@ -111,10 +111,10 @@ func (c *insertFastPathFKCheck) init(params runParams) error {
 	}
 	for i, ord := range c.InsertCols {
 		var colID descpb.ColumnID
-		if i < c.idx.NumKeyColumns() {
-			colID = c.idx.GetKeyColumnID(i)
+		if i < len(c.idxDesc.ColumnIDs) {
+			colID = c.idxDesc.ColumnIDs[i]
 		} else {
-			colID = c.idx.GetKeySuffixColumnID(i - c.idx.NumKeyColumns())
+			colID = c.idxDesc.ExtraColumnIDs[i-len(c.idxDesc.ColumnIDs)]
 		}
 
 		c.colMap.Set(colID, int(ord))
@@ -249,7 +249,7 @@ func (n *insertFastPathNode) startExec(params runParams) error {
 		}
 	}
 
-	return n.run.ti.init(params.ctx, params.p.txn, params.EvalContext(), &params.EvalContext().Settings.SV)
+	return n.run.ti.init(params.ctx, params.p.txn, params.EvalContext())
 }
 
 // Next is required because batchedPlanNode inherits from planNode, but
@@ -304,7 +304,7 @@ func (n *insertFastPathNode) BatchedNext(params runParams) (bool, error) {
 		return false, err
 	}
 
-	n.run.ti.setRowsWrittenLimit(params.extendedEvalCtx.SessionData())
+	n.run.ti.setRowsWrittenLimit(params.extendedEvalCtx.SessionData)
 	if err := n.run.ti.finalize(params.ctx); err != nil {
 		return false, err
 	}
@@ -312,7 +312,7 @@ func (n *insertFastPathNode) BatchedNext(params runParams) (bool, error) {
 	n.run.done = true
 
 	// Possibly initiate a run of CREATE STATISTICS.
-	params.ExecCfg().StatsRefresher.NotifyMutation(n.run.ti.ri.Helper.TableDesc, len(n.input))
+	params.ExecCfg().StatsRefresher.NotifyMutation(n.run.ti.ri.Helper.TableDesc.GetID(), len(n.input))
 
 	return true, nil
 }
@@ -325,12 +325,6 @@ func (n *insertFastPathNode) BatchedValues(rowIdx int) tree.Datums { return n.ru
 
 func (n *insertFastPathNode) Close(ctx context.Context) {
 	n.run.ti.close(ctx)
-	for i := range n.run.fkChecks {
-		builder := n.run.fkChecks[i].spanBuilder
-		if builder != nil {
-			builder.Release()
-		}
-	}
 	*n = insertFastPathNode{}
 	insertFastPathNodePool.Put(n)
 }
@@ -349,21 +343,23 @@ func (n *insertFastPathNode) enableAutoCommit() {
 // If colNum is not -1, only the colNum'th column in insertCols will be checked
 // for AlterColumnTypeInProgress, otherwise every column in insertCols will
 // be checked.
-func interceptAlterColumnTypeParseError(insertCols []catalog.Column, colNum int, err error) error {
+func interceptAlterColumnTypeParseError(
+	insertCols []descpb.ColumnDescriptor, colNum int, err error,
+) error {
 	// Only intercept the error if the column being inserted into
 	// is an actual column. This is to avoid checking on values that don't
 	// correspond to an actual column, for example a check constraint.
 	if colNum >= len(insertCols) {
 		return err
 	}
-	var insertCol catalog.Column
+	var insertCol descpb.ColumnDescriptor
 
 	// wrapParseError is a helper function that checks if an insertCol has the
 	// AlterColumnTypeInProgress flag and wraps the parse error msg stating
 	// that the error may be because the column is being altered.
 	// Returns if the error msg has been wrapped and the wrapped error msg.
-	wrapParseError := func(insertCol catalog.Column, colNum int, err error) (bool, error) {
-		if insertCol.ColumnDesc().AlterColumnTypeInProgress {
+	wrapParseError := func(insertCol descpb.ColumnDescriptor, colNum int, err error) (bool, error) {
+		if insertCol.AlterColumnTypeInProgress {
 			code := pgerror.GetPGCode(err)
 			if code == pgcode.InvalidTextRepresentation {
 				if colNum != -1 {

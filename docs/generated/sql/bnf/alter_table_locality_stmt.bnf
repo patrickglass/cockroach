@@ -1,3 +1,0 @@
-alter_table_locality_stmt ::=
-	'ALTER' 'TABLE' relation_expr 'SET' locality
-	| 'ALTER' 'TABLE' 'IF' 'EXISTS' relation_expr 'SET' locality

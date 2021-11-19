@@ -38,7 +38,10 @@ func (dsp *DistSQLPlanner) createScrubPhysicalCheck(
 	for i, sp := range spanPartitions {
 		tr := &execinfrapb.TableReaderSpec{}
 		*tr = *spec
-		tr.Spans = sp.Spans
+		tr.Spans = make([]execinfrapb.TableReaderSpan, len(sp.Spans))
+		for j := range sp.Spans {
+			tr.Spans[j].Span = sp.Spans[j]
+		}
 
 		corePlacement[i].NodeID = sp.Node
 		corePlacement[i].Core.TableReader = tr

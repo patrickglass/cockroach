@@ -18,7 +18,7 @@ go_library(
     deps = [
         "//pkg/geo",
         "//pkg/geo/geopb",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/sql/inverted",
         "//pkg/sql/pgwire/pgcode",
         "//pkg/sql/pgwire/pgerror",
@@ -39,10 +39,10 @@ go_test(
     ],
     data = glob(["testdata/**"]),
     embed = [":json"],
+    tags = ["broken_in_bazel"],
     deps = [
         "//pkg/sql/inverted",
         "//pkg/sql/pgwire/pgerror",
-        "//pkg/testutils",
         "//pkg/util/encoding",
         "//pkg/util/randutil",
         "//pkg/util/timeutil",

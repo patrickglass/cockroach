@@ -11,6 +11,7 @@
 package caller
 
 import (
+	"fmt"
 	"path"
 	"regexp"
 	"testing"
@@ -54,9 +55,22 @@ func TestDefaultCallResolver(t *testing.T) {
 	}
 }
 
-func BenchmarkSimpleCaller(b *testing.B) {
-	b.ReportAllocs()
+func BenchmarkFormattedCaller(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		_, _, _ = Lookup(1)
+		file, line, _ := Lookup(1)
+		s := fmt.Sprintf("%s:%d", file, line)
+		if testing.Verbose() {
+			b.Log(s)
+		}
+	}
+}
+
+func BenchmarkSimpleCaller(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		file, line, _ := Lookup(1)
+		if testing.Verbose() {
+			s := fmt.Sprintf("%s:%d", file, line)
+			b.Log(s)
+		}
 	}
 }

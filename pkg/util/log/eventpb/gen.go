@@ -8,8 +8,7 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//go:build bazel
-// +build bazel
+// +build ignore
 
 package main
 
@@ -84,7 +83,6 @@ type fieldInfo struct {
 	FieldName           string
 	AlwaysReportingSafe bool
 	ReportingSafeRe     string
-	MixedRedactable     bool
 	Inherited           bool
 	IsEnum              bool
 }
@@ -369,16 +367,12 @@ func readInput(
 
 				name := snakeToCamel(fieldDefRe.ReplaceAllString(line, "$name"))
 				alwayssafe := false
-				mixed := false
 				if nameOverride := fieldDefRe.ReplaceAllString(line, "$noverride"); nameOverride != "" {
 					name = nameOverride
 				}
 				// redact:"nonsensitive" - always safe for reporting.
 				if reportingSafe := fieldDefRe.ReplaceAllString(line, "$reportingsafe"); reportingSafe != "" {
 					alwayssafe = true
-					if reportingSafe == "mixed" {
-						mixed = true
-					}
 				}
 				// Certain types are also always safe for reporting.
 				if !alwayssafe && isSafeType(typ) {
@@ -416,7 +410,6 @@ func readInput(
 					FieldName:           name,
 					AlwaysReportingSafe: alwayssafe,
 					ReportingSafeRe:     safeReName,
-					MixedRedactable:     mixed,
 					IsEnum:              isEnum,
 				}
 				curMsg.Fields = append(curMsg.Fields, fi)
@@ -443,7 +436,7 @@ var fieldDefRe = regexp.MustCompile(`\s*(?P<typ>[a-z._A-Z0-9]+)` +
 	`\s+(?P<name>[a-z_]+)` +
 	`(;|` +
 	`\s+(.*customname\) = "(?P<noverride>[A-Za-z]+)")?` +
-	`(.*"redact:\\"(?P<reportingsafe>nonsensitive|mixed)\\"")?` +
+	`(.*"redact:\\"(?P<reportingsafe>nonsensitive)\\"")?` +
 	`(.*"redact:\\"safeif:(?P<safeif>([^\\]|\\[^"])+)\\"")?` +
 	`).*$`)
 
@@ -503,7 +496,7 @@ func (m *{{.GoType}}) AppendJSONFields(printComma bool, b redact.RedactableBytes
      if printComma { b = append(b, ',')}; printComma = true
      b = append(b, "\"{{.FieldName}}\":\""...)
      {{ if .AlwaysReportingSafe -}}
-     b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(m.{{.FieldName}})))
+     b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), m.{{.FieldName}}))
      {{- else if ne .ReportingSafeRe "" }}
      if {{ .ReportingSafeRe }}.MatchString(m.{{.FieldName}}) {
        b = redact.RedactableBytes(jsonbytes.EncodeString([]byte(b), string(redact.EscapeMarkers([]byte(m.{{.FieldName}})))))
@@ -652,7 +645,7 @@ Events in this category are logged to the ` + "`" + `{{.LogChannel}}` + "`" + ` 
 | Field | Description | Sensitive |
 |--|--|--|
 {{range .Fields -}}
-| ` + "`" + `{{- .FieldName -}}` + "`" + ` | {{ .Comment | tableCell }}{{- if .IsEnum }} See below for possible values for type ` + "`" + `{{- .FieldType -}}` + "`" + `.{{- end }} | {{ if .MixedRedactable }}partially{{ else if .AlwaysReportingSafe }}no{{else if ne .ReportingSafeRe "" }}depends{{else}}yes{{end}} |
+| ` + "`" + `{{- .FieldName -}}` + "`" + ` | {{ .Comment | tableCell }}{{- if .IsEnum }} See below for possible values for type ` + "`" + `{{- .FieldType -}}` + "`" + `.{{- end }} | {{ if .AlwaysReportingSafe }}no{{else if ne .ReportingSafeRe "" }}depends{{else}}yes{{end}} |
 {{end}}
 {{- end}}
 
@@ -662,7 +655,7 @@ Events in this category are logged to the ` + "`" + `{{.LogChannel}}` + "`" + ` 
 | Field | Description | Sensitive |
 |--|--|--|
 {{range .InheritedFields -}}
-| ` + "`" + `{{- .FieldName -}}` + "`" + ` | {{ .Comment | tableCell }} | {{ if .MixedRedactable }}partially{{ else if .AlwaysReportingSafe }}no{{else if ne .ReportingSafeRe "" }}depends{{else}}yes{{end}} |
+| ` + "`" + `{{- .FieldName -}}` + "`" + ` | {{ .Comment | tableCell }} | {{ if .AlwaysReportingSafe }}no{{else if ne .ReportingSafeRe "" }}depends{{else}}yes{{end}} |
 {{end}}
 {{- end}}
 
@@ -677,7 +670,7 @@ Events in this category are logged to the ` + "`" + `{{.LogChannel}}` + "`" + ` 
 {{ .Comment }}
 
 | Value | Textual alias in code or documentation | Description |
-|--|--|--|
+|--|--|
 {{range .Values -}}
 | {{ .Value }} | {{ .Name }} | {{ .Comment | tableCell }} |
 {{end}}

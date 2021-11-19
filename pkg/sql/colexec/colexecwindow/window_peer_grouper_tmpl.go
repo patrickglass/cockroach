@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for window_peer_grouper.eg.go. It's
 // formatted in a special way, so it's both valid Go and a valid text/template
@@ -22,6 +20,8 @@
 package colexecwindow
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
@@ -47,7 +47,7 @@ func NewWindowPeerGrouper(
 	orderingCols []execinfrapb.Ordering_Column,
 	partitionColIdx int,
 	outputColIdx int,
-) colexecop.Operator {
+) (op colexecop.Operator, err error) {
 	allPeers := len(orderingCols) == 0
 	var distinctCol []bool
 	if !allPeers {
@@ -55,13 +55,16 @@ func NewWindowPeerGrouper(
 		for i, ordCol := range orderingCols {
 			orderIdxs[i] = ordCol.ColIdx
 		}
-		input, distinctCol = colexecbase.OrderedDistinctColsToOperators(
-			input, orderIdxs, typs, false, /* nullsAreDistinct */
+		input, distinctCol, err = colexecbase.OrderedDistinctColsToOperators(
+			input, orderIdxs, typs,
 		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	input = colexecutils.NewVectorTypeEnforcer(allocator, input, types.Bool, outputColIdx)
 	initFields := windowPeerGrouperInitFields{
-		OneInputHelper:  colexecop.MakeOneInputHelper(input),
+		OneInputNode:    colexecop.NewOneInputNode(input),
 		allocator:       allocator,
 		partitionColIdx: partitionColIdx,
 		distinctCol:     distinctCol,
@@ -71,24 +74,24 @@ func NewWindowPeerGrouper(
 		if partitionColIdx != tree.NoColumnIdx {
 			return &windowPeerGrouperAllPeersWithPartitionOp{
 				windowPeerGrouperInitFields: initFields,
-			}
+			}, nil
 		}
 		return &windowPeerGrouperAllPeersNoPartitionOp{
 			windowPeerGrouperInitFields: initFields,
-		}
+		}, nil
 	}
 	if partitionColIdx != tree.NoColumnIdx {
 		return &windowPeerGrouperWithPartitionOp{
 			windowPeerGrouperInitFields: initFields,
-		}
+		}, nil
 	}
 	return &windowPeerGrouperNoPartitionOp{
 		windowPeerGrouperInitFields: initFields,
-	}
+	}, nil
 }
 
 type windowPeerGrouperInitFields struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator       *colmem.Allocator
 	partitionColIdx int
@@ -110,8 +113,12 @@ type _PEER_GROUPER_STRINGOp struct {
 
 var _ colexecop.Operator = &_PEER_GROUPER_STRINGOp{}
 
-func (p *_PEER_GROUPER_STRINGOp) Next() coldata.Batch {
-	b := p.Input.Next()
+func (p *_PEER_GROUPER_STRINGOp) Init() {
+	p.Input.Init()
+}
+
+func (p *_PEER_GROUPER_STRINGOp) Next(ctx context.Context) coldata.Batch {
+	b := p.Input.Next(ctx)
 	n := b.Length()
 	if n == 0 {
 		return b

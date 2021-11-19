@@ -13,9 +13,10 @@ package sql
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
 // recursiveCTENode implements the logic for a recursive CTE:
@@ -35,38 +36,27 @@ type recursiveCTENode struct {
 
 	label string
 
-	// If true, all rows must be deduplicated against previous rows.
-	deduplicate bool
-
 	recursiveCTERun
 }
 
 type recursiveCTERun struct {
-	// typs is the schema of the rows produced by this CTE.
-	typs []*types.T
 	// workingRows contains the rows produced by the current iteration (aka the
 	// "working" table).
-	workingRows rowContainerHelper
-	iterator    *rowContainerIterator
-	currentRow  tree.Datums
-
-	// allRows contains all distinct rows produced (in all iterations); only used
-	// if deduplicating.
-	allRows rowContainerHelper
+	workingRows *rowcontainer.RowContainer
+	// nextRowIdx is the index inside workingRows of the next row to be returned
+	// by the operator.
+	nextRowIdx int
 
 	initialDone bool
 	done        bool
-
-	// err is only used to implement rowResultWriter.
-	err error
 }
 
 func (n *recursiveCTENode) startExec(params runParams) error {
-	n.typs = planTypes(n.initial)
-	n.workingRows.Init(n.typs, params.extendedEvalCtx, "cte" /* opName */)
-	if n.deduplicate {
-		n.allRows.InitWithDedup(n.typs, params.extendedEvalCtx, "cte-all" /* opName */)
-	}
+	n.workingRows = rowcontainer.NewRowContainer(
+		params.EvalContext().Mon.MakeBoundAccount(),
+		colinfo.ColTypeInfoFromResCols(getPlanColumns(n.initial, false /* mut */)),
+	)
+	n.nextRowIdx = 0
 	return nil
 }
 
@@ -75,23 +65,19 @@ func (n *recursiveCTENode) Next(params runParams) (bool, error) {
 		return false, err
 	}
 
+	n.nextRowIdx++
+
 	if !n.initialDone {
-		// Fully consume the initial rows (we could have read the initial rows one
-		// at a time and returned them in the same fashion, but that would require
-		// special-case behavior).
-		for {
-			ok, err := n.initial.Next(params)
-			if err != nil {
-				return false, err
-			}
-			if !ok {
-				break
-			}
-			if err := n.AddRow(params.ctx, n.initial.Values()); err != nil {
-				return false, err
-			}
+		ok, err := n.initial.Next(params)
+		if err != nil {
+			return false, err
 		}
-		n.iterator = newRowContainerIterator(params.ctx, n.workingRows, n.typs)
+		if ok {
+			if _, err = n.workingRows.AddRow(params.ctx, n.initial.Values()); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
 		n.initialDone = true
 	}
 
@@ -105,100 +91,46 @@ func (n *recursiveCTENode) Next(params runParams) (bool, error) {
 		return false, nil
 	}
 
-	var err error
-	n.currentRow, err = n.iterator.Next()
-	if err != nil {
-		return false, err
-	}
-	if n.currentRow != nil {
-		// There are more rows to return from the last iteration.
+	// There are more rows to return from the last iteration.
+	if n.nextRowIdx <= n.workingRows.Len() {
 		return true, nil
 	}
 
 	// Let's run another iteration.
 
-	n.iterator.Close()
-	n.iterator = nil
 	lastWorkingRows := n.workingRows
 	defer lastWorkingRows.Close(params.ctx)
 
-	n.workingRows = rowContainerHelper{}
-	n.workingRows.Init(n.typs, params.extendedEvalCtx, "cte" /* opName */)
+	n.workingRows = rowcontainer.NewRowContainer(
+		params.EvalContext().Mon.MakeBoundAccount(),
+		colinfo.ColTypeInfoFromResCols(getPlanColumns(n.initial, false /* mut */)),
+	)
 
 	// Set up a bufferNode that can be used as a reference for a scanBufferNode.
 	buf := &bufferNode{
 		// The plan here is only useful for planColumns, so it's ok to always use
 		// the initial plan.
-		plan:  n.initial,
-		typs:  n.typs,
-		rows:  lastWorkingRows,
-		label: n.label,
+		plan:         n.initial,
+		bufferedRows: lastWorkingRows,
+		label:        n.label,
 	}
 	newPlan, err := n.genIterationFn(newExecFactory(params.p), buf)
 	if err != nil {
 		return false, err
 	}
 
-	if err := runPlanInsidePlan(params, newPlan.(*planComponents), rowResultWriter(n)); err != nil {
+	if err := runPlanInsidePlan(params, newPlan.(*planComponents), n.workingRows); err != nil {
 		return false, err
 	}
-
-	n.iterator = newRowContainerIterator(params.ctx, n.workingRows, n.typs)
-	n.currentRow, err = n.iterator.Next()
-	if err != nil {
-		return false, err
-	}
-	return n.currentRow != nil, nil
+	n.nextRowIdx = 1
+	return n.workingRows.Len() > 0, nil
 }
 
 func (n *recursiveCTENode) Values() tree.Datums {
-	return n.currentRow
+	return n.workingRows.At(n.nextRowIdx - 1)
 }
 
 func (n *recursiveCTENode) Close(ctx context.Context) {
 	n.initial.Close(ctx)
-	if n.deduplicate {
-		n.allRows.Close(ctx)
-	}
 	n.workingRows.Close(ctx)
-	if n.iterator != nil {
-		n.iterator.Close()
-		n.iterator = nil
-	}
-}
-
-// recursiveCTENode implements rowResultWriter and is used as the result writer
-// for each iteration.
-var _ rowResultWriter = (*recursiveCTENode)(nil)
-
-// AddRow is part of the rowResultWriter interface.
-//
-// If we are not deduplicating, the rows are added to the workingRows container.
-//
-// If we are deduplicating, each row is either discarded if it has a duplicate
-// in the allRows container or added to both allRows and workingRows otherwise.
-func (n *recursiveCTENode) AddRow(ctx context.Context, row tree.Datums) error {
-	if n.deduplicate {
-		if ok, err := n.allRows.AddRowWithDedup(ctx, row); err != nil {
-			return err
-		} else if !ok {
-			// Duplicate row; don't add to the resulting rows.
-			return nil
-		}
-	}
-	return n.workingRows.AddRow(ctx, row)
-}
-
-// IncrementRowsAffected is part of the rowResultWriter interface.
-func (n *recursiveCTENode) IncrementRowsAffected(context.Context, int) {
-}
-
-// SetError is part of the rowResultWriter interface.
-func (n *recursiveCTENode) SetError(err error) {
-	n.err = err
-}
-
-// Error is part of the rowResultWriter interface.
-func (n *recursiveCTENode) Err() error {
-	return n.err
 }

@@ -39,10 +39,10 @@ func GetLikeProjectionOperator(
 	pat := []byte(pattern)
 	input = colexecutils.NewVectorTypeEnforcer(allocator, input, types.Bool, resultIdx)
 	base := projConstOpBase{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
-		allocator:      allocator,
-		colIdx:         colIdx,
-		outputIdx:      resultIdx,
+		OneInputNode: colexecop.NewOneInputNode(input),
+		allocator:    allocator,
+		colIdx:       colIdx,
+		outputIdx:    resultIdx,
 	}
 	switch likeOpType {
 	case colexeccmp.LikeConstant:

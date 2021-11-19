@@ -21,12 +21,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/constraint"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/ordering"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -36,7 +34,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -165,22 +162,10 @@ func (b *Builder) buildRelational(e memo.RelExpr) (execPlan, error) {
 		}
 	}
 
-	if opt.IsMutationOp(e) {
-		b.ContainsMutation = true
-		// Raise error if mutation op is part of a read-only transaction.
-		if b.evalCtx.TxnReadOnly {
-			return execPlan{}, pgerror.Newf(pgcode.ReadOnlySQLTransaction,
-				"cannot execute %s in a read-only transaction", b.statementTag(e))
-		}
-	}
-
-	// Raise error if bounded staleness is used incorrectly.
-	if b.boundedStaleness() {
-		if _, ok := boundedStalenessAllowList[e.Op()]; !ok {
-			return execPlan{}, unimplemented.NewWithIssuef(67562,
-				"cannot use bounded staleness for %s", b.statementTag(e),
-			)
-		}
+	// Raise error if mutation op is part of a read-only transaction.
+	if opt.IsMutationOp(e) && b.evalCtx.TxnReadOnly {
+		return execPlan{}, pgerror.Newf(pgcode.ReadOnlySQLTransaction,
+			"cannot execute %s in a read-only transaction", b.statementTag(e))
 	}
 
 	// Collect usage telemetry for relational node, if appropriate.
@@ -207,9 +192,6 @@ func (b *Builder) buildRelational(e memo.RelExpr) (execPlan, error) {
 	case *memo.ScanExpr:
 		ep, err = b.buildScan(t)
 
-	case *memo.PlaceholderScanExpr:
-		ep, err = b.buildPlaceholderScan(t)
-
 	case *memo.SelectExpr:
 		ep, err = b.buildSelect(t)
 
@@ -222,9 +204,6 @@ func (b *Builder) buildRelational(e memo.RelExpr) (execPlan, error) {
 	case *memo.DistinctOnExpr, *memo.EnsureDistinctOnExpr, *memo.UpsertDistinctOnExpr,
 		*memo.EnsureUpsertDistinctOnExpr:
 		ep, err = b.buildDistinct(t)
-
-	case *memo.TopKExpr:
-		ep, err = b.buildTopK(t)
 
 	case *memo.LimitExpr, *memo.OffsetExpr:
 		ep, err = b.buildLimitOffset(e)
@@ -352,7 +331,7 @@ func (b *Builder) buildRelational(e memo.RelExpr) (execPlan, error) {
 
 	// In test builds, assert that the exec plan output columns match the opt
 	// plan output columns.
-	if buildutil.CrdbTestBuild {
+	if util.CrdbTestBuild {
 		optCols := e.Relational().OutputCols
 		var execCols opt.ColSet
 		ep.outputCols.ForEach(func(key, val int) {
@@ -383,7 +362,6 @@ func (b *Builder) buildRelational(e memo.RelExpr) (execPlan, error) {
 					val.TableStatsRowCount = 1
 				}
 				val.TableStatsCreatedAt = stat.CreatedAt()
-				val.LimitHint = scan.RequiredPhysical().LimitHint
 			}
 		}
 		ef.AnnotateNode(ep.root, exec.EstimatedStatsID, &val)
@@ -490,9 +468,7 @@ func (b *Builder) getColumns(
 // indexConstraintMaxResults returns the maximum number of results for a scan;
 // if successful (ok=true), the scan is guaranteed never to return more results
 // than maxRows.
-func (b *Builder) indexConstraintMaxResults(
-	scan *memo.ScanPrivate, relProps *props.Relational,
-) (maxRows uint64, ok bool) {
+func (b *Builder) indexConstraintMaxResults(scan *memo.ScanExpr) (maxRows uint64, ok bool) {
 	c := scan.Constraint
 	if c == nil || c.IsContradiction() || c.IsUnconstrained() {
 		return 0, false
@@ -503,16 +479,16 @@ func (b *Builder) indexConstraintMaxResults(
 	for i := 0; i < numCols; i++ {
 		indexCols.Add(c.Columns.Get(i).ID())
 	}
-	if !relProps.FuncDeps.ColsAreLaxKey(indexCols) {
+	rel := scan.Relational()
+	if !rel.FuncDeps.ColsAreLaxKey(indexCols) {
 		return 0, false
 	}
 
-	return c.CalculateMaxResults(b.evalCtx, indexCols, relProps.NotNullCols)
+	return c.CalculateMaxResults(b.evalCtx, indexCols, rel.NotNullCols)
 }
 
-// scanParams populates ScanParams and the output column mapping.
 func (b *Builder) scanParams(
-	tab cat.Table, scan *memo.ScanPrivate, relProps *props.Relational, reqProps *physical.Required,
+	tab cat.Table, scan *memo.ScanExpr,
 ) (exec.ScanParams, opt.ColMap, error) {
 	// Check if we tried to force a specific index but there was no Scan with that
 	// index in the memo.
@@ -539,13 +515,8 @@ func (b *Builder) scanParams(
 				idx.Name(),
 			)
 		default:
+			// This should never happen.
 			err = fmt.Errorf("index \"%s\" cannot be used for this query", idx.Name())
-			if b.evalCtx.SessionData().DisallowFullTableScans &&
-				(b.ContainsLargeFullTableScan || b.ContainsLargeFullIndexScan) {
-				err = errors.WithHint(err,
-					"try overriding the `disallow_full_table_scans` or increasing the `large_full_scan_rows` cluster/session settings",
-				)
-			}
 		}
 
 		return exec.ScanParams{}, opt.ColMap{}, err
@@ -564,53 +535,28 @@ func (b *Builder) scanParams(
 
 	needed, outputMap := b.getColumns(scan.Cols, scan.Table)
 
-	// Get the estimated row count from the statistics. When there are no
-	// statistics available, we construct a scan node with
-	// the estimated row count of zero rows.
-	//
+	// Get the estimated row count from the statistics.
 	// Note: if this memo was originally created as part of a PREPARE
 	// statement or was stored in the query cache, the column stats would have
 	// been removed by DetachMemo. Update that function if the column stats are
 	// needed here in the future.
-	var rowCount float64
-	if relProps.Stats.Available {
-		rowCount = relProps.Stats.RowCount
+	rowCount := scan.Relational().Stats.RowCount
+	if !scan.Relational().Stats.Available {
+		// When there are no statistics available, we construct a scan node with
+		// the estimated row count of zero rows.
+		rowCount = 0
 	}
 
 	if scan.PartitionConstrainedScan {
 		sqltelemetry.IncrementPartitioningCounter(sqltelemetry.PartitionConstrainedScan)
 	}
 
-	softLimit := int64(math.Ceil(reqProps.LimitHint))
+	softLimit := int64(math.Ceil(scan.RequiredPhysical().LimitHint))
 	hardLimit := scan.HardLimit.RowCount()
-
-	// If this is a bounded staleness query, check that it touches at most one
-	// range.
-	if b.boundedStaleness() {
-		valid := true
-		if b.containsBoundedStalenessScan {
-			// We already planned a scan, perhaps as part of a subquery.
-			valid = false
-		} else if hardLimit != 0 {
-			// If hardLimit is not 0, from KV's perspective, this is a multi-row scan
-			// with a limit. That means that even if the limit is 1, the scan can span
-			// multiple ranges if the first range is empty.
-			valid = false
-		} else {
-			maxResults, ok := b.indexConstraintMaxResults(scan, relProps)
-			valid = ok && maxResults == 1
-		}
-		if !valid {
-			return exec.ScanParams{}, opt.ColMap{}, unimplemented.NewWithIssuef(67562,
-				"cannot use bounded staleness for queries that may touch more than one range or require an index join",
-			)
-		}
-		b.containsBoundedStalenessScan = true
-	}
 
 	parallelize := false
 	if hardLimit == 0 && softLimit == 0 {
-		maxResults, ok := b.indexConstraintMaxResults(scan, relProps)
+		maxResults, ok := b.indexConstraintMaxResults(scan)
 		if ok && maxResults < ParallelScanResultThreshold {
 			// Don't set the flag when we have a single span which returns a single
 			// row: it does nothing in this case except litter EXPLAINs.
@@ -622,28 +568,18 @@ func (b *Builder) scanParams(
 		}
 	}
 
-	// Figure out if we need to scan in reverse (ScanPrivateCanProvide takes
-	// HardLimit.Reverse() into account).
-	ok, reverse := ordering.ScanPrivateCanProvide(
-		b.mem.Metadata(),
-		scan,
-		&reqProps.Ordering,
-	)
-	if !ok {
-		return exec.ScanParams{}, opt.ColMap{}, errors.AssertionFailedf("scan can't provide required ordering")
-	}
-
 	return exec.ScanParams{
 		NeededCols:         needed,
 		IndexConstraint:    scan.Constraint,
 		InvertedConstraint: scan.InvertedConstraint,
 		HardLimit:          hardLimit,
 		SoftLimit:          softLimit,
-		Reverse:            reverse,
-		Parallelize:        parallelize,
-		Locking:            locking,
-		EstimatedRowCount:  rowCount,
-		LocalityOptimized:  scan.LocalityOptimized,
+		// HardLimit.Reverse() is taken into account by ScanIsReverse.
+		Reverse:           ordering.ScanIsReverse(scan, &scan.RequiredPhysical().Ordering),
+		Parallelize:       parallelize,
+		Locking:           locking,
+		EstimatedRowCount: rowCount,
+		LocalityOptimized: scan.LocalityOptimized,
 	}, outputMap, nil
 }
 
@@ -655,26 +591,26 @@ func (b *Builder) buildScan(scan *memo.ScanExpr) (execPlan, error) {
 		telemetry.Inc(sqltelemetry.PartialIndexScanUseCounter)
 	}
 
-	if scan.Flags.ForceZigzag {
-		return execPlan{}, fmt.Errorf("could not produce a query plan conforming to the FORCE_ZIGZAG hint")
+	params, outputCols, err := b.scanParams(tab, scan)
+	if err != nil {
+		return execPlan{}, err
 	}
-
-	isUnfiltered := scan.IsUnfiltered(md)
-	if scan.Flags.NoFullScan {
-		// Normally a full scan of a partial index would be allowed with the
-		// NO_FULL_SCAN hint (isUnfiltered is false for partial indexes), but if the
-		// user has explicitly forced the partial index *and* used NO_FULL_SCAN, we
-		// disallow the full index scan.
-		if isUnfiltered || (scan.Flags.ForceIndex && scan.IsFullIndexScan(md)) {
-			return execPlan{}, fmt.Errorf("could not produce a query plan conforming to the NO_FULL_SCAN hint")
-		}
+	res := execPlan{outputCols: outputCols}
+	root, err := b.factory.ConstructScan(
+		tab,
+		tab.Index(scan.Index),
+		params,
+		res.reqOrdering(scan),
+	)
+	if err != nil {
+		return execPlan{}, err
 	}
 
 	// Save if we planned a full table/index scan on the builder so that the
 	// planner can be made aware later. We only do this for non-virtual tables.
-	if !tab.IsVirtualTable() && isUnfiltered {
+	if !tab.IsVirtualTable() && scan.Constraint == nil && scan.InvertedConstraint == nil && !scan.HardLimit.IsSet() {
 		stats := scan.Relational().Stats
-		large := !stats.Available || stats.RowCount > b.evalCtx.SessionData().LargeFullScanRows
+		large := !stats.Available || stats.RowCount > b.evalCtx.SessionData.LargeFullScanRows
 		if scan.Index == cat.PrimaryIndex {
 			b.ContainsFullTableScan = true
 			b.ContainsLargeFullTableScan = b.ContainsLargeFullTableScan || large
@@ -682,87 +618,6 @@ func (b *Builder) buildScan(scan *memo.ScanExpr) (execPlan, error) {
 			b.ContainsFullIndexScan = true
 			b.ContainsLargeFullIndexScan = b.ContainsLargeFullIndexScan || large
 		}
-	}
-
-	params, outputCols, err := b.scanParams(tab, &scan.ScanPrivate, scan.Relational(), scan.RequiredPhysical())
-	if err != nil {
-		return execPlan{}, err
-	}
-	res := execPlan{outputCols: outputCols}
-	root, err := b.factory.ConstructScan(
-		tab,
-		tab.Index(scan.Index),
-		params,
-		res.reqOrdering(scan),
-	)
-	if err != nil {
-		return execPlan{}, err
-	}
-
-	res.root = root
-	return res, nil
-}
-
-func (b *Builder) buildPlaceholderScan(scan *memo.PlaceholderScanExpr) (execPlan, error) {
-	if scan.Constraint != nil || scan.InvertedConstraint != nil {
-		return execPlan{}, errors.AssertionFailedf("PlaceholderScan cannot have constraints")
-	}
-
-	md := b.mem.Metadata()
-	tab := md.Table(scan.Table)
-	idx := tab.Index(scan.Index)
-
-	// Build the index constraint.
-	spanColumns := make([]opt.OrderingColumn, len(scan.Span))
-	for i := range spanColumns {
-		col := idx.Column(i)
-		ordinal := col.Ordinal()
-		colID := scan.Table.ColumnID(ordinal)
-		spanColumns[i] = opt.MakeOrderingColumn(colID, col.Descending)
-	}
-	var columns constraint.Columns
-	columns.Init(spanColumns)
-	keyCtx := constraint.MakeKeyContext(&columns, b.evalCtx)
-
-	values := make([]tree.Datum, len(scan.Span))
-	for i, expr := range scan.Span {
-		// The expression is either a placeholder or a constant.
-		if p, ok := expr.(*memo.PlaceholderExpr); ok {
-			val, err := p.Value.(*tree.Placeholder).Eval(b.evalCtx)
-			if err != nil {
-				return execPlan{}, err
-			}
-			values[i] = val
-		} else {
-			values[i] = memo.ExtractConstDatum(expr)
-		}
-	}
-
-	key := constraint.MakeCompositeKey(values...)
-	var span constraint.Span
-	span.Init(key, constraint.IncludeBoundary, key, constraint.IncludeBoundary)
-	var spans constraint.Spans
-	spans.InitSingleSpan(&span)
-
-	var c constraint.Constraint
-	c.Init(&keyCtx, &spans)
-
-	private := scan.ScanPrivate
-	private.SetConstraint(b.evalCtx, &c)
-
-	params, outputCols, err := b.scanParams(tab, &private, scan.Relational(), scan.RequiredPhysical())
-	if err != nil {
-		return execPlan{}, err
-	}
-	res := execPlan{outputCols: outputCols}
-	root, err := b.factory.ConstructScan(
-		tab,
-		tab.Index(scan.Index),
-		params,
-		res.reqOrdering(scan),
-	)
-	if err != nil {
-		return execPlan{}, err
 	}
 
 	res.root = root
@@ -910,9 +765,9 @@ func (b *Builder) buildApplyJoin(join memo.RelExpr) (execPlan, error) {
 	rightProps := rightExpr.Relational()
 	filters := join.Child(2).(*memo.FiltersExpr)
 
-	// We will pre-populate the withExprs of the right-hand side execbuilder.
-	withExprs := make([]builtWithExpr, len(b.withExprs))
-	copy(withExprs, b.withExprs)
+	if len(memo.WithUses(rightExpr)) != 0 {
+		return execPlan{}, fmt.Errorf("references to WITH expressions from correlated subqueries are unsupported")
+	}
 
 	leftPlan, err := b.buildRelational(leftExpr)
 	if err != nil {
@@ -957,19 +812,6 @@ func (b *Builder) buildApplyJoin(join memo.RelExpr) (execPlan, error) {
 				if leftOrd, ok := leftBoundColMap.Get(int(t.Col)); ok {
 					return f.ConstructConstVal(leftRow[leftOrd], t.Typ)
 				}
-
-			case *memo.WithScanExpr:
-				// Allow referring to "outer" With expressions. The bound expressions
-				// are not part of this Memo but they are used only for their relational
-				// properties, which should be valid.
-				for i := range withExprs {
-					if withExprs[i].id == t.With {
-						memoExpr := b.mem.Metadata().WithBinding(t.With)
-						f.Metadata().AddWithBinding(t.With, memoExpr)
-						break
-					}
-				}
-				// Fall through.
 			}
 			return f.CopyAndReplaceDefault(e, replaceFn)
 		}
@@ -982,7 +824,6 @@ func (b *Builder) buildApplyJoin(join memo.RelExpr) (execPlan, error) {
 
 		eb := New(ef, &o, f.Memo(), b.catalog, newRightSide, b.evalCtx, false /* allowAutoCommit */)
 		eb.disableTelemetry = true
-		eb.withExprs = withExprs
 		plan, err := eb.Build()
 		if err != nil {
 			if errors.IsAssertionFailure(err) {
@@ -1162,40 +1003,19 @@ func (b *Builder) buildMergeJoin(join *memo.MergeJoinExpr) (execPlan, error) {
 	}
 
 	joinType := joinOpToJoinType(join.JoinType)
-	leftExpr, rightExpr := join.Left, join.Right
-	leftEq, rightEq := join.LeftEq, join.RightEq
-
-	if joinType == descpb.LeftSemiJoin || joinType == descpb.LeftAntiJoin {
-		// We have a partial join, and we want to make sure that the relation
-		// with smaller cardinality is on the right side. Note that we assumed
-		// it during the costing.
-		// TODO(raduberinde): we might also need to look at memo.JoinFlags when
-		// choosing a side.
-		leftRowCount := leftExpr.Relational().Stats.RowCount
-		rightRowCount := rightExpr.Relational().Stats.RowCount
-		if leftRowCount < rightRowCount {
-			if joinType == descpb.LeftSemiJoin {
-				joinType = descpb.RightSemiJoin
-			} else {
-				joinType = descpb.RightAntiJoin
-			}
-			leftExpr, rightExpr = rightExpr, leftExpr
-			leftEq, rightEq = rightEq, leftEq
-		}
-	}
 
 	left, right, onExpr, outputCols, err := b.initJoinBuild(
-		leftExpr, rightExpr, join.On, joinType,
+		join.Left, join.Right, join.On, joinType,
 	)
 	if err != nil {
 		return execPlan{}, err
 	}
-	leftOrd := left.sqlOrdering(leftEq)
-	rightOrd := right.sqlOrdering(rightEq)
+	leftOrd := left.sqlOrdering(join.LeftEq)
+	rightOrd := right.sqlOrdering(join.RightEq)
 	ep := execPlan{outputCols: outputCols}
 	reqOrd := ep.reqOrdering(join)
-	leftEqColsAreKey := leftExpr.Relational().FuncDeps.ColsAreStrictKey(leftEq.ColSet())
-	rightEqColsAreKey := rightExpr.Relational().FuncDeps.ColsAreStrictKey(rightEq.ColSet())
+	leftEqColsAreKey := join.Left.Relational().FuncDeps.ColsAreStrictKey(join.LeftEq.ColSet())
+	rightEqColsAreKey := join.Right.Relational().FuncDeps.ColsAreStrictKey(join.RightEq.ColSet())
 	ep.root, err = b.factory.ConstructMergeJoin(
 		joinType,
 		left.root, right.root,
@@ -1356,9 +1176,8 @@ func (b *Builder) buildGroupBy(groupBy memo.RelExpr) (execPlan, error) {
 			&groupBy.GroupingPrivate, &groupBy.RequiredPhysical().Ordering,
 		))
 		reqOrdering := ep.reqOrdering(groupBy)
-		orderType := exec.GroupingOrderType(groupBy.GroupingOrderType(&groupBy.RequiredPhysical().Ordering))
 		ep.root, err = b.factory.ConstructGroupBy(
-			input.root, groupingColIdx, groupingColOrder, aggInfos, reqOrdering, orderType,
+			input.root, groupingColIdx, groupingColOrder, aggInfos, reqOrdering,
 		)
 	}
 	if err != nil {
@@ -1536,61 +1355,21 @@ func (b *Builder) buildSetOp(set memo.RelExpr) (execPlan, error) {
 		// child.
 		// TODO(rytaft): Store the limit in the expression.
 		hardLimit = uint64(set.Relational().Cardinality.Max)
+		if hardLimit > 1 {
+			panic(errors.AssertionFailedf(
+				"locality optimized search is not yet supported for more than one row at a time",
+			))
+		}
 	}
-
-	ep := execPlan{}
+	node, err := b.factory.ConstructSetOp(typ, all, left.root, right.root, hardLimit)
+	if err != nil {
+		return execPlan{}, err
+	}
+	ep := execPlan{root: node}
 	for i, col := range private.OutCols {
 		ep.outputCols.Set(int(col), i)
 	}
-	streamingOrdering := ep.sqlOrdering(
-		ordering.StreamingSetOpOrdering(set, &set.RequiredPhysical().Ordering),
-	)
-	reqOrdering := ep.reqOrdering(set)
-
-	if typ == tree.UnionOp && all {
-		ep.root, err = b.factory.ConstructUnionAll(left.root, right.root, reqOrdering, hardLimit)
-	} else if len(streamingOrdering) > 0 {
-		ep.root, err = b.factory.ConstructStreamingSetOp(typ, all, left.root, right.root, streamingOrdering, reqOrdering)
-	} else {
-		if len(reqOrdering) > 0 {
-			return execPlan{}, errors.AssertionFailedf("hash set op is not supported with a required ordering")
-		}
-		ep.root, err = b.factory.ConstructHashSetOp(typ, all, left.root, right.root)
-	}
-	if err != nil {
-		return execPlan{}, err
-	}
 	return ep, nil
-}
-
-// buildTopK builds a plan for a TopKOp, which is like a combined SortOp and LimitOp.
-func (b *Builder) buildTopK(e *memo.TopKExpr) (execPlan, error) {
-	inputExpr := e.Input
-	input, err := b.buildRelational(inputExpr)
-	if err != nil {
-		return execPlan{}, err
-	}
-	ordering := e.Ordering.ToOrdering()
-	inputOrdering := e.Input.ProvidedPhysical().Ordering
-	alreadyOrderedPrefix := 0
-	for i := range inputOrdering {
-		if i == len(ordering) {
-			return execPlan{}, errors.AssertionFailedf("sort ordering already provided by input")
-		}
-		if inputOrdering[i] != ordering[i] {
-			break
-		}
-		alreadyOrderedPrefix = i + 1
-	}
-	node, err := b.factory.ConstructTopK(
-		input.root,
-		e.K,
-		exec.OutputOrdering(input.sqlOrdering(ordering)),
-		alreadyOrderedPrefix)
-	if err != nil {
-		return execPlan{}, err
-	}
-	return execPlan{root: node, outputCols: input.outputCols}, nil
 }
 
 // buildLimitOffset builds a plan for a LimitOp or OffsetOp
@@ -1736,17 +1515,10 @@ func (b *Builder) buildLookupJoin(join *memo.LookupJoinExpr) (execPlan, error) {
 		ivh:     tree.MakeIndexedVarHelper(nil /* container */, allCols.Len()),
 		ivarMap: allCols,
 	}
-	var lookupExpr, remoteLookupExpr tree.TypedExpr
+	var lookupExpr tree.TypedExpr
 	if len(join.LookupExpr) > 0 {
 		var err error
 		lookupExpr, err = b.buildScalar(&ctx, &join.LookupExpr)
-		if err != nil {
-			return execPlan{}, err
-		}
-	}
-	if len(join.RemoteLookupExpr) > 0 {
-		var err error
-		remoteLookupExpr, err = b.buildScalar(&ctx, &join.RemoteLookupExpr)
 		if err != nil {
 			return execPlan{}, err
 		}
@@ -1776,7 +1548,6 @@ func (b *Builder) buildLookupJoin(join *memo.LookupJoinExpr) (execPlan, error) {
 		keyCols,
 		join.LookupColsAreTableKey,
 		lookupExpr,
-		remoteLookupExpr,
 		lookupOrdinals,
 		onExpr,
 		join.IsSecondJoinInPairedJoiner,
@@ -1823,12 +1594,12 @@ func (b *Builder) buildInvertedJoin(join *memo.InvertedJoinExpr) (execPlan, erro
 		lookupCols.Remove(join.ContinuationCol)
 	}
 
-	// Add the inverted column. Its source column will be referenced in the
-	// inverted expression and needs a corresponding indexed var. It will be
+	// Add the virtual inverted column. Its source column will be referenced in
+	// the inverted expression and needs a corresponding indexed var. It will be
 	// projected away below.
-	invertedColumn := idx.InvertedColumn()
-	invertedColID := join.Table.ColumnID(invertedColumn.Ordinal())
-	lookupCols.Add(invertedColID)
+	virtualInvertedCol := idx.VirtualInvertedColumn()
+	virtualInvertedColID := join.Table.ColumnID(virtualInvertedCol.Ordinal())
+	lookupCols.Add(virtualInvertedColID)
 
 	lookupOrdinals, lookupColMap := b.getColumns(lookupCols, join.Table)
 	// allExprCols are the columns used in expressions evaluated by this join.
@@ -1861,16 +1632,16 @@ func (b *Builder) buildInvertedJoin(join *memo.InvertedJoinExpr) (execPlan, erro
 		return execPlan{}, err
 	}
 
-	// The inverted filter refers to the inverted column's source column, but it
-	// is actually evaluated implicitly using the inverted column; the inverted
-	// column's source column is not even accessible here.
+	// The inverted filter refers to the inverted source column, but it is
+	// actually evaluated implicitly using the virtual inverted column; the
+	// inverted source column is not even accessible here.
 	//
 	// TODO(radu): this is sketchy. The inverted column should not even have the
 	// geospatial type (which would make the expression invalid in terms of
 	// typing). Perhaps we need to pass this information in a more specific way
 	// and not as a generic expression?
-	ord, _ := ctx.ivarMap.Get(int(invertedColID))
-	ctx.ivarMap.Set(int(join.Table.ColumnID(invertedColumn.InvertedSourceColumnOrdinal())), ord)
+	ord, _ := ctx.ivarMap.Get(int(virtualInvertedColID))
+	ctx.ivarMap.Set(int(join.Table.ColumnID(virtualInvertedCol.InvertedSourceColumnOrdinal())), ord)
 	invertedExpr, err := b.buildScalar(&ctx, join.InvertedExpr)
 	if err != nil {
 		return execPlan{}, err
@@ -2016,9 +1787,8 @@ func (b *Builder) buildWith(with *memo.WithExpr) (execPlan, error) {
 		// subquery mode that reads and discards all rows. This could possibly also
 		// be fixed by ensuring that bufferNode exhausts its input (and forcing it
 		// to behave like a spoolNode) and using the EXISTS mode.
-		Mode:     exec.SubqueryAllRows,
-		Root:     buffer,
-		RowCount: int64(with.Relational().Stats.RowCountIfAvailable()),
+		Mode: exec.SubqueryAllRows,
+		Root: buffer,
 	})
 
 	b.addBuiltWithExpr(with.ID, value.outputCols, buffer)
@@ -2072,13 +1842,12 @@ func (b *Builder) buildRecursiveCTE(rec *memo.RecursiveCTEExpr) (execPlan, error
 		if err != nil {
 			return nil, err
 		}
-		rootRowCount := int64(rec.Recursive.Relational().Stats.RowCountIfAvailable())
-		return innerBld.factory.ConstructPlan(plan.root, innerBld.subqueries, innerBld.cascades, innerBld.checks, rootRowCount)
+		return innerBld.factory.ConstructPlan(plan.root, innerBld.subqueries, innerBld.cascades, innerBld.checks)
 	}
 
 	label := fmt.Sprintf("working buffer (%s)", rec.Name)
 	var ep execPlan
-	ep.root, err = b.factory.ConstructRecursiveCTE(initial.root, fn, label, rec.Deduplicate)
+	ep.root, err = b.factory.ConstructRecursiveCTE(initial.root, fn, label)
 	if err != nil {
 		return execPlan{}, err
 	}
@@ -2443,7 +2212,7 @@ func (b *Builder) buildSequenceSelect(seqSel *memo.SequenceSelectExpr) (execPlan
 func (b *Builder) applySaveTable(
 	input execPlan, e memo.RelExpr, saveTableName string,
 ) (execPlan, error) {
-	name := tree.NewTableNameWithSchema(tree.Name(opt.SaveTablesDatabase), tree.PublicSchemaName, tree.Name(saveTableName))
+	name := tree.NewTableName(tree.Name(opt.SaveTablesDatabase), tree.Name(saveTableName))
 
 	// Ensure that the column names are unique and match the names used by the
 	// opttester.
@@ -2566,26 +2335,4 @@ func (b *Builder) statementTag(expr memo.RelExpr) string {
 	default:
 		return expr.Op().SyntaxTag()
 	}
-}
-
-// boundedStalenessAllowList contains the operators that may be used with
-// bounded staleness queries.
-var boundedStalenessAllowList = map[opt.Operator]struct{}{
-	opt.ValuesOp:           {},
-	opt.ScanOp:             {},
-	opt.PlaceholderScanOp:  {},
-	opt.SelectOp:           {},
-	opt.ProjectOp:          {},
-	opt.GroupByOp:          {},
-	opt.ScalarGroupByOp:    {},
-	opt.DistinctOnOp:       {},
-	opt.EnsureDistinctOnOp: {},
-	opt.LimitOp:            {},
-	opt.OffsetOp:           {},
-	opt.SortOp:             {},
-	opt.OrdinalityOp:       {},
-	opt.Max1RowOp:          {},
-	opt.ProjectSetOp:       {},
-	opt.WindowOp:           {},
-	opt.ExplainOp:          {},
 }

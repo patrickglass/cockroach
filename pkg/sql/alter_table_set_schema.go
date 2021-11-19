@@ -14,7 +14,6 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
@@ -27,7 +26,6 @@ import (
 
 type alterTableSetSchemaNode struct {
 	newSchema string
-	prefix    catalog.ResolvedObjectPrefix
 	tableDesc *tabledesc.Mutable
 	n         *tree.AlterTableSetSchema
 }
@@ -52,7 +50,7 @@ func (p *planner) AlterTableSetSchema(
 	} else if n.IsSequence {
 		requiredTableKind = tree.ResolveRequireSequenceDesc
 	}
-	prefix, tableDesc, err := p.ResolveMutableTableDescriptor(
+	tableDesc, err := p.ResolveMutableTableDescriptor(
 		ctx, &tn, !n.IfExists, requiredTableKind)
 	if err != nil {
 		return nil, err
@@ -90,7 +88,6 @@ func (p *planner) AlterTableSetSchema(
 
 	return &alterTableSetSchemaNode{
 		newSchema: string(n.Schema),
-		prefix:    prefix,
 		tableDesc: tableDesc,
 		n:         n,
 	}, nil
@@ -101,42 +98,45 @@ func (n *alterTableSetSchemaNode) startExec(params runParams) error {
 	ctx := params.ctx
 	p := params.p
 	tableDesc := n.tableDesc
-	oldNameKey := descpb.NameInfo{
-		ParentID:       tableDesc.GetParentID(),
-		ParentSchemaID: tableDesc.GetParentSchemaID(),
-		Name:           tableDesc.GetName(),
-	}
+	schemaID := tableDesc.GetParentSchemaID()
+	databaseID := tableDesc.GetParentID()
 
 	kind := tree.GetTableType(tableDesc.IsSequence(), tableDesc.IsView(), tableDesc.GetIsMaterializedView())
-	oldName := tree.MakeTableNameFromPrefix(n.prefix.NamePrefix(), tree.Name(n.tableDesc.GetName()))
+	oldName, err := p.getQualifiedTableName(ctx, tableDesc)
+	if err != nil {
+		return err
+	}
 
-	desiredSchemaID, err := p.prepareSetSchema(ctx, n.prefix.Database, tableDesc, n.newSchema)
+	desiredSchemaID, err := p.prepareSetSchema(ctx, tableDesc, n.newSchema)
 	if err != nil {
 		return err
 	}
 
 	// If the schema being changed to is the same as the current schema for the
 	// table, do a no-op.
-	if desiredSchemaID == oldNameKey.GetParentSchemaID() {
+	if desiredSchemaID == schemaID {
 		return nil
 	}
 
-	// TODO(ajwerner): Use the collection here.
 	exists, _, err := catalogkv.LookupObjectID(
-		ctx, p.txn, p.ExecCfg().Codec, tableDesc.GetParentID(), desiredSchemaID, tableDesc.GetName(),
+		ctx, p.txn, p.ExecCfg().Codec, databaseID, desiredSchemaID, tableDesc.Name,
 	)
 	if err == nil && exists {
 		return pgerror.Newf(pgcode.DuplicateRelation,
-			"relation %s already exists in schema %s", tableDesc.GetName(), n.newSchema)
+			"relation %s already exists in schema %s", tableDesc.Name, n.newSchema)
 	} else if err != nil {
 		return err
 	}
 
+	renameDetails := descpb.NameInfo{
+		ParentID:       databaseID,
+		ParentSchemaID: schemaID,
+		Name:           tableDesc.Name,
+	}
+	tableDesc.AddDrainingName(renameDetails)
+
 	// Set the tableDesc's new schema id to the desired schema's id.
 	tableDesc.SetParentSchemaID(desiredSchemaID)
-
-	b := p.txn.NewBatch()
-	p.renameNamespaceEntry(ctx, b, oldNameKey, tableDesc)
 
 	if err := p.writeSchemaChange(
 		ctx, tableDesc, descpb.InvalidMutationID, tree.AsStringWithFQNames(n.n, params.Ann()),
@@ -144,7 +144,10 @@ func (n *alterTableSetSchemaNode) startExec(params runParams) error {
 		return err
 	}
 
-	if err := p.txn.Run(ctx, b); err != nil {
+	newTbKey := catalogkv.MakeObjectNameKey(ctx, p.ExecCfg().Settings,
+		databaseID, desiredSchemaID, tableDesc.Name)
+
+	if err := p.writeNameKey(ctx, newTbKey, tableDesc.ID); err != nil {
 		return err
 	}
 

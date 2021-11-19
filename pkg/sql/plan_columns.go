@@ -10,10 +10,7 @@
 
 package sql
 
-import (
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
-)
+import "github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 
 var noColumns = make(colinfo.ResultColumns, 0)
 
@@ -152,32 +149,15 @@ func getPlanColumns(plan planNode, mut bool) colinfo.ResultColumns {
 		return getPlanColumns(n.buffer, mut)
 	case *sortNode:
 		return getPlanColumns(n.plan, mut)
-	case *topKNode:
-		return getPlanColumns(n.plan, mut)
 	case *recursiveCTENode:
 		return getPlanColumns(n.initial, mut)
 
-	case *showVarNode:
-		return colinfo.ResultColumns{
-			{Name: n.name, Typ: types.String},
-		}
 	case *rowSourceToPlanNode:
 		return n.planCols
 	}
 
 	// Every other node has no columns in their results.
 	return noColumns
-}
-
-// planTypes returns the types schema of the rows produced by this planNode. See
-// comments on planColumns for more details.
-func planTypes(plan planNode) []*types.T {
-	columns := planColumns(plan)
-	typs := make([]*types.T, len(columns))
-	for i := range typs {
-		typs[i] = columns[i].Typ
-	}
-	return typs
 }
 
 // optColumnsSlot is a helper struct for nodes with a static signature.

@@ -14,12 +14,10 @@ go_library(
         "//pkg/sql/colexecop",
         "//pkg/sql/colmem",
         "//pkg/sql/execinfra",
-        "//pkg/sql/randgen",
+        "//pkg/sql/rowenc",
         "//pkg/sql/types",
         "//pkg/util/duration",
-        "//pkg/util/json",
         "//pkg/util/timeutil",
-        "//pkg/util/uuid",
         "@com_github_cockroachdb_errors//:errors",
     ],
 )

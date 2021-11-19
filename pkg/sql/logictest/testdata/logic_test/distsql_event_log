@@ -1,3 +1,5 @@
+# LogicTest: !3node-tenant(50047)
+
 ###################
 # CREATE STATISTICS
 ###################

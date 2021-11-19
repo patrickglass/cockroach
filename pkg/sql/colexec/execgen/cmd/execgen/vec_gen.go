@@ -23,15 +23,13 @@ const vecTmpl = "pkg/col/coldata/vec_tmpl.go"
 func genVec(inputFileContents string, wr io.Writer) error {
 	r := strings.NewReplacer("_CANONICAL_TYPE_FAMILY", "{{.CanonicalTypeFamilyStr}}",
 		"_TYPE_WIDTH", typeWidthReplacement,
-		"_GOTYPESLICE", "{{.GoTypeSliceNameInColdata}}",
 		"_GOTYPE", "{{.GoType}}",
-		"_TYPE", "{{.VecMethod}}",
 		"TemplateType", "{{.VecMethod}}",
 	)
 	s := r.Replace(inputFileContents)
 
-	copyWithReorderedSource := makeFunctionRegex("_COPY_WITH_REORDERED_SOURCE", 1)
-	s = copyWithReorderedSource.ReplaceAllString(s, `{{template "copyWithReorderedSource" buildDict "SrcHasNulls" $1}}`)
+	copyWithSel := makeFunctionRegex("_COPY_WITH_SEL", 6)
+	s = copyWithSel.ReplaceAllString(s, `{{template "copyWithSel" buildDict "Global" . "SelOnDest" $6}}`)
 
 	s = replaceManipulationFuncs(s)
 

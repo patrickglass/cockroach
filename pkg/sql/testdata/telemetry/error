@@ -20,7 +20,7 @@ REVOKE node FROM root;
 DELETE FROM system.users WHERE username = 'node';
 SELECT * FROM tbl;
 ----
-error: pq: internal error: relation "tbl" (53): missing fk back reference "tbl_customer_fkey" to "tbl" from "fktbl"
+error: pq: internal error: relation "tbl" (53): missing fk back reference "fk_customer_ref_fktbl" to "tbl" from "fktbl"
 errorcodes.XX000
 sql.schema.validation_errors.read.cross_references.relation
 
@@ -44,7 +44,7 @@ sql.schema.validation_errors.read.self.type
 feature-usage
 CREATE TABLE t (x INT PRIMARY KEY);
 BEGIN;
-ALTER TABLE t DROP CONSTRAINT t_pkey;
+ALTER TABLE t DROP CONSTRAINT "primary";
 COMMIT;
 ----
 error: pq: relation "t" (56): unimplemented: primary key dropped without subsequent addition of new primary key in same transaction
@@ -88,6 +88,22 @@ error: pq: crdb_internal.set_vmodule(): syntax error: expect comma-separated lis
 errorcodes.XXUUU
 othererror.XXUUU
 othererror.XXUUU.crdb_internal.set_vmodule()
+
+# 0A000 is pgcode.FeatureNotSupported.
+feature-usage
+CREATE TABLE foo (a INT8 PRIMARY KEY, b INT8, INDEX (b) INTERLEAVE IN PARENT foo (b))
+----
+error: pq: unimplemented: use CREATE INDEX to make interleaved indexes
+errorcodes.0A000
+unimplemented.#9148
+
+# 0A000 is pgcode.FeatureNotSupported.
+feature-usage
+SELECT * FROM pg_catalog.pg_stat_wal_receiver
+----
+error: pq: unimplemented: virtual schema table not implemented: pg_catalog.pg_stat_wal_receiver
+errorcodes.0A000
+unimplemented.pg_catalog.pg_stat_wal_receiver
 
 # 22012 is pgcode.DivisionByZero.
 feature-usage

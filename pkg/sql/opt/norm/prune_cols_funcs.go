@@ -15,6 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
@@ -175,7 +176,7 @@ func (c *CustomFuncs) NeededMutationFetchCols(
 			// columns have been mapped to their source columns. Virtual columns
 			// are never part of the updated columns. Updates to source columns
 			// trigger index changes.
-			indexCols := tabMeta.IndexColumnsMapInverted(i)
+			indexCols := tabMeta.IndexColumnsMapVirtual(i)
 			pred, isPartialIndex := tabMeta.PartialIndexPredicate(i)
 			indexAndPredCols := indexCols.Copy()
 			if isPartialIndex {
@@ -188,7 +189,7 @@ func (c *CustomFuncs) NeededMutationFetchCols(
 
 			// Always add index strict key columns, since these are needed to fetch
 			// existing rows from the store.
-			keyCols := tabMeta.IndexKeyColumnsMapInverted(i)
+			keyCols := tabMeta.IndexKeyColumnsMapVirtual(i)
 			cols.UnionWith(keyCols)
 
 			// Add all columns in any family that includes an update column.
@@ -228,7 +229,7 @@ func (c *CustomFuncs) NeededMutationFetchCols(
 		// it is necessary to delete rows even from indexes that are being added
 		// or dropped.
 		for i, n := 0, tabMeta.Table.DeletableIndexCount(); i < n; i++ {
-			cols.UnionWith(tabMeta.IndexKeyColumnsMapInverted(i))
+			cols.UnionWith(tabMeta.IndexKeyColumnsMapVirtual(i))
 		}
 
 		// Add inbound foreign keys that may require a check or cascade.
@@ -561,7 +562,7 @@ func DerivePruneCols(e memo.RelExpr) opt.ColSet {
 		// Any pruneable input columns can potentially be pruned, as long as
 		// they're not used as an ordering column.
 		inputPruneCols := DerivePruneCols(e.Child(0).(memo.RelExpr))
-		ordering := e.Private().(*props.OrderingChoice).ColSet()
+		ordering := e.Private().(*physical.OrderingChoice).ColSet()
 		relProps.Rule.PruneCols = inputPruneCols.Difference(ordering)
 
 	case opt.OrdinalityOp:
@@ -681,11 +682,11 @@ func (c *CustomFuncs) MutationTable(private *memo.MutationPrivate) opt.TableID {
 // NeededColMapLeft returns the subset of a SetPrivate's LeftCols that corresponds to the
 // needed subset of OutCols. This is useful for pruning columns in set operations.
 func (c *CustomFuncs) NeededColMapLeft(needed opt.ColSet, set *memo.SetPrivate) opt.ColSet {
-	return opt.TranslateColSetStrict(needed, set.OutCols, set.LeftCols)
+	return opt.TranslateColSet(needed, set.OutCols, set.LeftCols)
 }
 
 // NeededColMapRight returns the subset of a SetPrivate's RightCols that corresponds to the
 // needed subset of OutCols. This is useful for pruning columns in set operations.
 func (c *CustomFuncs) NeededColMapRight(needed opt.ColSet, set *memo.SetPrivate) opt.ColSet {
-	return opt.TranslateColSetStrict(needed, set.OutCols, set.RightCols)
+	return opt.TranslateColSet(needed, set.OutCols, set.RightCols)
 }

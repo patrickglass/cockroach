@@ -8,12 +8,11 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
+// +build crdb_test
+
 package memo
 
-import (
-	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
-	"github.com/cockroachdb/errors"
-)
+import "github.com/cockroachdb/errors"
 
 // FiltersExprMutateChecker is used to check if a FiltersExpr has been
 // erroneously mutated. This code is called in crdb_test builds so that the
@@ -25,9 +24,6 @@ type FiltersExprMutateChecker struct {
 
 // Init initializes a FiltersExprMutateChecker with the original filters.
 func (fmc *FiltersExprMutateChecker) Init(filters FiltersExpr) {
-	if !buildutil.CrdbTestBuild {
-		return
-	}
 	// This initialization pattern ensures that fields are not unwittingly
 	// reused. Field reuse must be explicit.
 	*fmc = FiltersExprMutateChecker{}
@@ -39,9 +35,6 @@ func (fmc *FiltersExprMutateChecker) Init(filters FiltersExpr) {
 // CheckForMutation panics if the given filters are not equal to the filters
 // passed for the previous Init function call.
 func (fmc *FiltersExprMutateChecker) CheckForMutation(filters FiltersExpr) {
-	if !buildutil.CrdbTestBuild {
-		return
-	}
 	fmc.hasher.Init()
 	fmc.hasher.HashFiltersExpr(filters)
 	if fmc.hash != fmc.hasher.hash {

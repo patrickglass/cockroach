@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/hba"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/identmap"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -42,7 +41,7 @@ func loadDefaultMethods() {
 	//
 	// Care should be taken by administrators to only accept this auth
 	// method over secure connections, e.g. those encrypted using SSL.
-	RegisterAuthMethod("password", authPassword, hba.ConnAny, NoOptionsAllowed)
+	RegisterAuthMethod("password", authPassword, hba.ConnAny, nil)
 
 	// The "cert" method requires a valid client certificate for the
 	// user attempting to connect.
@@ -57,70 +56,74 @@ func loadDefaultMethods() {
 
 	// The "reject" method rejects any connection attempt that matches
 	// the current rule.
-	RegisterAuthMethod("reject", authReject, hba.ConnAny, NoOptionsAllowed)
+	RegisterAuthMethod("reject", authReject, hba.ConnAny, nil)
 
 	// The "trust" method accepts any connection attempt that matches
 	// the current rule.
-	RegisterAuthMethod("trust", authTrust, hba.ConnAny, NoOptionsAllowed)
+	RegisterAuthMethod("trust", authTrust, hba.ConnAny, nil)
 }
 
-// AuthMethod is a top-level factory for composing the various
-// functionality needed to authenticate an incoming connection.
-type AuthMethod = func(
+// AuthMethod defines a method for authentication of a connection.
+type AuthMethod func(
 	ctx context.Context,
 	c AuthConn,
 	tlsState tls.ConnectionState,
+	pwRetrieveFn PasswordRetrievalFn,
+	pwValidUntilFn PasswordValidUntilFn,
 	execCfg *sql.ExecutorConfig,
 	entry *hba.Entry,
-	identMap *identmap.Conf,
-) (*AuthBehaviors, error)
+) (security.UserAuthHook, error)
+
+// PasswordRetrievalFn defines a method to retrieve the hashed
+// password for the user logging in.
+type PasswordRetrievalFn = func(context.Context) ([]byte, error)
+
+// PasswordValidUntilFn defines a method to retrieve the expiration time
+// of the user's password.
+type PasswordValidUntilFn = func(context.Context) (*tree.DTimestamp, error)
 
 func authPassword(
-	_ context.Context,
+	ctx context.Context,
 	c AuthConn,
 	_ tls.ConnectionState,
+	pwRetrieveFn PasswordRetrievalFn,
+	pwValidUntilFn PasswordValidUntilFn,
 	_ *sql.ExecutorConfig,
 	_ *hba.Entry,
-	_ *identmap.Conf,
-) (*AuthBehaviors, error) {
-	b := &AuthBehaviors{}
-	b.SetRoleMapper(UseProvidedIdentity)
-	b.SetAuthenticator(func(
-		ctx context.Context,
-		systemIdentity security.SQLUsername,
-		clientConnection bool,
-		pwRetrieveFn PasswordRetrievalFn,
-	) error {
-		if err := c.SendAuthRequest(authCleartextPassword, nil /* data */); err != nil {
-			return err
-		}
-		pwdData, err := c.GetPwdData()
-		if err != nil {
-			return err
-		}
-		password, err := passwordString(pwdData)
-		if err != nil {
-			return err
-		}
-		hashedPassword, pwValidUntil, err := pwRetrieveFn(ctx)
-		if err != nil {
-			return err
-		}
-		if len(hashedPassword) == 0 {
-			c.LogAuthInfof(ctx, "user has no password defined")
-		}
+) (security.UserAuthHook, error) {
+	if err := c.SendAuthRequest(authCleartextPassword, nil /* data */); err != nil {
+		return nil, err
+	}
+	pwdData, err := c.GetPwdData()
+	if err != nil {
+		return nil, err
+	}
+	password, err := passwordString(pwdData)
+	if err != nil {
+		return nil, err
+	}
+	hashedPassword, err := pwRetrieveFn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(hashedPassword) == 0 {
+		c.LogAuthInfof(ctx, "user has no password defined")
+	}
 
-		if pwValidUntil != nil {
-			if pwValidUntil.Sub(timeutil.Now()) < 0 {
-				c.LogAuthFailed(ctx, eventpb.AuthFailReason_CREDENTIALS_EXPIRED, nil)
-				return errors.New("password is expired")
-			}
+	validUntil, err := pwValidUntilFn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if validUntil != nil {
+		if validUntil.Sub(timeutil.Now()) < 0 {
+			c.LogAuthFailed(ctx, eventpb.AuthFailReason_CREDENTIALS_EXPIRED, nil)
+			return nil, errors.New("password is expired")
 		}
-		return security.UserAuthPasswordHook(
-			false /*insecure*/, password, hashedPassword,
-		)(ctx, systemIdentity, clientConnection)
-	})
-	return b, nil
+	}
+
+	return security.UserAuthPasswordHook(
+		false /*insecure*/, password, hashedPassword,
+	), nil
 }
 
 func passwordString(pwdData []byte) (string, error) {
@@ -135,42 +138,30 @@ func authCert(
 	_ context.Context,
 	_ AuthConn,
 	tlsState tls.ConnectionState,
+	_ PasswordRetrievalFn,
+	_ PasswordValidUntilFn,
 	_ *sql.ExecutorConfig,
-	hbaEntry *hba.Entry,
-	identMap *identmap.Conf,
-) (*AuthBehaviors, error) {
-	b := &AuthBehaviors{}
-	b.SetRoleMapper(HbaMapper(hbaEntry, identMap))
-	b.SetAuthenticator(func(
-		ctx context.Context,
-		systemIdentity security.SQLUsername,
-		clientConnection bool,
-		pwRetrieveFn PasswordRetrievalFn,
-	) error {
-		if len(tlsState.PeerCertificates) == 0 {
-			return errors.New("no TLS peer certificates, but required for auth")
-		}
-		// Normalize the username contained in the certificate.
-		tlsState.PeerCertificates[0].Subject.CommonName = tree.Name(
-			tlsState.PeerCertificates[0].Subject.CommonName,
-		).Normalize()
-		hook, err := security.UserAuthCertHook(false /*insecure*/, &tlsState)
-		if err != nil {
-			return err
-		}
-		return hook(ctx, systemIdentity, clientConnection)
-	})
-	return b, nil
+	_ *hba.Entry,
+) (security.UserAuthHook, error) {
+	if len(tlsState.PeerCertificates) == 0 {
+		return nil, errors.New("no TLS peer certificates, but required for auth")
+	}
+	// Normalize the username contained in the certificate.
+	tlsState.PeerCertificates[0].Subject.CommonName = tree.Name(
+		tlsState.PeerCertificates[0].Subject.CommonName,
+	).Normalize()
+	return security.UserAuthCertHook(false /*insecure*/, &tlsState)
 }
 
 func authCertPassword(
 	ctx context.Context,
 	c AuthConn,
 	tlsState tls.ConnectionState,
+	pwRetrieveFn PasswordRetrievalFn,
+	pwValidUntilFn PasswordValidUntilFn,
 	execCfg *sql.ExecutorConfig,
 	entry *hba.Entry,
-	identMap *identmap.Conf,
-) (*AuthBehaviors, error) {
+) (security.UserAuthHook, error) {
 	var fn AuthMethod
 	if len(tlsState.PeerCertificates) == 0 {
 		c.LogAuthInfof(ctx, "no client certificate, proceeding with password authentication")
@@ -179,37 +170,31 @@ func authCertPassword(
 		c.LogAuthInfof(ctx, "client presented certificate, proceeding with certificate validation")
 		fn = authCert
 	}
-	return fn(ctx, c, tlsState, execCfg, entry, identMap)
+	return fn(ctx, c, tlsState, pwRetrieveFn, pwValidUntilFn, execCfg, entry)
 }
 
 func authTrust(
 	_ context.Context,
 	_ AuthConn,
 	_ tls.ConnectionState,
+	_ PasswordRetrievalFn,
+	_ PasswordValidUntilFn,
 	_ *sql.ExecutorConfig,
 	_ *hba.Entry,
-	_ *identmap.Conf,
-) (*AuthBehaviors, error) {
-	b := &AuthBehaviors{}
-	b.SetRoleMapper(UseProvidedIdentity)
-	b.SetAuthenticator(func(_ context.Context, _ security.SQLUsername, _ bool, _ PasswordRetrievalFn) error {
-		return nil
-	})
-	return b, nil
+) (security.UserAuthHook, error) {
+	return func(_ context.Context, _ security.SQLUsername, _ bool) (func(), error) { return nil, nil }, nil
 }
 
 func authReject(
 	_ context.Context,
 	_ AuthConn,
 	_ tls.ConnectionState,
+	_ PasswordRetrievalFn,
+	_ PasswordValidUntilFn,
 	_ *sql.ExecutorConfig,
 	_ *hba.Entry,
-	_ *identmap.Conf,
-) (*AuthBehaviors, error) {
-	b := &AuthBehaviors{}
-	b.SetRoleMapper(UseProvidedIdentity)
-	b.SetAuthenticator(func(_ context.Context, _ security.SQLUsername, _ bool, _ PasswordRetrievalFn) error {
-		return errors.New("authentication rejected by configuration")
-	})
-	return b, nil
+) (security.UserAuthHook, error) {
+	return func(_ context.Context, _ security.SQLUsername, _ bool) (func(), error) {
+		return nil, errors.New("authentication rejected by configuration")
+	}, nil
 }

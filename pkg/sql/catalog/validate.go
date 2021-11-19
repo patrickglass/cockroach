@@ -14,8 +14,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/errors"
 )
@@ -203,7 +202,7 @@ func (ve *validationErrors) CombinedError() error {
 	// Otherwise, those not in the causal chain will be ignored.
 	for _, err := range ve.errors {
 		for _, key := range errors.GetTelemetryKeys(err) {
-			if strings.HasPrefix(key, telemetry.ValidationTelemetryKeyPrefix) {
+			if strings.HasPrefix(key, catconstants.ValidationTelemetryKeyPrefix) {
 				extraTelemetryKeys = append(extraTelemetryKeys, key)
 			}
 		}
@@ -329,7 +328,7 @@ func (vea *validationErrorAccumulator) decorate(err error) error {
 	default:
 		return err
 	}
-	return errors.WithTelemetry(err, telemetry.ValidationTelemetryKeyPrefix+tkSuffix)
+	return errors.WithTelemetry(err, catconstants.ValidationTelemetryKeyPrefix+tkSuffix)
 }
 
 // ValidationDescGetter is used by the validation methods on Descriptor.
@@ -395,11 +394,7 @@ func (vdg *validationDescGetterImpl) GetTypeDescriptor(id descpb.ID) (TypeDescri
 	if !found || desc == nil {
 		return nil, WrapTypeDescRefErr(id, ErrDescriptorNotFound)
 	}
-	descriptor, err := AsTypeDescriptor(desc)
-	if err != nil {
-		return nil, err
-	}
-	return descriptor, err
+	return AsTypeDescriptor(desc)
 }
 
 func (vdg *validationDescGetterImpl) addNamespaceEntries(
@@ -442,14 +437,9 @@ type collectorState struct {
 }
 
 // addDirectReferences adds all immediate neighbors of desc to the state.
-func (cs *collectorState) addDirectReferences(desc Descriptor) error {
+func (cs *collectorState) addDirectReferences(desc Descriptor) {
 	cs.vdg.Descriptors[desc.GetID()] = desc
-	idSet, err := desc.GetReferencedDescIDs()
-	if err != nil {
-		return err
-	}
-	idSet.ForEach(cs.referencedBy.Add)
-	return nil
+	desc.GetReferencedDescIDs().ForEach(cs.referencedBy.Add)
 }
 
 // getMissingDescs fetches the descriptors which have corresponding IDs in the
@@ -501,9 +491,7 @@ func collectDescriptorsForValidation(
 		referencedBy: MakeDescriptorIDSet(),
 	}
 	for _, desc := range descriptors {
-		if err := cs.addDirectReferences(desc); err != nil {
-			return nil, err
-		}
+		cs.addDirectReferences(desc)
 	}
 	newDescs, err := cs.getMissingDescs(ctx, maybeBatchDescGetter)
 	if err != nil {
@@ -515,9 +503,7 @@ func collectDescriptorsForValidation(
 		}
 		switch newDesc.(type) {
 		case DatabaseDescriptor, TypeDescriptor:
-			if err := cs.addDirectReferences(newDesc); err != nil {
-				return nil, err
-			}
+			cs.addDirectReferences(newDesc)
 		}
 	}
 	_, err = cs.getMissingDescs(ctx, maybeBatchDescGetter)
@@ -527,12 +513,17 @@ func collectDescriptorsForValidation(
 	return &cs.vdg, nil
 }
 
+const (
+	namespaceTableID  = 2
+	namespace2TableID = 30
+)
+
 // validateNamespace checks that the namespace entries associated with a
 // descriptor are sane.
 func validateNamespace(
 	desc Descriptor, vea ValidationErrorAccumulator, namespace map[descpb.NameInfo]descpb.ID,
 ) {
-	if desc.GetID() == keys.NamespaceTableID || desc.GetID() == keys.DeprecatedNamespaceTableID {
+	if desc.GetID() == namespaceTableID || desc.GetID() == namespace2TableID {
 		return
 	}
 

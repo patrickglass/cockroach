@@ -32,6 +32,7 @@ func TestHashFunctionFamily(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	ctx := context.Background()
 	bucketsA, bucketsB := make([]uint64, coldata.BatchSize()), make([]uint64, coldata.BatchSize())
 	nKeys := coldata.BatchSize()
 	keyTypes := []*types.T{types.Int}
@@ -45,13 +46,12 @@ func TestHashFunctionFamily(t *testing.T) {
 		overloadHelperVar execgen.OverloadHelper
 		datumAlloc        rowenc.DatumAlloc
 	)
-	cancelChecker.Init(context.Background())
 
 	for initHashValue, buckets := range [][]uint64{bucketsA, bucketsB} {
 		// We need +1 here because 0 is not a valid initial hash value.
 		initHash(buckets, nKeys, uint64(initHashValue+1))
 		for _, keysCol := range keys {
-			rehash(buckets, keysCol, nKeys, nil /* sel */, cancelChecker, &overloadHelperVar, &datumAlloc)
+			rehash(ctx, buckets, keysCol, nKeys, nil /* sel */, cancelChecker, overloadHelperVar, &datumAlloc)
 		}
 		finalizeHash(buckets, nKeys, numBuckets)
 	}

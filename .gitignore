@@ -35,10 +35,6 @@ build/Railroad.jar
 
 # Bazel generated symlinks
 /bazel-*
-/_bazel
 
 # Per-user .bazelrc
 /.bazelrc.user
-
-# Local disk buffers for "roachprod logs" command
-/*.logs

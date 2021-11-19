@@ -13,7 +13,6 @@ package opt_test
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -118,20 +117,8 @@ func TestMetadata(t *testing.T) {
 		t.Fatalf("expected constraints to be copied")
 	}
 
-	compColsPtr := reflect.ValueOf(tabMeta.ComputedCols).Pointer()
-	newCompColsPtr := reflect.ValueOf(tabMetaNew.ComputedCols).Pointer()
-	if newCompColsPtr == compColsPtr {
-		t.Fatalf("expected computed columns map to be copied, not shared")
-	}
-
 	if tabMetaNew.ComputedCols[cmpID] == scalar {
 		t.Fatalf("expected computed column expression to be copied")
-	}
-
-	partialIdxPredPtr := reflect.ValueOf(tabMeta.PartialIndexPredicatesUnsafe()).Pointer()
-	newPartialIdxPredPtr := reflect.ValueOf(tabMetaNew.PartialIndexPredicatesUnsafe()).Pointer()
-	if newPartialIdxPredPtr == partialIdxPredPtr {
-		t.Fatalf("expected partial index predicates map to be copied, not shared")
 	}
 
 	if tabMetaNew.PartialIndexPredicatesUnsafe()[0] == scalar {
@@ -238,7 +225,7 @@ func TestMetadataTables(t *testing.T) {
 
 	mkCol := func(ordinal int, name string) cat.Column {
 		var c cat.Column
-		c.Init(
+		c.InitNonVirtual(
 			ordinal,
 			cat.StableID(ordinal+1),
 			tree.Name(name),
@@ -248,9 +235,6 @@ func TestMetadataTables(t *testing.T) {
 			cat.Visible,
 			nil, /* defaultExpr */
 			nil, /* computedExpr */
-			nil, /* onUpdateExpr */
-			cat.NotGeneratedAsIdentity,
-			nil, /* generatedAsIdentitySequenceOption */
 		)
 		return c
 	}
@@ -391,16 +375,6 @@ func TestDuplicateTable(t *testing.T) {
 	pred, isPartialIndex := dupTabMeta.PartialIndexPredicate(1)
 	if !isPartialIndex {
 		t.Fatalf("expected partial index predicates to be duplicated")
-	}
-
-	colMeta := md.ColumnMeta(dupB)
-	if colMeta.Table != dupA {
-		t.Fatalf("expected new column to reference new table ID")
-	}
-
-	colMeta = md.ColumnMeta(dupB2)
-	if colMeta.Table != dupA {
-		t.Fatalf("expected new column to reference new table ID")
 	}
 
 	col = pred.(*memo.VariableExpr).Col

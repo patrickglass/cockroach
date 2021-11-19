@@ -49,36 +49,6 @@ func NewNonNullViolationError(columnName string) error {
 	return pgerror.Newf(pgcode.NotNullViolation, "null value in column %q violates not-null constraint", columnName)
 }
 
-// NewGeneratedAlwaysAsIdentityColumnOverrideError creates an error for
-// explicitly writing a column created with `GENERATED ALWAYS AS IDENTITY`
-// syntax.
-// TODO(janexing): Should add a HINT with "Use OVERRIDING SYSTEM VALUE
-// to override." once issue #68201 is resolved.
-// Check also: https://github.com/cockroachdb/cockroach/issues/68201.
-func NewGeneratedAlwaysAsIdentityColumnOverrideError(columnName string) error {
-	return errors.WithDetailf(
-		pgerror.Newf(pgcode.GeneratedAlways, "cannot insert into column %q", columnName),
-		"Column %q is an identity column defined as GENERATED ALWAYS", columnName,
-	)
-}
-
-// NewGeneratedAlwaysAsIdentityColumnUpdateError creates an error for
-// updating a column created with `GENERATED ALWAYS AS IDENTITY` syntax to
-// an expression other than "DEFAULT".
-func NewGeneratedAlwaysAsIdentityColumnUpdateError(columnName string) error {
-	return errors.WithDetailf(
-		pgerror.Newf(pgcode.GeneratedAlways, "column %q can only be updated to DEFAULT", columnName),
-		"Column %q is an identity column defined as GENERATED ALWAYS", columnName,
-	)
-}
-
-// NewIdentityColumnTypeError creates an error for declaring an IDENTITY column
-// with a non-integer type.
-func NewIdentityColumnTypeError() error {
-	return pgerror.Newf(pgcode.InvalidParameterValue,
-		"identity column type must be INT, INT2, INT4 or INT8")
-}
-
 // NewInvalidSchemaDefinitionError creates an error for an invalid schema
 // definition such as a schema definition that doesn't parse.
 func NewInvalidSchemaDefinitionError(err error) error {
@@ -89,6 +59,13 @@ func NewInvalidSchemaDefinitionError(err error) error {
 // TODO (lucy): Have this take a database name.
 func NewUndefinedSchemaError(name string) error {
 	return pgerror.Newf(pgcode.InvalidSchemaName, "unknown schema %q", name)
+}
+
+// NewUnsupportedSchemaUsageError creates an error for an invalid
+// schema use, e.g. mydb.someschema.tbl.
+func NewUnsupportedSchemaUsageError(name string) error {
+	return pgerror.Newf(pgcode.InvalidSchemaName,
+		"unsupported schema specification: %q", name)
 }
 
 // NewCCLRequiredError creates an error for when a CCL feature is used in an OSS
@@ -217,7 +194,11 @@ func NewDependentObjectErrorf(format string, args ...interface{}) error {
 
 // NewRangeUnavailableError creates an unavailable range error.
 func NewRangeUnavailableError(rangeID roachpb.RangeID, origErr error) error {
-	return pgerror.Wrapf(origErr, pgcode.RangeUnavailable, "key range id:%d is unavailable", rangeID)
+	// TODO(knz): This could should really use errors.Wrap or
+	// errors.WithSecondaryError.
+	return pgerror.Newf(pgcode.RangeUnavailable,
+		"key range id:%d is unavailable. Original error: %v",
+		rangeID, origErr)
 }
 
 // NewWindowInAggError creates an error for the case when a window function is

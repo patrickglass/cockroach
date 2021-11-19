@@ -1,11 +1,5 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
-filegroup(
-    name = "testdata",
-    srcs = glob(["testdata/**"]),
-    visibility = ["//pkg/ccl/logictestccl:__subpackages__"],
-)
-
 go_library(
     name = "logictest",
     srcs = ["logic.go"],
@@ -14,26 +8,24 @@ go_library(
     deps = [
         "//pkg/base",
         "//pkg/build",
-        "//pkg/build/bazel",
         "//pkg/clusterversion",
         "//pkg/kv/kvserver",
-        "//pkg/migration",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/migration/migrationmanager",
+        "//pkg/roachpb",
         "//pkg/security",
         "//pkg/server",
         "//pkg/settings/cluster",
         "//pkg/sql",
         "//pkg/sql/execinfra",
+        "//pkg/sql/mutations",
         "//pkg/sql/parser",
         "//pkg/sql/pgwire/pgcode",
         "//pkg/sql/pgwire/pgerror",
-        "//pkg/sql/randgen",
+        "//pkg/sql/row",
         "//pkg/sql/sem/tree",
-        "//pkg/sql/sessiondatapb",
-        "//pkg/sql/sqlstats",
+        "//pkg/sql/sessiondata",
         "//pkg/sql/stats",
         "//pkg/testutils",
-        "//pkg/testutils/floatcmp",
         "//pkg/testutils/physicalplanutils",
         "//pkg/testutils/serverutils",
         "//pkg/testutils/skip",
@@ -53,18 +45,15 @@ go_library(
 
 go_test(
     name = "logictest_test",
-    size = "enormous",
+    size = "large",
     srcs = [
         "logic_test.go",
         "main_test.go",
         "parallel_test.go",
     ],
-    data = [
-        ":testdata",
-        "@cockroach//c-deps:libgeos",
-        "@com_github_cockroachdb_sqllogictest//:testfiles",
-    ],
+    data = glob(["testdata/**"]),
     embed = [":logictest"],
+    tags = ["broken_in_bazel"],
     deps = [
         "//pkg/base",
         "//pkg/config/zonepb",
@@ -73,7 +62,7 @@ go_test(
         "//pkg/security/securitytest",
         "//pkg/server",
         "//pkg/sql",
-        "//pkg/sql/sessiondatapb",
+        "//pkg/sql/sessiondata",
         "//pkg/sql/stats",
         "//pkg/sql/tests",
         "//pkg/testutils/serverutils",

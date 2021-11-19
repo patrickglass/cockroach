@@ -51,9 +51,9 @@ func GenerateUniqueDescID(ctx context.Context, db *kv.DB, codec keys.SQLCodec) (
 // GetDescriptorID looks up the ID for plainKey.
 // InvalidID is returned if the name cannot be resolved.
 func GetDescriptorID(
-	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, plainKey catalog.NameKey,
+	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, plainKey catalogkeys.DescriptorKey,
 ) (descpb.ID, error) {
-	key := catalogkeys.EncodeNameKey(codec, plainKey)
+	key := plainKey.Key(codec)
 	log.Eventf(ctx, "looking up descriptor ID for name key %q", key)
 	gr, err := txn.Get(ctx, key)
 	if err != nil {
@@ -75,7 +75,7 @@ func ResolveSchemaID(
 		return true, keys.PublicSchemaID, nil
 	}
 
-	sKey := catalogkeys.NewNameKeyComponents(dbID, keys.RootNamespaceID, scName)
+	sKey := catalogkeys.NewSchemaKey(dbID, scName)
 	schemaID, err := GetDescriptorID(ctx, txn, codec, sKey)
 	if err != nil || schemaID == descpb.InvalidID {
 		return false, descpb.InvalidID, err
@@ -150,17 +150,14 @@ func descriptorFromKeyValue(
 	required required,
 	dg catalog.DescGetter,
 	validationLevel catalog.ValidationLevel,
-	shouldRunPostDeserializationChanges bool,
 ) (catalog.Descriptor, error) {
 	id, b, err := builderFromKeyValue(codec, kv, expectedType, required)
 	if err != nil || b == nil {
 		return nil, err
 	}
-	if shouldRunPostDeserializationChanges {
-		err = b.RunPostDeserializationChanges(ctx, dg)
-		if err != nil {
-			return nil, err
-		}
+	err = b.RunPostDeserializationChanges(ctx, dg)
+	if err != nil {
+		return nil, err
 	}
 	var desc catalog.Descriptor
 	if mutable {
@@ -227,7 +224,7 @@ func requiredError(expectedObjectType catalog.DescriptorType, id descpb.ID) erro
 		err = sqlerrors.NewUndefinedSchemaError(fmt.Sprintf("[%d]", id))
 		wrapper = catalog.WrapSchemaDescRefErr
 	case catalog.Type:
-		err = sqlerrors.NewUndefinedTypeError(tree.NewUnqualifiedTypeName(fmt.Sprintf("[%d]", id)))
+		err = sqlerrors.NewUndefinedTypeError(tree.NewUnqualifiedTypeName(tree.Name(fmt.Sprintf("[%d]", id))))
 		wrapper = catalog.WrapTypeDescRefErr
 	default:
 		err = errors.Errorf("failed to find descriptor [%d]", id)
@@ -239,7 +236,7 @@ func requiredError(expectedObjectType catalog.DescriptorType, id descpb.ID) erro
 // CountUserDescriptors returns the number of descriptors present that were
 // created by the user (i.e. not present when the cluster started).
 func CountUserDescriptors(ctx context.Context, txn *kv.Txn, codec keys.SQLCodec) (int, error) {
-	allDescs, err := GetAllDescriptors(ctx, txn, codec, true /* shouldRunPostDeserializationChanges */)
+	allDescs, err := GetAllDescriptors(ctx, txn, codec)
 	if err != nil {
 		return 0, err
 	}
@@ -255,11 +252,7 @@ func CountUserDescriptors(ctx context.Context, txn *kv.Txn, codec keys.SQLCodec)
 }
 
 func getAllDescriptorsAndMaybeNamespaceEntriesUnvalidated(
-	ctx context.Context,
-	txn *kv.Txn,
-	codec keys.SQLCodec,
-	withNamespace bool,
-	shouldRunPostDeserializationChanges bool,
+	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, withNamespace bool,
 ) (m catalog.MapDescGetter, err error) {
 	if withNamespace {
 		log.Eventf(ctx, "fetching all descriptors and namespace entries")
@@ -273,6 +266,11 @@ func getAllDescriptorsAndMaybeNamespaceEntriesUnvalidated(
 	}
 	if withNamespace {
 		// Batch results index 1.
+		prefixDeprecated := codec.IndexPrefix(
+			uint32(systemschema.DeprecatedNamespaceTable.GetID()),
+			uint32(systemschema.DeprecatedNamespaceTable.GetPrimaryIndexID()))
+		b.Scan(prefixDeprecated, prefixDeprecated.PrefixEnd())
+		// Batch results index 2.
 		prefix := codec.IndexPrefix(
 			uint32(systemschema.NamespaceTable.GetID()),
 			uint32(systemschema.NamespaceTable.GetPrimaryIndexID()))
@@ -284,7 +282,7 @@ func getAllDescriptorsAndMaybeNamespaceEntriesUnvalidated(
 	}
 	m.Descriptors = make(map[descpb.ID]catalog.Descriptor, len(b.Results[0].Rows))
 	if withNamespace {
-		m.Namespace = make(map[descpb.NameInfo]descpb.ID, len(b.Results[1].Rows))
+		m.Namespace = make(map[descpb.NameInfo]descpb.ID, len(b.Results[1].Rows)+len(b.Results[2].Rows))
 	}
 	dg := NewOneLevelUncachedDescGetter(txn, codec)
 	for queryIndex, results := range b.Results {
@@ -299,15 +297,15 @@ func getAllDescriptorsAndMaybeNamespaceEntriesUnvalidated(
 			switch queryIndex {
 			case 0:
 				var desc catalog.Descriptor
-				desc, err = descriptorFromKeyValue(
-					ctx, codec, row, immutable, catalog.Any,
-					bestEffort, dg, catalog.NoValidation, shouldRunPostDeserializationChanges,
-				)
+				desc, err = descriptorFromKeyValue(ctx, codec, row, immutable, catalog.Any, bestEffort, dg, catalog.NoValidation)
 				if desc != nil {
 					m.Descriptors[desc.GetID()] = desc
 				}
 			case 1:
-				k, err = catalogkeys.DecodeNameMetadataKey(codec, row.Key)
+				k.ParentID, k.Name, err = catalogkeys.DecodeDeprecatedNameMetadataKey(codec, row.Key)
+				m.Namespace[k] = descpb.ID(row.ValueInt())
+			case 2:
+				k.ParentID, k.ParentSchemaID, k.Name, err = catalogkeys.DecodeNameMetadataKey(codec, row.Key)
 				m.Namespace[k] = descpb.ID(row.ValueInt())
 			default:
 				panic("missing switch case")
@@ -327,26 +325,14 @@ func getAllDescriptorsAndMaybeNamespaceEntriesUnvalidated(
 func GetAllDescriptorsAndNamespaceEntriesUnvalidated(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec,
 ) (m catalog.MapDescGetter, err error) {
-	return getAllDescriptorsAndMaybeNamespaceEntriesUnvalidated(
-		ctx,
-		txn,
-		codec,
-		true, /* withNamespace */
-		true, /* shouldRunPostDeserializationChanges */
-	)
+	return getAllDescriptorsAndMaybeNamespaceEntriesUnvalidated(ctx, txn, codec, true /* withNamespace */)
 }
 
 // GetAllDescriptors looks up and returns all available descriptors.
 func GetAllDescriptors(
-	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, shouldRunPostDeserializationChanges bool,
+	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec,
 ) ([]catalog.Descriptor, error) {
-	m, err := getAllDescriptorsAndMaybeNamespaceEntriesUnvalidated(
-		ctx,
-		txn,
-		codec,
-		false,                               /* withNamespace */
-		shouldRunPostDeserializationChanges, /* shouldRunPostDeserializationChanges */
-	)
+	m, err := getAllDescriptorsAndMaybeNamespaceEntriesUnvalidated(ctx, txn, codec, false /* withNamespace */)
 	if err != nil {
 		return nil, err
 	}
@@ -363,11 +349,21 @@ func GetAllDatabaseDescriptorIDs(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec,
 ) ([]descpb.ID, error) {
 	log.Eventf(ctx, "fetching all database descriptor IDs")
-	nameKey := catalogkeys.MakeDatabaseNameKey(codec, "")
+	nameKey := catalogkeys.NewDatabaseKey("" /* name */).Key(codec)
 	kvs, err := txn.Scan(ctx, nameKey, nameKey.PrefixEnd(), 0 /*maxRows */)
 	if err != nil {
 		return nil, err
 	}
+	// See the comment in physical_schema_accessors.go,
+	// func (a UncachedPhysicalAccessor) GetObjectNames. Same concept
+	// applies here.
+	// TODO(solon): This complexity can be removed in 20.2.
+	nameKey = catalogkeys.NewDeprecatedDatabaseKey("" /* name */).Key(codec)
+	dkvs, err := txn.Scan(ctx, nameKey, nameKey.PrefixEnd(), 0 /* maxRows */)
+	if err != nil {
+		return nil, err
+	}
+	kvs = append(kvs, dkvs...)
 
 	descIDs := make([]descpb.ID, 0, len(kvs))
 	alreadySeen := make(map[descpb.ID]bool)
@@ -461,9 +457,7 @@ func getDescriptorByID(
 	}
 	dg := NewOneLevelUncachedDescGetter(txn, codec)
 	const level = catalog.ValidationLevelCrossReferences
-	return descriptorFromKeyValue(
-		ctx, codec, r, mutable, expectedType, required, dg, level, true, /* shouldRunPostDeserializationChanges */
-	)
+	return descriptorFromKeyValue(ctx, codec, r, mutable, expectedType, required, dg, level)
 }
 
 // GetDatabaseDescByID looks up the database descriptor given its ID,
@@ -471,12 +465,12 @@ func getDescriptorByID(
 // found" condition to return an error, use MustGetDatabaseDescByID instead.
 func GetDatabaseDescByID(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, id descpb.ID,
-) (catalog.DatabaseDescriptor, error) {
+) (*dbdesc.Immutable, error) {
 	desc, err := getDescriptorByID(ctx, txn, codec, id, immutable, catalog.Database, bestEffort)
 	if err != nil || desc == nil {
 		return nil, err
 	}
-	return desc.(catalog.DatabaseDescriptor), nil
+	return desc.(*dbdesc.Immutable), nil
 }
 
 // MustGetTableDescByID looks up the table descriptor given its ID,
@@ -507,36 +501,36 @@ func MustGetMutableTableDescByID(
 // returning an error if the type is not found.
 func MustGetTypeDescByID(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, id descpb.ID,
-) (catalog.TypeDescriptor, error) {
+) (*typedesc.Immutable, error) {
 	desc, err := getDescriptorByID(ctx, txn, codec, id, immutable, catalog.Type, mustGet)
 	if err != nil {
 		return nil, err
 	}
-	return desc.(catalog.TypeDescriptor), nil
+	return desc.(*typedesc.Immutable), nil
 }
 
 // MustGetDatabaseDescByID looks up the database descriptor given its ID,
 // returning an error if the descriptor is not found.
 func MustGetDatabaseDescByID(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, id descpb.ID,
-) (catalog.DatabaseDescriptor, error) {
+) (*dbdesc.Immutable, error) {
 	desc, err := getDescriptorByID(ctx, txn, codec, id, immutable, catalog.Database, mustGet)
 	if err != nil {
 		return nil, err
 	}
-	return desc.(catalog.DatabaseDescriptor), nil
+	return desc.(*dbdesc.Immutable), nil
 }
 
 // MustGetSchemaDescByID looks up the schema descriptor given its ID,
 // returning an error if the descriptor is not found.
 func MustGetSchemaDescByID(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, id descpb.ID,
-) (catalog.SchemaDescriptor, error) {
+) (*schemadesc.Immutable, error) {
 	desc, err := getDescriptorByID(ctx, txn, codec, id, immutable, catalog.Schema, mustGet)
 	if err != nil {
 		return nil, err
 	}
-	return desc.(catalog.SchemaDescriptor), nil
+	return desc.(*schemadesc.Immutable), nil
 }
 
 // GetDescriptorByID looks up the descriptor given its ID,
@@ -554,6 +548,19 @@ func MustGetDescriptorByID(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, id descpb.ID,
 ) (catalog.Descriptor, error) {
 	return getDescriptorByID(ctx, txn, codec, id, immutable, catalog.Any, mustGet)
+}
+
+// GetMutableDescriptorByID looks up the mutable descriptor given its ID,
+// returning nil if the descriptor is not found. If you want the "not found"
+// condition to return an error, use MustGetMutableDescriptorByID instead.
+func GetMutableDescriptorByID(
+	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, id descpb.ID,
+) (catalog.MutableDescriptor, error) {
+	desc, err := getDescriptorByID(ctx, txn, codec, id, mutable, catalog.Any, bestEffort)
+	if err != nil || desc == nil {
+		return nil, err
+	}
+	return desc.(catalog.MutableDescriptor), err
 }
 
 // MustGetMutableDescriptorByID looks up the mutable descriptor given its ID,
@@ -606,7 +613,6 @@ func getDescriptorsFromIDs(
 			bestEffort,
 			dg,
 			catalog.ValidationLevelCrossReferences,
-			true, /* shouldRunPostDeserializationChanges */
 		)
 		if err != nil {
 			return nil, err
@@ -627,18 +633,18 @@ func getDescriptorsFromIDs(
 // descriptors otherwise it will throw an error.
 func GetDatabaseDescriptorsFromIDs(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, ids []descpb.ID,
-) ([]catalog.DatabaseDescriptor, error) {
+) ([]*dbdesc.Immutable, error) {
 	descs, err := getDescriptorsFromIDs(ctx, txn, codec, ids, catalog.WrapDatabaseDescRefErr)
 	if err != nil {
 		return nil, err
 	}
-	res := make([]catalog.DatabaseDescriptor, len(descs))
+	res := make([]*dbdesc.Immutable, len(descs))
 	for i, id := range ids {
 		desc := descs[i]
 		if desc == nil {
 			return nil, catalog.WrapDatabaseDescRefErr(id, catalog.ErrDescriptorNotFound)
 		}
-		db, ok := desc.(catalog.DatabaseDescriptor)
+		db, ok := desc.(*dbdesc.Immutable)
 		if !ok {
 			return nil, catalog.WrapDatabaseDescRefErr(id, catalog.NewDescriptorTypeError(desc))
 		}
@@ -652,18 +658,18 @@ func GetDatabaseDescriptorsFromIDs(
 // a schema.
 func GetSchemaDescriptorsFromIDs(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, ids []descpb.ID,
-) ([]catalog.SchemaDescriptor, error) {
+) ([]*schemadesc.Immutable, error) {
 	descs, err := getDescriptorsFromIDs(ctx, txn, codec, ids, catalog.WrapSchemaDescRefErr)
 	if err != nil {
 		return nil, err
 	}
-	res := make([]catalog.SchemaDescriptor, len(descs))
+	res := make([]*schemadesc.Immutable, len(descs))
 	for i, id := range ids {
 		desc := descs[i]
 		if desc == nil {
 			return nil, catalog.WrapSchemaDescRefErr(id, catalog.ErrDescriptorNotFound)
 		}
-		schema, ok := desc.(catalog.SchemaDescriptor)
+		schema, ok := desc.(*schemadesc.Immutable)
 		if !ok {
 			return nil, catalog.WrapSchemaDescRefErr(id, catalog.NewDescriptorTypeError(desc))
 		}

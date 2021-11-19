@@ -12,6 +12,7 @@ package roachpb
 
 import (
 	"math/rand"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -59,12 +60,15 @@ func TestMergeSpans(t *testing.T) {
 		{"a-c,b-bb", "a-c", false},
 		{"a-c,b-c", "a-c", false},
 	}
-	for _, c := range testCases {
-		spans := makeSpans(c.spans)
-		spans, distinct := MergeSpans((*[]Span)(&spans))
+	for i, c := range testCases {
+		spans, distinct := MergeSpans(makeSpans(c.spans))
 		expected := makeSpans(c.expected)
-		require.Equal(t, expected, spans)
-		require.Equal(t, c.distinct, distinct)
+		if (len(expected) != 0 || len(spans) != 0) && reflect.DeepEqual(expected, spans) {
+			t.Fatalf("%d: expected\n%s\n, but found:\n%s", i, expected, spans)
+		}
+		if c.distinct != distinct {
+			t.Fatalf("%d: expected %t, but found %t", i, c.distinct, distinct)
+		}
 	}
 }
 
@@ -113,7 +117,7 @@ func TestSubtractSpans(t *testing.T) {
 	t.Run("random", func(t *testing.T) {
 		const iterations = 100
 		for i := 0; i < iterations; i++ {
-			r, s := randutil.NewTestRand()
+			r, s := randutil.NewPseudoRand()
 			t.Logf("random seed: %d", s)
 			const max = 1000
 			before := makeRandomParitialCovering(r, max)

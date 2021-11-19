@@ -13,7 +13,7 @@ package delegate
 import (
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/errors"
@@ -23,10 +23,29 @@ import (
 func (d *delegator) delegateShowRegions(n *tree.ShowRegions) (tree.Statement, error) {
 	zonesClause := `
 		SELECT
-			region, zones
-		FROM crdb_internal.regions
-		ORDER BY region
-`
+			substring(locality, 'region=([^,]*)') AS region,
+			array_remove(
+				array_agg(
+					COALESCE(
+						substring(locality, 'az=([^,]*)'),
+						substring(
+							locality,
+							'availability-zone=([^,]*)'),
+						substring(
+							locality,
+							'zone=([^,]*)'
+						)
+					)
+					ORDER BY locality
+				),
+				NULL
+			)
+				AS zones
+		FROM
+			crdb_internal.kv_node_status
+		GROUP BY
+			region
+	`
 	switch n.ShowRegionsFrom {
 	case tree.ShowRegionsFromAllDatabases:
 		sqltelemetry.IncrementShowCounter(sqltelemetry.RegionsFromAllDatabases)
@@ -44,7 +63,7 @@ ORDER BY database_name
 		sqltelemetry.IncrementShowCounter(sqltelemetry.RegionsFromDatabase)
 		dbName := string(n.DatabaseName)
 		if dbName == "" {
-			dbName = d.evalCtx.SessionData().Database
+			dbName = d.evalCtx.SessionData.Database
 		}
 		// Note the LEFT JOIN here -- in the case where regions no longer exist on the cluster
 		// but still exist on the database config, we want to still see this database region
@@ -70,7 +89,7 @@ FROM [
 LEFT JOIN zones_table ON (r.region = zones_table.region)
 ORDER BY "primary" DESC, "region"`,
 			zonesClause,
-			lexbase.EscapeSQLString(dbName),
+			lex.EscapeSQLString(dbName),
 		)
 		return parse(query)
 

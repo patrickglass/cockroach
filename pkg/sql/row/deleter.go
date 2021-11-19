@@ -27,7 +27,7 @@ import (
 // Deleter abstracts the key/value operations for deleting table rows.
 type Deleter struct {
 	Helper    rowHelper
-	FetchCols []catalog.Column
+	FetchCols []descpb.ColumnDescriptor
 	// FetchColIDtoRowIndex must be kept in sync with FetchCols.
 	FetchColIDtoRowIndex catalog.TableColMap
 	// For allocation avoidance.
@@ -44,14 +44,18 @@ type Deleter struct {
 func MakeDeleter(
 	codec keys.SQLCodec,
 	tableDesc catalog.TableDescriptor,
-	requestedCols []catalog.Column,
+	requestedCols []descpb.ColumnDescriptor,
 	sv *settings.Values,
 	internal bool,
 	metrics *Metrics,
 ) Deleter {
 	indexes := tableDesc.DeletableNonPrimaryIndexes()
+	indexDescs := make([]descpb.IndexDescriptor, len(indexes))
+	for i, index := range indexes {
+		indexDescs[i] = *index.IndexDesc()
+	}
 
-	var fetchCols []catalog.Column
+	var fetchCols []descpb.ColumnDescriptor
 	var fetchColIDtoRowIndex catalog.TableColMap
 	if requestedCols != nil {
 		fetchCols = requestedCols[:len(requestedCols):len(requestedCols)]
@@ -64,26 +68,26 @@ func MakeDeleter(
 					return err
 				}
 				fetchColIDtoRowIndex.Set(col.GetID(), len(fetchCols))
-				fetchCols = append(fetchCols, col)
+				fetchCols = append(fetchCols, *col.ColumnDesc())
 			}
 			return nil
 		}
-		for j := 0; j < tableDesc.GetPrimaryIndex().NumKeyColumns(); j++ {
-			colID := tableDesc.GetPrimaryIndex().GetKeyColumnID(j)
+		for j := 0; j < tableDesc.GetPrimaryIndex().NumColumns(); j++ {
+			colID := tableDesc.GetPrimaryIndex().GetColumnID(j)
 			if err := maybeAddCol(colID); err != nil {
 				return Deleter{}
 			}
 		}
 		for _, index := range indexes {
-			for j := 0; j < index.NumKeyColumns(); j++ {
-				colID := index.GetKeyColumnID(j)
+			for j := 0; j < index.NumColumns(); j++ {
+				colID := index.GetColumnID(j)
 				if err := maybeAddCol(colID); err != nil {
 					return Deleter{}
 				}
 			}
 			// The extra columns are needed to fix #14601.
-			for j := 0; j < index.NumKeySuffixColumns(); j++ {
-				colID := index.GetKeySuffixColumnID(j)
+			for j := 0; j < index.NumExtraColumns(); j++ {
+				colID := index.GetExtraColumnID(j)
 				if err := maybeAddCol(colID); err != nil {
 					return Deleter{}
 				}
@@ -92,7 +96,7 @@ func MakeDeleter(
 	}
 
 	rd := Deleter{
-		Helper:               newRowHelper(codec, tableDesc, indexes, sv, internal, metrics),
+		Helper:               newRowHelper(codec, tableDesc, indexDescs, sv, internal, metrics),
 		FetchCols:            fetchCols,
 		FetchColIDtoRowIndex: fetchColIDtoRowIndex,
 	}
@@ -112,7 +116,7 @@ func (rd *Deleter) DeleteRow(
 	for i := range rd.Helper.Indexes {
 		// If the index ID exists in the set of indexes to ignore, do not
 		// attempt to delete from the index.
-		if pm.IgnoreForDel.Contains(int(rd.Helper.Indexes[i].GetID())) {
+		if pm.IgnoreForDel.Contains(int(rd.Helper.Indexes[i].ID)) {
 			continue
 		}
 
@@ -120,7 +124,7 @@ func (rd *Deleter) DeleteRow(
 		entries, err := rowenc.EncodeSecondaryIndex(
 			rd.Helper.Codec,
 			rd.Helper.TableDesc,
-			rd.Helper.Indexes[i],
+			&rd.Helper.Indexes[i],
 			rd.FetchColIDtoRowIndex,
 			values,
 			true, /* includeEmpty */
@@ -129,9 +133,10 @@ func (rd *Deleter) DeleteRow(
 			return err
 		}
 		for _, e := range entries {
-			if err := rd.Helper.deleteIndexEntry(ctx, b, rd.Helper.Indexes[i], rd.Helper.secIndexValDirs[i], &e, traceKV); err != nil {
-				return err
+			if traceKV {
+				log.VEventf(ctx, 2, "Del %s", keys.PrettyPrint(rd.Helper.secIndexValDirs[i], e.Key))
 			}
+			b.Del(&e.Key)
 		}
 	}
 
@@ -160,4 +165,34 @@ func (rd *Deleter) DeleteRow(
 		rd.key = nil
 		return nil
 	})
+}
+
+// DeleteIndexRow adds to the batch the kv operations necessary to delete a
+// table row from the given index.
+func (rd *Deleter) DeleteIndexRow(
+	ctx context.Context, b *kv.Batch, idx *descpb.IndexDescriptor, values []tree.Datum, traceKV bool,
+) error {
+	// We want to include empty k/v pairs because we want
+	// to delete all k/v's for this row. By setting includeEmpty
+	// to true, we will get a k/v pair for each family in the row,
+	// which will guarantee that we delete all the k/v's in this row.
+	secondaryIndexEntry, err := rowenc.EncodeSecondaryIndex(
+		rd.Helper.Codec,
+		rd.Helper.TableDesc,
+		idx,
+		rd.FetchColIDtoRowIndex,
+		values,
+		true, /* includeEmpty */
+	)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range secondaryIndexEntry {
+		if traceKV {
+			log.VEventf(ctx, 2, "Del %s", entry.Key)
+		}
+		b.Del(entry.Key)
+	}
+	return nil
 }

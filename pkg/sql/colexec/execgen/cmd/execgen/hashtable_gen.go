@@ -88,12 +88,17 @@ func genHashTable(inputFileContents string, wr io.Writer, htm hashTableMode) err
 	)
 	s := r.Replace(inputFileContents)
 
+	s = strings.ReplaceAll(s, "_L_UNSAFEGET", "execgen.UNSAFEGET")
+	s = replaceManipulationFuncsAmbiguous(".Global.Left", s)
+	s = strings.ReplaceAll(s, "_R_UNSAFEGET", "execgen.UNSAFEGET")
+	s = replaceManipulationFuncsAmbiguous(".Global.Right", s)
+
 	assignNeRe := makeFunctionRegex("_ASSIGN_NE", 6)
 	s = assignNeRe.ReplaceAllString(s, makeTemplateFunctionCall("Global.Right.Assign", 6))
 
-	checkColBody := makeFunctionRegex("_CHECK_COL_BODY", 6)
+	checkColBody := makeFunctionRegex("_CHECK_COL_BODY", 7)
 	s = checkColBody.ReplaceAllString(s,
-		`{{template "checkColBody" buildDict "Global" .Global "ProbeHasNulls" $1 "BuildHasNulls" $2 "SelectDistinct" $3 "UseProbeSel" $4 "ProbingAgainstItself" $5 "DeletingProbeMode" $6}}`,
+		`{{template "checkColBody" buildDict "Global" .Global "ProbeHasNulls" $1 "BuildHasNulls" $2 "AllowNullEquality" $3 "SelectDistinct" $4 "UseProbeSel" $5 "ProbingAgainstItself" $6 "DeletingProbeMode" $7}}`,
 	)
 
 	checkColWithNulls := makeFunctionRegex("_CHECK_COL_WITH_NULLS", 3)
@@ -111,9 +116,9 @@ func genHashTable(inputFileContents string, wr io.Writer, htm hashTableMode) err
 		`{{template "checkColForDistinctWithNulls" buildDict "Global" . "UseProbeSel" $1}}`,
 	)
 
-	checkBody := makeFunctionRegex("_CHECK_BODY", 3)
+	checkBody := makeFunctionRegex("_CHECK_BODY", 2)
 	s = checkBody.ReplaceAllString(s,
-		`{{template "checkBody" buildDict "Global" . "SelectSameTuples" $1 "DeletingProbeMode" $2 "SelectDistinct" $3}}`,
+		`{{template "checkBody" buildDict "Global" . "SelectSameTuples" $1 "DeletingProbeMode" $2}}`,
 	)
 
 	updateSelBody := makeFunctionRegex("_UPDATE_SEL_BODY", 1)

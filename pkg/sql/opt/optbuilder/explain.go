@@ -14,22 +14,19 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/errors"
 )
 
 func (b *Builder) buildExplain(explain *tree.Explain, inScope *scope) (outScope *scope) {
-	if _, ok := explain.Statement.(*tree.Execute); ok {
-		panic(pgerror.New(
-			pgcode.FeatureNotSupported, "EXPLAIN EXECUTE is not supported; use EXPLAIN ANALYZE",
-		))
-	}
+	b.pushWithFrame()
 
-	stmtScope := b.buildStmtAtRoot(explain.Statement, nil /* desiredTypes */)
+	// We don't allow the statement under Explain to reference outer columns, so we
+	// pass a "blank" scope rather than inScope.
+	stmtScope := b.buildStmtAtRoot(explain.Statement, nil /* desiredTypes */, b.allocScope())
 
+	b.popWithFrame(stmtScope)
 	outScope = inScope.push()
 
 	switch explain.Mode {
@@ -55,15 +52,12 @@ func (b *Builder) buildExplain(explain *tree.Explain, inScope *scope) (outScope 
 			telemetry.Inc(sqltelemetry.ExplainDDLStages)
 		}
 
-	case tree.ExplainGist:
-		telemetry.Inc(sqltelemetry.ExplainGist)
-
 	default:
 		panic(errors.Errorf("EXPLAIN mode %s not supported", explain.Mode))
 	}
 	b.synthesizeResultColumns(outScope, colinfo.ExplainPlanColumns)
 
-	input := stmtScope.expr
+	input := stmtScope.expr.(memo.RelExpr)
 	private := memo.ExplainPrivate{
 		Options:  explain.ExplainOptions,
 		ColList:  colsToColList(outScope.cols),

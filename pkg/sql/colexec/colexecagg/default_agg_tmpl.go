@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for default_agg.eg.go. It's formatted
 // in a special way, so it's both valid Go and a valid text/template input.
@@ -39,7 +37,7 @@ type default_AGGKINDAgg struct {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	orderedAggregateFuncBase
 	// {{else}}
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// {{end}}
 	fn  tree.AggregateFunc
 	ctx context.Context
@@ -60,12 +58,12 @@ func (a *default_AGGKINDAgg) SetOutput(vec coldata.Vec) {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	a.orderedAggregateFuncBase.SetOutput(vec)
 	// {{else}}
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	// {{end}}
 }
 
 func (a *default_AGGKINDAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	// Note that we only need to account for the memory of the output vector
 	// and not for the intermediate results of aggregation since the aggregate
@@ -76,8 +74,8 @@ func (a *default_AGGKINDAgg) Compute(
 		// https://github.com/golang/go/issues/39756
 		groups := a.groups
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			for tupleIdx := startIdx; tupleIdx < endIdx; tupleIdx++ {
+			_ = groups[inputLen-1]
+			for tupleIdx := 0; tupleIdx < inputLen; tupleIdx++ {
 				_ADD_TUPLE(a, groups, a.nulls, tupleIdx, false)
 			}
 		} else
@@ -91,7 +89,7 @@ func (a *default_AGGKINDAgg) Compute(
 			// Both aggregators convert the batch "sparsely" - without
 			// deselection - so converted values are at the same positions as
 			// the original ones.
-			for _, tupleIdx := range sel[startIdx:endIdx] {
+			for _, tupleIdx := range sel[:inputLen] {
 				_ADD_TUPLE(a, a.groups, a.nulls, tupleIdx, true)
 			}
 		}
@@ -209,9 +207,9 @@ func (a *default_AGGKINDAggAlloc) newAggFunc() AggregateFunc {
 	return f
 }
 
-func (a *default_AGGKINDAggAlloc) Close() error {
+func (a *default_AGGKINDAggAlloc) Close(ctx context.Context) error {
 	for _, fn := range a.returnedFns {
-		fn.fn.Close(fn.ctx)
+		fn.fn.Close(ctx)
 	}
 	a.returnedFns = nil
 	return nil

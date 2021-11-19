@@ -19,9 +19,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -31,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/pebble"
 	"github.com/stretchr/testify/assert"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/tracker"
@@ -856,7 +859,22 @@ func TestTruncateLogRecompute(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	tc := testContext{}
+	dir, cleanup := testutils.TempDir(t)
+	defer cleanup()
+
+	cache := pebble.NewCache(1 << 20)
+	defer cache.Unref()
+	opts := storage.DefaultPebbleOptions()
+	opts.Cache = cache
+	eng, err := storage.NewPebble(ctx, storage.PebbleConfig{StorageConfig: base.StorageConfig{Dir: dir}, Opts: opts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+
+	tc := testContext{
+		engine: eng,
+	}
 	cfg := TestStoreConfig(nil)
 	cfg.TestingKnobs.DisableRaftLogQueue = true
 	stopper := stop.NewStopper()

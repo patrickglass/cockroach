@@ -35,7 +35,6 @@ import (
 
 const (
 	initServiceName     = "temp-init-service"
-	caCommonName        = "Cockroach CA"
 	defaultInitLifespan = 10 * time.Minute
 
 	trustInitURL     = "/trustInit/"
@@ -135,28 +134,25 @@ func createNodeInitTempCertificates(
 	log.Ops.Infof(ctx, "creating temporary initial certificates for hosts %+v, duration %s", hostnames, lifespan)
 
 	caCtx := logtags.AddTag(ctx, "create-temp-ca", nil)
-	caCertPEM, caKeyPEM, err := security.CreateCACertAndKey(caCtx, log.Ops.Infof, lifespan, initServiceName)
+	caCert, caKey, err := security.CreateCACertAndKey(caCtx, log.Ops.Infof, lifespan, initServiceName)
 	if err != nil {
 		return certs, err
 	}
 	serviceCtx := logtags.AddTag(ctx, "create-temp-service", nil)
-	serviceCertPEM, serviceKeyPEM, err := security.CreateServiceCertAndKey(
+	serviceCert, serviceKey, err := security.CreateServiceCertAndKey(
 		serviceCtx,
 		log.Ops.Infof,
 		lifespan,
 		security.NodeUser,
+		initServiceName,
 		hostnames,
-		caCertPEM,
-		caKeyPEM,
+		caCert,
+		caKey,
 		false, /* serviceCertIsAlsoValidAsClient */
 	)
 	if err != nil {
 		return certs, err
 	}
-	caCert := pem.EncodeToMemory(caCertPEM)
-	caKey := pem.EncodeToMemory(caKeyPEM)
-	serviceCert := pem.EncodeToMemory(serviceCertPEM)
-	serviceKey := pem.EncodeToMemory(serviceKeyPEM)
 
 	certs = ServiceCertificateBundle{
 		CACertificate:   caCert,
@@ -587,31 +583,29 @@ func initHandshakeHelper(
 			return errors.Wrap(err, "error when creating initialization bundle")
 		}
 
-		if numExpectedPeers > 0 {
-			peerInit, err := collectLocalCABundle(cfg.SSLCertsDir)
-			if err != nil {
-				return errors.Wrap(err, "error when loading initialization bundle")
-			}
+		peerInit, err := collectLocalCABundle(*cfg)
+		if err != nil {
+			return errors.Wrap(err, "error when loading initialization bundle")
+		}
 
-			trustBundle := nodeTrustBundle{Bundle: peerInit}
-			trustBundle.signHMAC(handshaker.token)
+		trustBundle := nodeTrustBundle{Bundle: peerInit}
+		trustBundle.signHMAC(handshaker.token)
 
-			if reporter != nil {
-				reporter("sending cert bundle to peers")
-			}
+		if reporter != nil {
+			reporter("sending cert bundle to peers")
+		}
 
-			// For each peer, use its CA to establish a secure connection and deliver the trust bundle.
-			for p := range peerCACerts {
-				peerCtx := logtags.AddTag(leaderCtx, "peer", p)
-				log.Ops.Infof(peerCtx, "delivering bundle to peer")
-				if err := handshaker.sendBundle(peerCtx, p, peerCACerts[p], trustBundle); err != nil {
-					// TODO(bilal): sendBundle should fail fast instead of retrying (or
-					// waiting for ctx cancellation) if the error returned is due to a
-					// mismatching CA cert than peerCACerts[p]. This would likely mean
-					// a man-in-the-middle attack, or a node restart / replacement since
-					// the start of this handshake.
-					return errors.Wrap(err, "error when sending bundle to peers as leader")
-				}
+		// For each peer, use its CA to establish a secure connection and deliver the trust bundle.
+		for p := range peerCACerts {
+			peerCtx := logtags.AddTag(leaderCtx, "peer", p)
+			log.Ops.Infof(peerCtx, "delivering bundle to peer")
+			if err := handshaker.sendBundle(peerCtx, p, peerCACerts[p], trustBundle); err != nil {
+				// TODO(bilal): sendBundle should fail fast instead of retrying (or
+				// waiting for ctx cancellation) if the error returned is due to a
+				// mismatching CA cert than peerCACerts[p]. This would likely mean
+				// a man-in-the-middle attack, or a node restart / replacement since
+				// the start of this handshake.
+				return errors.Wrap(err, "error when sending bundle to peers as leader")
 			}
 		}
 		return nil

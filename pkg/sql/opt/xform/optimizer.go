@@ -238,10 +238,6 @@ func (o *Optimizer) Optimize() (_ opt.Expr, err error) {
 		)
 	}
 
-	// Validate that the factory's stack depth is zero after all optimizations
-	// have been applied.
-	o.f.CheckConstructorStackDepth()
-
 	return root, nil
 }
 
@@ -585,16 +581,11 @@ func (o *Optimizer) enforceProps(
 		memberProps := BuildChildPhysicalProps(o.mem, enforcer, 0, required)
 		fullyOptimized = o.optimizeEnforcer(state, enforcer, required, member, memberProps)
 
-		// Try Sort enforcer that requires a partial ordering from its input. Choose
-		// the interesting ordering that forms the longest common prefix with the
-		// required ordering. We do not need to add the enforcer if the required
-		// ordering is implied by the input ordering (in which case the returned
-		// prefix is nil).
-		interestingOrderings := ordering.DeriveInterestingOrderings(member)
-		longestCommonPrefix := interestingOrderings.LongestCommonPrefix(&required.Ordering)
-		if longestCommonPrefix != nil {
+		// Try Sort enforcer that requires a partial ordering from its input.
+		longestCommonPrefix := deriveInterestingOrderingPrefix(member, required.Ordering)
+		if len(longestCommonPrefix) > 0 && len(longestCommonPrefix) < len(required.Ordering.Columns) {
 			enforcer := &memo.SortExpr{Input: state.best}
-			enforcer.InputOrdering = *longestCommonPrefix
+			enforcer.InputOrdering.FromOrdering(longestCommonPrefix)
 			memberProps := BuildChildPhysicalProps(o.mem, enforcer, 0, required)
 			if o.optimizeEnforcer(state, enforcer, required, member, memberProps) {
 				fullyOptimized = true
@@ -605,6 +596,34 @@ func (o *Optimizer) enforceProps(
 	}
 
 	return true
+}
+
+// deriveInterestingOrderingPrefix finds the longest prefix of the required ordering
+// that is "interesting" as defined in Relational.Rule.InterestingOrderings.
+func deriveInterestingOrderingPrefix(
+	member memo.RelExpr, requiredOrdering physical.OrderingChoice,
+) opt.Ordering {
+	// Find the interesting orderings of the member expression.
+	interestingOrderings := DeriveInterestingOrderings(member)
+
+	// Find the longest interesting ordering that is a prefix of the required ordering.
+	var longestCommonPrefix opt.Ordering
+	for _, ordering := range interestingOrderings {
+		var commonPrefix opt.Ordering
+		for i, orderingCol := range ordering {
+			if i < len(requiredOrdering.Columns) &&
+				requiredOrdering.Columns[i].Group.Contains(orderingCol.ID()) &&
+				requiredOrdering.Columns[i].Descending == orderingCol.Descending() {
+				commonPrefix = append(commonPrefix, orderingCol)
+			} else {
+				break
+			}
+		}
+		if len(commonPrefix) > len(longestCommonPrefix) {
+			longestCommonPrefix = commonPrefix
+		}
+	}
+	return longestCommonPrefix
 }
 
 // optimizeEnforcer optimizes and costs the enforcer.
@@ -976,9 +995,4 @@ func (o *Optimizer) recomputeCostImpl(
 // FormatExpr is a convenience wrapper for memo.FormatExpr.
 func (o *Optimizer) FormatExpr(e opt.Expr, flags memo.ExprFmtFlags) string {
 	return memo.FormatExpr(e, flags, o.mem, o.catalog)
-}
-
-// CustomFuncs exports the xform.CustomFuncs for testing purposes.
-func (o *Optimizer) CustomFuncs() *CustomFuncs {
-	return &o.explorer.funcs
 }

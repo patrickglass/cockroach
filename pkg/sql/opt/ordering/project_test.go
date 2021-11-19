@@ -14,10 +14,10 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/testcat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/testexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -25,8 +25,7 @@ import (
 )
 
 func TestProject(t *testing.T) {
-	st := cluster.MakeTestingClusterSettings()
-	evalCtx := tree.NewTestingEvalContext(st)
+	evalCtx := tree.NewTestingEvalContext(nil /* st */)
 	var f norm.Factory
 	f.Init(evalCtx, testcat.New())
 	md := f.Metadata()
@@ -84,7 +83,7 @@ func TestProject(t *testing.T) {
 		},
 	}
 	for _, tc := range testCases {
-		req := props.ParseOrderingChoice(tc.req)
+		req := physical.ParseOrderingChoice(tc.req)
 		project := f.Memo().MemoizeProject(input, nil /* projections */, opt.MakeColSet(1, 2, 3, 4))
 
 		res := "no"

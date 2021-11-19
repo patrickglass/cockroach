@@ -40,7 +40,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
@@ -57,6 +56,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -798,12 +798,10 @@ type RaftMessageHandlerInterceptor struct {
 }
 
 func (mh RaftMessageHandlerInterceptor) HandleSnapshot(
-	ctx context.Context,
-	header *kvserver.SnapshotRequest_Header,
-	respStream kvserver.SnapshotResponseStream,
+	header *kvserver.SnapshotRequest_Header, respStream kvserver.SnapshotResponseStream,
 ) error {
 	mh.handleSnapshotFilter(header)
-	return mh.RaftMessageHandler.HandleSnapshot(ctx, header, respStream)
+	return mh.RaftMessageHandler.HandleSnapshot(header, respStream)
 }
 
 // TestStoreEmptyRangeSnapshotSize tests that the snapshot request header for a
@@ -2013,7 +2011,6 @@ func TestStoreSplitGCThreshold(t *testing.T) {
 // and the uninitialized replica reacting to messages.
 func TestStoreRangeSplitRaceUninitializedRHS(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	skip.WithIssue(t, 66480, "flaky test")
 	defer log.Scope(t).Close(t)
 
 	currentTrigger := make(chan *roachpb.SplitTrigger, 1)
@@ -2411,7 +2408,7 @@ func TestStoreTxnWaitQueueEnabledOnSplit(t *testing.T) {
 	}
 
 	rhsRepl := store.LookupReplica(roachpb.RKey(keys.UserTableDataMin))
-	if !rhsRepl.GetConcurrencyManager().TestingTxnWaitQueue().IsEnabled() {
+	if !rhsRepl.GetConcurrencyManager().TxnWaitQueue().IsEnabled() {
 		t.Errorf("expected RHS replica's push txn queue to be enabled post-split")
 	}
 }
@@ -2566,7 +2563,7 @@ func TestUnsplittableRange(t *testing.T) {
 	require.NoError(t, err)
 
 	// Add a single large row to /Table/14.
-	tableKey := roachpb.RKey(keys.SystemSQLCodec.TablePrefix(uint32(systemschema.UITable.GetID())))
+	tableKey := roachpb.RKey(keys.SystemSQLCodec.TablePrefix(keys.UITableID))
 	row1Key := roachpb.Key(encoding.EncodeVarintAscending(append([]byte(nil), tableKey...), 1))
 	col1Key := keys.MakeFamilyKey(append([]byte(nil), row1Key...), 0)
 	valueLen := 0.9 * maxBytes
@@ -2773,7 +2770,7 @@ func TestStoreCapacityAfterSplit(t *testing.T) {
 	desc := tc.AddVotersOrFatal(t, key, tc.Target(1))
 	tc.TransferRangeLeaseOrFatal(t, desc, tc.Target(1))
 	testutils.SucceedsSoon(t, func() error {
-		repl, err := s.GetReplica(desc.RangeID)
+		repl, err := tc.GetFirstStoreFromServer(t, 1).GetReplica(desc.RangeID)
 		if err != nil {
 			return err
 		}
@@ -2783,7 +2780,7 @@ func TestStoreCapacityAfterSplit(t *testing.T) {
 		return nil
 	})
 
-	cap, err := s.Capacity(ctx, false /* useCached */)
+	cap, err := s.Capacity(context.Background(), false /* useCached */)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2805,22 +2802,12 @@ func TestStoreCapacityAfterSplit(t *testing.T) {
 	// Increment the manual clock and do a write to increase the qps above zero.
 	manualClock.Increment(int64(kvserver.MinStatsDuration))
 	pArgs := incrementArgs(key, 10)
-	if _, pErr := kv.SendWrapped(ctx, s.TestSender(), pArgs); pErr != nil {
+	if _, pErr := kv.SendWrapped(context.Background(), s.TestSender(), pArgs); pErr != nil {
 		t.Fatal(pErr)
 	}
-	// We want to make sure we can read the value through raft, so we know
-	// the stats are updated.
-	testutils.SucceedsSoon(t, func() error {
-		getArgs := getArgs(key)
-		if reply, err := kv.SendWrapped(ctx, s.TestSender(), getArgs); err != nil {
-			return errors.Errorf("failed to read data: %s", err)
-		} else if e, v := int64(10), mustGetInt(reply.(*roachpb.GetResponse).Value); v != e {
-			return errors.Errorf("failed to read correct data: expected %d, got %d", e, v)
-		}
-		return nil
-	})
+	tc.WaitForValues(t, key, []int64{10, 10})
 
-	cap, err = s.Capacity(ctx, false /* useCached */)
+	cap, err = s.Capacity(context.Background(), false /* useCached */)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2854,11 +2841,11 @@ func TestStoreCapacityAfterSplit(t *testing.T) {
 
 	// Split the range to verify stats work properly with more than one range.
 	sArgs := adminSplitArgs(key.Next().Next())
-	if _, pErr := kv.SendWrapped(ctx, s.TestSender(), sArgs); pErr != nil {
+	if _, pErr := kv.SendWrapped(context.Background(), s.TestSender(), sArgs); pErr != nil {
 		t.Fatal(pErr)
 	}
 
-	cap, err = s.Capacity(ctx, false /* useCached */)
+	cap, err = s.Capacity(context.Background(), false /* useCached */)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3199,19 +3186,9 @@ func TestRangeLookupAsyncResolveIntent(t *testing.T) {
 func TestStoreSplitDisappearingReplicas(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	serv, _, _ := serverutils.StartServer(t, base.TestServerArgs{
-		Knobs: base.TestingKnobs{
-			Store: &kvserver.StoreTestingKnobs{
-				DisableMergeQueue: true,
-			},
-		},
-	})
-	s := serv.(*server.TestServer)
-	defer s.Stopper().Stop(ctx)
-	store, err := s.Stores().GetStore(s.GetFirstStoreID())
-	require.NoError(t, err)
+	stopper := stop.NewStopper()
+	defer stopper.Stop(context.Background())
+	store, _ := createTestStore(t, stopper)
 	go kvserver.WatchForDisappearingReplicas(t, store)
 	for i := 0; i < 100; i++ {
 		key := roachpb.Key(fmt.Sprintf("a%d", i))
@@ -3312,9 +3289,7 @@ func TestSplitTriggerMeetsUnexpectedReplicaID(t *testing.T) {
 	// second node).
 	g := ctxgroup.WithContext(ctx)
 	g.GoCtx(func(ctx context.Context) error {
-		_, err := tc.Servers[0].DB().AdminChangeReplicas(
-			ctx, k, tc.LookupRangeOrFatal(t, k), roachpb.MakeReplicationChanges(roachpb.ADD_VOTER, tc.Target(1)),
-		)
+		_, err := tc.AddVoters(k, tc.Target(1))
 		return err
 	})
 
@@ -3349,9 +3324,7 @@ func TestSplitTriggerMeetsUnexpectedReplicaID(t *testing.T) {
 	// Now repeatedly re-add the learner on the rhs, so it has a
 	// different replicaID than the split trigger expects.
 	add := func() {
-		_, err := tc.Servers[0].DB().AdminChangeReplicas(
-			ctx, kRHS, tc.LookupRangeOrFatal(t, kRHS), roachpb.MakeReplicationChanges(roachpb.ADD_VOTER, tc.Target(1)),
-		)
+		_, err := tc.AddVoters(kRHS, tc.Target(1))
 		// The "snapshot intersects existing range" error is expected if the store
 		// has not heard a raft message addressed to a later replica ID while the
 		// "was not found on" error is expected if the store has heard that it has

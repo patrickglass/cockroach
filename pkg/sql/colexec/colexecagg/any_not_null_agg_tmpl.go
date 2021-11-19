@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for any_not_null_agg.eg.go. It's formatted
 // in a special way, so it's both valid Go and a valid text/template input.
@@ -26,14 +24,12 @@ import (
 
 	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/errors"
 )
 
@@ -43,8 +39,6 @@ var (
 	_ tree.AggType
 	_ apd.Context
 	_ duration.Duration
-	_ json.JSON
-	_ colexecerror.StorageError
 )
 
 // {{/*
@@ -89,7 +83,7 @@ type anyNotNull_TYPE_AGGKINDAgg struct {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	orderedAggregateFuncBase
 	// {{else}}
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// {{end}}
 	col                         _GOTYPESLICE
 	curAgg                      _GOTYPE
@@ -102,13 +96,13 @@ func (a *anyNotNull_TYPE_AGGKINDAgg) SetOutput(vec coldata.Vec) {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	a.orderedAggregateFuncBase.SetOutput(vec)
 	// {{else}}
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	// {{end}}
 	a.col = vec.TemplateType()
 }
 
 func (a *anyNotNull_TYPE_AGGKINDAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	// {{if eq "_AGGKIND" "Hash"}}
 	if a.foundNonNullForCurrentGroup {
@@ -134,21 +128,21 @@ func (a *anyNotNull_TYPE_AGGKINDAgg) Compute(
 		// sel to specify the tuples to be aggregated.
 		// */}}
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 					_FIND_ANY_NOT_NULL(a, groups, nulls, i, true, false)
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 					_FIND_ANY_NOT_NULL(a, groups, nulls, i, false, false)
 				}
 			}
 		} else
 		// {{end}}
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 					_FIND_ANY_NOT_NULL(a, groups, nulls, i, true, true)
@@ -179,12 +173,17 @@ func (a *anyNotNull_TYPE_AGGKINDAgg) Flush(outputIdx int) {
 	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		a.col.Set(outputIdx, a.curAgg)
+		execgen.SET(a.col, outputIdx, a.curAgg)
 	}
-	// {{if or (.IsBytesLike) (eq .VecMethod "Datum")}}
+	// {{if or (eq .VecMethod "Bytes") (eq .VecMethod "Datum")}}
 	// Release the reference to curAgg eagerly.
-	execgen.SETVARIABLESIZE(oldCurAggSize, a.curAgg)
-	a.allocator.AdjustMemoryUsage(-int64(oldCurAggSize))
+	// {{if eq .VecMethod "Bytes"}}
+	a.allocator.AdjustMemoryUsage(-int64(len(a.curAgg)))
+	// {{else}}
+	if d, ok := a.curAgg.(*coldataext.Datum); ok {
+		a.allocator.AdjustMemoryUsage(-int64(d.Size()))
+	}
+	// {{end}}
 	a.curAgg = nil
 	// {{end}}
 }
@@ -246,7 +245,9 @@ func _FIND_ANY_NOT_NULL(
 			if !a.foundNonNullForCurrentGroup {
 				a.nulls.SetNull(a.curIdx)
 			} else {
-				a.col.Set(a.curIdx, a.curAgg)
+				// {{with .Global}}
+				execgen.SET(a.col, a.curIdx, a.curAgg)
+				// {{end}}
 			}
 			a.curIdx++
 			a.foundNonNullForCurrentGroup = false
@@ -268,8 +269,8 @@ func _FIND_ANY_NOT_NULL(
 		// {{if and (.Sliceable) (not .HasSel)}}
 		//gcassert:bce
 		// {{end}}
-		val := col.Get(i)
 		// {{with .Global}}
+		val := col.Get(i)
 		execgen.COPYVAL(a.curAgg, val)
 		// {{end}}
 		a.foundNonNullForCurrentGroup = true

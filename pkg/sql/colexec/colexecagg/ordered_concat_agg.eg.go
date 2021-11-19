@@ -40,7 +40,7 @@ func (a *concatOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *concatOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	oldCurAggSize := len(a.curAgg)
 	vec := vecs[inputIdxs[0]]
@@ -50,9 +50,9 @@ func (a *concatOrderedAgg) Compute(
 		// https://github.com/golang/go/issues/39756
 		groups := a.groups
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
+			_ = groups[inputLen-1]
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -80,7 +80,7 @@ func (a *concatOrderedAgg) Compute(
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
@@ -108,7 +108,7 @@ func (a *concatOrderedAgg) Compute(
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 

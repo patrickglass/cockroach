@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -39,43 +38,19 @@ import (
 // use a different plan builder.
 // TODO(rytaft,andyk): study and reuse this.
 type SchemaResolver interface {
-	ObjectNameExistingResolver
-	ObjectNameTargetResolver
+	tree.ObjectNameExistingResolver
+	tree.ObjectNameTargetResolver
 	tree.QualifiedNameResolver
-	tree.TypeReferenceResolver
 
-	// Accessor is a crufty name and interface that wraps the *descs.Collection.
-	Accessor() catalog.Accessor
+	Txn() *kv.Txn
+	LogicalSchemaAccessor() catalog.Accessor
+	CurrentDatabase() string
 	CurrentSearchPath() sessiondata.SearchPath
 	CommonLookupFlags(required bool) tree.CommonLookupFlags
-}
+	ObjectLookupFlags(required bool, requireMutable bool) tree.ObjectLookupFlags
+	LookupTableByID(ctx context.Context, id descpb.ID) (catalog.TableDescriptor, error)
 
-// ObjectNameExistingResolver is the helper interface to resolve table
-// names when the object is expected to exist already. The boolean passed
-// is used to specify if a MutableTableDescriptor is to be returned in the
-// result. ResolvedObjectPrefix should always be populated by implementors
-// to allows us to generate errors at higher level layers, since it allows
-// us to know if the schema and database were found.
-type ObjectNameExistingResolver interface {
-	LookupObject(
-		ctx context.Context, flags tree.ObjectLookupFlags,
-		dbName, scName, obName string,
-	) (
-		found bool,
-		prefix catalog.ResolvedObjectPrefix,
-		objMeta catalog.Descriptor,
-		err error,
-	)
-}
-
-// ObjectNameTargetResolver is the helper interface to resolve object
-// names when the object is not expected to exist. The planner implements
-// LookupSchema to return an object consisting of the parent database and
-// resolved target schema.
-type ObjectNameTargetResolver interface {
-	LookupSchema(
-		ctx context.Context, dbName, scName string,
-	) (found bool, scMeta catalog.ResolvedObjectPrefix, err error)
+	tree.TypeReferenceResolver
 }
 
 // ErrNoPrimaryKey is returned when resolving a table object and the
@@ -83,10 +58,10 @@ type ObjectNameTargetResolver interface {
 var ErrNoPrimaryKey = pgerror.Newf(pgcode.NoPrimaryKey,
 	"requested table does not have a primary key")
 
-// GetObjectNamesAndIDs retrieves the names and IDs of all objects in the
-// target database/schema. If explicitPrefix is set, the returned
-// table names will have an explicit schema and catalog name.
-func GetObjectNamesAndIDs(
+// GetObjectNames retrieves the names of all objects in the target database/
+// schema. If explicitPrefix is set, the returned table names will have an
+// explicit schema and catalog name.
+func GetObjectNames(
 	ctx context.Context,
 	txn *kv.Txn,
 	sc SchemaResolver,
@@ -94,11 +69,12 @@ func GetObjectNamesAndIDs(
 	dbDesc catalog.DatabaseDescriptor,
 	scName string,
 	explicitPrefix bool,
-) (tree.TableNames, descpb.IDs, error) {
-	return sc.Accessor().GetObjectNamesAndIDs(ctx, txn, dbDesc, scName, tree.DatabaseListFlags{
-		CommonLookupFlags: sc.CommonLookupFlags(true /* required */),
-		ExplicitPrefix:    explicitPrefix,
-	})
+) (res tree.TableNames, err error) {
+	return sc.LogicalSchemaAccessor().GetObjectNames(ctx, txn, codec, dbDesc, scName,
+		tree.DatabaseListFlags{
+			CommonLookupFlags: sc.CommonLookupFlags(true /* required */),
+			ExplicitPrefix:    explicitPrefix,
+		})
 }
 
 // ResolveExistingTableObject looks up an existing object.
@@ -108,22 +84,18 @@ func GetObjectNamesAndIDs(
 // The object name is modified in-place with the result of the name
 // resolution, if successful. It is not modified in case of error or
 // if no object is found.
-//
-// TODO(ajwerner): Remove this function. It mutates a table name in place,
-// which is lame but a common pattern and it throws away all the work of
-// resolving the prefix.
 func ResolveExistingTableObject(
 	ctx context.Context, sc SchemaResolver, tn *tree.TableName, lookupFlags tree.ObjectLookupFlags,
-) (prefix catalog.ResolvedObjectPrefix, res catalog.TableDescriptor, err error) {
+) (res catalog.TableDescriptor, err error) {
 	// TODO: As part of work for #34240, an UnresolvedObjectName should be
 	//  passed as an argument to this function.
 	un := tn.ToUnresolvedObjectName()
 	desc, prefix, err := ResolveExistingObject(ctx, sc, un, lookupFlags)
 	if err != nil || desc == nil {
-		return prefix, nil, err
+		return nil, err
 	}
-	tn.ObjectNamePrefix = prefix.NamePrefix()
-	return prefix, desc.(catalog.TableDescriptor), nil
+	tn.ObjectNamePrefix = prefix
+	return desc.(catalog.TableDescriptor), nil
 }
 
 // ResolveMutableExistingTableObject looks up an existing mutable object.
@@ -139,7 +111,7 @@ func ResolveMutableExistingTableObject(
 	tn *tree.TableName,
 	required bool,
 	requiredType tree.RequiredTableKind,
-) (prefix catalog.ResolvedObjectPrefix, res *tabledesc.Mutable, err error) {
+) (res *tabledesc.Mutable, err error) {
 	lookupFlags := tree.ObjectLookupFlags{
 		CommonLookupFlags:    tree.CommonLookupFlags{Required: required, RequireMutable: true},
 		DesiredObjectKind:    tree.TableObject,
@@ -148,13 +120,12 @@ func ResolveMutableExistingTableObject(
 	// TODO: As part of work for #34240, an UnresolvedObjectName should be
 	// passed as an argument to this function.
 	un := tn.ToUnresolvedObjectName()
-	var desc catalog.Descriptor
-	desc, prefix, err = ResolveExistingObject(ctx, sc, un, lookupFlags)
+	desc, prefix, err := ResolveExistingObject(ctx, sc, un, lookupFlags)
 	if err != nil || desc == nil {
-		return prefix, nil, err
+		return nil, err
 	}
-	tn.ObjectNamePrefix = prefix.NamePrefix()
-	return prefix, desc.(*tabledesc.Mutable), nil
+	tn.ObjectNamePrefix = prefix
+	return desc.(*tabledesc.Mutable), nil
 }
 
 // ResolveMutableType resolves a type descriptor for mutable access. It
@@ -162,25 +133,17 @@ func ResolveMutableExistingTableObject(
 // object name.
 func ResolveMutableType(
 	ctx context.Context, sc SchemaResolver, un *tree.UnresolvedObjectName, required bool,
-) (catalog.ResolvedObjectPrefix, *typedesc.Mutable, error) {
+) (*tree.TypeName, *typedesc.Mutable, error) {
 	lookupFlags := tree.ObjectLookupFlags{
 		CommonLookupFlags: tree.CommonLookupFlags{Required: required, RequireMutable: true},
 		DesiredObjectKind: tree.TypeObject,
 	}
 	desc, prefix, err := ResolveExistingObject(ctx, sc, un, lookupFlags)
 	if err != nil || desc == nil {
-		return catalog.ResolvedObjectPrefix{}, nil, err
+		return nil, nil, err
 	}
-	switch t := desc.(type) {
-	case *typedesc.Mutable:
-		return prefix, t, nil
-	case *typedesc.TableImplicitRecordType:
-		return catalog.ResolvedObjectPrefix{}, nil, pgerror.Newf(pgcode.DependentObjectsStillExist,
-			"cannot modify table record type %q", desc.GetName())
-	default:
-		return catalog.ResolvedObjectPrefix{}, nil,
-			errors.AssertionFailedf("unhandled type descriptor type %T during resolve mutable desc", t)
-	}
+	tn := tree.MakeNewQualifiedTypeName(prefix.Catalog(), prefix.Schema(), un.Object())
+	return &tn, desc.(*typedesc.Mutable), nil
 }
 
 // ResolveExistingObject resolves an object with the given flags.
@@ -189,48 +152,35 @@ func ResolveExistingObject(
 	sc SchemaResolver,
 	un *tree.UnresolvedObjectName,
 	lookupFlags tree.ObjectLookupFlags,
-) (res catalog.Descriptor, _ catalog.ResolvedObjectPrefix, err error) {
-	found, prefix, obj, err := ResolveExisting(ctx, un, sc, lookupFlags, sc.CurrentDatabase(), sc.CurrentSearchPath())
+) (res tree.NameResolutionResult, prefix tree.ObjectNamePrefix, err error) {
+	found, prefix, descI, err := tree.ResolveExisting(ctx, un, sc, lookupFlags, sc.CurrentDatabase(), sc.CurrentSearchPath())
 	if err != nil {
 		return nil, prefix, err
 	}
 	// Construct the resolved table name for use in error messages.
+	resolvedTn := tree.MakeTableNameFromPrefix(prefix, tree.Name(un.Object()))
 	if !found {
 		if lookupFlags.Required {
-			// The contract coming out of ResolveExisting is that if the database
-			// or schema exist then they will be populated in the prefix even if
-			// the object does not exist. In the case where we have explicit names
-			// we can populate a more appropriate error regarding what part of the
-			// name does not exist. If we're searching the empty database explicitly,
-			// then all bets are off and just return an undefined object error.
-			if un.HasExplicitCatalog() && un.Catalog() != "" {
-				if prefix.Database == nil {
-					return nil, prefix, sqlerrors.NewUndefinedDatabaseError(un.Catalog())
-				}
-				if un.HasExplicitSchema() && prefix.Schema == nil {
-					return nil, prefix, sqlerrors.NewUndefinedSchemaError(un.Schema())
-				}
-			}
-			return nil, prefix, sqlerrors.NewUndefinedObjectError(un, lookupFlags.DesiredObjectKind)
+			return nil, prefix, sqlerrors.NewUndefinedObjectError(&resolvedTn, lookupFlags.DesiredObjectKind)
 		}
 		return nil, prefix, nil
 	}
-	getResolvedTn := func() *tree.TableName {
-		tn := tree.MakeTableNameFromPrefix(prefix.NamePrefix(), tree.Name(un.Object()))
-		return &tn
-	}
 
+	obj := descI.(catalog.Descriptor)
 	switch lookupFlags.DesiredObjectKind {
 	case tree.TypeObject:
-		typ, isType := obj.(catalog.TypeDescriptor)
+		_, isType := obj.(catalog.TypeDescriptor)
 		if !isType {
-			return nil, prefix, sqlerrors.NewUndefinedTypeError(getResolvedTn())
+			return nil, prefix, sqlerrors.NewUndefinedTypeError(&resolvedTn)
 		}
-		return typ, prefix, nil
+		if lookupFlags.RequireMutable {
+			return obj.(*typedesc.Mutable), prefix, nil
+		}
+		return obj.(*typedesc.Immutable), prefix, nil
 	case tree.TableObject:
 		table, ok := obj.(catalog.TableDescriptor)
 		if !ok {
-			return nil, prefix, sqlerrors.NewUndefinedRelationError(getResolvedTn())
+			return nil, prefix, sqlerrors.NewUndefinedRelationError(&resolvedTn)
 		}
 		goodType := true
 		switch lookupFlags.DesiredTableDescKind {
@@ -244,7 +194,7 @@ func ResolveExistingObject(
 			goodType = table.IsSequence()
 		}
 		if !goodType {
-			return nil, prefix, sqlerrors.NewWrongObjectTypeError(getResolvedTn(), lookupFlags.DesiredTableDescKind.String())
+			return nil, prefix, sqlerrors.NewWrongObjectTypeError(&resolvedTn, lookupFlags.DesiredTableDescKind.String())
 		}
 
 		// If the table does not have a primary key, return an error
@@ -255,7 +205,11 @@ func ResolveExistingObject(
 			return nil, prefix, ErrNoPrimaryKey
 		}
 
-		return obj.(catalog.TableDescriptor), prefix, nil
+		if lookupFlags.RequireMutable {
+			return descI.(*tabledesc.Mutable), prefix, nil
+		}
+
+		return descI.(catalog.TableDescriptor), prefix, nil
 	default:
 		return nil, prefix, errors.AssertionFailedf(
 			"unknown desired object kind %d", lookupFlags.DesiredObjectKind)
@@ -268,27 +222,36 @@ func ResolveExistingObject(
 // prefix for the input object.
 func ResolveTargetObject(
 	ctx context.Context, sc SchemaResolver, un *tree.UnresolvedObjectName,
-) (catalog.ResolvedObjectPrefix, tree.ObjectNamePrefix, error) {
-	found, prefix, scInfo, err := ResolveTarget(ctx, un, sc, sc.CurrentDatabase(), sc.CurrentSearchPath())
+) (*catalog.ResolvedObjectPrefix, tree.ObjectNamePrefix, error) {
+	found, prefix, scMeta, err := tree.ResolveTarget(ctx, un, sc, sc.CurrentDatabase(), sc.CurrentSearchPath())
 	if err != nil {
-		return catalog.ResolvedObjectPrefix{}, prefix, err
+		return nil, prefix, err
 	}
 	if !found {
 		if !un.HasExplicitSchema() && !un.HasExplicitCatalog() {
-			return catalog.ResolvedObjectPrefix{}, prefix,
-				pgerror.New(pgcode.InvalidName, "no database specified")
+			return nil, prefix, pgerror.New(pgcode.InvalidName, "no database specified")
 		}
 		err = pgerror.Newf(pgcode.InvalidSchemaName,
 			"cannot create %q because the target database or schema does not exist",
 			tree.ErrString(un))
 		err = errors.WithHint(err, "verify that the current database and search_path are valid and/or the target database exists")
-		return catalog.ResolvedObjectPrefix{}, prefix, err
+		return nil, prefix, err
 	}
-	if scInfo.Schema.SchemaKind() == catalog.SchemaVirtual {
-		return catalog.ResolvedObjectPrefix{}, prefix, pgerror.Newf(pgcode.InsufficientPrivilege,
+	scInfo := scMeta.(*catalog.ResolvedObjectPrefix)
+	if scInfo.Schema.Kind == catalog.SchemaVirtual {
+		return nil, prefix, pgerror.Newf(pgcode.InsufficientPrivilege,
 			"schema cannot be modified: %q", tree.ErrString(&prefix))
 	}
 	return scInfo, prefix, nil
+}
+
+// StaticSchemaIDMap is a map of statically known schema IDs.
+var StaticSchemaIDMap = map[descpb.ID]string{
+	keys.PublicSchemaID:              tree.PublicSchema,
+	catconstants.PgCatalogID:         sessiondata.PgCatalogName,
+	catconstants.InformationSchemaID: sessiondata.InformationSchemaName,
+	catconstants.CrdbInternalID:      sessiondata.CRDBInternalSchemaName,
+	catconstants.PgExtensionSchemaID: sessiondata.PgExtensionSchemaName,
 }
 
 // ResolveSchemaNameByID resolves a schema's name based on db and schema id.
@@ -299,35 +262,29 @@ func ResolveSchemaNameByID(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, dbID descpb.ID, schemaID descpb.ID,
 ) (string, error) {
 	// Fast-path for public schema and virtual schemas, to avoid hot lookups.
-	if schemaName, ok := catconstants.StaticSchemaIDMap[uint32(schemaID)]; ok {
-		return schemaName, nil
+	for id, schemaName := range StaticSchemaIDMap {
+		if id == schemaID {
+			return schemaName, nil
+		}
 	}
 	schemas, err := GetForDatabase(ctx, txn, codec, dbID)
 	if err != nil {
 		return "", err
 	}
 	if schema, ok := schemas[schemaID]; ok {
-		return schema.Name, nil
+		return schema, nil
 	}
 	return "", errors.Newf("unable to resolve schema id %d for db %d", schemaID, dbID)
 }
 
-// SchemaEntryForDB entry for an individual schema,
-// which includes the name and modification timestamp.
-type SchemaEntryForDB struct {
-	Name      string
-	Timestamp hlc.Timestamp
-}
-
 // GetForDatabase looks up and returns all available
-// schema ids to SchemaEntryForDB structures for a
-//given database.
+// schema ids to names for a given database.
 func GetForDatabase(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, dbID descpb.ID,
-) (map[descpb.ID]SchemaEntryForDB, error) {
+) (map[descpb.ID]string, error) {
 	log.Eventf(ctx, "fetching all schema descriptor IDs for %d", dbID)
 
-	nameKey := catalogkeys.MakeSchemaNameKey(codec, dbID, "" /* name */)
+	nameKey := catalogkeys.NewSchemaKey(dbID, "" /* name */).Key(codec)
 	kvs, err := txn.Scan(ctx, nameKey, nameKey.PrefixEnd(), 0 /* maxRows */)
 	if err != nil {
 		return nil, err
@@ -336,233 +293,19 @@ func GetForDatabase(
 	// Always add public schema ID.
 	// TODO(solon): This can be removed in 20.2, when this is always written.
 	// In 20.1, in a migrating state, it may be not included yet.
-	ret := make(map[descpb.ID]SchemaEntryForDB, len(kvs)+1)
-	ret[descpb.ID(keys.PublicSchemaID)] =
-		SchemaEntryForDB{
-			Name:      tree.PublicSchema,
-			Timestamp: txn.ReadTimestamp(),
-		}
+	ret := make(map[descpb.ID]string, len(kvs)+1)
+	ret[descpb.ID(keys.PublicSchemaID)] = tree.PublicSchema
+
 	for _, kv := range kvs {
 		id := descpb.ID(kv.ValueInt())
 		if _, ok := ret[id]; ok {
 			continue
 		}
-		k, err := catalogkeys.DecodeNameMetadataKey(codec, kv.Key)
+		_, _, name, err := catalogkeys.DecodeNameMetadataKey(codec, kv.Key)
 		if err != nil {
 			return nil, err
 		}
-		ret[id] = SchemaEntryForDB{
-			Name:      k.GetName(),
-			Timestamp: kv.Value.Timestamp,
-		}
+		ret[id] = name
 	}
 	return ret, nil
-}
-
-// ResolveExisting performs name resolution for an object name when
-// the target object is expected to exist already. It does not
-// mutate the input name. It additionally returns the resolved
-// prefix qualification for the object. For example, if the unresolved
-// name was "a.b" and the name was resolved to "a.public.b", the
-// prefix "a.public" is returned.
-//
-// Note that the returned prefix will be populated with the relevant found
-// components because LookupObject retains those components. This is error
-// prone and exists only for backwards compatibility with certain error
-// reporting behaviors.
-//
-// Note also that if the implied current database does not exist and the name
-// is either unqualified or qualified by a virtual schema, an error will be
-// returned to indicate that the database does not exist. This error will be
-// returned regardless of the value set on the Required flag.
-func ResolveExisting(
-	ctx context.Context,
-	u *tree.UnresolvedObjectName,
-	r ObjectNameExistingResolver,
-	lookupFlags tree.ObjectLookupFlags,
-	curDb string,
-	searchPath sessiondata.SearchPath,
-) (found bool, prefix catalog.ResolvedObjectPrefix, result catalog.Descriptor, err error) {
-	if u.HasExplicitSchema() {
-		if u.HasExplicitCatalog() {
-			// Already 3 parts: nothing to search. Delegate to the resolver.
-			found, prefix, result, err = r.LookupObject(ctx, lookupFlags, u.Catalog(), u.Schema(), u.Object())
-			prefix.ExplicitDatabase, prefix.ExplicitSchema = true, true
-			return found, prefix, result, err
-		}
-
-		// Two parts: D.T.
-		// Try to use the current database, and be satisfied if it's sufficient to find the object.
-		//
-		// Note: CockroachDB supports querying virtual schemas even when the current
-		// database is not set. For example, `select * from pg_catalog.pg_tables` is
-		// meant to show all tables across all databases when there is no current
-		// database set. Therefore, we test this even if curDb == "", as long as the
-		// schema name is for a virtual schema.
-		_, isVirtualSchema := catconstants.VirtualSchemaNames[u.Schema()]
-		if isVirtualSchema || curDb != "" {
-			if found, prefix, result, err = r.LookupObject(
-				ctx, lookupFlags, curDb, u.Schema(), u.Object(),
-			); found || err != nil || isVirtualSchema {
-				if !found && err == nil && prefix.Database == nil { // && isVirtualSchema
-					// If the database was not found during the lookup for a virtual schema
-					// we should return a database not found error. We will use the prefix
-					// information to confirm this, since its possible that someone might
-					// be selecting a non-existent table or type. While normally we generate
-					// errors above this layer, we have no way of flagging if the looked up object
-					// was virtual schema. The Required flag is never set above when doing
-					// the object look up, so no errors will be generated for missing objects
-					// or databases.
-					err = sqlerrors.NewUndefinedDatabaseError(curDb)
-				}
-				// Special case the qualification of virtual schema accesses for
-				// backwards compatibility.
-				prefix.ExplicitDatabase = false
-				prefix.ExplicitSchema = true
-				return found, prefix, result, err
-			}
-		}
-
-		// No luck so far. Compatibility with CockroachDB v1.1: try D.public.T instead.
-		found, prefix, result, err = r.LookupObject(ctx, lookupFlags, u.Schema(), tree.PublicSchema, u.Object())
-		if found && err == nil {
-			prefix.ExplicitSchema = true
-			prefix.ExplicitDatabase = true
-		}
-		return found, prefix, result, err
-	}
-
-	// This is a naked object name. Use the search path.
-	iter := searchPath.Iter()
-	foundDatabase := false
-	for next, ok := iter.Next(); ok; next, ok = iter.Next() {
-		if found, prefix, result, err = r.LookupObject(
-			ctx, lookupFlags, curDb, next, u.Object(),
-		); found || err != nil {
-			return found, prefix, result, err
-		}
-		foundDatabase = foundDatabase || prefix.Database != nil
-	}
-
-	// If we have a database, and we didn't find it, then we're never going to
-	// find it because it must not exist. This error return path is a bit of
-	// a rough edge, but it preserves backwards compatibility and makes sure
-	// we return a database does not exist error in cases where the current
-	// database definitely does not exist.
-	if curDb != "" && !foundDatabase {
-		return false, prefix, nil, sqlerrors.NewUndefinedDatabaseError(curDb)
-	}
-	return false, prefix, nil, nil
-}
-
-// ResolveTarget performs name resolution for an object name when
-// the target object is not expected to exist already. It does not
-// mutate the input name. It additionally returns the resolved
-// prefix qualification for the object. For example, if the unresolved
-// name was "a.b" and the name was resolved to "a.public.b", the
-// prefix "a.public" is returned.
-func ResolveTarget(
-	ctx context.Context,
-	u *tree.UnresolvedObjectName,
-	r ObjectNameTargetResolver,
-	curDb string,
-	searchPath sessiondata.SearchPath,
-) (found bool, _ tree.ObjectNamePrefix, scMeta catalog.ResolvedObjectPrefix, err error) {
-	if u.HasExplicitSchema() {
-		if u.HasExplicitCatalog() {
-			// Already 3 parts: nothing to do.
-			found, scMeta, err = r.LookupSchema(ctx, u.Catalog(), u.Schema())
-			scMeta.ExplicitDatabase, scMeta.ExplicitSchema = true, true
-			return found, scMeta.NamePrefix(), scMeta, err
-		}
-		// Two parts: D.T.
-		// Try to use the current database, and be satisfied if it's sufficient to find the object.
-		if found, scMeta, err = r.LookupSchema(ctx, curDb, u.Schema()); found || err != nil {
-			if err == nil {
-				scMeta.ExplicitDatabase, scMeta.ExplicitSchema = false, true
-			}
-			return found, scMeta.NamePrefix(), scMeta, err
-		}
-		// No luck so far. Compatibility with CockroachDB v1.1: use D.public.T instead.
-		if found, scMeta, err = r.LookupSchema(ctx, u.Schema(), tree.PublicSchema); found || err != nil {
-			if err == nil {
-				scMeta.ExplicitDatabase, scMeta.ExplicitSchema = true, true
-			}
-			return found, scMeta.NamePrefix(), scMeta, err
-		}
-		// Welp, really haven't found anything.
-		return false, tree.ObjectNamePrefix{}, catalog.ResolvedObjectPrefix{}, nil
-	}
-
-	// This is a naked table name. Use the current schema = the first
-	// valid item in the search path.
-	iter := searchPath.IterWithoutImplicitPGSchemas()
-	for scName, ok := iter.Next(); ok; scName, ok = iter.Next() {
-		if found, scMeta, err = r.LookupSchema(ctx, curDb, scName); found || err != nil {
-			if err == nil {
-				scMeta.ExplicitDatabase, scMeta.ExplicitSchema = false, false
-			}
-			break
-		}
-	}
-	return found, scMeta.NamePrefix(), scMeta, err
-}
-
-// ResolveObjectNamePrefix is used for table prefixes. This is adequate for table
-// patterns with stars, e.g. AllTablesSelector.
-func ResolveObjectNamePrefix(
-	ctx context.Context,
-	r ObjectNameTargetResolver,
-	curDb string,
-	searchPath sessiondata.SearchPath,
-	tp *tree.ObjectNamePrefix,
-) (found bool, scMeta catalog.ResolvedObjectPrefix, err error) {
-	if tp.ExplicitSchema {
-		// pg_temp can be used as an alias for the current sessions temporary schema.
-		// We must perform this resolution before looking up the object. This
-		// resolution only succeeds if the session already has a temporary schema.
-		scName, err := searchPath.MaybeResolveTemporarySchema(tp.Schema())
-		if err != nil {
-			return false, catalog.ResolvedObjectPrefix{}, err
-		}
-		if tp.ExplicitCatalog {
-			// Catalog name is explicit; nothing to do.
-			tp.SchemaName = tree.Name(scName)
-			return r.LookupSchema(ctx, tp.Catalog(), scName)
-		}
-		// Try with the current database. This may be empty, because
-		// virtual schemas exist even when the db name is empty
-		// (CockroachDB extension).
-		if found, scMeta, err = r.LookupSchema(ctx, curDb, scName); found || err != nil {
-			if err == nil {
-				tp.CatalogName = tree.Name(curDb)
-				tp.SchemaName = tree.Name(scName)
-			}
-			return found, scMeta, err
-		}
-		// No luck so far. Compatibility with CockroachDB v1.1: use D.public.T instead.
-		if found, scMeta, err = r.LookupSchema(ctx, tp.Schema(), tree.PublicSchema); found || err != nil {
-			if err == nil {
-				tp.CatalogName = tp.SchemaName
-				tp.SchemaName = tree.PublicSchemaName
-				tp.ExplicitCatalog = true
-			}
-			return found, scMeta, err
-		}
-		// No luck.
-		return false, catalog.ResolvedObjectPrefix{}, nil
-	}
-	// This is a naked table name. Use the current schema = the first
-	// valid item in the search path.
-	iter := searchPath.IterWithoutImplicitPGSchemas()
-	for scName, ok := iter.Next(); ok; scName, ok = iter.Next() {
-		if found, scMeta, err = r.LookupSchema(ctx, curDb, scName); found || err != nil {
-			if err == nil {
-				tp.CatalogName = tree.Name(curDb)
-				tp.SchemaName = tree.Name(scName)
-			}
-			break
-		}
-	}
-	return found, scMeta, err
 }

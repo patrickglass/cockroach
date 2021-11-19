@@ -17,7 +17,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	_ "github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -76,7 +76,7 @@ func TestCastFromNull(t *testing.T) {
 func TestStringConcat(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	ctx := context.Background()
 	evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 	defer evalCtx.Stop(ctx)
@@ -85,15 +85,14 @@ func TestStringConcat(t *testing.T) {
 		if typ == types.String || typ == types.Bytes {
 			continue
 		}
-		d := randgen.RandDatum(rng, typ, false /* nullOk */)
+		d := rowenc.RandDatum(rng, typ, false /* nullOk */)
 		expected, err := tree.PerformCast(&evalCtx, d, types.String)
 		require.NoError(t, err)
-		concatOp := tree.MakeBinaryOperator(tree.Concat)
-		concatExprLeft := tree.NewTypedBinaryExpr(concatOp, tree.NewDString(""), d, types.String)
+		concatExprLeft := tree.NewTypedBinaryExpr(tree.Concat, tree.NewDString(""), d, types.String)
 		resLeft, err := concatExprLeft.Eval(&evalCtx)
 		require.NoError(t, err)
 		require.Equal(t, expected, resLeft)
-		concatExprRight := tree.NewTypedBinaryExpr(concatOp, d, tree.NewDString(""), types.String)
+		concatExprRight := tree.NewTypedBinaryExpr(tree.Concat, d, tree.NewDString(""), types.String)
 		resRight, err := concatExprRight.Eval(&evalCtx)
 		require.NoError(t, err)
 		require.Equal(t, expected, resRight)

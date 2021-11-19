@@ -59,11 +59,11 @@ func TestTraceAnalyzer(t *testing.T) {
 			UseDatabase: "test",
 			Knobs: base.TestingKnobs{
 				SQLExecutor: &sql.ExecutorTestingKnobs{
-					TestingSaveFlows: func(stmt string) func(map[roachpb.NodeID]*execinfrapb.FlowSpec, execinfra.OpChains) error {
+					TestingSaveFlows: func(stmt string) func(map[roachpb.NodeID]*execinfrapb.FlowSpec) error {
 						if stmt != testStmt {
-							return func(map[roachpb.NodeID]*execinfrapb.FlowSpec, execinfra.OpChains) error { return nil }
+							return func(map[roachpb.NodeID]*execinfrapb.FlowSpec) error { return nil }
 						}
-						return func(flows map[roachpb.NodeID]*execinfrapb.FlowSpec, _ execinfra.OpChains) error {
+						return func(flows map[roachpb.NodeID]*execinfrapb.FlowSpec) error {
 							flowsMetadata := execstats.NewFlowsMetadata(flows)
 							analyzer := execstats.NewTraceAnalyzer(flowsMetadata)
 							analyzerChan <- analyzer
@@ -114,8 +114,8 @@ func TestTraceAnalyzer(t *testing.T) {
 				SessionData: sessiondatapb.SessionData{
 					VectorizeMode: vectorizeMode,
 				},
-				LocalOnlySessionData: sessiondatapb.LocalOnlySessionData{
-					DistSQLMode: sessiondatapb.DistSQLOn,
+				LocalOnlySessionData: sessiondata.LocalOnlySessionData{
+					DistSQLMode: sessiondata.DistSQLOn,
 				},
 			},
 		)
@@ -128,7 +128,7 @@ func TestTraceAnalyzer(t *testing.T) {
 		)
 		sp.Finish()
 		require.NoError(t, err)
-		trace := sp.GetRecording(tracing.RecordingVerbose)
+		trace := sp.GetRecording()
 		analyzer := <-analyzerChan
 		require.NoError(t, analyzer.AddTrace(trace, true /* makeDeterministic */))
 		require.NoError(t, analyzer.ProcessStats())

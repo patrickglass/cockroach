@@ -10,7 +10,6 @@ package backupresolver
 
 import (
 	"context"
-	"fmt"
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -19,8 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
@@ -41,30 +38,7 @@ type DescriptorsMatched struct {
 	RequestedDBs []catalog.DatabaseDescriptor
 }
 
-// MissingTableErr is a custom error type for Missing Table when resolver.ResolveExisting()
-// is called in DescriptorsMatchingTargets
-type MissingTableErr struct {
-	wrapped   error
-	tableName string
-}
-
-// Error() implements the erorr interface for MissingTableErr and outputs an error string
-func (e *MissingTableErr) Error() string {
-	return fmt.Sprintf("table %q does not exist, or invalid RESTORE timestamp: %v", e.GetTableName(), e.wrapped.Error())
-}
-
-// Unwrap() implements the erorr interface for MissingTableErr and outputs wrapped error
-// implemented so that errors.As can be used with MissingTableErr
-func (e *MissingTableErr) Unwrap() error {
-	return e.wrapped
-}
-
-// GetTableName is an accessor function for the member variable tableName
-func (e *MissingTableErr) GetTableName() string {
-	return e.tableName
-}
-
-// CheckExpansions determines if matched targets are covered by the specified
+// CheckExpansions determines if  matched targets are covered by the specified
 // descriptors.
 func (d DescriptorsMatched) CheckExpansions(coveredDBs []descpb.ID) error {
 	covered := make(map[descpb.ID]bool)
@@ -97,72 +71,44 @@ type DescriptorResolver struct {
 	ObjsByName map[descpb.ID]map[string]map[string]descpb.ID
 }
 
-// LookupSchema implements the resolver.ObjectNameTargetResolver interface.
+// LookupSchema implements the tree.ObjectNameTargetResolver interface.
 func (r *DescriptorResolver) LookupSchema(
-	ctx context.Context, dbName, scName string,
-) (bool, catalog.ResolvedObjectPrefix, error) {
+	_ context.Context, dbName, scName string,
+) (bool, tree.SchemaMeta, error) {
 	dbID, ok := r.DbsByName[dbName]
 	if !ok {
-		return false, catalog.ResolvedObjectPrefix{}, nil
+		return false, nil, nil
 	}
-	schemas := r.SchemasByName[dbID]
-	if scID, ok := schemas[scName]; ok {
-		dbDesc, dbOk := r.DescByID[dbID].(catalog.DatabaseDescriptor)
-		scDesc, scOk := r.DescByID[scID].(catalog.SchemaDescriptor)
-		if !scOk && scID == keys.PublicSchemaID {
-			scDesc, scOk = schemadesc.GetPublicSchema(), true
-		}
-		if dbOk && scOk {
-			return true, catalog.ResolvedObjectPrefix{
-				Database: dbDesc,
-				Schema:   scDesc,
-			}, nil
+	schemas := r.ObjsByName[dbID]
+	if _, ok := schemas[scName]; ok {
+		// TODO (rohany): Not sure if we want to change this to also
+		//  use the resolved schema struct.
+		if dbDesc, ok := r.DescByID[dbID].(catalog.DatabaseDescriptor); ok {
+			return true, dbDesc, nil
 		}
 	}
-	return false, catalog.ResolvedObjectPrefix{}, nil
+	return false, nil, nil
 }
 
 // LookupObject implements the tree.ObjectNameExistingResolver interface.
 func (r *DescriptorResolver) LookupObject(
-	ctx context.Context, flags tree.ObjectLookupFlags, dbName, scName, obName string,
-) (bool, catalog.ResolvedObjectPrefix, catalog.Descriptor, error) {
-	// LookupObject guarantees that the ResolvedObjectPrefix is always
-	// populated, even if the object itself cannot be found. This information
-	// is used to generate the appropriate error at higher level layers.
-	resolvedPrefix := catalog.ResolvedObjectPrefix{}
+	_ context.Context, flags tree.ObjectLookupFlags, dbName, scName, obName string,
+) (bool, tree.NameResolutionResult, error) {
 	if flags.RequireMutable {
 		panic("did not expect request for mutable descriptor")
 	}
 	dbID, ok := r.DbsByName[dbName]
 	if !ok {
-		return false, resolvedPrefix, nil, nil
-	}
-	resolvedPrefix.Database, ok = r.DescByID[dbID].(catalog.DatabaseDescriptor)
-	if !ok {
-		return false, resolvedPrefix, nil, nil
-	}
-	scID, ok := r.SchemasByName[dbID][scName]
-	if !ok {
-		return false, resolvedPrefix, nil, nil
+		return false, nil, nil
 	}
 	if scMap, ok := r.ObjsByName[dbID]; ok {
 		if objMap, ok := scMap[scName]; ok {
 			if objID, ok := objMap[obName]; ok {
-				if scID == keys.PublicSchemaID {
-					resolvedPrefix.Schema = schemadesc.GetPublicSchema()
-				} else {
-					resolvedPrefix.Schema, ok = r.DescByID[scID].(catalog.SchemaDescriptor)
-					if !ok {
-						return false, resolvedPrefix, nil, errors.AssertionFailedf(
-							"expected schema for ID %d, got %T", scID, r.DescByID[scID])
-					}
-				}
-
-				return true, resolvedPrefix, r.DescByID[objID], nil
+				return true, r.DescByID[objID], nil
 			}
 		}
 	}
-	return false, catalog.ResolvedObjectPrefix{}, nil, nil
+	return false, nil, nil
 }
 
 // NewDescriptorResolver prepares a DescriptorResolver for the given
@@ -302,29 +248,24 @@ func DescriptorsMatchingTargets(
 	searchPath sessiondata.SearchPath,
 	descriptors []catalog.Descriptor,
 	targets tree.TargetList,
-	asOf hlc.Timestamp,
 ) (DescriptorsMatched, error) {
 	ret := DescriptorsMatched{}
 
-	r, err := NewDescriptorResolver(descriptors)
+	resolver, err := NewDescriptorResolver(descriptors)
 	if err != nil {
 		return ret, err
 	}
 
 	alreadyRequestedDBs := make(map[descpb.ID]struct{})
 	alreadyExpandedDBs := make(map[descpb.ID]struct{})
-	invalidRestoreTsErr := errors.Errorf("supplied backups do not cover requested time")
 	// Process all the DATABASE requests.
 	for _, d := range targets.Databases {
-		dbID, ok := r.DbsByName[string(d)]
+		dbID, ok := resolver.DbsByName[string(d)]
 		if !ok {
-			if asOf.IsEmpty() {
-				return ret, errors.Errorf("database %q does not exist", d)
-			}
-			return ret, errors.Wrapf(invalidRestoreTsErr, "database %q does not exist, or invalid RESTORE timestamp", d)
+			return ret, errors.Errorf("unknown database %q", d)
 		}
 		if _, ok := alreadyRequestedDBs[dbID]; !ok {
-			desc := r.DescByID[dbID]
+			desc := resolver.DescByID[dbID]
 			ret.Descs = append(ret.Descs, desc)
 			ret.RequestedDBs = append(ret.RequestedDBs,
 				desc.(catalog.DatabaseDescriptor))
@@ -341,7 +282,7 @@ func DescriptorsMatchingTargets(
 			return nil
 		}
 		if _, ok := alreadyRequestedSchemas[id]; !ok {
-			schemaDesc := r.DescByID[id]
+			schemaDesc := resolver.DescByID[id]
 			if err := catalog.FilterDescriptorState(
 				schemaDesc, tree.CommonLookupFlags{},
 			); err != nil {
@@ -353,13 +294,13 @@ func DescriptorsMatchingTargets(
 				return nil
 			}
 			alreadyRequestedSchemas[id] = struct{}{}
-			ret.Descs = append(ret.Descs, r.DescByID[id])
+			ret.Descs = append(ret.Descs, resolver.DescByID[id])
 		}
 
 		return nil
 	}
 	getSchemaIDByName := func(scName string, dbID descpb.ID) (descpb.ID, error) {
-		schemas, ok := r.SchemasByName[dbID]
+		schemas, ok := resolver.SchemasByName[dbID]
 		if !ok {
 			return 0, errors.Newf("database with ID %d not found", dbID)
 		}
@@ -377,11 +318,11 @@ func DescriptorsMatchingTargets(
 			// need to request the parent database because it has already been
 			// requested by the table that holds this type.
 			alreadyRequestedTypes[id] = struct{}{}
-			ret.Descs = append(ret.Descs, r.DescByID[id])
+			ret.Descs = append(ret.Descs, resolver.DescByID[id])
 		}
 	}
 	getTypeByID := func(id descpb.ID) (catalog.TypeDescriptor, error) {
-		desc, ok := r.DescByID[id]
+		desc, ok := resolver.DescByID[id]
 		if !ok {
 			return nil, errors.Newf("type with ID %d not found", id)
 		}
@@ -395,8 +336,6 @@ func DescriptorsMatchingTargets(
 	// Process all the TABLE requests.
 	// Pulling in a table needs to pull in the underlying database too.
 	alreadyRequestedTables := make(map[descpb.ID]struct{})
-	// Process specific SCHEMAs requested for a database.
-	alreadyRequestedSchemasByDBs := make(map[descpb.ID]map[string]struct{})
 	for _, pattern := range targets.Tables {
 		var err error
 		pattern, err = pattern.NormalizeTablePattern()
@@ -406,22 +345,17 @@ func DescriptorsMatchingTargets(
 
 		switch p := pattern.(type) {
 		case *tree.TableName:
+			// TODO: As part of work for #34240, this should not be a TableName.
+			//  Instead, it should be an UnresolvedObjectName.
 			un := p.ToUnresolvedObjectName()
-			found, prefix, descI, err := resolver.ResolveExisting(ctx, un, r, tree.ObjectLookupFlags{}, currentDatabase, searchPath)
+			found, prefix, descI, err := tree.ResolveExisting(ctx, un, resolver, tree.ObjectLookupFlags{}, currentDatabase, searchPath)
 			if err != nil {
 				return ret, err
 			}
-			// If the prefix is more informative than the input, take it.
-			if (prefix.ExplicitDatabase && !p.ExplicitCatalog) ||
-				(prefix.ExplicitSchema && !p.ExplicitSchema) {
-				p.ObjectNamePrefix = prefix.NamePrefix()
-			}
+			p.ObjectNamePrefix = prefix
 			doesNotExistErr := errors.Errorf(`table %q does not exist`, tree.ErrString(p))
 			if !found {
-				if asOf.IsEmpty() {
-					return ret, doesNotExistErr
-				}
-				return ret, &MissingTableErr{invalidRestoreTsErr, tree.ErrString(p)}
+				return ret, doesNotExistErr
 			}
 			tableDesc, isTable := descI.(catalog.TableDescriptor)
 			// If the type assertion didn't work, then we resolved a type instead, so
@@ -441,7 +375,7 @@ func DescriptorsMatchingTargets(
 			// If the parent database is not requested already, request it now.
 			parentID := tableDesc.GetParentID()
 			if _, ok := alreadyRequestedDBs[parentID]; !ok {
-				parentDesc := r.DescByID[parentID]
+				parentDesc := resolver.DescByID[parentID]
 				ret.Descs = append(ret.Descs, parentDesc)
 				alreadyRequestedDBs[parentID] = struct{}{}
 			}
@@ -456,9 +390,9 @@ func DescriptorsMatchingTargets(
 				return ret, err
 			}
 			// Get all the types used by this table.
-			desc := r.DescByID[tableDesc.GetParentID()]
+			desc := resolver.DescByID[tableDesc.GetParentID()]
 			dbDesc := desc.(catalog.DatabaseDescriptor)
-			typeIDs, _, err := tableDesc.GetAllReferencedTypeIDs(dbDesc, getTypeByID)
+			typeIDs, err := tableDesc.GetAllReferencedTypeIDs(dbDesc, getTypeByID)
 			if err != nil {
 				return ret, err
 			}
@@ -467,123 +401,81 @@ func DescriptorsMatchingTargets(
 			}
 
 		case *tree.AllTablesSelector:
-			// We should only back up targets in the scoped schema if the table
-			// pattern is fully qualified, i.e., `db.schema.*`, both the schema
-			// field and catalog field were set.
-			hasSchemaScope := p.ExplicitSchema && p.ExplicitCatalog
-			found, prefix, err := resolver.ResolveObjectNamePrefix(ctx, r, currentDatabase, searchPath, &p.ObjectNamePrefix)
+			found, descI, err := p.ObjectNamePrefix.Resolve(ctx, resolver, currentDatabase, searchPath)
 			if err != nil {
 				return ret, err
 			}
 			if !found {
 				return ret, sqlerrors.NewInvalidWildcardError(tree.ErrString(p))
 			}
+			desc := descI.(catalog.DatabaseDescriptor)
 
 			// If the database is not requested already, request it now.
-			dbID := prefix.Database.GetID()
+			dbID := desc.GetID()
 			if _, ok := alreadyRequestedDBs[dbID]; !ok {
-				ret.Descs = append(ret.Descs, prefix.Database)
+				ret.Descs = append(ret.Descs, desc)
 				alreadyRequestedDBs[dbID] = struct{}{}
 			}
 
 			// Then request the expansion.
-			if _, ok := alreadyExpandedDBs[prefix.Database.GetID()]; !ok {
-				ret.ExpandedDB = append(ret.ExpandedDB, prefix.Database.GetID())
-				alreadyExpandedDBs[prefix.Database.GetID()] = struct{}{}
+			if _, ok := alreadyExpandedDBs[desc.GetID()]; !ok {
+				ret.ExpandedDB = append(ret.ExpandedDB, desc.GetID())
+				alreadyExpandedDBs[desc.GetID()] = struct{}{}
 			}
 
-			// If the target was fully qualified, i.e. `db.schema.*` then
-			// `hasSchemaScope` would be set to true above.
-			//
-			// After resolution if the target does not have ExplicitCatalog
-			// set to true, it means that the target was of the form `schema.*`.
-			// In this case, we want to only backup the object in the schema scope.
-			//
-			// If neither of the above cases apply, the target is of the form `db.*`.
-			// In this case we want to backup all objects in db and so `hasSchemaScope`
-			// should be set to false.
-			if !hasSchemaScope && !p.ExplicitCatalog {
-				hasSchemaScope = true
-			}
-
-			// If we are given a specified schema scope, i.e., `db.schema.*`
-			// or `schema.*`, add the schema to `alreadyRequestedSchemasByDBs`
-			if hasSchemaScope {
-				if _, ok := alreadyRequestedSchemasByDBs[dbID]; !ok {
-					scMap := make(map[string]struct{})
-					alreadyRequestedSchemasByDBs[dbID] = scMap
-				}
-				scMap := alreadyRequestedSchemasByDBs[dbID]
-				scMap[p.Schema()] = struct{}{}
-			}
 		default:
 			return ret, errors.Errorf("unknown pattern %T: %+v", pattern, pattern)
 		}
 	}
 
-	addTableDescsInSchema := func(schemas map[string]descpb.ID) error {
-		for _, id := range schemas {
-			desc := r.DescByID[id]
-			switch desc := desc.(type) {
-			case catalog.TableDescriptor:
-				if err := catalog.FilterDescriptorState(
-					desc, tree.CommonLookupFlags{},
-				); err != nil {
-					// Don't include this table in the expansion since it's not in a valid
-					// state. Silently fail since this table was not directly requested,
-					// but was just part of an expansion.
-					continue
-				}
-				if _, ok := alreadyRequestedTables[id]; !ok {
-					ret.Descs = append(ret.Descs, desc)
-				}
-				// If this table is a member of a user defined schema, then request the
-				// user defined schema.
-				if desc.GetParentSchemaID() != keys.PublicSchemaID {
-					// Note, that although we're processing the database expansions,
-					// since the table is in a PUBLIC state, we also expect the schema
-					// to be in a similar state.
-					if err := maybeAddSchemaDesc(desc.GetParentSchemaID(), true /* requirePublic */); err != nil {
-						return err
-					}
-				}
-				// Get all the types used by this table.
-				dbRaw := r.DescByID[desc.GetParentID()]
-				dbDesc := dbRaw.(catalog.DatabaseDescriptor)
-				typeIDs, _, err := desc.GetAllReferencedTypeIDs(dbDesc, getTypeByID)
-				if err != nil {
-					return err
-				}
-				for _, id := range typeIDs {
-					maybeAddTypeDesc(id)
-				}
-			case catalog.TypeDescriptor:
-				maybeAddTypeDesc(desc.GetID())
-			}
-		}
-		return nil
-	}
-
 	// Then process the database expansions.
 	for dbID := range alreadyExpandedDBs {
-		if requestedSchemas, ok := alreadyRequestedSchemasByDBs[dbID]; !ok {
-			for schemaName, schemas := range r.ObjsByName[dbID] {
-				schemaID, err := getSchemaIDByName(schemaName, dbID)
-				if err != nil {
-					return ret, err
-				}
-				if err := maybeAddSchemaDesc(schemaID, false /* requirePublic */); err != nil {
-					return ret, err
-				}
-				if err := addTableDescsInSchema(schemas); err != nil {
-					return ret, err
-				}
+		for schemaName, schemas := range resolver.ObjsByName[dbID] {
+			schemaID, err := getSchemaIDByName(schemaName, dbID)
+			if err != nil {
+				return ret, err
 			}
-		} else {
-			for schemaName := range requestedSchemas {
-				schemas := r.ObjsByName[dbID][schemaName]
-				if err := addTableDescsInSchema(schemas); err != nil {
-					return ret, err
+			if err := maybeAddSchemaDesc(schemaID, false /* requirePublic */); err != nil {
+				return ret, err
+			}
+
+			for _, id := range schemas {
+				desc := resolver.DescByID[id]
+				switch desc := desc.(type) {
+				case catalog.TableDescriptor:
+					if err := catalog.FilterDescriptorState(
+						desc, tree.CommonLookupFlags{},
+					); err != nil {
+						// Don't include this table in the expansion since it's not in a valid
+						// state. Silently fail since this table was not directly requested,
+						// but was just part of an expansion.
+						continue
+					}
+					if _, ok := alreadyRequestedTables[id]; !ok {
+						ret.Descs = append(ret.Descs, desc)
+					}
+					// If this table is a member of a user defined schema, then request the
+					// user defined schema.
+					if desc.GetParentSchemaID() != keys.PublicSchemaID {
+						// Note, that although we're processing the database expansions,
+						// since the table is in a PUBLIC state, we also expect the schema
+						// to be in a similar state.
+						if err := maybeAddSchemaDesc(desc.GetParentSchemaID(), true /* requirePublic */); err != nil {
+							return ret, err
+						}
+					}
+					// Get all the types used by this table.
+					dbRaw := resolver.DescByID[desc.GetParentID()]
+					dbDesc := dbRaw.(catalog.DatabaseDescriptor)
+					typeIDs, err := desc.GetAllReferencedTypeIDs(dbDesc, getTypeByID)
+					if err != nil {
+						return ret, err
+					}
+					for _, id := range typeIDs {
+						maybeAddTypeDesc(id)
+					}
+				case catalog.TypeDescriptor:
+					maybeAddTypeDesc(desc.GetID())
 				}
 			}
 		}
@@ -599,14 +491,9 @@ func LoadAllDescs(
 	var allDescs []catalog.Descriptor
 	if err := db.Txn(
 		ctx,
-		func(ctx context.Context, txn *kv.Txn) error {
-			err := txn.SetFixedTimestamp(ctx, asOf)
-			if err != nil {
-				return err
-			}
-			allDescs, err = catalogkv.GetAllDescriptors(
-				ctx, txn, codec, true, /* shouldRunPostDeserializationChanges */
-			)
+		func(ctx context.Context, txn *kv.Txn) (err error) {
+			txn.SetFixedTimestamp(ctx, asOf)
+			allDescs, err = catalogkv.GetAllDescriptors(ctx, txn, codec)
 			return err
 		}); err != nil {
 		return nil, err
@@ -616,8 +503,6 @@ func LoadAllDescs(
 
 // ResolveTargetsToDescriptors performs name resolution on a set of targets and
 // returns the resulting descriptors.
-//
-// TODO(ajwerner): adopt the collection here.
 func ResolveTargetsToDescriptors(
 	ctx context.Context, p sql.PlanHookState, endTime hlc.Timestamp, targets *tree.TargetList,
 ) ([]catalog.Descriptor, []descpb.ID, error) {
@@ -628,15 +513,12 @@ func ResolveTargetsToDescriptors(
 
 	var matched DescriptorsMatched
 	if matched, err = DescriptorsMatchingTargets(ctx,
-		p.CurrentDatabase(), p.CurrentSearchPath(), allDescs, *targets, endTime); err != nil {
+		p.CurrentDatabase(), p.CurrentSearchPath(), allDescs, *targets); err != nil {
 		return nil, nil, err
 	}
 
-	// This sorting was originally required to support interleaves.
-	// Now that these have been removed, sorting is not strictly-speaking
-	// necessary but has been preserved to maintain the output of SHOW BACKUPS
-	// that certain tests rely on.
+	// Ensure interleaved tables appear after their parent. Since parents must be
+	// created before their children, simply sorting by ID accomplishes this.
 	sort.Slice(matched.Descs, func(i, j int) bool { return matched.Descs[i].GetID() < matched.Descs[j].GetID() })
-
 	return matched.Descs, matched.ExpandedDB, nil
 }

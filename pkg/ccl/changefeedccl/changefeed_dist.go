@@ -13,10 +13,11 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeeddist"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -104,48 +105,36 @@ func distChangefeedFlow(
 			spansTS = spansTS.Next()
 		}
 		var err error
-		trackedSpans, err = fetchSpansForTargets(ctx, execCfg, details.Targets, spansTS)
+		trackedSpans, err = fetchSpansForTargets(ctx, execCfg.DB, execCfg.Codec, details.Targets, spansTS)
 		if err != nil {
 			return err
 		}
 	}
 
-	var checkpoint jobspb.ChangefeedProgress_Checkpoint
-	if cf := progress.GetChangefeed(); cf != nil && cf.Checkpoint != nil {
-		checkpoint = *cf.Checkpoint
-	}
 	return changefeeddist.StartDistChangefeed(
-		ctx, execCtx, jobID, details, trackedSpans, initialHighWater, checkpoint, resultsCh)
+		ctx, execCtx, jobID, details, trackedSpans, initialHighWater, resultsCh)
 }
 
 func fetchSpansForTargets(
 	ctx context.Context,
-	execCfg *sql.ExecutorConfig,
+	db *kv.DB,
+	codec keys.SQLCodec,
 	targets jobspb.ChangefeedTargets,
 	ts hlc.Timestamp,
 ) ([]roachpb.Span, error) {
 	var spans []roachpb.Span
-	fetchSpans := func(
-		ctx context.Context, txn *kv.Txn, descriptors *descs.Collection,
-	) error {
+	err := db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		spans = nil
-		if err := txn.SetFixedTimestamp(ctx, ts); err != nil {
-			return err
-		}
+		txn.SetFixedTimestamp(ctx, ts)
 		// Note that all targets are currently guaranteed to be tables.
 		for tableID := range targets {
-			flags := tree.ObjectLookupFlagsWithRequired()
-			flags.AvoidCached = true
-			tableDesc, err := descriptors.GetImmutableTableByID(ctx, txn, tableID, flags)
+			tableDesc, err := catalogkv.MustGetTableDescByID(ctx, txn, codec, tableID)
 			if err != nil {
 				return err
 			}
-			spans = append(spans, tableDesc.PrimaryIndexSpan(execCfg.Codec))
+			spans = append(spans, tableDesc.PrimaryIndexSpan(codec))
 		}
 		return nil
-	}
-	if err := sql.DescsTxn(ctx, execCfg, fetchSpans); err != nil {
-		return nil, err
-	}
-	return spans, nil
+	})
+	return spans, err
 }

@@ -14,19 +14,20 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
@@ -142,6 +143,7 @@ func TestHeartbeatFindsOutAboutAbortedTransaction(t *testing.T) {
 // times a heartbeat loop was started.
 func TestNoDuplicateHeartbeatLoops(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	skip.WithIssue(t, 59373, "Needs rewrite - uses tracing in illegal manner")
 	defer log.Scope(t).Close(t)
 
 	s, _, db := serverutils.StartServer(t, base.TestServerArgs{})
@@ -151,7 +153,8 @@ func TestNoDuplicateHeartbeatLoops(t *testing.T) {
 	key := roachpb.Key("a")
 
 	tracer := tracing.NewTracer()
-	sp := tracer.StartSpan("test", tracing.WithRecording(tracing.RecordingVerbose))
+	sp := tracer.StartSpan("test", tracing.WithForceRealSpan())
+	sp.SetVerbose(true)
 	txnCtx := tracing.ContextWithSpan(context.Background(), sp)
 
 	push := func(ctx context.Context, key roachpb.Key) error {
@@ -177,10 +180,11 @@ func TestNoDuplicateHeartbeatLoops(t *testing.T) {
 	if attempts != 2 {
 		t.Fatalf("expected 2 attempts, got: %d", attempts)
 	}
-	recording := sp.FinishAndGetRecording(tracing.RecordingVerbose)
+	sp.Finish()
+	recording := sp.GetRecording()
 	var foundHeartbeatLoop bool
 	for _, sp := range recording {
-		if tracing.LogsContainMsg(sp, kvbase.SpawningHeartbeatLoopMsg) {
+		if strings.Contains(sp.Operation, "heartbeat loop") {
 			if foundHeartbeatLoop {
 				t.Fatal("second heartbeat loop found")
 			}

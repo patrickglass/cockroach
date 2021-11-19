@@ -25,6 +25,7 @@ import (
 	"unsafe"
 
 	"github.com/cockroachdb/apd/v2"
+	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/cockroach/pkg/util/bitarray"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
@@ -104,11 +105,12 @@ const (
 
 	arrayKeyTerminator           byte = 0x00
 	arrayKeyDescendingTerminator byte = 0xFF
-	// We use different null encodings for nulls within key arrays. Doing this
-	// allows for the terminator to be less/greater than the null value within
-	// arrays. These byte values overlap with encodedNotNull and
-	// encodedNotNullDesc, but they can only exist within an encoded array key.
-	// Because of the context, they cannot be ambiguous with these other bytes.
+	// We use different null encodings for nulls within key arrays.
+	// Doing this allows for the terminator to be less/greater than
+	// the null value within arrays. These byte values overlap with
+	// encodedNotNull, encodedNotNullDesc, and interleavedSentinel,
+	// but they can only exist within an encoded array key. Because
+	// of the context, they cannot be ambiguous with these other bytes.
 	ascendingNullWithinArrayKey  byte = 0x01
 	descendingNullWithinArrayKey byte = 0xFE
 
@@ -125,7 +127,16 @@ const (
 	// This value is not actually ever present in a stored key, but
 	// it's used in keys used as span boundaries for index scans.
 	encodedNotNullDesc = 0xfe
-	encodedNullDesc    = 0xff
+	// interleavedSentinel uses the same byte as encodedNotNullDesc.
+	// It is used in the key encoding of interleaved index keys in order
+	// to coerce the key to sort after its respective parent and ancestors'
+	// index keys.
+	// The byte for NotNullDesc was chosen over NullDesc since NotNullDesc
+	// is never used in actual encoded keys.
+	// This allowed the key pretty printer for interleaved keys to work
+	// without table descriptors.
+	interleavedSentinel = 0xfe
+	encodedNullDesc     = 0xff
 
 	// offsetSecsToMicros is a constant that allows conversion from seconds
 	// to microseconds for offsetSecs type calculations (e.g. for TimeTZ).
@@ -584,38 +595,25 @@ func EncodeBytesDescending(b []byte, data []byte) []byte {
 // are appended to r. The remainder of the input buffer and the
 // decoded []byte are returned.
 func DecodeBytesAscending(b []byte, r []byte) ([]byte, []byte, error) {
-	return decodeBytesInternal(b, r, ascendingBytesEscapes, true /* expectMarker */, false /* deepCopy */)
-}
-
-// DecodeBytesAscendingDeepCopy is the same as DecodeBytesAscending, but the
-// decoded []byte will never alias memory of b.
-func DecodeBytesAscendingDeepCopy(b []byte, r []byte) ([]byte, []byte, error) {
-	return decodeBytesInternal(b, r, ascendingBytesEscapes, true /* expectMarker */, true /* deepCopy */)
+	return decodeBytesInternal(b, r, ascendingBytesEscapes, true /* expectMarker */)
 }
 
 // DecodeBytesDescending decodes a []byte value from the input buffer
 // which was encoded using EncodeBytesDescending. The decoded bytes
 // are appended to r. The remainder of the input buffer and the
 // decoded []byte are returned.
-//
-// Note that this method internally will always perform a deep copy, so there is
-// no need to introduce DecodeBytesDescendingDeepCopy to mirror
-// DecodeBytesAscendingDeepCopy.
 func DecodeBytesDescending(b []byte, r []byte) ([]byte, []byte, error) {
-	// Ask for the deep copy to make sure we never get back a sub-slice of `b`,
+	// Always pass an `r` to make sure we never get back a sub-slice of `b`,
 	// since we're going to modify the contents of the slice.
-	b, r, err := decodeBytesInternal(b, r, descendingBytesEscapes, true /* expectMarker */, true /* deepCopy */)
+	if r == nil {
+		r = []byte{}
+	}
+	b, r, err := decodeBytesInternal(b, r, descendingBytesEscapes, true /* expectMarker */)
 	onesComplement(r)
 	return b, r, err
 }
 
-// decodeBytesInternal decodes an encoded []byte value from b and appends it to
-// r. The remainder of b and the decoded []byte are returned. If deepCopy is
-// true, then the decoded []byte will be deep copied from b and there will no
-// aliasing of the same memory.
-func decodeBytesInternal(
-	b []byte, r []byte, e escapes, expectMarker bool, deepCopy bool,
-) ([]byte, []byte, error) {
+func decodeBytesInternal(b []byte, r []byte, e escapes, expectMarker bool) ([]byte, []byte, error) {
 	if expectMarker {
 		if len(b) == 0 || b[0] != e.marker {
 			return nil, nil, errors.Errorf("did not find marker %#x in buffer %#x", e.marker, b)
@@ -633,7 +631,7 @@ func decodeBytesInternal(
 		}
 		v := b[i+1]
 		if v == e.escapedTerm {
-			if r == nil && !deepCopy {
+			if r == nil {
 				r = b[:i]
 			} else {
 				r = append(r, b[:i]...)
@@ -815,14 +813,6 @@ func DecodeUnsafeStringAscending(b []byte, r []byte) ([]byte, string, error) {
 	return b, unsafeString(r), err
 }
 
-// DecodeUnsafeStringAscendingDeepCopy is the same as
-// DecodeUnsafeStringAscending but the returned string will never share storage
-// with the input buffer.
-func DecodeUnsafeStringAscendingDeepCopy(b []byte, r []byte) ([]byte, string, error) {
-	b, r, err := DecodeBytesAscendingDeepCopy(b, r)
-	return b, unsafeString(r), err
-}
-
 // DecodeUnsafeStringDescending decodes a string value from the input buffer which
 // was encoded using EncodeStringDescending or EncodeBytesDescending. The r
 // []byte is used as a temporary buffer in order to avoid memory
@@ -980,6 +970,14 @@ func EncodeNotNullDescending(b []byte) []byte {
 	return append(b, encodedNotNullDesc)
 }
 
+// EncodeInterleavedSentinel encodes an interleavedSentinel that is necessary
+// for interleaved indexes and their index keys.
+// The interleavedSentinel has a byte value 0xfe and is equivalent to
+// encodedNotNullDesc.
+func EncodeInterleavedSentinel(b []byte) []byte {
+	return append(b, interleavedSentinel)
+}
+
 // DecodeIfNull decodes a NULL value from the input buffer. If the input buffer
 // contains a null at the start of the buffer then it is removed from the
 // buffer and true is returned for the second result. Otherwise, the buffer is
@@ -1008,6 +1006,31 @@ func DecodeIfNotNull(b []byte) ([]byte, bool) {
 		return b[1:], true
 	}
 	return b, false
+}
+
+// DecodeIfNotNullDescending decodes encodedNotNullDesc from the input buffer
+// and returns the remaining buffer without the sentinel if encodedNotNullDesc
+// is the first byte.
+// Otherwise, the buffer is returned unchanged and false is returned.
+func DecodeIfNotNullDescending(b []byte) ([]byte, bool) {
+	if len(b) == 0 {
+		return b, false
+	}
+
+	if b[0] == encodedNotNullDesc {
+		return b[1:], true
+	}
+
+	return b, false
+}
+
+// DecodeIfInterleavedSentinel decodes the interleavedSentinel from the input
+// buffer and returns the remaining buffer without the sentinel if the
+// interleavedSentinel is the first byte.
+// Otherwise, the buffer is returned unchanged and false is returned.
+func DecodeIfInterleavedSentinel(b []byte) ([]byte, bool) {
+	// The interleavedSentinel is equivalent to encodedNotNullDesc
+	return DecodeIfNotNullDescending(b)
 }
 
 // EncodeTimeAscending encodes a time value, appends it to the supplied buffer,
@@ -1070,7 +1093,7 @@ func decodeTime(b []byte) (r []byte, sec int64, nsec int64, err error) {
 }
 
 // EncodeBox2DAscending encodes a bounding box in ascending order.
-func EncodeBox2DAscending(b []byte, box geopb.BoundingBox) ([]byte, error) {
+func EncodeBox2DAscending(b []byte, box geo.CartesianBoundingBox) ([]byte, error) {
 	b = append(b, box2DMarker)
 	b = EncodeFloatAscending(b, box.LoX)
 	b = EncodeFloatAscending(b, box.HiX)
@@ -1080,7 +1103,7 @@ func EncodeBox2DAscending(b []byte, box geopb.BoundingBox) ([]byte, error) {
 }
 
 // EncodeBox2DDescending encodes a bounding box in descending order.
-func EncodeBox2DDescending(b []byte, box geopb.BoundingBox) ([]byte, error) {
+func EncodeBox2DDescending(b []byte, box geo.CartesianBoundingBox) ([]byte, error) {
 	b = append(b, box2DMarker)
 	b = EncodeFloatDescending(b, box.LoX)
 	b = EncodeFloatDescending(b, box.HiX)
@@ -1090,8 +1113,8 @@ func EncodeBox2DDescending(b []byte, box geopb.BoundingBox) ([]byte, error) {
 }
 
 // DecodeBox2DAscending decodes a box2D object in ascending order.
-func DecodeBox2DAscending(b []byte) ([]byte, geopb.BoundingBox, error) {
-	box := geopb.BoundingBox{}
+func DecodeBox2DAscending(b []byte) ([]byte, geo.CartesianBoundingBox, error) {
+	box := geo.CartesianBoundingBox{}
 	if PeekType(b) != Box2D {
 		return nil, box, errors.Errorf("did not find Box2D marker")
 	}
@@ -1118,8 +1141,8 @@ func DecodeBox2DAscending(b []byte) ([]byte, geopb.BoundingBox, error) {
 }
 
 // DecodeBox2DDescending decodes a box2D object in descending order.
-func DecodeBox2DDescending(b []byte) ([]byte, geopb.BoundingBox, error) {
-	box := geopb.BoundingBox{}
+func DecodeBox2DDescending(b []byte) ([]byte, geo.CartesianBoundingBox, error) {
+	box := geo.CartesianBoundingBox{}
 	if PeekType(b) != Box2D {
 		return nil, box, errors.Errorf("did not find Box2D marker")
 	}
@@ -1192,7 +1215,7 @@ func DecodeGeoAscending(b []byte, so *geopb.SpatialObject) ([]byte, error) {
 	}
 
 	var pbBytes []byte
-	b, pbBytes, err = decodeBytesInternal(b, pbBytes, ascendingGeoEscapes, false /* expectMarker */, false /* deepCopy */)
+	b, pbBytes, err = decodeBytesInternal(b, pbBytes, ascendingGeoEscapes, false /* expectMarker */)
 	if err != nil {
 		return b, err
 	}
@@ -1217,7 +1240,7 @@ func DecodeGeoDescending(b []byte, so *geopb.SpatialObject) ([]byte, error) {
 	}
 
 	var pbBytes []byte
-	b, pbBytes, err = decodeBytesInternal(b, pbBytes, descendingGeoEscapes, false /* expectMarker */, false /* deepCopy */)
+	b, pbBytes, err = decodeBytesInternal(b, pbBytes, descendingGeoEscapes, false /* expectMarker */)
 	if err != nil {
 		return b, err
 	}
@@ -1717,10 +1740,12 @@ func PeekLength(b []byte) (int, error) {
 	case encodedNull, encodedNullDesc, encodedNotNull, encodedNotNullDesc,
 		floatNaN, floatNaNDesc, floatZero, decimalZero, byte(True), byte(False),
 		emptyArray:
+		// interleavedSentinel also falls into this path. Since it
+		// contains the same byte value as encodedNotNullDesc, it
+		// cannot be included explicitly in the case statement.
 		// ascendingNullWithinArrayKey and descendingNullWithinArrayKey also
 		// contain the same byte values as encodedNotNull and encodedNotNullDesc
-		// respectively, but they cannot be included explicitly in the case
-		// statement.
+		// respectively.
 		return 1, nil
 	case bitArrayMarker, bitArrayDescMarker:
 		terminator := byte(bitArrayDataTerminator)
@@ -1863,7 +1888,27 @@ func prettyPrintValueImpl(valDirs []Direction, b []byte, sep string) (string, bo
 // after decoding.
 //
 // Ascending will be the default direction (when dir is the 0 value) for all
-// values.
+// values except for NotNull.
+//
+// NotNull: if Ascending or Descending directions are explicitly provided (i.e.
+// for table keys), then !NULL will be used. Otherwise, # will be used.
+//
+// We prove that the default # will only be used for interleaved sentinels:
+//  - For non-table keys, we never have NotNull.
+//  - For table keys, we always explicitly pass in Ascending and Descending for
+//    all key values, including NotNulls. The only case we do not pass in
+//    direction is during a SHOW RANGES ON TABLE parent and there exists
+//    an interleaved split key. Note that interleaved keys cannot have NotNull
+//    values except for the interleaved sentinel.
+//
+// Defaulting to Ascending for all other value types is fine since all
+// non-table keys encode values with Ascending.
+//
+// The only case where we end up defaulting direction for table keys is for
+// interleaved split keys in SHOW RANGES ON TABLE parent. Since
+// interleaved prefixes are defined on the primary key (and primary key values
+// are always encoded Ascending), this will always print out the correct key
+// even if we don't have directions for the child index's columns.
 func prettyPrintFirstValue(dir Direction, b []byte) ([]byte, string, error) {
 	var err error
 	switch typ := PeekType(b); typ {
@@ -1917,7 +1962,15 @@ func prettyPrintFirstValue(dir Direction, b []byte) ([]byte, string, error) {
 		build.WriteString("]")
 		return buf, build.String(), nil
 	case NotNull:
+		// The tag can be either encodedNotNull or encodedNotNullDesc. The
+		// latter can be an interleaved sentinel.
+		isNotNullDesc := (b[0] == encodedNotNullDesc)
 		b, _ = DecodeIfNotNull(b)
+		if dir != Ascending && dir != Descending && isNotNullDesc {
+			// Unspecified direction (0 value) will default to '#' for the
+			// interleaved sentinel.
+			return b, "#", nil
+		}
 		return b, "!NULL", nil
 	case Int:
 		var i int64
@@ -2315,16 +2368,16 @@ func EncodeUntaggedTimeTZValue(appendTo []byte, t timetz.TimeTZ) []byte {
 	return EncodeNonsortingStdlibVarint(appendTo, int64(t.OffsetSecs))
 }
 
-// EncodeBox2DValue encodes a geopb.BoundingBox with its value tag, appends it to
+// EncodeBox2DValue encodes a geo.CartesianBoundingBox with its value tag, appends it to
 // the supplied buffer and returns the final buffer.
-func EncodeBox2DValue(appendTo []byte, colID uint32, b geopb.BoundingBox) ([]byte, error) {
+func EncodeBox2DValue(appendTo []byte, colID uint32, b geo.CartesianBoundingBox) ([]byte, error) {
 	appendTo = EncodeValueTag(appendTo, colID, Box2D)
 	return EncodeUntaggedBox2DValue(appendTo, b)
 }
 
-// EncodeUntaggedBox2DValue encodes a geopb.BoundingBox value, appends it to the supplied buffer,
+// EncodeUntaggedBox2DValue encodes a geo.CartesianBoundingBox value, appends it to the supplied buffer,
 // and returns the final buffer.
-func EncodeUntaggedBox2DValue(appendTo []byte, b geopb.BoundingBox) ([]byte, error) {
+func EncodeUntaggedBox2DValue(appendTo []byte, b geo.CartesianBoundingBox) ([]byte, error) {
 	appendTo = EncodeFloatAscending(appendTo, b.LoX)
 	appendTo = EncodeFloatAscending(appendTo, b.HiX)
 	appendTo = EncodeFloatAscending(appendTo, b.LoY)
@@ -2617,8 +2670,10 @@ func DecodeDecimalValue(b []byte) (remaining []byte, d apd.Decimal, err error) {
 }
 
 // DecodeUntaggedBox2DValue decodes a value encoded by EncodeUntaggedBox2DValue.
-func DecodeUntaggedBox2DValue(b []byte) (remaining []byte, box geopb.BoundingBox, err error) {
-	box = geopb.BoundingBox{}
+func DecodeUntaggedBox2DValue(
+	b []byte,
+) (remaining []byte, box geo.CartesianBoundingBox, err error) {
+	box = geo.CartesianBoundingBox{}
 	remaining = b
 
 	remaining, box.LoX, err = DecodeFloatAscending(remaining)
@@ -2986,6 +3041,29 @@ func PrettyPrintValueEncoded(b []byte) ([]byte, string, error) {
 	default:
 		return b, "", errors.Errorf("unknown type %s", typ)
 	}
+}
+
+// DecomposeKeyTokens breaks apart a key into its individual key-encoded values
+// and returns a slice of byte slices, one for each key-encoded value.
+// It also returns whether the key contains a NULL value.
+func DecomposeKeyTokens(b []byte) (tokens [][]byte, containsNull bool, err error) {
+	var out [][]byte
+
+	for len(b) > 0 {
+		tokenLen, err := PeekLength(b)
+		if err != nil {
+			return nil, false, err
+		}
+
+		if PeekType(b) == Null {
+			containsNull = true
+		}
+
+		out = append(out, b[:tokenLen])
+		b = b[tokenLen:]
+	}
+
+	return out, containsNull, nil
 }
 
 // getInvertedIndexKeyLength finds the length of an inverted index key

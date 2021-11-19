@@ -23,8 +23,8 @@ import (
 )
 
 func Example_nodelocal() {
-	c := NewCLITest(TestCLIParams{})
-	defer c.Cleanup()
+	c := newCLITest(cliTestParams{})
+	defer c.cleanup()
 
 	file, cleanUp := createTestFile("test.csv", "content")
 	defer cleanUp()
@@ -49,8 +49,8 @@ func Example_nodelocal() {
 }
 
 func Example_nodelocal_disabled() {
-	c := NewCLITest(TestCLIParams{NoNodelocal: true})
-	defer c.Cleanup()
+	c := newCLITest(cliTestParams{noNodelocal: true})
+	defer c.cleanup()
 
 	file, cleanUp := createTestFile("test.csv", "non-empty-file")
 	defer cleanUp()
@@ -71,8 +71,8 @@ func Example_nodelocal_disabled() {
 func TestNodeLocalFileUpload(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	c := NewCLITest(TestCLIParams{T: t})
-	defer c.Cleanup()
+	c := newCLITest(cliTestParams{t: t})
+	defer c.cleanup()
 
 	dir, cleanFn := testutils.TempDir(t)
 	defer cleanFn()

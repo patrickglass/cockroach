@@ -160,13 +160,12 @@ func TestRateLimiterBasic(t *testing.T) {
 
 		// THis should need to wait one second for the bucket to fill up.
 		go doWait(30)
-		timer := ensureNotDone()
+		ensureNotDone()
 
 		// Adjust the rate and the burst down. This should move the current
 		// capacity down to 0 and lower the burst. It will now take 10 seconds
 		// before the bucket is full.
 		rl.UpdateLimit(1, 10)
-		waitForTimersNotEqual(timer)
 		mt.Advance(9 * time.Second)
 		ensureNotDone()
 		mt.Advance(time.Second)

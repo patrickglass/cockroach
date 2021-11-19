@@ -32,10 +32,10 @@ import (
 type Updater struct {
 	Helper       rowHelper
 	DeleteHelper *rowHelper
-	FetchCols    []catalog.Column
+	FetchCols    []descpb.ColumnDescriptor
 	// FetchColIDtoRowIndex must be kept in sync with FetchCols.
 	FetchColIDtoRowIndex  catalog.TableColMap
-	UpdateCols            []catalog.Column
+	UpdateCols            []descpb.ColumnDescriptor
 	UpdateColIDtoRowIndex catalog.TableColMap
 	primaryKeyColChange   bool
 
@@ -66,6 +66,12 @@ const (
 	UpdaterOnlyColumns rowUpdaterType = 1
 )
 
+type returnTrue struct{}
+
+func (returnTrue) Error() string { panic(errors.AssertionFailedf("unimplemented")) }
+
+var returnTruePseudoError error = returnTrue{}
+
 // MakeUpdater creates a Updater for the given table.
 //
 // UpdateCols are the columns being updated and correspond to the updateValues
@@ -80,8 +86,8 @@ func MakeUpdater(
 	txn *kv.Txn,
 	codec keys.SQLCodec,
 	tableDesc catalog.TableDescriptor,
-	updateCols []catalog.Column,
-	requestedCols []catalog.Column,
+	updateCols []descpb.ColumnDescriptor,
+	requestedCols []descpb.ColumnDescriptor,
 	updateType rowUpdaterType,
 	alloc *rowenc.DatumAlloc,
 	sv *settings.Values,
@@ -95,14 +101,14 @@ func MakeUpdater(
 	updateColIDtoRowIndex := ColIDtoRowIndexFromCols(updateCols)
 
 	var primaryIndexCols catalog.TableColSet
-	for i := 0; i < tableDesc.GetPrimaryIndex().NumKeyColumns(); i++ {
-		colID := tableDesc.GetPrimaryIndex().GetKeyColumnID(i)
+	for i := 0; i < tableDesc.GetPrimaryIndex().NumColumns(); i++ {
+		colID := tableDesc.GetPrimaryIndex().GetColumnID(i)
 		primaryIndexCols.Add(colID)
 	}
 
 	var primaryKeyColChange bool
 	for _, c := range updateCols {
-		if primaryIndexCols.Contains(c.GetID()) {
+		if primaryIndexCols.Contains(c.ID) {
 			primaryKeyColChange = true
 			break
 		}
@@ -131,31 +137,28 @@ func MakeUpdater(
 		if index.IsPartial() {
 			return true
 		}
-		colIDs := index.CollectKeyColumnIDs()
-		colIDs.UnionWith(index.CollectSecondaryStoredColumnIDs())
-		colIDs.UnionWith(index.CollectKeySuffixColumnIDs())
-		for _, colID := range colIDs.Ordered() {
-			if _, ok := updateColIDtoRowIndex.Get(colID); ok {
-				return true
+		return index.ForEachColumnID(func(id descpb.ColumnID) error {
+			if _, ok := updateColIDtoRowIndex.Get(id); ok {
+				return returnTruePseudoError
 			}
-		}
-		return false
+			return nil
+		}) != nil
 	}
 
-	includeIndexes := make([]catalog.Index, 0, len(tableDesc.WritableNonPrimaryIndexes()))
-	var deleteOnlyIndexes []catalog.Index
+	includeIndexes := make([]descpb.IndexDescriptor, 0, len(tableDesc.WritableNonPrimaryIndexes()))
+	var deleteOnlyIndexes []descpb.IndexDescriptor
 	for _, index := range tableDesc.DeletableNonPrimaryIndexes() {
 		if !needsUpdate(index) {
 			continue
 		}
 		if !index.DeleteOnly() {
-			includeIndexes = append(includeIndexes, index)
+			includeIndexes = append(includeIndexes, *index.IndexDesc())
 		} else {
 			if deleteOnlyIndexes == nil {
 				// Allocate at most once.
-				deleteOnlyIndexes = make([]catalog.Index, 0, len(tableDesc.DeleteOnlyNonPrimaryIndexes()))
+				deleteOnlyIndexes = make([]descpb.IndexDescriptor, 0, len(tableDesc.DeleteOnlyNonPrimaryIndexes()))
 			}
-			deleteOnlyIndexes = append(deleteOnlyIndexes, index)
+			deleteOnlyIndexes = append(deleteOnlyIndexes, *index.IndexDesc())
 		}
 	}
 
@@ -223,7 +226,7 @@ func (ru *Updater) UpdateRow(
 	if err != nil {
 		return nil, err
 	}
-	var deleteOldSecondaryIndexEntries map[catalog.Index][]rowenc.IndexEntry
+	var deleteOldSecondaryIndexEntries []rowenc.IndexEntry
 	if ru.DeleteHelper != nil {
 		// We want to include empty k/v pairs because we want
 		// to delete all k/v's for this row. By setting includeEmpty
@@ -244,7 +247,7 @@ func (ru *Updater) UpdateRow(
 	// happen before index encoding because certain datum types (i.e. tuple)
 	// cannot be used as index values.
 	for i, val := range updateValues {
-		if ru.marshaled[i], err = rowenc.MarshalColumnValue(ru.UpdateCols[i], val); err != nil {
+		if ru.marshaled[i], err = rowenc.MarshalColumnValue(&ru.UpdateCols[i], val); err != nil {
 			return nil, err
 		}
 	}
@@ -252,7 +255,7 @@ func (ru *Updater) UpdateRow(
 	// Update the row values.
 	copy(ru.newValues, oldValues)
 	for i, updateCol := range ru.UpdateCols {
-		idx, ok := ru.FetchColIDtoRowIndex.Get(updateCol.GetID())
+		idx, ok := ru.FetchColIDtoRowIndex.Get(updateCol.ID)
 		if !ok {
 			return nil, errors.AssertionFailedf("update column without a corresponding fetch column")
 		}
@@ -270,7 +273,8 @@ func (ru *Updater) UpdateRow(
 		rowPrimaryKeyChanged = !bytes.Equal(primaryIndexKey, newPrimaryIndexKey)
 	}
 
-	for i, index := range ru.Helper.Indexes {
+	for i := range ru.Helper.Indexes {
+		index := &ru.Helper.Indexes[i]
 		// We don't want to insert any empty k/v's, so set includeEmpty to false.
 		// Consider the following case:
 		// TABLE t (
@@ -289,7 +293,7 @@ func (ru *Updater) UpdateRow(
 		// exists in ignoreIndexesForDel and ignoreIndexesForPut, respectively.
 		// Index IDs in these sets indicate that old and new values for the row
 		// do not satisfy a partial index's predicate expression.
-		if pm.IgnoreForDel.Contains(int(index.GetID())) {
+		if pm.IgnoreForDel.Contains(int(index.ID)) {
 			ru.oldIndexEntries[i] = nil
 		} else {
 			ru.oldIndexEntries[i], err = rowenc.EncodeSecondaryIndex(
@@ -304,7 +308,7 @@ func (ru *Updater) UpdateRow(
 				return nil, err
 			}
 		}
-		if pm.IgnoreForPut.Contains(int(index.GetID())) {
+		if pm.IgnoreForPut.Contains(int(index.ID)) {
 			ru.newIndexEntries[i] = nil
 		} else {
 			ru.newIndexEntries[i], err = rowenc.EncodeSecondaryIndex(
@@ -319,7 +323,7 @@ func (ru *Updater) UpdateRow(
 				return nil, err
 			}
 		}
-		if ru.Helper.Indexes[i].GetType() == descpb.IndexDescriptor_INVERTED {
+		if ru.Helper.Indexes[i].Type == descpb.IndexDescriptor_INVERTED {
 			// Deduplicate the keys we're adding and removing if we're updating an
 			// inverted index. For example, imagine a table with an inverted index on j:
 			//
@@ -381,8 +385,9 @@ func (ru *Updater) UpdateRow(
 	// Update secondary indexes.
 	// We're iterating through all of the indexes, which should have corresponding entries
 	// in the new and old values.
-	for i, index := range ru.Helper.Indexes {
-		if index.GetType() == descpb.IndexDescriptor_FORWARD {
+	for i := range ru.Helper.Indexes {
+		index := &ru.Helper.Indexes[i]
+		if index.Type == descpb.IndexDescriptor_FORWARD {
 			oldIdx, newIdx := 0, 0
 			oldEntries, newEntries := ru.oldIndexEntries[i], ru.newIndexEntries[i]
 			// The index entries for a particular index are stored in
@@ -408,9 +413,10 @@ func (ru *Updater) UpdateRow(
 					newIdx++
 					var expValue []byte
 					if !bytes.Equal(oldEntry.Key, newEntry.Key) {
-						if err := ru.Helper.deleteIndexEntry(ctx, batch, index, ru.Helper.secIndexValDirs[i], oldEntry, traceKV); err != nil {
-							return nil, err
+						if traceKV {
+							log.VEventf(ctx, 2, "Del %s", keys.PrettyPrint(ru.Helper.secIndexValDirs[i], oldEntry.Key))
 						}
+						batch.Del(oldEntry.Key)
 					} else if !newEntry.Value.EqualTagAndData(oldEntry.Value) {
 						expValue = oldEntry.Value.TagAndDataBytes()
 					} else {
@@ -430,20 +436,21 @@ func (ru *Updater) UpdateRow(
 					if oldEntry.Family == descpb.FamilyID(0) {
 						return nil, errors.AssertionFailedf(
 							"index entry for family 0 for table %s, index %s was not generated",
-							ru.Helper.TableDesc.GetName(), index.GetName(),
+							ru.Helper.TableDesc.GetName(), index.Name,
 						)
 					}
 					// In this case, the index has a k/v for a family that does not exist in
 					// the new set of k/v's for the row. So, we need to delete the old k/v.
-					if err := ru.Helper.deleteIndexEntry(ctx, batch, index, ru.Helper.secIndexValDirs[i], oldEntry, traceKV); err != nil {
-						return nil, err
+					if traceKV {
+						log.VEventf(ctx, 2, "Del %s", keys.PrettyPrint(ru.Helper.secIndexValDirs[i], oldEntry.Key))
 					}
+					batch.Del(oldEntry.Key)
 					oldIdx++
 				} else {
 					if newEntry.Family == descpb.FamilyID(0) {
 						return nil, errors.AssertionFailedf(
 							"index entry for family 0 for table %s, index %s was not generated",
-							ru.Helper.TableDesc.GetName(), index.GetName(),
+							ru.Helper.TableDesc.GetName(), index.Name,
 						)
 					}
 					// In this case, the index now has a k/v that did not exist in the
@@ -464,9 +471,10 @@ func (ru *Updater) UpdateRow(
 				// the new set of k/v's or 2) the index is a partial index and
 				// the new row values do not match the partial index predicate.
 				oldEntry := &oldEntries[oldIdx]
-				if err := ru.Helper.deleteIndexEntry(ctx, batch, index, ru.Helper.secIndexValDirs[i], oldEntry, traceKV); err != nil {
-					return nil, err
+				if traceKV {
+					log.VEventf(ctx, 2, "Del %s", keys.PrettyPrint(ru.Helper.secIndexValDirs[i], oldEntry.Key))
 				}
+				batch.Del(oldEntry.Key)
 				oldIdx++
 			}
 			for newIdx < len(newEntries) {
@@ -488,9 +496,10 @@ func (ru *Updater) UpdateRow(
 		} else {
 			// Remove all inverted index entries, and re-add them.
 			for j := range ru.oldIndexEntries[i] {
-				if err := ru.Helper.deleteIndexEntry(ctx, batch, index, nil /*valDir*/, &ru.oldIndexEntries[i][j], traceKV); err != nil {
-					return nil, err
+				if traceKV {
+					log.VEventf(ctx, 2, "Del %s", ru.oldIndexEntries[i][j].Key)
 				}
+				batch.Del(ru.oldIndexEntries[i][j].Key)
 			}
 			putFn := insertInvertedPutFn
 			// We're adding all of the inverted index entries from the row being updated.
@@ -503,20 +512,11 @@ func (ru *Updater) UpdateRow(
 	// We're deleting indexes in a delete only state. We're bounding this by the number of indexes because inverted
 	// indexed will be handled separately.
 	if ru.DeleteHelper != nil {
-
-		// For determinism, add the entries for the secondary indexes in the same
-		// order as they appear in the helper.
-		for idx := range ru.DeleteHelper.Indexes {
-			index := ru.DeleteHelper.Indexes[idx]
-			deletedSecondaryIndexEntries, ok := deleteOldSecondaryIndexEntries[index]
-
-			if ok {
-				for _, deletedSecondaryIndexEntry := range deletedSecondaryIndexEntries {
-					if err := ru.DeleteHelper.deleteIndexEntry(ctx, batch, index, nil /*valDir*/, &deletedSecondaryIndexEntry, traceKV); err != nil {
-						return nil, err
-					}
-				}
+		for _, deletedSecondaryIndexEntry := range deleteOldSecondaryIndexEntries {
+			if traceKV {
+				log.VEventf(ctx, 2, "Del %s", deletedSecondaryIndexEntry.Key)
 			}
+			batch.Del(deletedSecondaryIndexEntry.Key)
 		}
 	}
 

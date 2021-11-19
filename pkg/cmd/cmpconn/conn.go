@@ -19,9 +19,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/mutations"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx"
 	"github.com/lib/pq"
 )
 
@@ -32,13 +33,13 @@ type Conn interface {
 	// PGX returns pgx connection.
 	PGX() *pgx.Conn
 	// Values executes prep and exec and returns the results of exec.
-	Values(ctx context.Context, prep, exec string) (rows pgx.Rows, err error)
+	Values(ctx context.Context, prep, exec string) (rows *pgx.Rows, err error)
 	// Exec executes s.
 	Exec(ctx context.Context, s string) error
 	// Ping pings a connection.
-	Ping(ctx context.Context) error
+	Ping() error
 	// Close closes the connections.
-	Close(ctx context.Context)
+	Close()
 }
 
 type conn struct {
@@ -58,39 +59,41 @@ func (c *conn) PGX() *pgx.Conn {
 	return c.pgx
 }
 
+var simpleProtocol = &pgx.QueryExOptions{SimpleProtocol: true}
+
 // Values executes prep and exec and returns the results of exec.
-func (c *conn) Values(ctx context.Context, prep, exec string) (rows pgx.Rows, err error) {
+func (c *conn) Values(ctx context.Context, prep, exec string) (rows *pgx.Rows, err error) {
 	if prep != "" {
-		rows, err = c.pgx.Query(ctx, prep, pgx.QuerySimpleProtocol(true))
+		rows, err = c.pgx.QueryEx(ctx, prep, simpleProtocol)
 		if err != nil {
 			return nil, err
 		}
 		rows.Close()
 	}
-	return c.pgx.Query(ctx, exec, pgx.QuerySimpleProtocol(true))
+	return c.pgx.QueryEx(ctx, exec, simpleProtocol)
 }
 
 // Exec executes s.
 func (c *conn) Exec(ctx context.Context, s string) error {
-	_, err := c.pgx.Exec(ctx, s, pgx.QuerySimpleProtocol(true))
+	_, err := c.pgx.ExecEx(ctx, s, simpleProtocol)
 	return errors.Wrap(err, "exec")
 }
 
 // Ping pings a connection.
-func (c *conn) Ping(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+func (c *conn) Ping() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	return c.pgx.Ping(ctx)
 }
 
 // Close closes the connections.
-func (c *conn) Close(ctx context.Context) {
+func (c *conn) Close() {
 	_ = c.db.Close()
-	_ = c.pgx.Close(ctx)
+	_ = c.pgx.Close()
 }
 
 // NewConn returns a new Conn on the given uri and executes initSQL on it.
-func NewConn(ctx context.Context, uri string, initSQL ...string) (Conn, error) {
+func NewConn(uri string, initSQL ...string) (Conn, error) {
 	c := conn{}
 
 	{
@@ -102,11 +105,11 @@ func NewConn(ctx context.Context, uri string, initSQL ...string) (Conn, error) {
 	}
 
 	{
-		config, err := pgx.ParseConfig(uri)
+		config, err := pgx.ParseURI(uri)
 		if err != nil {
 			return nil, errors.Wrap(err, "pgx parse")
 		}
-		conn, err := pgx.ConnectConfig(ctx, config)
+		conn, err := pgx.Connect(config)
 		if err != nil {
 			return nil, errors.Wrap(err, "pgx conn")
 		}
@@ -118,7 +121,7 @@ func NewConn(ctx context.Context, uri string, initSQL ...string) (Conn, error) {
 			continue
 		}
 
-		if _, err := c.pgx.Exec(ctx, s); err != nil {
+		if _, err := c.pgx.Exec(s); err != nil {
 			return nil, errors.Wrap(err, "init SQL")
 		}
 	}
@@ -131,7 +134,7 @@ func NewConn(ctx context.Context, uri string, initSQL ...string) (Conn, error) {
 type connWithMutators struct {
 	Conn
 	rng         *rand.Rand
-	sqlMutators []randgen.Mutator
+	sqlMutators []rowenc.Mutator
 }
 
 var _ Conn = &connWithMutators{}
@@ -140,7 +143,7 @@ var _ Conn = &connWithMutators{}
 // on it. The mutators are applied to initSQL and will be applied to all
 // queries to be executed in CompareConns.
 func NewConnWithMutators(
-	ctx context.Context, uri string, rng *rand.Rand, sqlMutators []randgen.Mutator, initSQL ...string,
+	uri string, rng *rand.Rand, sqlMutators []rowenc.Mutator, initSQL ...string,
 ) (Conn, error) {
 	mutatedInitSQL := make([]string, len(initSQL))
 	for i, s := range initSQL {
@@ -149,9 +152,9 @@ func NewConnWithMutators(
 			continue
 		}
 
-		mutatedInitSQL[i], _ = randgen.ApplyString(rng, s, sqlMutators...)
+		mutatedInitSQL[i], _ = mutations.ApplyString(rng, s, sqlMutators...)
 	}
-	conn, err := NewConn(ctx, uri, mutatedInitSQL...)
+	conn, err := NewConn(uri, mutatedInitSQL...)
 	if err != nil {
 		return nil, err
 	}
@@ -175,12 +178,12 @@ func CompareConns(
 ) (ignoredErr bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	connRows := make(map[string]pgx.Rows)
+	connRows := make(map[string]*pgx.Rows)
 	connExecs := make(map[string]string)
 	for name, conn := range conns {
 		connExecs[name] = exec
 		if cwm, withMutators := conn.(*connWithMutators); withMutators {
-			connExecs[name], _ = randgen.ApplyString(cwm.rng, exec, cwm.sqlMutators...)
+			connExecs[name], _ = mutations.ApplyString(cwm.rng, exec, cwm.sqlMutators...)
 		}
 		rows, err := conn.Values(ctx, prep, connExecs[name])
 		if err != nil {
@@ -218,7 +221,7 @@ func CompareConns(
 // ignoreSQLErrors specifies whether SQL errors should be ignored (in which
 // case the function returns nil if SQL error occurs).
 func compareRows(
-	connRows map[string]pgx.Rows, ignoreSQLErrors bool,
+	connRows map[string]*pgx.Rows, ignoreSQLErrors bool,
 ) (ignoredErr bool, retErr error) {
 	var first []interface{}
 	var firstName string
@@ -249,7 +252,7 @@ ReadRows:
 				first = vals
 			} else {
 				if err := CompareVals(first, vals); err != nil {
-					return false, errors.Wrapf(err, "compare %s to %s", firstName, name)
+					return false, fmt.Errorf("compare %s to %s:\n%v", firstName, name, err)
 				}
 			}
 		}

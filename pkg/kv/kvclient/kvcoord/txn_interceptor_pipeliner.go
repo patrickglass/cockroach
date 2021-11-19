@@ -34,6 +34,16 @@ var pipelinedWritesEnabled = settings.RegisterBoolSetting(
 	"if enabled, transactional writes are pipelined through Raft consensus",
 	true,
 )
+var pipelinedWritesMaxInFlightSize = settings.RegisterByteSizeSetting(
+	// TODO(nvanbenschoten): The need for this extra setting alongside
+	// kv.transaction.max_intents_bytes indicates that we should explore
+	// the unification of intent tracking and in-flight write tracking.
+	// The two mechanisms track subtly different information, but there's
+	// no fundamental reason why they can't be unified.
+	"kv.transaction.write_pipelining_max_outstanding_size",
+	"maximum number of bytes used to track in-flight pipelined writes before disabling pipelining",
+	1<<18, /* 256 KB */
+)
 var pipelinedWritesMaxBatchSize = settings.RegisterIntSetting(
 	"kv.transaction.write_pipelining_max_batch_size",
 	"if non-zero, defines that maximum size batch that will be pipelined through Raft consensus",
@@ -49,33 +59,20 @@ var pipelinedWritesMaxBatchSize = settings.RegisterIntSetting(
 	settings.NonNegativeInt,
 )
 
-// trackedWritesMaxSize is a byte threshold for the tracking of writes performed
-// a single transaction. This includes the tracking of lock spans and of
-// in-flight writes, both stored in the txnPipeliner.
+// trackedWritesMaxSize is a threshold in bytes for lock spans stored on the
+// coordinator during the lifetime of a transaction. Locks are included with a
+// transaction on commit or abort, to be cleaned up asynchronously. If they
+// exceed this threshold, they're condensed to avoid memory blowup both on the
+// coordinator and (critically) on the EndTxn command at the Raft group
+// responsible for the transaction record.
 //
-// Locks are included with a transaction on commit or abort, to be cleaned up
-// asynchronously. If they exceed this threshold, they're condensed to avoid
-// memory blowup both on the coordinator and (critically) on the EndTxn command
-// at the Raft group responsible for the transaction record.
-//
-// The in-flight writes are, on the happy path, also attached to the commit
-// EndTxn. On less happy paths, they are turned into lock spans.
-//
-// NB: this is called "max_intents_bytes" instead of "max_lock_bytes" because it
-// was created before the concept of intents were generalized to locks, and also
-// before we introduced in-flight writes with the "parallel commits". Switching
-// it would require a migration which doesn't seem worth it.
-//
-// Note: Default value was arbitrarily set to 256KB but practice showed that
-// it could be raised higher. When transaction reaches this limit, intent
-// cleanup switches to range instead of point cleanup which is expensive
-// because it needs to hold broad latches and iterate through the range to
-// find matching intents.
-// See #54029 for more details.
+// NB: this is called "max_intents_bytes" instead of "max_lock_bytes" because
+// it was created before the concept of intents were generalized to locks.
+// Switching it would require a migration which doesn't seem worth it.
 var trackedWritesMaxSize = settings.RegisterIntSetting(
 	"kv.transaction.max_intents_bytes",
 	"maximum number of bytes used to track locks in transactions",
-	1<<22, /* 4 MB */
+	1<<18, /* 256 KB */
 ).WithPublic()
 
 // rejectTxnOverTrackedWritesBudget dictates what happens when a txn exceeds
@@ -276,8 +273,6 @@ func (tp *txnPipeliner) SendLocked(
 		}
 	}
 
-	ba.AsyncConsensus = tp.canUseAsyncConsensus(ctx, ba)
-
 	// Adjust the batch so that it doesn't miss any in-flight writes.
 	ba = tp.chainToInFlightWrites(ba)
 
@@ -294,7 +289,7 @@ func (tp *txnPipeliner) SendLocked(
 	// go over budget despite the earlier pre-emptive check, then we stay over
 	// budget. Further requests will be rejected if they attempt to take more
 	// locks.
-	tp.updateLockTracking(ctx, ba, br, pErr, maxBytes, !rejectOverBudget /* condenseLocksIfOverBudget */)
+	tp.updateLockTracking(ctx, ba, br, maxBytes, !rejectOverBudget /* condenseLocksIfOverBudget */)
 	if pErr != nil {
 		return nil, tp.adjustError(ctx, ba, pErr)
 	}
@@ -399,7 +394,7 @@ func (tp *txnPipeliner) attachLocksToEndTxn(
 	}
 
 	// Sort both sets and condense the lock spans.
-	et.LockSpans, _ = roachpb.MergeSpans(&et.LockSpans)
+	et.LockSpans, _ = roachpb.MergeSpans(et.LockSpans)
 	sort.Sort(roachpb.SequencedWriteBySeq(et.InFlightWrites))
 
 	if log.V(3) {
@@ -413,26 +408,21 @@ func (tp *txnPipeliner) attachLocksToEndTxn(
 	return ba, nil
 }
 
-// canUseAsyncConsensus checks the conditions necessary for this batch to be
-// allowed to set the AsyncConsensus flag.
-func (tp *txnPipeliner) canUseAsyncConsensus(ctx context.Context, ba roachpb.BatchRequest) bool {
-	// Short-circuit for EndTransactions; it's common enough to have batches
-	// containing a prefix of writes (which, by themselves, are all eligible for
-	// async consensus) and then an EndTxn (which is not eligible). Note that
-	// ba.GetArg() is efficient for EndTransactions, having its own internal
-	// optimization.
-	if _, hasET := ba.GetArg(roachpb.EndTxn); hasET {
-		return false
-	}
+// chainToInFlightWrites ensures that we "chain" on to any in-flight writes that
+// overlap the keys we're trying to read/write. We do this by prepending
+// QueryIntent requests with the ErrorIfMissing option before each request that
+// touches any of the in-flight writes. In effect, this allows us to prove that
+// a write succeeded before depending on its existence. We later prune down the
+// list of writes we proved to exist that are no longer "in-flight" in
+// updateLockTracking.
+func (tp *txnPipeliner) chainToInFlightWrites(ba roachpb.BatchRequest) roachpb.BatchRequest {
+	asyncConsensus := pipelinedWritesEnabled.Get(&tp.st.SV) && !tp.disabled
 
-	if !pipelinedWritesEnabled.Get(&tp.st.SV) || tp.disabled {
-		return false
-	}
-
-	// There's a memory budget for lock tracking. If this batch would push us over
-	// this setting, don't allow it to perform async consensus.
+	// We provide a setting to bound the size of in-flight writes that the
+	// pipeliner is tracking. If this batch would push us over this setting,
+	// don't allow it to perform async consensus.
 	addedIFBytes := int64(0)
-	maxTrackingBytes := trackedWritesMaxSize.Get(&tp.st.SV)
+	maxIFBytes := pipelinedWritesMaxInFlightSize.Get(&tp.st.SV)
 
 	// We provide a setting to bound the number of writes we permit in a batch
 	// that uses async consensus. This is useful because we'll have to prove
@@ -442,56 +432,8 @@ func (tp *txnPipeliner) canUseAsyncConsensus(ctx context.Context, ba roachpb.Bat
 	if maxBatch := pipelinedWritesMaxBatchSize.Get(&tp.st.SV); maxBatch > 0 {
 		batchSize := int64(len(ba.Requests))
 		if batchSize > maxBatch {
-			return false
+			asyncConsensus = false
 		}
-	}
-
-	for _, ru := range ba.Requests {
-		req := ru.GetInner()
-
-		// Determine whether the current request prevents us from performing async
-		// consensus on the batch.
-		if !roachpb.IsIntentWrite(req) || roachpb.IsRange(req) {
-			// Only allow batches consisting of solely transactional point
-			// writes to perform consensus asynchronously.
-			// TODO(nvanbenschoten): We could allow batches with reads and point
-			// writes to perform async consensus, but this would be a bit
-			// tricky. Any read would need to chain on to any write that came
-			// before it in the batch and overlaps. For now, it doesn't seem
-			// worth it.
-			return false
-		}
-		// Inhibit async consensus if the batch would push us over the maximum
-		// tracking memory budget. If we allowed async consensus on this batch, its
-		// writes would need to be tracked precisely. By inhibiting async consensus,
-		// its writes will only need to be tracked as locks, and we can compress the
-		// lock spans with loss of fidelity. This helps both memory usage and the
-		// eventual size of the Raft command for the commit.
-		//
-		// NB: this estimation is conservative because it doesn't factor
-		// in that some writes may be proven by this batch and removed
-		// from the in-flight write set. The real accounting in
-		// inFlightWriteSet.{insert,remove} gets this right.
-		addedIFBytes += keySize(req.Header().Key)
-		if (tp.ifWrites.byteSize() + addedIFBytes + tp.lockFootprint.bytes) > maxTrackingBytes {
-			log.VEventf(ctx, 2, "cannot perform async consensus because memory budget exceeded")
-			return false
-		}
-	}
-	return true
-}
-
-// chainToInFlightWrites ensures that we "chain" on to any in-flight writes that
-// overlap the keys we're trying to read/write. We do this by prepending
-// QueryIntent requests with the ErrorIfMissing option before each request that
-// touches any of the in-flight writes. In effect, this allows us to prove that
-// a write succeeded before depending on its existence. We later prune down the
-// list of writes we proved to exist that are no longer "in-flight" in
-// updateLockTracking.
-func (tp *txnPipeliner) chainToInFlightWrites(ba roachpb.BatchRequest) roachpb.BatchRequest {
-	// If there are no in-flight writes, there's nothing to chain to.
-	if tp.ifWrites.len() == 0 {
-		return ba
 	}
 
 	forked := false
@@ -501,11 +443,40 @@ func (tp *txnPipeliner) chainToInFlightWrites(ba roachpb.BatchRequest) roachpb.B
 	// chainedKeys map between calls to this function.
 	var chainedKeys map[string]struct{}
 	for i, ru := range oldReqs {
+		if !asyncConsensus && !forked && tp.ifWrites.len() == len(chainedKeys) {
+			// If there are no in-flight writes or all in-flight writes
+			// have been chained onto and async consensus is disallowed,
+			// short-circuit immediately.
+			break
+		}
 		req := ru.GetInner()
 
-		// If we've chained onto all the in-flight writes (ifWrites.len() ==
-		// len(chainedKeys)), we don't need to pile on more QueryIntents. So, only
-		// do this work if that's not the case.
+		if asyncConsensus {
+			// If we're currently planning on performing the batch with
+			// performing async consensus, determine whether this request
+			// changes that.
+			if !roachpb.IsIntentWrite(req) || roachpb.IsRange(req) {
+				// Only allow batches consisting of solely transactional point
+				// writes to perform consensus asynchronously.
+				// TODO(nvanbenschoten): We could allow batches with reads and point
+				// writes to perform async consensus, but this would be a bit
+				// tricky. Any read would need to chain on to any write that came
+				// before it in the batch and overlaps. For now, it doesn't seem
+				// worth it.
+				asyncConsensus = false
+			} else {
+				// Only allow batches that would not push us over the maximum
+				// in-flight write size limit to perform consensus asynchronously.
+				//
+				// NB: this estimation is conservative because it doesn't factor
+				// in that some writes may be proven by this batch and removed
+				// from the in-flight write set. The real accounting in
+				// inFlightWriteSet.{insert,remove} gets this right.
+				addedIFBytes += keySize(req.Header().Key)
+				asyncConsensus = (tp.ifWrites.byteSize() + addedIFBytes) <= maxIFBytes
+			}
+		}
+
 		if tp.ifWrites.len() > len(chainedKeys) {
 			// For each conflicting in-flight write, add a QueryIntent request
 			// to the batch to assert that it has succeeded and "chain" onto it.
@@ -568,6 +539,9 @@ func (tp *txnPipeliner) chainToInFlightWrites(ba roachpb.BatchRequest) roachpb.B
 		}
 	}
 
+	// Set the batch's AsyncConsensus flag based on whether AsyncConsensus is
+	// permitted for the batch.
+	ba.AsyncConsensus = asyncConsensus
 	return ba
 }
 
@@ -594,11 +568,10 @@ func (tp *txnPipeliner) updateLockTracking(
 	ctx context.Context,
 	ba roachpb.BatchRequest,
 	br *roachpb.BatchResponse,
-	pErr *roachpb.Error,
 	maxBytes int64,
 	condenseLocksIfOverBudget bool,
 ) {
-	tp.updateLockTrackingInner(ctx, ba, br, pErr)
+	tp.updateLockTrackingInner(ctx, ba, br)
 
 	// Deal with compacting the lock spans.
 
@@ -636,30 +609,15 @@ func (tp *txnPipeliner) updateLockTracking(
 }
 
 func (tp *txnPipeliner) updateLockTrackingInner(
-	ctx context.Context, ba roachpb.BatchRequest, br *roachpb.BatchResponse, pErr *roachpb.Error,
+	ctx context.Context, ba roachpb.BatchRequest, br *roachpb.BatchResponse,
 ) {
 	// If the request failed, add all lock acquisitions attempts directly to the
 	// lock footprint. This reduces the likelihood of dangling locks blocking
 	// concurrent requests for extended periods of time. See #3346.
-	if pErr != nil {
-		// However, as an optimization, if the error indicates that a specific
-		// request (identified by pErr.Index) unambiguously did not acquire any
-		// locks, we ignore that request for the purposes of accounting for lock
-		// spans. This is important for transactions that only perform a single
-		// request and hit an unambiguous error like a ConditionFailedError, as it
-		// can allow them to avoid sending a rollback. It it also important for
-		// transactions that throw a WriteIntentError due to heavy contention on a
-		// certain key after either passing a Error wait policy or hitting a lock
-		// timeout / queue depth limit. In such cases, this optimization prevents
-		// these transactions from adding even more load to the contended key by
-		// trying to perform unnecessary intent resolution.
-		baStripped := ba
-		if roachpb.ErrPriority(pErr.GoError()) <= roachpb.ErrorScoreUnambiguousError && pErr.Index != nil {
-			baStripped.Requests = make([]roachpb.RequestUnion, len(ba.Requests)-1)
-			copy(baStripped.Requests, ba.Requests[:pErr.Index.Index])
-			copy(baStripped.Requests[pErr.Index.Index:], ba.Requests[pErr.Index.Index+1:])
-		}
-		baStripped.LockSpanIterate(nil, tp.trackLocks)
+	if br == nil {
+		// The transaction cannot continue in this epoch whether this is
+		// a retryable error or not.
+		ba.LockSpanIterate(nil, tp.trackLocks)
 		return
 	}
 
@@ -709,12 +667,6 @@ func (tp *txnPipeliner) updateLockTrackingInner(
 				// need to prove that these succeeded sometime before we commit.
 				header := req.Header()
 				tp.ifWrites.insert(header.Key, header.Sequence)
-				// The request is not expected to be a ranged one, as we're only
-				// tracking one key in the ifWrites. Ranged requests do not admit
-				// ba.AsyncConsensus.
-				if roachpb.IsRange(req) {
-					log.Fatalf(ctx, "unexpected range request with AsyncConsensus: %s", req)
-				}
 			} else {
 				// If the lock acquisitions weren't performed asynchronously
 				// then add them directly to our lock footprint. Locking read
@@ -804,7 +756,7 @@ func (tp *txnPipeliner) populateLeafFinalState(*roachpb.LeafTxnFinalState) {}
 // importLeafFinalState is part of the txnInterceptor interface.
 func (tp *txnPipeliner) importLeafFinalState(context.Context, *roachpb.LeafTxnFinalState) {}
 
-// epochBumpedLocked implements the txnInterceptor interface.
+// epochBumpedLocked implements the txnReqInterceptor interface.
 func (tp *txnPipeliner) epochBumpedLocked() {
 	// Move all in-flight writes into the lock footprint. These writes no longer
 	// need to be tracked precisely, but we don't want to forget about them and
@@ -818,10 +770,10 @@ func (tp *txnPipeliner) epochBumpedLocked() {
 	}
 }
 
-// createSavepointLocked is part of the txnInterceptor interface.
+// createSavepointLocked is part of the txnReqInterceptor interface.
 func (tp *txnPipeliner) createSavepointLocked(context.Context, *savepoint) {}
 
-// rollbackToSavepointLocked is part of the txnInterceptor interface.
+// rollbackToSavepointLocked is part of the txnReqInterceptor interface.
 func (tp *txnPipeliner) rollbackToSavepointLocked(ctx context.Context, s savepoint) {
 	// Move all the writes in txnPipeliner that are not in the savepoint to the
 	// lock footprint. We no longer care if these write succeed or fail, so we're
@@ -850,7 +802,7 @@ func (tp *txnPipeliner) rollbackToSavepointLocked(ctx context.Context, s savepoi
 	}
 }
 
-// closeLocked implements the txnInterceptor interface.
+// closeLocked implements the txnReqInterceptor interface.
 func (tp *txnPipeliner) closeLocked() {
 	if tp.lockFootprint.condensed {
 		tp.txnMetrics.TxnsWithCondensedIntentsGauge.Dec(1)

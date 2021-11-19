@@ -17,7 +17,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -31,9 +30,9 @@ func TestProjectSet(t *testing.T) {
 
 	v := [10]rowenc.EncDatum{}
 	for i := range v {
-		v[i] = randgen.IntEncDatum(i)
+		v[i] = rowenc.IntEncDatum(i)
 	}
-	null := randgen.NullEncDatum()
+	null := rowenc.NullEncDatum()
 
 	testCases := []struct {
 		description string
@@ -48,13 +47,13 @@ func TestProjectSet(t *testing.T) {
 				Exprs: []execinfrapb.Expression{
 					{Expr: "@1 + 1"},
 				},
-				GeneratedColumns: types.OneIntCol,
+				GeneratedColumns: rowenc.OneIntCol,
 				NumColsPerGen:    []uint32{1},
 			},
 			input: rowenc.EncDatumRows{
 				{v[2]},
 			},
-			inputTypes: types.OneIntCol,
+			inputTypes: rowenc.OneIntCol,
 			expected: rowenc.EncDatumRows{
 				{v[2], v[3]},
 			},
@@ -65,14 +64,14 @@ func TestProjectSet(t *testing.T) {
 				Exprs: []execinfrapb.Expression{
 					{Expr: "generate_series(@1, 2)"},
 				},
-				GeneratedColumns: types.OneIntCol,
+				GeneratedColumns: rowenc.OneIntCol,
 				NumColsPerGen:    []uint32{1},
 			},
 			input: rowenc.EncDatumRows{
 				{v[0]},
 				{v[1]},
 			},
-			inputTypes: types.OneIntCol,
+			inputTypes: rowenc.OneIntCol,
 			expected: rowenc.EncDatumRows{
 				{v[0], v[0]},
 				{v[0], v[1]},
@@ -96,7 +95,7 @@ func TestProjectSet(t *testing.T) {
 			input: rowenc.EncDatumRows{
 				{v[0]},
 			},
-			inputTypes: types.OneIntCol,
+			inputTypes: rowenc.OneIntCol,
 			expected: rowenc.EncDatumRows{
 				{v[0], v[0], v[0], v[0], v[0]},
 				{v[0], null, null, v[1], v[1]},
@@ -131,7 +130,7 @@ func BenchmarkProjectSet(b *testing.B) {
 
 	v := [10]rowenc.EncDatum{}
 	for i := range v {
-		v[i] = randgen.IntEncDatum(i)
+		v[i] = rowenc.IntEncDatum(i)
 	}
 
 	benchCases := []struct {
@@ -146,13 +145,13 @@ func BenchmarkProjectSet(b *testing.B) {
 				Exprs: []execinfrapb.Expression{
 					{Expr: "generate_series(1, 100000)"},
 				},
-				GeneratedColumns: types.OneIntCol,
+				GeneratedColumns: rowenc.OneIntCol,
 				NumColsPerGen:    []uint32{1},
 			},
 			input: rowenc.EncDatumRows{
 				{v[0]},
 			},
-			inputTypes: types.OneIntCol,
+			inputTypes: rowenc.OneIntCol,
 		},
 	}
 

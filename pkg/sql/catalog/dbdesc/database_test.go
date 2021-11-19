@@ -23,7 +23,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/redact"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v2"
@@ -41,7 +40,7 @@ func TestSafeMessage(t *testing.T) {
 				State:         descpb.DescriptorState_OFFLINE,
 				OfflineReason: "foo",
 			}).BuildImmutableDatabase(),
-			exp: "dbdesc.immutable: {ID: 12, Version: 1, ModificationTime: \"0,0\", State: OFFLINE, OfflineReason: \"foo\"}",
+			exp: "dbdesc.Immutable: {ID: 12, Version: 1, ModificationTime: \"0,0\", State: OFFLINE, OfflineReason: \"foo\"}",
 		},
 		{
 			desc: NewBuilder(&descpb.DatabaseDescriptor{
@@ -80,8 +79,8 @@ func TestMakeDatabaseDesc(t *testing.T) {
 	if desc.GetID() != id {
 		t.Fatalf("expected ID == %d, got %d", id, desc.GetID())
 	}
-	if len(desc.GetPrivileges().Users) != 3 {
-		t.Fatalf("wrong number of privilege users, expected 3, got: %d", len(desc.GetPrivileges().Users))
+	if len(desc.GetPrivileges().Users) != 2 {
+		t.Fatalf("wrong number of privilege users, expected 2, got: %d", len(desc.GetPrivileges().Users))
 	}
 }
 
@@ -96,7 +95,7 @@ func TestValidateDatabaseDesc(t *testing.T) {
 			descpb.DatabaseDescriptor{
 				Name:       "db",
 				ID:         0,
-				Privileges: descpb.NewBaseDatabasePrivilegeDescriptor(security.RootUserName()),
+				Privileges: descpb.NewDefaultPrivilegeDescriptor(security.RootUserName()),
 			},
 		},
 		{
@@ -105,7 +104,7 @@ func TestValidateDatabaseDesc(t *testing.T) {
 				Name:         "multi-region-db",
 				ID:           200,
 				RegionConfig: &descpb.DatabaseDescriptor_RegionConfig{},
-				Privileges:   descpb.NewBaseDatabasePrivilegeDescriptor(security.RootUserName()),
+				Privileges:   descpb.NewDefaultPrivilegeDescriptor(security.RootUserName()),
 			},
 		},
 	}
@@ -143,7 +142,7 @@ func TestValidateCrossDatabaseReferences(t *testing.T) {
 				ID:   51,
 				Name: "db1",
 				Schemas: map[string]descpb.DatabaseDescriptor_SchemaInfo{
-					"schema1": {ID: 52},
+					"schema1": {ID: 52, Dropped: false},
 				},
 			},
 			schemaDescs: []descpb.SchemaDescriptor{
@@ -169,7 +168,7 @@ func TestValidateCrossDatabaseReferences(t *testing.T) {
 				ID:   51,
 				Name: "db1",
 				Schemas: map[string]descpb.DatabaseDescriptor_SchemaInfo{
-					"schema1": {ID: 500},
+					"schema1": {ID: 500, Dropped: false},
 				},
 			},
 		},
@@ -179,7 +178,7 @@ func TestValidateCrossDatabaseReferences(t *testing.T) {
 				ID:   51,
 				Name: "db1",
 				Schemas: map[string]descpb.DatabaseDescriptor_SchemaInfo{
-					"schema1": {ID: 52},
+					"schema1": {ID: 52, Dropped: false},
 				},
 			},
 			schemaDescs: []descpb.SchemaDescriptor{
@@ -234,7 +233,7 @@ func TestValidateCrossDatabaseReferences(t *testing.T) {
 			},
 		},
 		{ // 8
-			err: `schema mapping entry "schema1" (53): referenced schema ID 53: descriptor is a *typedesc.immutable: unexpected descriptor type`,
+			err: `schema mapping entry "schema1" (53): referenced schema ID 53: descriptor is a *typedesc.Immutable: unexpected descriptor type`,
 			desc: descpb.DatabaseDescriptor{
 				ID:   51,
 				Name: "db1",
@@ -248,7 +247,7 @@ func TestValidateCrossDatabaseReferences(t *testing.T) {
 			},
 		},
 		{ // 9
-			err: `multi-region enum: referenced type ID 53: descriptor is a *schemadesc.immutable: unexpected descriptor type`,
+			err: `multi-region enum: referenced type ID 53: descriptor is a *schemadesc.Immutable: unexpected descriptor type`,
 			desc: descpb.DatabaseDescriptor{
 				ID:   51,
 				Name: "db1",
@@ -268,7 +267,7 @@ func TestValidateCrossDatabaseReferences(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		privilege := descpb.NewBasePrivilegeDescriptor(security.AdminRoleName())
+		privilege := descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName())
 		descs := catalog.MakeMapDescGetter()
 		test.desc.Privileges = privilege
 		desc := NewBuilder(&test.desc).BuildImmutable()
@@ -297,31 +296,4 @@ func TestValidateCrossDatabaseReferences(t *testing.T) {
 			t.Errorf("%d: expected \"%s\", but found \"%s\"", i, expectedErr, err.Error())
 		}
 	}
-}
-
-// TestFixDroppedSchemaName tests fixing a corrupted descriptor as part of
-// RunPostDeserializationChanges. It tests for a particular corruption that
-// happened when a schema was dropped that had the same name as its parent
-// database name.
-func TestFixDroppedSchemaName(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-	const (
-		dbName = "foo"
-		dbID   = 1
-	)
-	dbDesc := descpb.DatabaseDescriptor{
-		Name: dbName,
-		ID:   dbID,
-		Schemas: map[string]descpb.DatabaseDescriptor_SchemaInfo{
-			dbName: {ID: dbID, Dropped: true},
-		},
-	}
-	b := NewBuilder(&dbDesc)
-	require.NoError(t, b.RunPostDeserializationChanges(ctx, nil))
-	desc := b.BuildCreatedMutableDatabase()
-	require.Truef(t, desc.HasPostDeserializationChanges(), "expected changes in descriptor, found none")
-	_, ok := desc.Schemas[dbName]
-	require.Falsef(t, ok, "erroneous entry exists")
 }

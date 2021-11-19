@@ -23,8 +23,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldatatestutils"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexectestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
@@ -33,7 +31,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -117,24 +114,9 @@ func makeMockFlowStreamRPCLayer() mockFlowStreamRPCLayer {
 func handleStream(
 	ctx context.Context, inbox *Inbox, stream flowStreamServer, doneFn func(),
 ) chan error {
-	return handleStreamWithFlowCtxDone(ctx, inbox, stream, nil /* flowCtxDone */, doneFn)
-}
-
-// handleStreamWithFlowCtxDone is the same as handleStream but also takes in
-// an optional Done channel for the flow context of the inbox host.
-func handleStreamWithFlowCtxDone(
-	ctx context.Context,
-	inbox *Inbox,
-	stream flowStreamServer,
-	flowCtxDone <-chan struct{},
-	doneFn func(),
-) chan error {
 	handleStreamErrCh := make(chan error, 1)
-	if flowCtxDone == nil {
-		flowCtxDone = make(<-chan struct{})
-	}
 	go func() {
-		handleStreamErrCh <- inbox.RunWithStream(ctx, stream, flowCtxDone)
+		handleStreamErrCh <- inbox.RunWithStream(ctx, stream)
 		if doneFn != nil {
 			doneFn()
 		}
@@ -146,15 +128,16 @@ func TestOutboxInbox(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	// Set up the RPC layer.
+	ctx := context.Background()
 	stopper := stop.NewStopper()
-	defer stopper.Stop(context.Background())
+	defer stopper.Stop(ctx)
 
 	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
 	_, mockServer, addr, err := execinfrapb.StartMockDistSQLServer(clock, stopper, execinfra.StaticNodeID)
 	require.NoError(t, err)
 
 	// Generate a random cancellation scenario.
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	type cancellationType int
 	const (
 		// In this scenario, no cancellation happens and all the data is pushed
@@ -198,7 +181,7 @@ func TestOutboxInbox(t *testing.T) {
 		}()
 	}
 
-	streamCtx, streamCancelFn := context.WithCancel(context.Background())
+	streamCtx, streamCancelFn := context.WithCancel(ctx)
 	client := execinfrapb.NewDistSQLClient(conn)
 	clientStream, err := client.FlowStream(streamCtx)
 	require.NoError(t, err)
@@ -253,6 +236,26 @@ func TestOutboxInbox(t *testing.T) {
 				args.BatchAccumulator = nil
 			}
 		}
+		inputMemAcc := testMemMonitor.MakeBoundAccount()
+		defer inputMemAcc.Close(ctx)
+		input := coldatatestutils.NewRandomDataOp(
+			colmem.NewAllocator(ctx, &inputMemAcc, coldata.StandardColumnFactory), rng, args,
+		)
+
+		outboxMemAcc := testMemMonitor.MakeBoundAccount()
+		defer outboxMemAcc.Close(ctx)
+		outbox, err := NewOutbox(
+			colmem.NewAllocator(ctx, &outboxMemAcc, coldata.StandardColumnFactory),
+			input, typs, nil /* getStats */, nil /* metadataSources */, nil, /* toClose */
+		)
+		require.NoError(t, err)
+
+		inboxMemAcc := testMemMonitor.MakeBoundAccount()
+		defer inboxMemAcc.Close(ctx)
+		inbox, err := NewInbox(ctx, colmem.NewAllocator(ctx, &inboxMemAcc, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0))
+		require.NoError(t, err)
+
+		streamHandlerErrCh := handleStream(serverStream.Context(), inbox, serverStream, func() { close(serverStreamNotification.Donec) })
 
 		var (
 			flowCtxCanceled uint32
@@ -264,42 +267,23 @@ func TestOutboxInbox(t *testing.T) {
 		)
 		wg.Add(1)
 		go func() {
-			flowCtx, flowCtxCancelFn := context.WithCancel(context.Background())
-			flowCtxCancel := func() {
-				atomic.StoreUint32(&flowCtxCanceled, 1)
-				flowCtxCancelFn()
-			}
-			outboxCtx, outboxCtxCancelFn := context.WithCancel(flowCtx)
-			outboxCtxCancel := func() {
-				atomic.StoreUint32(&outboxCtxCanceled, 1)
-				outboxCtxCancelFn()
-			}
-
-			inputMemAcc := testMemMonitor.MakeBoundAccount()
-			defer inputMemAcc.Close(outboxCtx)
-			input := coldatatestutils.NewRandomDataOp(
-				colmem.NewAllocator(outboxCtx, &inputMemAcc, coldata.StandardColumnFactory), rng, args,
-			)
-			outboxMemAcc := testMemMonitor.MakeBoundAccount()
-			defer outboxMemAcc.Close(outboxCtx)
-			outbox, err := NewOutbox(
-				colmem.NewAllocator(outboxCtx, &outboxMemAcc, coldata.StandardColumnFactory),
-				colexecargs.OpWithMetaInfo{Root: input}, typs, nil, /* getStats */
-			)
-			require.NoError(t, err)
-
 			// There is a bit of trickery going on here with the context
 			// management caused by the fact that we're using an internal
 			// runWithStream method rather than exported Run method. The goal is
 			// to create a context of the node on which the outbox runs and keep
 			// it different from the streamCtx. This matters in
 			// 'transportBreaks' scenario.
-			outbox.runnerCtx = outboxCtx
-			outbox.runWithStream(streamCtx, clientStream, flowCtxCancel, outboxCtxCancel)
+			var flowCtxCancelFn context.CancelFunc
+			outbox.runnerCtx, flowCtxCancelFn = context.WithCancel(ctx)
+			flowCtxCancel := func() {
+				atomic.StoreUint32(&flowCtxCanceled, 1)
+				flowCtxCancelFn()
+			}
+			outbox.runWithStream(streamCtx, clientStream, flowCtxCancel, func() { atomic.StoreUint32(&outboxCtxCanceled, 1) })
 			wg.Done()
 		}()
 
-		readerCtx, readerCancelFn := context.WithCancel(context.Background())
+		readerCtx, readerCancelFn := context.WithCancel(ctx)
 		wg.Add(1)
 		go func() {
 			if sleepBeforeCancellation {
@@ -319,30 +303,20 @@ func TestOutboxInbox(t *testing.T) {
 			wg.Done()
 		}()
 
-		inboxMemAcc := testMemMonitor.MakeBoundAccount()
-		defer inboxMemAcc.Close(readerCtx)
-		inbox, err := NewInbox(colmem.NewAllocator(readerCtx, &inboxMemAcc, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0))
-		require.NoError(t, err)
-
-		streamHandlerErrCh := handleStream(serverStream.Context(), inbox, serverStream, func() { close(serverStreamNotification.Donec) })
-
 		// Use a deselector op to verify that the Outbox gets rid of the selection
 		// vector.
 		deselectorMemAcc := testMemMonitor.MakeBoundAccount()
-		defer deselectorMemAcc.Close(readerCtx)
+		defer deselectorMemAcc.Close(ctx)
 		inputBatches := colexecutils.NewDeselectorOp(
-			colmem.NewAllocator(readerCtx, &deselectorMemAcc, coldata.StandardColumnFactory), inputBuffer, typs,
+			colmem.NewAllocator(ctx, &deselectorMemAcc, coldata.StandardColumnFactory), inputBuffer, typs,
 		)
-		inputBatches.Init(readerCtx)
+		inputBatches.Init()
 		outputBatches := colexecop.NewBatchBuffer()
 		var readerErr error
 		for {
 			var outputBatch coldata.Batch
 			if err := colexecerror.CatchVectorizedRuntimeError(func() {
-				// Note that it is ok that we call Init on every iteration - it
-				// is a noop every time except for the first one.
-				inbox.Init(readerCtx)
-				outputBatch = inbox.Next()
+				outputBatch = inbox.Next(readerCtx)
 			}); err != nil {
 				readerErr = err
 				break
@@ -357,9 +331,11 @@ func TestOutboxInbox(t *testing.T) {
 					testAllocator.PerformOperation(batchCopy.ColVecs(), func() {
 						for i := range typs {
 							batchCopy.ColVec(i).Copy(
-								coldata.SliceArgs{
-									Src:       outputBatch.ColVec(i),
-									SrcEndIdx: outputBatch.Length(),
+								coldata.CopySliceArgs{
+									SliceArgs: coldata.SliceArgs{
+										Src:       outputBatch.ColVec(i),
+										SrcEndIdx: outputBatch.Length(),
+									},
 								},
 							)
 						}
@@ -393,8 +369,8 @@ func TestOutboxInbox(t *testing.T) {
 			// If no cancellation happened, the output can be fully verified
 			// against the input.
 			for batchNum := 0; ; batchNum++ {
-				outputBatch := outputBatches.Next()
-				inputBatch := inputBatches.Next()
+				outputBatch := outputBatches.Next(ctx)
+				inputBatch := inputBatches.Next(ctx)
 				require.Equal(t, outputBatch.Length(), inputBatch.Length())
 				if outputBatch.Length() == 0 {
 					break
@@ -448,95 +424,6 @@ func TestOutboxInbox(t *testing.T) {
 	})
 }
 
-// TestInboxHostCtxCancellation verifies that the inbox-outbox pair is properly
-// shutdown if the inbox host's flow context is canceled and Inbox.Init is never
-// called.
-func TestInboxHostCtxCancellation(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-
-	// Set up the RPC layer.
-	stopper := stop.NewStopper()
-	defer stopper.Stop(context.Background())
-
-	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
-	_, mockServer, addr, err := execinfrapb.StartMockDistSQLServer(clock, stopper, execinfra.StaticNodeID)
-	require.NoError(t, err)
-
-	rng, _ := randutil.NewTestRand()
-	conn, err := grpc.Dial(addr.String(), grpc.WithInsecure())
-	require.NoError(t, err)
-	defer func() {
-		err := conn.Close() // nolint:grpcconnclose
-		require.NoError(t, err)
-	}()
-
-	// Simulate the "remote" node with a separate context.
-	outboxHostCtx, outboxHostCtxCancel := context.WithCancel(context.Background())
-	// Derive a separate context for the outbox itself (this is what is done in
-	// Outbox.Run).
-	outboxCtx, outboxCtxCancel := context.WithCancel(outboxHostCtx)
-
-	// Initiate the FlowStream RPC from the outbox.
-	client := execinfrapb.NewDistSQLClient(conn)
-	clientStream, err := client.FlowStream(outboxCtx)
-	require.NoError(t, err)
-
-	// Create and run the outbox.
-	//
-	// The input to the outbox doesn't matter, so we just create an arbitrary
-	// operator that returns a single row with no columns.
-	typs := []*types.T{}
-	outboxInput := colexecutils.NewFixedNumTuplesNoInputOp(testAllocator, 1 /* numTuples */, nil /* opToInitialize */)
-	outboxMemAcc := testMemMonitor.MakeBoundAccount()
-	defer outboxMemAcc.Close(outboxHostCtx)
-	outbox, err := NewOutbox(
-		colmem.NewAllocator(outboxHostCtx, &outboxMemAcc, coldata.StandardColumnFactory),
-		colexecargs.OpWithMetaInfo{Root: outboxInput}, typs, nil, /* getStats */
-	)
-	require.NoError(t, err)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		outbox.runWithStream(outboxCtx, clientStream, outboxHostCtxCancel, outboxCtxCancel)
-		wg.Done()
-	}()
-
-	// Create the inbox on the "local" node (simulated by a separate context).
-	inboxHostCtx, inboxHostCtxCancel := context.WithCancel(context.Background())
-	inboxMemAcc := testMemMonitor.MakeBoundAccount()
-	defer inboxMemAcc.Close(inboxHostCtx)
-	inbox, err := NewInbox(colmem.NewAllocator(inboxHostCtx, &inboxMemAcc, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0))
-	require.NoError(t, err)
-
-	// Spawn up the stream handler (a separate goroutine) for the server side
-	// of the FlowStream RPC.
-	serverStreamNotification := <-mockServer.InboundStreams
-	serverStream := serverStreamNotification.Stream
-	streamHandlerErrCh := handleStreamWithFlowCtxDone(
-		serverStream.Context(), inbox, serverStream,
-		inboxHostCtx.Done(), func() { close(serverStreamNotification.Donec) },
-	)
-
-	// Here is the meat of the test - the inbox is never initialized, and,
-	// instead, the inbox host's flow context is canceled after some delay.
-	var sleepBeforeCancellation = rng.Float64() <= 0.25
-	var sleepTime = time.Microsecond * time.Duration(rng.Intn(500))
-	wg.Add(1)
-	go func() {
-		if sleepBeforeCancellation {
-			time.Sleep(sleepTime)
-		}
-		inboxHostCtxCancel()
-		wg.Done()
-	}()
-
-	// Wait for the Outbox to return.
-	wg.Wait()
-	// Make sure the Inbox stream handler returned.
-	streamHandlerErr := <-streamHandlerErrCh
-	require.Equal(t, cancelchecker.QueryCanceledError, streamHandlerErr)
-}
-
 func TestOutboxInboxMetadataPropagation(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
@@ -556,7 +443,7 @@ func TestOutboxInboxMetadataPropagation(t *testing.T) {
 		require.NoError(t, err)
 	}()
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	// numNextsBeforeDrain is used in ExplicitDrainRequest. This number is
 	// generated now to avoid racing on rng accesses between this main goroutine
 	// and the Outbox generating random batches.
@@ -588,9 +475,9 @@ func TestOutboxInboxMetadataPropagation(t *testing.T) {
 				// Simulate the inbox flow calling Next an arbitrary amount of times
 				// (including none).
 				for i := 0; i < numNextsBeforeDrain; i++ {
-					inbox.Next()
+					inbox.Next(ctx)
 				}
-				return inbox.DrainMeta()
+				return inbox.DrainMeta(ctx)
 			},
 		},
 		{
@@ -600,12 +487,12 @@ func TestOutboxInboxMetadataPropagation(t *testing.T) {
 			numBatches: 4,
 			test: func(ctx context.Context, inbox *Inbox) []execinfrapb.ProducerMetadata {
 				for {
-					b := inbox.Next()
+					b := inbox.Next(ctx)
 					if b.Length() == 0 {
 						break
 					}
 				}
-				return inbox.DrainMeta()
+				return inbox.DrainMeta(ctx)
 			},
 		},
 		{
@@ -621,7 +508,7 @@ func TestOutboxInboxMetadataPropagation(t *testing.T) {
 				for {
 					var b coldata.Batch
 					if err := colexecerror.CatchVectorizedRuntimeError(func() {
-						b = inbox.Next()
+						b = inbox.Next(ctx)
 					}); err != nil {
 						return []execinfrapb.ProducerMetadata{{Err: err}}
 					}
@@ -662,24 +549,18 @@ func TestOutboxInboxMetadataPropagation(t *testing.T) {
 			}
 			outbox, err := NewOutbox(
 				colmem.NewAllocator(ctx, &outboxMemAcc, coldata.StandardColumnFactory),
-				colexecargs.OpWithMetaInfo{
-					Root: input,
-					MetadataSources: []colexecop.MetadataSource{
-						colexectestutils.CallbackMetadataSource{
-							DrainMetaCb: func() []execinfrapb.ProducerMetadata {
-								return expectedMetadata
-							},
+				input, typs, nil /* getStats */, []execinfrapb.MetadataSource{
+					execinfrapb.CallbackMetadataSource{
+						DrainMetaCb: func(context.Context) []execinfrapb.ProducerMetadata {
+							return expectedMetadata
 						},
 					},
-				},
-				typs,
-				nil, /* getStats */
-			)
+				}, nil /* toClose */)
 			require.NoError(t, err)
 
 			inboxMemAcc := testMemMonitor.MakeBoundAccount()
 			defer inboxMemAcc.Close(ctx)
-			inbox, err := NewInbox(colmem.NewAllocator(ctx, &inboxMemAcc, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0))
+			inbox, err := NewInbox(ctx, colmem.NewAllocator(ctx, &inboxMemAcc, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0))
 			require.NoError(t, err)
 
 			var (
@@ -699,7 +580,6 @@ func TestOutboxInboxMetadataPropagation(t *testing.T) {
 
 			streamHanderErrCh := handleStream(serverStream.Context(), inbox, serverStream, func() { close(serverStreamNotification.Donec) })
 
-			inbox.Init(ctx)
 			meta := tc.test(ctx, inbox)
 
 			wg.Wait()
@@ -756,13 +636,13 @@ func BenchmarkOutboxInbox(b *testing.B) {
 	defer outboxMemAcc.Close(ctx)
 	outbox, err := NewOutbox(
 		colmem.NewAllocator(ctx, &outboxMemAcc, coldata.StandardColumnFactory),
-		colexecargs.OpWithMetaInfo{Root: input}, typs, nil, /* getStats */
+		input, typs, nil /* getStats */, nil /* metadataSources */, nil, /* toClose */
 	)
 	require.NoError(b, err)
 
 	inboxMemAcc := testMemMonitor.MakeBoundAccount()
 	defer inboxMemAcc.Close(ctx)
-	inbox, err := NewInbox(colmem.NewAllocator(ctx, &inboxMemAcc, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0))
+	inbox, err := NewInbox(ctx, colmem.NewAllocator(ctx, &inboxMemAcc, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0))
 	require.NoError(b, err)
 
 	var wg sync.WaitGroup
@@ -774,16 +654,15 @@ func BenchmarkOutboxInbox(b *testing.B) {
 
 	streamHandlerErrCh := handleStream(serverStream.Context(), inbox, serverStream, func() { close(serverStreamNotification.Donec) })
 
-	inbox.Init(ctx)
 	b.SetBytes(8 * int64(coldata.BatchSize()))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		inbox.Next()
+		inbox.Next(ctx)
 	}
 	b.StopTimer()
 
 	// This is a way of telling the Outbox we're satisfied with the data received.
-	meta := inbox.DrainMeta()
+	meta := inbox.DrainMeta(ctx)
 	require.True(b, len(meta) == 0)
 
 	require.NoError(b, <-streamHandlerErrCh)
@@ -810,7 +689,7 @@ func TestOutboxStreamIDPropagation(t *testing.T) {
 	var inTags *logtags.Buffer
 
 	nextDone := make(chan struct{})
-	input := &colexecop.CallbackOperator{NextCb: func() coldata.Batch {
+	input := &colexecop.CallbackOperator{NextCb: func(ctx context.Context) coldata.Batch {
 		b := testAllocator.NewMemBatchWithFixedCapacity(typs, 0)
 		inTags = logtags.FromContext(ctx)
 		nextDone <- struct{}{}
@@ -821,7 +700,7 @@ func TestOutboxStreamIDPropagation(t *testing.T) {
 	defer outboxMemAcc.Close(ctx)
 	outbox, err := NewOutbox(
 		colmem.NewAllocator(ctx, &outboxMemAcc, coldata.StandardColumnFactory),
-		colexecargs.OpWithMetaInfo{Root: input}, typs, nil, /* getStats */
+		input, typs, nil /* getStats */, nil /* metadataSources */, nil, /* toClose */
 	)
 	require.NoError(t, err)
 
@@ -862,20 +741,20 @@ func TestInboxCtxStreamIDTagging(t *testing.T) {
 	testCases := []struct {
 		name string
 		// test is the body of the test to be run.
-		test func(*Inbox)
+		test func(context.Context, *Inbox)
 	}{
 		{
 			// CtxTaggedInNext verifies that Next adds StreamID to the Context in maybeInit.
 			name: "CtxTaggedInNext",
-			test: func(inbox *Inbox) {
-				inbox.Next()
+			test: func(ctx context.Context, inbox *Inbox) {
+				inbox.Next(ctx)
 			},
 		},
 		{
 			// CtxTaggedInDrainMeta verifies that DrainMeta adds StreamID to the Context in maybeInit.
 			name: "CtxTaggedInDrainMeta",
-			test: func(inbox *Inbox) {
-				inbox.DrainMeta()
+			test: func(ctx context.Context, inbox *Inbox) {
+				inbox.DrainMeta(ctx)
 			},
 		},
 	}
@@ -887,7 +766,7 @@ func TestInboxCtxStreamIDTagging(t *testing.T) {
 
 			typs := []*types.T{types.Int}
 
-			inbox, err := NewInbox(testAllocator, typs, streamID)
+			inbox, err := NewInbox(ctx, testAllocator, typs, streamID)
 			require.NoError(t, err)
 
 			ctxExtract := make(chan struct{})
@@ -903,8 +782,7 @@ func TestInboxCtxStreamIDTagging(t *testing.T) {
 
 			inboxTested := make(chan struct{})
 			go func() {
-				inbox.Init(ctx)
-				tc.test(inbox)
+				tc.test(ctx, inbox)
 				inboxTested <- struct{}{}
 			}()
 

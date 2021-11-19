@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/optgen/lang"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/ordering"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -78,7 +77,7 @@ func Build(catalog cat.Catalog, factory *norm.Factory, input string) (_ opt.Expr
 			if e, ok := r.(exprGenErr); ok {
 				err = e.error
 			} else {
-				err = r.(error)
+				panic(r)
 			}
 		}
 	}()
@@ -293,7 +292,7 @@ func (eg *exprGen) castToDesiredType(arg interface{}, desiredType reflect.Type) 
 		}
 
 		// String to OrderingChoice.
-		if desiredType == reflect.TypeOf(props.OrderingChoice{}) {
+		if desiredType == reflect.TypeOf(physical.OrderingChoice{}) {
 			return eg.OrderingChoice(str)
 		}
 

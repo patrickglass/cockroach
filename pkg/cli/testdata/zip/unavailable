@@ -30,9 +30,6 @@ debug zip --concurrency=1 --cpu-profile-duration=0 /dev/null --timeout=.5s
 [cluster] retrieving SQL data for crdb_internal.cluster_transactions... writing output: debug/crdb_internal.cluster_transactions.txt...
 [cluster] retrieving SQL data for crdb_internal.cluster_transactions: last request failed: pq: query execution canceled due to statement timeout
 [cluster] retrieving SQL data for crdb_internal.cluster_transactions: creating error output: debug/crdb_internal.cluster_transactions.txt.err.txt... done
-[cluster] retrieving SQL data for crdb_internal.default_privileges... writing output: debug/crdb_internal.default_privileges.txt...
-[cluster] retrieving SQL data for crdb_internal.default_privileges: last request failed: pq: query execution canceled due to statement timeout
-[cluster] retrieving SQL data for crdb_internal.default_privileges: creating error output: debug/crdb_internal.default_privileges.txt.err.txt... done
 [cluster] retrieving SQL data for crdb_internal.jobs... writing output: debug/crdb_internal.jobs.txt...
 [cluster] retrieving SQL data for crdb_internal.jobs: last request failed: pq: query execution canceled due to statement timeout
 [cluster] retrieving SQL data for crdb_internal.jobs: creating error output: debug/crdb_internal.jobs.txt.err.txt... done
@@ -45,6 +42,9 @@ debug zip --concurrency=1 --cpu-profile-duration=0 /dev/null --timeout=.5s
 [cluster] retrieving SQL data for system.namespace... writing output: debug/system.namespace.txt...
 [cluster] retrieving SQL data for system.namespace: last request failed: pq: query execution canceled due to statement timeout
 [cluster] retrieving SQL data for system.namespace: creating error output: debug/system.namespace.txt.err.txt... done
+[cluster] retrieving SQL data for system.namespace2... writing output: debug/system.namespace2.txt...
+[cluster] retrieving SQL data for system.namespace2: last request failed: pq: query execution canceled due to statement timeout
+[cluster] retrieving SQL data for system.namespace2: creating error output: debug/system.namespace2.txt.err.txt... done
 [cluster] retrieving SQL data for system.scheduled_jobs... writing output: debug/system.scheduled_jobs.txt...
 [cluster] retrieving SQL data for system.scheduled_jobs: last request failed: pq: query execution canceled due to statement timeout
 [cluster] retrieving SQL data for system.scheduled_jobs: creating error output: debug/system.scheduled_jobs.txt.err.txt... done
@@ -63,9 +63,6 @@ debug zip --concurrency=1 --cpu-profile-duration=0 /dev/null --timeout=.5s
 [cluster] retrieving SQL data for crdb_internal.kv_store_status... writing output: debug/crdb_internal.kv_store_status.txt...
 [cluster] retrieving SQL data for crdb_internal.kv_store_status: last request failed: pq: query execution canceled due to statement timeout
 [cluster] retrieving SQL data for crdb_internal.kv_store_status: creating error output: debug/crdb_internal.kv_store_status.txt.err.txt... done
-[cluster] retrieving SQL data for crdb_internal.regions... writing output: debug/crdb_internal.regions.txt...
-[cluster] retrieving SQL data for crdb_internal.regions: last request failed: pq: query execution canceled due to statement timeout
-[cluster] retrieving SQL data for crdb_internal.regions: creating error output: debug/crdb_internal.regions.txt.err.txt... done
 [cluster] retrieving SQL data for crdb_internal.schema_changes... writing output: debug/crdb_internal.schema_changes.txt...
 [cluster] retrieving SQL data for crdb_internal.schema_changes: last request failed: pq: query execution canceled due to statement timeout
 [cluster] retrieving SQL data for crdb_internal.schema_changes: creating error output: debug/crdb_internal.schema_changes.txt.err.txt... done
@@ -78,9 +75,6 @@ debug zip --concurrency=1 --cpu-profile-duration=0 /dev/null --timeout=.5s
 [cluster] retrieving SQL data for crdb_internal.invalid_objects... writing output: debug/crdb_internal.invalid_objects.txt...
 [cluster] retrieving SQL data for crdb_internal.invalid_objects: last request failed: pq: query execution canceled due to statement timeout
 [cluster] retrieving SQL data for crdb_internal.invalid_objects: creating error output: debug/crdb_internal.invalid_objects.txt.err.txt... done
-[cluster] retrieving SQL data for crdb_internal.index_usage_statistics... writing output: debug/crdb_internal.index_usage_statistics.txt...
-[cluster] retrieving SQL data for crdb_internal.index_usage_statistics: last request failed: pq: query execution canceled due to statement timeout
-[cluster] retrieving SQL data for crdb_internal.index_usage_statistics: creating error output: debug/crdb_internal.index_usage_statistics.txt.err.txt... done
 [cluster] requesting nodes... received response...
 [cluster] requesting nodes: last request failed: operation "[cluster] requesting nodes" timed out after 500ms: rpc error: ...
 [cluster] requesting nodes: creating error output: debug/nodes.json.err.txt... done
@@ -109,6 +103,7 @@ debug zip --concurrency=1 --cpu-profile-duration=0 /dev/null --timeout=.5s
 [node 1] requesting data for debug/nodes/1/gossip... received response... converting to JSON... writing binary output: debug/nodes/1/gossip.json... done
 [node 1] requesting data for debug/nodes/1/enginestats... received response... converting to JSON... writing binary output: debug/nodes/1/enginestats.json... done
 [node 1] requesting stacks... received response... writing binary output: debug/nodes/1/stacks.txt... done
+[node 1] requesting threads... received response... writing binary output: debug/nodes/1/threads.txt... done
 [node 1] requesting heap profile... received response... writing binary output: debug/nodes/1/heap.pprof... done
 [node 1] requesting heap file list... received response...
 [node 1] requesting heap file list: last request failed: rpc error: ...
@@ -120,7 +115,7 @@ debug zip --concurrency=1 --cpu-profile-duration=0 /dev/null --timeout=.5s
 [node 1] 1 log file ...
 [node 1] [log file ...
 [node 1] requesting ranges... received response... done
-[node 1] 42 ranges found
+[node 1] 36 ranges found
 [node 1] writing range 1... converting to JSON... writing binary output: debug/nodes/1/ranges/1.json... done
 [node 1] writing range 2... converting to JSON... writing binary output: debug/nodes/1/ranges/2.json... done
 [node 1] writing range 3... converting to JSON... writing binary output: debug/nodes/1/ranges/3.json... done
@@ -157,11 +152,5 @@ debug zip --concurrency=1 --cpu-profile-duration=0 /dev/null --timeout=.5s
 [node 1] writing range 34... converting to JSON... writing binary output: debug/nodes/1/ranges/34.json... done
 [node 1] writing range 35... converting to JSON... writing binary output: debug/nodes/1/ranges/35.json... done
 [node 1] writing range 36... converting to JSON... writing binary output: debug/nodes/1/ranges/36.json... done
-[node 1] writing range 37... converting to JSON... writing binary output: debug/nodes/1/ranges/37.json... done
-[node 1] writing range 38... converting to JSON... writing binary output: debug/nodes/1/ranges/38.json... done
-[node 1] writing range 39... converting to JSON... writing binary output: debug/nodes/1/ranges/39.json... done
-[node 1] writing range 40... converting to JSON... writing binary output: debug/nodes/1/ranges/40.json... done
-[node 1] writing range 41... converting to JSON... writing binary output: debug/nodes/1/ranges/41.json... done
-[node 1] writing range 42... converting to JSON... writing binary output: debug/nodes/1/ranges/42.json... done
 [cluster] pprof summary script... writing binary output: debug/pprof-summary.sh... done
 [cluster] hot range summary script... writing binary output: debug/hot-ranges.sh... done

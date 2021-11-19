@@ -18,16 +18,14 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
+	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -51,8 +49,8 @@ func TestMaybeRefreshStats(t *testing.T) {
 	evalCtx := tree.NewTestingEvalContext(st)
 	defer evalCtx.Stop(ctx)
 
-	AutomaticStatisticsClusterMode.Override(ctx, &st.SV, false)
-	AutomaticStatisticsMinStaleRows.Override(ctx, &st.SV, 5)
+	AutomaticStatisticsClusterMode.Override(&st.SV, false)
+	AutomaticStatisticsMinStaleRows.Override(&st.SV, 5)
 
 	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
 	sqlRun.Exec(t,
@@ -66,17 +64,18 @@ func TestMaybeRefreshStats(t *testing.T) {
 	cache := NewTableStatisticsCache(
 		ctx,
 		10, /* cacheSize */
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		kvDB,
 		executor,
 		keys.SystemSQLCodec,
+		s.LeaseManager().(*lease.Manager),
 		s.ClusterSettings(),
 		s.RangeFeedFactory().(*rangefeed.Factory),
-		s.CollectionFactory().(*descs.CollectionFactory),
 	)
 	refresher := MakeRefresher(st, executor, cache, time.Microsecond /* asOfTime */)
 
 	// There should not be any stats yet.
-	if err := checkStatsCount(ctx, cache, descA, 0 /* expected */); err != nil {
+	if err := checkStatsCount(ctx, cache, descA.GetID(), 0 /* expected */); err != nil {
 		t.Fatal(err)
 	}
 
@@ -85,7 +84,7 @@ func TestMaybeRefreshStats(t *testing.T) {
 	refresher.maybeRefreshStats(
 		ctx, s.Stopper(), descA.GetID(), 0 /* rowsAffected */, time.Microsecond, /* asOf */
 	)
-	if err := checkStatsCount(ctx, cache, descA, 1 /* expected */); err != nil {
+	if err := checkStatsCount(ctx, cache, descA.GetID(), 1 /* expected */); err != nil {
 		t.Fatal(err)
 	}
 
@@ -94,7 +93,7 @@ func TestMaybeRefreshStats(t *testing.T) {
 	refresher.maybeRefreshStats(
 		ctx, s.Stopper(), descA.GetID(), 0 /* rowsAffected */, time.Microsecond, /* asOf */
 	)
-	if err := checkStatsCount(ctx, cache, descA, 1 /* expected */); err != nil {
+	if err := checkStatsCount(ctx, cache, descA.GetID(), 1 /* expected */); err != nil {
 		t.Fatal(err)
 	}
 
@@ -103,7 +102,7 @@ func TestMaybeRefreshStats(t *testing.T) {
 	refresher.maybeRefreshStats(
 		ctx, s.Stopper(), descA.GetID(), 10 /* rowsAffected */, time.Microsecond, /* asOf */
 	)
-	if err := checkStatsCount(ctx, cache, descA, 2 /* expected */); err != nil {
+	if err := checkStatsCount(ctx, cache, descA.GetID(), 2 /* expected */); err != nil {
 		t.Fatal(err)
 	}
 
@@ -133,7 +132,7 @@ func TestAverageRefreshTime(t *testing.T) {
 	evalCtx := tree.NewTestingEvalContext(st)
 	defer evalCtx.Stop(ctx)
 
-	AutomaticStatisticsClusterMode.Override(ctx, &st.SV, false)
+	AutomaticStatisticsClusterMode.Override(&st.SV, false)
 
 	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
 	sqlRun.Exec(t,
@@ -142,16 +141,17 @@ func TestAverageRefreshTime(t *testing.T) {
 		INSERT INTO t.a VALUES (1);`)
 
 	executor := s.InternalExecutor().(sqlutil.InternalExecutor)
-	table := catalogkv.TestingGetTableDescriptor(s.DB(), keys.SystemSQLCodec, "t", "a")
+	tableID := catalogkv.TestingGetTableDescriptor(s.DB(), keys.SystemSQLCodec, "t", "a").GetID()
 	cache := NewTableStatisticsCache(
 		ctx,
 		10, /* cacheSize */
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		kvDB,
 		executor,
 		keys.SystemSQLCodec,
+		s.LeaseManager().(*lease.Manager),
 		s.ClusterSettings(),
 		s.RangeFeedFactory().(*rangefeed.Factory),
-		s.CollectionFactory().(*descs.CollectionFactory),
 	)
 	refresher := MakeRefresher(st, executor, cache, time.Microsecond /* asOfTime */)
 
@@ -161,8 +161,9 @@ func TestAverageRefreshTime(t *testing.T) {
 	curTime := timeutil.Now()
 
 	checkAverageRefreshTime := func(expected time.Duration) error {
+		cache.RefreshTableStats(ctx, tableID)
 		return testutils.SucceedsSoonError(func() error {
-			stats, err := cache.GetTableStats(ctx, table)
+			stats, err := cache.GetTableStats(ctx, tableID)
 			if err != nil {
 				return err
 			}
@@ -177,8 +178,9 @@ func TestAverageRefreshTime(t *testing.T) {
 	// Checks that the most recent statistic was created less than (greater than)
 	// expectedAge time ago if lessThan is true (false).
 	checkMostRecentStat := func(expectedAge time.Duration, lessThan bool) error {
+		cache.RefreshTableStats(ctx, tableID)
 		return testutils.SucceedsSoonError(func() error {
-			stats, err := cache.GetTableStats(ctx, table)
+			stats, err := cache.GetTableStats(ctx, tableID)
 			if err != nil {
 				return err
 			}
@@ -218,17 +220,15 @@ func TestAverageRefreshTime(t *testing.T) {
 					  "createdAt",
 					  "rowCount",
 					  "distinctCount",
-					  "nullCount",
-					  "avgSize"
-				  ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-			table.GetID(),
+					  "nullCount"
+				  ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			tableID,
 			name,
 			columnIDs,
 			createdAt,
 			1, /* rowCount */
 			1, /* distinctCount */
 			0, /* nullCount */
-			4, /* avgSize */
 		)
 		return err
 	}
@@ -256,7 +256,7 @@ func TestAverageRefreshTime(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkStatsCount(ctx, cache, table, 10 /* expected */); err != nil {
+	if err := checkStatsCount(ctx, cache, tableID, 10 /* expected */); err != nil {
 		t.Fatal(err)
 	}
 
@@ -280,7 +280,7 @@ func TestAverageRefreshTime(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if err := insertStat(txn, jobspb.AutoStatsName, columnIDsVal, createdAt); err != nil {
+			if err := insertStat(txn, AutoStatsName, columnIDsVal, createdAt); err != nil {
 				return err
 			}
 		}
@@ -288,7 +288,7 @@ func TestAverageRefreshTime(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkStatsCount(ctx, cache, table, 20 /* expected */); err != nil {
+	if err := checkStatsCount(ctx, cache, tableID, 20 /* expected */); err != nil {
 		t.Fatal(err)
 	}
 
@@ -311,9 +311,9 @@ func TestAverageRefreshTime(t *testing.T) {
 	// the statistics on table t. With rowsAffected=0, the probability of refresh
 	// is 0.
 	refresher.maybeRefreshStats(
-		ctx, s.Stopper(), table.GetID(), 0 /* rowsAffected */, time.Microsecond, /* asOf */
+		ctx, s.Stopper(), tableID, 0 /* rowsAffected */, time.Microsecond, /* asOf */
 	)
-	if err := checkStatsCount(ctx, cache, table, 20 /* expected */); err != nil {
+	if err := checkStatsCount(ctx, cache, tableID, 20 /* expected */); err != nil {
 		t.Fatal(err)
 	}
 
@@ -331,7 +331,7 @@ func TestAverageRefreshTime(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if err := insertStat(txn, jobspb.AutoStatsName, columnIDsVal, createdAt); err != nil {
+			if err := insertStat(txn, AutoStatsName, columnIDsVal, createdAt); err != nil {
 				return err
 			}
 		}
@@ -339,7 +339,7 @@ func TestAverageRefreshTime(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkStatsCount(ctx, cache, table, 30 /* expected */); err != nil {
+	if err := checkStatsCount(ctx, cache, tableID, 30 /* expected */); err != nil {
 		t.Fatal(err)
 	}
 
@@ -361,9 +361,9 @@ func TestAverageRefreshTime(t *testing.T) {
 	// remain (5 from column k and 10 from column v), since the old stats on k
 	// were deleted.
 	refresher.maybeRefreshStats(
-		ctx, s.Stopper(), table.GetID(), 0 /* rowsAffected */, time.Microsecond, /* asOf */
+		ctx, s.Stopper(), tableID, 0 /* rowsAffected */, time.Microsecond, /* asOf */
 	)
-	if err := checkStatsCount(ctx, cache, table, 15 /* expected */); err != nil {
+	if err := checkStatsCount(ctx, cache, tableID, 15 /* expected */); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -377,7 +377,7 @@ func TestAutoStatsReadOnlyTables(t *testing.T) {
 	defer s.Stopper().Stop(ctx)
 
 	st := cluster.MakeTestingClusterSettings()
-	AutomaticStatisticsClusterMode.Override(ctx, &st.SV, false)
+	AutomaticStatisticsClusterMode.Override(&st.SV, false)
 	evalCtx := tree.NewTestingEvalContext(st)
 	defer evalCtx.Stop(ctx)
 
@@ -395,16 +395,17 @@ func TestAutoStatsReadOnlyTables(t *testing.T) {
 	cache := NewTableStatisticsCache(
 		ctx,
 		10, /* cacheSize */
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		kvDB,
 		executor,
 		keys.SystemSQLCodec,
+		s.LeaseManager().(*lease.Manager),
 		s.ClusterSettings(),
 		s.RangeFeedFactory().(*rangefeed.Factory),
-		s.CollectionFactory().(*descs.CollectionFactory),
 	)
 	refresher := MakeRefresher(st, executor, cache, time.Microsecond /* asOfTime */)
 
-	AutomaticStatisticsClusterMode.Override(ctx, &st.SV, true)
+	AutomaticStatisticsClusterMode.Override(&st.SV, true)
 
 	if err := refresher.Start(
 		ctx, s.Stopper(), time.Millisecond, /* refreshInterval */
@@ -443,12 +444,13 @@ func TestNoRetryOnFailure(t *testing.T) {
 	cache := NewTableStatisticsCache(
 		ctx,
 		10, /* cacheSize */
+		gossip.MakeOptionalGossip(s.GossipI().(*gossip.Gossip)),
 		kvDB,
 		executor,
 		keys.SystemSQLCodec,
+		s.LeaseManager().(*lease.Manager),
 		s.ClusterSettings(),
 		s.RangeFeedFactory().(*rangefeed.Factory),
-		s.CollectionFactory().(*descs.CollectionFactory),
 	)
 	r := MakeRefresher(st, executor, cache, time.Microsecond /* asOfTime */)
 
@@ -471,19 +473,16 @@ func TestMutationsChannel(t *testing.T) {
 	evalCtx := tree.NewTestingEvalContext(st)
 	defer evalCtx.Stop(ctx)
 
-	AutomaticStatisticsClusterMode.Override(ctx, &st.SV, true)
+	AutomaticStatisticsClusterMode.Override(&st.SV, true)
 	r := Refresher{
 		st:        st,
 		mutations: make(chan mutation, refreshChanBufferLen),
 	}
 
-	tbl := descpb.TableDescriptor{ID: 53, ParentID: 52, Name: "foo"}
-	tableDesc := tabledesc.NewBuilder(&tbl).BuildImmutableTable()
-
 	// Test that the mutations channel doesn't block even when we add 10 more
 	// items than can fit in the buffer.
 	for i := 0; i < refreshChanBufferLen+10; i++ {
-		r.NotifyMutation(tableDesc, 5 /* rowsAffected */)
+		r.NotifyMutation(descpb.ID(53), 5 /* rowsAffected */)
 	}
 
 	if expected, actual := refreshChanBufferLen, len(r.mutations); expected != actual {
@@ -500,7 +499,7 @@ func TestDefaultColumns(t *testing.T) {
 	defer s.Stopper().Stop(ctx)
 
 	st := cluster.MakeTestingClusterSettings()
-	AutomaticStatisticsClusterMode.Override(ctx, &st.SV, false)
+	AutomaticStatisticsClusterMode.Override(&st.SV, false)
 	evalCtx := tree.NewTestingEvalContext(st)
 	defer evalCtx.Stop(ctx)
 
@@ -527,10 +526,11 @@ func TestDefaultColumns(t *testing.T) {
 }
 
 func checkStatsCount(
-	ctx context.Context, cache *TableStatisticsCache, table catalog.TableDescriptor, expected int,
+	ctx context.Context, cache *TableStatisticsCache, tableID descpb.ID, expected int,
 ) error {
+	cache.RefreshTableStats(ctx, tableID)
 	return testutils.SucceedsSoonError(func() error {
-		stats, err := cache.GetTableStats(ctx, table)
+		stats, err := cache.GetTableStats(ctx, tableID)
 		if err != nil {
 			return err
 		}

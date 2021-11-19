@@ -78,20 +78,6 @@ var vecToDatumConversionTmpls = map[types.Family]string{
 	types.BytesFamily: `// Note that there is no need for a copy since DBytes uses a string
 						// as underlying storage, which will perform the copy for us.
 						%[1]s := %[3]s.NewDBytes(tree.DBytes(%[2]s))`,
-	types.JsonFamily: `
-            // The following operation deliberately copies the input JSON
-            // bytes, since FromEncoding is lazy and keeps a handle on the bytes
-            // it is passed in.
-            _bytes, _err := json.EncodeJSON(nil, %[2]s)
-            if _err != nil {
-                colexecerror.ExpectedError(_err)
-            }
-            var _j json.JSON
-            _j, _err = json.FromEncoding(_bytes)
-            if _err != nil {
-                colexecerror.ExpectedError(_err)
-            }
-            %[1]s := %[3]s.NewDJSON(tree.DJSON{JSON: _j})`,
 	types.UuidFamily: ` // Note that there is no need for a copy because uuid.FromBytes
 						// will perform a copy.
 						id, err := uuid.FromBytes(%[2]s)
@@ -102,18 +88,28 @@ var vecToDatumConversionTmpls = map[types.Family]string{
 	types.TimestampFamily:                `%[1]s := %[3]s.NewDTimestamp(tree.DTimestamp{Time: %[2]s})`,
 	types.TimestampTZFamily:              `%[1]s := %[3]s.NewDTimestampTZ(tree.DTimestampTZ{Time: %[2]s})`,
 	types.IntervalFamily:                 `%[1]s := %[3]s.NewDInterval(tree.DInterval{Duration: %[2]s})`,
-	typeconv.DatumVecCanonicalTypeFamily: `%[1]s := %[2]s.(tree.Datum)`,
+	typeconv.DatumVecCanonicalTypeFamily: `%[1]s := %[2]s.(*coldataext.Datum).Datum`,
 }
 
 const vecToDatumTmpl = "pkg/sql/colconv/vec_to_datum_tmpl.go"
 
 func genVecToDatum(inputFileContents string, wr io.Writer) error {
 	r := strings.NewReplacer(
+		"_HAS_NULLS", "$.HasNulls",
+		"_HAS_SEL", "$.HasSel",
+		"_DESELECT", "$.Deselect",
 		"_TYPE_FAMILY", "{{.TypeFamily}}",
 		"_TYPE_WIDTH", typeWidthReplacement,
 		"_VEC_METHOD", "{{.VecMethod}}",
 	)
 	s := r.Replace(inputFileContents)
+
+	setDestIdx := makeFunctionRegex("_SET_DEST_IDX", 5)
+	s = setDestIdx.ReplaceAllString(s, `{{template "setDestIdx" buildDict "HasSel" $4 "Deselect" $5}}`)
+	setSrcIdx := makeFunctionRegex("_SET_SRC_IDX", 4)
+	s = setSrcIdx.ReplaceAllString(s, `{{template "setSrcIdx" buildDict "HasSel" $4}}`)
+	vecToDatum := makeFunctionRegex("_VEC_TO_DATUM", 8)
+	s = vecToDatum.ReplaceAllString(s, `{{template "vecToDatum" buildDict "Global" . "HasNulls" $6 "HasSel" $7 "Deselect" $8}}`)
 
 	assignConvertedRe := makeFunctionRegex("_ASSIGN_CONVERTED", 3)
 	s = assignConvertedRe.ReplaceAllString(s, makeTemplateFunctionCall("AssignConverted", 3))
@@ -128,7 +124,7 @@ func genVecToDatum(inputFileContents string, wr io.Writer) error {
 	// the template explicitly, so it is omitted from this slice.
 	optimizedTypeFamilies := []types.Family{
 		types.BoolFamily, types.IntFamily, types.FloatFamily, types.DecimalFamily,
-		types.DateFamily, types.BytesFamily, types.JsonFamily, types.UuidFamily,
+		types.DateFamily, types.BytesFamily, types.UuidFamily,
 		types.TimestampFamily, types.TimestampTZFamily, types.IntervalFamily,
 	}
 	for _, typeFamily := range optimizedTypeFamilies {

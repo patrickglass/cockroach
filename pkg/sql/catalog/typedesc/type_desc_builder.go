@@ -14,9 +14,7 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catprivilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 )
 
@@ -24,16 +22,13 @@ import (
 // for type descriptors.
 type TypeDescriptorBuilder interface {
 	catalog.DescriptorBuilder
-	BuildImmutableType() catalog.TypeDescriptor
+	BuildImmutableType() *Immutable
 	BuildExistingMutableType() *Mutable
 	BuildCreatedMutableType() *Mutable
 }
 
 type typeDescriptorBuilder struct {
-	original      *descpb.TypeDescriptor
-	maybeModified *descpb.TypeDescriptor
-
-	changed bool
+	original *descpb.TypeDescriptor
 }
 
 var _ TypeDescriptorBuilder = &typeDescriptorBuilder{}
@@ -56,14 +51,6 @@ func (tdb *typeDescriptorBuilder) DescriptorType() catalog.DescriptorType {
 func (tdb *typeDescriptorBuilder) RunPostDeserializationChanges(
 	_ context.Context, _ catalog.DescGetter,
 ) error {
-	tdb.maybeModified = protoutil.Clone(tdb.original).(*descpb.TypeDescriptor)
-	tdb.changed = catprivilege.MaybeFixPrivileges(
-		&tdb.maybeModified.Privileges,
-		tdb.maybeModified.GetParentID(),
-		tdb.maybeModified.GetParentSchemaID(),
-		privilege.Type,
-		tdb.maybeModified.GetName(),
-	)
 	return nil
 }
 
@@ -73,12 +60,8 @@ func (tdb *typeDescriptorBuilder) BuildImmutable() catalog.Descriptor {
 }
 
 // BuildImmutableType returns an immutable type descriptor.
-func (tdb *typeDescriptorBuilder) BuildImmutableType() catalog.TypeDescriptor {
-	desc := tdb.maybeModified
-	if desc == nil {
-		desc = tdb.original
-	}
-	imm := makeImmutable(desc)
+func (tdb *typeDescriptorBuilder) BuildImmutableType() *Immutable {
+	imm := makeImmutable(tdb.original)
 	return &imm
 }
 
@@ -90,15 +73,8 @@ func (tdb *typeDescriptorBuilder) BuildExistingMutable() catalog.MutableDescript
 // BuildExistingMutableType returns a mutable descriptor for a type
 // which already exists.
 func (tdb *typeDescriptorBuilder) BuildExistingMutableType() *Mutable {
-	if tdb.maybeModified == nil {
-		tdb.maybeModified = protoutil.Clone(tdb.original).(*descpb.TypeDescriptor)
-	}
-	clusterVersion := makeImmutable(tdb.original)
-	return &Mutable{
-		immutable:      makeImmutable(tdb.maybeModified),
-		ClusterVersion: &clusterVersion,
-		changed:        tdb.changed,
-	}
+	clusterVersion := makeImmutable(protoutil.Clone(tdb.original).(*descpb.TypeDescriptor))
+	return &Mutable{Immutable: makeImmutable(tdb.original), ClusterVersion: &clusterVersion}
 }
 
 // BuildCreatedMutable implements the catalog.DescriptorBuilder interface.
@@ -109,14 +85,11 @@ func (tdb *typeDescriptorBuilder) BuildCreatedMutable() catalog.MutableDescripto
 // BuildCreatedMutableType returns a mutable descriptor for a type
 // which is in the process of being created.
 func (tdb *typeDescriptorBuilder) BuildCreatedMutableType() *Mutable {
-	return &Mutable{
-		immutable: makeImmutable(tdb.original),
-		changed:   tdb.changed,
-	}
+	return &Mutable{Immutable: makeImmutable(tdb.original)}
 }
 
-func makeImmutable(desc *descpb.TypeDescriptor) immutable {
-	immutDesc := immutable{TypeDescriptor: *desc}
+func makeImmutable(desc *descpb.TypeDescriptor) Immutable {
+	immutDesc := Immutable{TypeDescriptor: *desc}
 
 	// Initialize metadata specific to the TypeDescriptor kind.
 	switch immutDesc.Kind {

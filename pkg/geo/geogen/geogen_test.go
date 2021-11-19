@@ -24,11 +24,11 @@ import (
 const numRuns = 25
 
 func TestRandomValidLinearRingCoords(t *testing.T) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	for run := 0; run < numRuns; run++ {
 		t.Run(strconv.Itoa(run), func(t *testing.T) {
-			coords := RandomValidLinearRingCoords(rng, 10, MakeRandomGeomBoundsForGeography(), geom.NoLayout)
+			coords := RandomValidLinearRingCoords(rng, 10, -180, 180, -90, 90)
 			require.Len(t, coords, 10+1)
 			for _, coord := range coords {
 				require.True(t, -180 <= coord.X() && coord.X() <= 180)
@@ -40,15 +40,13 @@ func TestRandomValidLinearRingCoords(t *testing.T) {
 }
 
 func TestRandomGeomT(t *testing.T) {
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	for run := 0; run < numRuns; run++ {
 		t.Run(strconv.Itoa(run), func(t *testing.T) {
-			g := RandomGeomT(rng, MakeRandomGeomBoundsForGeography(), geopb.SRID(run), geom.NoLayout)
+			g := RandomGeomT(rng, -180, 180, -90, 90, geopb.SRID(run))
 			require.Equal(t, run, g.SRID())
-			require.True(t, g.Layout() != geom.NoLayout)
 			if gc, ok := g.(*geom.GeometryCollection); ok {
 				for gcIdx := 0; gcIdx < gc.NumGeoms(); gcIdx++ {
-					require.True(t, gc.Geom(gcIdx).Layout() != geom.NoLayout)
 					coords := gc.Geom(gcIdx).FlatCoords()
 					for i := 0; i < len(coords); i += g.Stride() {
 						x := coords[i]

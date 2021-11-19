@@ -67,11 +67,8 @@ func (e *Engine) Get(key roachpb.Key, ts hlc.Timestamp) roachpb.Value {
 	if !mvccKey.Key.Equal(key) {
 		return roachpb.Value{}
 	}
-	if len(iter.Value()) == 0 {
-		return roachpb.Value{}
-	}
 	var valCopy []byte
-	e.b, valCopy = e.b.Copy(iter.Value(), 0 /* extraCap */)
+	valCopy, e.b = e.b.Copy(iter.Value(), 0 /* extraCap */)
 	return roachpb.Value{RawBytes: valCopy, Timestamp: mvccKey.Timestamp}
 }
 
@@ -79,14 +76,6 @@ func (e *Engine) Get(key roachpb.Key, ts hlc.Timestamp) roachpb.Value {
 // Put again, it overwrites the previous value.
 func (e *Engine) Put(key storage.MVCCKey, value []byte) {
 	if err := e.kvs.Set(storage.EncodeKey(key), value, nil); err != nil {
-		panic(err)
-	}
-}
-
-// Delete writes a tombstone value for a given key/timestamp. This is
-// equivalent to a Put with an empty value.
-func (e *Engine) Delete(key storage.MVCCKey) {
-	if err := e.kvs.Set(storage.EncodeKey(key), nil, nil); err != nil {
 		panic(err)
 	}
 }
@@ -102,8 +91,8 @@ func (e *Engine) Iterate(fn func(key storage.MVCCKey, value []byte, err error)) 
 			continue
 		}
 		var keyCopy, valCopy []byte
-		e.b, keyCopy = e.b.Copy(iter.Key(), 0 /* extraCap */)
-		e.b, valCopy = e.b.Copy(iter.Value(), 0 /* extraCap */)
+		keyCopy, e.b = e.b.Copy(iter.Key(), 0 /* extraCap */)
+		valCopy, e.b = e.b.Copy(iter.Value(), 0 /* extraCap */)
 		key, err := storage.DecodeMVCCKey(keyCopy)
 		if err != nil {
 			fn(storage.MVCCKey{}, nil, err)

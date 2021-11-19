@@ -56,16 +56,14 @@ type Interceptor interface {
 }
 
 func (l *loggingT) newInterceptorSinkInfo() *sinkInfo {
-	si := &sinkInfo{
+	return &sinkInfo{
 		sink:       &l.interceptor,
+		threshold:  severity.INFO, // all events
 		editor:     getEditor(WithMarkedSensitiveData),
 		formatter:  formatInterceptor{},
 		redact:     false, // do not redact sensitive information
 		redactable: true,  // keep redaction markers
 	}
-	// Ensure all events are collected across all channels.
-	si.threshold.setAll(severity.INFO)
-	return si
 }
 
 // formatInterceptor converts the raw logpb.Entry to JSON.
@@ -119,13 +117,17 @@ func (i *interceptorSink) active() bool {
 	return atomic.LoadUint32(&i.activeCount) > 0
 }
 
-func (i *interceptorSink) output(b []byte, _ sinkOutputOptions) error {
+func (i *interceptorSink) output(_ bool, b []byte) error {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	for _, fn := range i.mu.fns {
 		fn.Intercept(b)
 	}
 	return nil
+}
+
+func (i *interceptorSink) emergencyOutput(b []byte) {
+	_ = i.output(false, b)
 }
 
 func (i *interceptorSink) attachHints(stacks []byte) []byte { return stacks }

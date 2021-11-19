@@ -10,6 +10,7 @@
 package colexecbase
 
 import (
+	"context"
 	"time"
 
 	"github.com/cockroachdb/apd/v2"
@@ -20,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/errors"
 )
 
@@ -29,7 +29,6 @@ import (
 var (
 	_ apd.Context
 	_ duration.Duration
-	_ json.JSON
 )
 
 // NewConstOp creates a new operator that produces a constant value constVal of
@@ -48,10 +47,10 @@ func NewConstOp(
 		case -1:
 		default:
 			return &constBoolOp{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				outputIdx:      outputIdx,
-				constVal:       constVal.(bool),
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				outputIdx:    outputIdx,
+				constVal:     constVal.(bool),
 			}, nil
 		}
 	case types.BytesFamily:
@@ -59,10 +58,10 @@ func NewConstOp(
 		case -1:
 		default:
 			return &constBytesOp{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				outputIdx:      outputIdx,
-				constVal:       constVal.([]byte),
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				outputIdx:    outputIdx,
+				constVal:     constVal.([]byte),
 			}, nil
 		}
 	case types.DecimalFamily:
@@ -70,35 +69,35 @@ func NewConstOp(
 		case -1:
 		default:
 			return &constDecimalOp{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				outputIdx:      outputIdx,
-				constVal:       constVal.(apd.Decimal),
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				outputIdx:    outputIdx,
+				constVal:     constVal.(apd.Decimal),
 			}, nil
 		}
 	case types.IntFamily:
 		switch t.Width() {
 		case 16:
 			return &constInt16Op{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				outputIdx:      outputIdx,
-				constVal:       constVal.(int16),
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				outputIdx:    outputIdx,
+				constVal:     constVal.(int16),
 			}, nil
 		case 32:
 			return &constInt32Op{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				outputIdx:      outputIdx,
-				constVal:       constVal.(int32),
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				outputIdx:    outputIdx,
+				constVal:     constVal.(int32),
 			}, nil
 		case -1:
 		default:
 			return &constInt64Op{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				outputIdx:      outputIdx,
-				constVal:       constVal.(int64),
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				outputIdx:    outputIdx,
+				constVal:     constVal.(int64),
 			}, nil
 		}
 	case types.FloatFamily:
@@ -106,10 +105,10 @@ func NewConstOp(
 		case -1:
 		default:
 			return &constFloat64Op{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				outputIdx:      outputIdx,
-				constVal:       constVal.(float64),
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				outputIdx:    outputIdx,
+				constVal:     constVal.(float64),
 			}, nil
 		}
 	case types.TimestampTZFamily:
@@ -117,10 +116,10 @@ func NewConstOp(
 		case -1:
 		default:
 			return &constTimestampOp{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				outputIdx:      outputIdx,
-				constVal:       constVal.(time.Time),
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				outputIdx:    outputIdx,
+				constVal:     constVal.(time.Time),
 			}, nil
 		}
 	case types.IntervalFamily:
@@ -128,21 +127,10 @@ func NewConstOp(
 		case -1:
 		default:
 			return &constIntervalOp{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				outputIdx:      outputIdx,
-				constVal:       constVal.(duration.Duration),
-			}, nil
-		}
-	case types.JsonFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &constJSONOp{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				outputIdx:      outputIdx,
-				constVal:       constVal.(json.JSON),
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				outputIdx:    outputIdx,
+				constVal:     constVal.(duration.Duration),
 			}, nil
 		}
 	case typeconv.DatumVecCanonicalTypeFamily:
@@ -150,10 +138,10 @@ func NewConstOp(
 		case -1:
 		default:
 			return &constDatumOp{
-				OneInputHelper: colexecop.MakeOneInputHelper(input),
-				allocator:      allocator,
-				outputIdx:      outputIdx,
-				constVal:       constVal.(interface{}),
+				OneInputNode: colexecop.NewOneInputNode(input),
+				allocator:    allocator,
+				outputIdx:    outputIdx,
+				constVal:     constVal.(interface{}),
 			}, nil
 		}
 	}
@@ -161,15 +149,19 @@ func NewConstOp(
 }
 
 type constBoolOp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator *colmem.Allocator
 	outputIdx int
 	constVal  bool
 }
 
-func (c constBoolOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c constBoolOp) Init() {
+	c.Input.Init()
+}
+
+func (c constBoolOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -190,13 +182,13 @@ func (c constBoolOp) Next() coldata.Batch {
 			col := col
 			if sel := batch.Selection(); sel != nil {
 				for _, i := range sel[:n] {
-					col.Set(i, c.constVal)
+					col[i] = c.constVal
 				}
 			} else {
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
 					//gcassert:bce
-					col.Set(i, c.constVal)
+					col[i] = c.constVal
 				}
 			}
 		},
@@ -205,15 +197,19 @@ func (c constBoolOp) Next() coldata.Batch {
 }
 
 type constBytesOp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator *colmem.Allocator
 	outputIdx int
 	constVal  []byte
 }
 
-func (c constBytesOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c constBytesOp) Init() {
+	c.Input.Init()
+}
+
+func (c constBytesOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -248,15 +244,19 @@ func (c constBytesOp) Next() coldata.Batch {
 }
 
 type constDecimalOp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator *colmem.Allocator
 	outputIdx int
 	constVal  apd.Decimal
 }
 
-func (c constDecimalOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c constDecimalOp) Init() {
+	c.Input.Init()
+}
+
+func (c constDecimalOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -277,13 +277,13 @@ func (c constDecimalOp) Next() coldata.Batch {
 			col := col
 			if sel := batch.Selection(); sel != nil {
 				for _, i := range sel[:n] {
-					col.Set(i, c.constVal)
+					col[i].Set(&c.constVal)
 				}
 			} else {
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
 					//gcassert:bce
-					col.Set(i, c.constVal)
+					col[i].Set(&c.constVal)
 				}
 			}
 		},
@@ -292,15 +292,19 @@ func (c constDecimalOp) Next() coldata.Batch {
 }
 
 type constInt16Op struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator *colmem.Allocator
 	outputIdx int
 	constVal  int16
 }
 
-func (c constInt16Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c constInt16Op) Init() {
+	c.Input.Init()
+}
+
+func (c constInt16Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -321,13 +325,13 @@ func (c constInt16Op) Next() coldata.Batch {
 			col := col
 			if sel := batch.Selection(); sel != nil {
 				for _, i := range sel[:n] {
-					col.Set(i, c.constVal)
+					col[i] = c.constVal
 				}
 			} else {
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
 					//gcassert:bce
-					col.Set(i, c.constVal)
+					col[i] = c.constVal
 				}
 			}
 		},
@@ -336,15 +340,19 @@ func (c constInt16Op) Next() coldata.Batch {
 }
 
 type constInt32Op struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator *colmem.Allocator
 	outputIdx int
 	constVal  int32
 }
 
-func (c constInt32Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c constInt32Op) Init() {
+	c.Input.Init()
+}
+
+func (c constInt32Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -365,13 +373,13 @@ func (c constInt32Op) Next() coldata.Batch {
 			col := col
 			if sel := batch.Selection(); sel != nil {
 				for _, i := range sel[:n] {
-					col.Set(i, c.constVal)
+					col[i] = c.constVal
 				}
 			} else {
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
 					//gcassert:bce
-					col.Set(i, c.constVal)
+					col[i] = c.constVal
 				}
 			}
 		},
@@ -380,15 +388,19 @@ func (c constInt32Op) Next() coldata.Batch {
 }
 
 type constInt64Op struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator *colmem.Allocator
 	outputIdx int
 	constVal  int64
 }
 
-func (c constInt64Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c constInt64Op) Init() {
+	c.Input.Init()
+}
+
+func (c constInt64Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -409,13 +421,13 @@ func (c constInt64Op) Next() coldata.Batch {
 			col := col
 			if sel := batch.Selection(); sel != nil {
 				for _, i := range sel[:n] {
-					col.Set(i, c.constVal)
+					col[i] = c.constVal
 				}
 			} else {
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
 					//gcassert:bce
-					col.Set(i, c.constVal)
+					col[i] = c.constVal
 				}
 			}
 		},
@@ -424,15 +436,19 @@ func (c constInt64Op) Next() coldata.Batch {
 }
 
 type constFloat64Op struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator *colmem.Allocator
 	outputIdx int
 	constVal  float64
 }
 
-func (c constFloat64Op) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c constFloat64Op) Init() {
+	c.Input.Init()
+}
+
+func (c constFloat64Op) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -453,13 +469,13 @@ func (c constFloat64Op) Next() coldata.Batch {
 			col := col
 			if sel := batch.Selection(); sel != nil {
 				for _, i := range sel[:n] {
-					col.Set(i, c.constVal)
+					col[i] = c.constVal
 				}
 			} else {
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
 					//gcassert:bce
-					col.Set(i, c.constVal)
+					col[i] = c.constVal
 				}
 			}
 		},
@@ -468,15 +484,19 @@ func (c constFloat64Op) Next() coldata.Batch {
 }
 
 type constTimestampOp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator *colmem.Allocator
 	outputIdx int
 	constVal  time.Time
 }
 
-func (c constTimestampOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c constTimestampOp) Init() {
+	c.Input.Init()
+}
+
+func (c constTimestampOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -497,13 +517,13 @@ func (c constTimestampOp) Next() coldata.Batch {
 			col := col
 			if sel := batch.Selection(); sel != nil {
 				for _, i := range sel[:n] {
-					col.Set(i, c.constVal)
+					col[i] = c.constVal
 				}
 			} else {
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
 					//gcassert:bce
-					col.Set(i, c.constVal)
+					col[i] = c.constVal
 				}
 			}
 		},
@@ -512,15 +532,19 @@ func (c constTimestampOp) Next() coldata.Batch {
 }
 
 type constIntervalOp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator *colmem.Allocator
 	outputIdx int
 	constVal  duration.Duration
 }
 
-func (c constIntervalOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c constIntervalOp) Init() {
+	c.Input.Init()
+}
+
+func (c constIntervalOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -541,56 +565,13 @@ func (c constIntervalOp) Next() coldata.Batch {
 			col := col
 			if sel := batch.Selection(); sel != nil {
 				for _, i := range sel[:n] {
-					col.Set(i, c.constVal)
+					col[i] = c.constVal
 				}
 			} else {
 				_ = col.Get(n - 1)
 				for i := 0; i < n; i++ {
 					//gcassert:bce
-					col.Set(i, c.constVal)
-				}
-			}
-		},
-	)
-	return batch
-}
-
-type constJSONOp struct {
-	colexecop.OneInputHelper
-
-	allocator *colmem.Allocator
-	outputIdx int
-	constVal  json.JSON
-}
-
-func (c constJSONOp) Next() coldata.Batch {
-	batch := c.Input.Next()
-	n := batch.Length()
-	if n == 0 {
-		return coldata.ZeroBatch
-	}
-	vec := batch.ColVec(c.outputIdx)
-	col := vec.JSON()
-	if vec.MaybeHasNulls() {
-		// We need to make sure that there are no left over null values in the
-		// output vector.
-		vec.Nulls().UnsetNulls()
-	}
-	c.allocator.PerformOperation(
-		[]coldata.Vec{vec},
-		func() {
-			// Shallow copy col to work around Go issue
-			// https://github.com/golang/go/issues/39756 which prevents bound check
-			// elimination from working in this case.
-			col := col
-			if sel := batch.Selection(); sel != nil {
-				for _, i := range sel[:n] {
-					col.Set(i, c.constVal)
-				}
-			} else {
-				_ = col.Get(n - 1)
-				for i := 0; i < n; i++ {
-					col.Set(i, c.constVal)
+					col[i] = c.constVal
 				}
 			}
 		},
@@ -599,15 +580,19 @@ func (c constJSONOp) Next() coldata.Batch {
 }
 
 type constDatumOp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator *colmem.Allocator
 	outputIdx int
 	constVal  interface{}
 }
 
-func (c constDatumOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c constDatumOp) Init() {
+	c.Input.Init()
+}
+
+func (c constDatumOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -648,20 +633,24 @@ func NewConstNullOp(
 ) colexecop.Operator {
 	input = colexecutils.NewVectorTypeEnforcer(allocator, input, types.Unknown, outputIdx)
 	return &constNullOp{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
-		outputIdx:      outputIdx,
+		OneInputNode: colexecop.NewOneInputNode(input),
+		outputIdx:    outputIdx,
 	}
 }
 
 type constNullOp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	outputIdx int
 }
 
 var _ colexecop.Operator = &constNullOp{}
 
-func (c constNullOp) Next() coldata.Batch {
-	batch := c.Input.Next()
+func (c constNullOp) Init() {
+	c.Input.Init()
+}
+
+func (c constNullOp) Next(ctx context.Context) coldata.Batch {
+	batch := c.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch

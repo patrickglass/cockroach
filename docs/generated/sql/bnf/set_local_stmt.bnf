@@ -1,3 +1,0 @@
-set_local_stmt ::=
-	'SET' 'LOCAL' var_name '=' var_value ( ( ',' var_value ) )*
-	| 'SET' 'LOCAL' var_name 'TO' var_value ( ( ',' var_value ) )*

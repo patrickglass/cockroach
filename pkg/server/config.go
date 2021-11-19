@@ -15,15 +15,14 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"runtime"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/docs"
+	"github.com/cockroachdb/cockroach/pkg/gossip/resolver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
@@ -35,13 +34,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/netutil"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/vfs"
-	"github.com/cockroachdb/redact"
+	"github.com/elastic/gosigar"
 )
 
 // Context defaults.
@@ -115,7 +111,6 @@ type BaseConfig struct {
 	Settings *cluster.Settings
 	*base.Config
 
-	Tracer *tracing.Tracer
 	// AmbientCtx is used to annotate contexts used inside the server.
 	AmbientCtx log.AmbientContext
 
@@ -138,13 +133,9 @@ type BaseConfig struct {
 	// CPUProfileDirName is the directory name for CPU profile dumps.
 	CPUProfileDirName string
 
-	// InflightTraceDirName is the directory name for job traces.
-	InflightTraceDirName string
-
 	// DefaultZoneConfig is used to set the default zone config inside the server.
 	// It can be overridden during tests by setting the DefaultZoneConfigOverride
-	// server testing knob. Whatever is installed here is in turn used to
-	// initialize stores, which need a default span config.
+	// server testing knob.
 	DefaultZoneConfig zonepb.ZoneConfig
 
 	// Locality is a description of the topography of the server.
@@ -154,23 +145,14 @@ type BaseConfig struct {
 	// instantiate stores.
 	StorageEngine enginepb.EngineType
 
-	// Enables the use of the (experimental) span configs infrastructure.
-	//
-	// Environment Variable: COCKROACH_EXPERIMENTAL_SPAN_CONFIGS
-	SpanConfigsEnabled bool
-
 	// TestingKnobs is used for internal test controls only.
 	TestingKnobs base.TestingKnobs
 }
 
 // MakeBaseConfig returns a BaseConfig with default values.
-func MakeBaseConfig(st *cluster.Settings, tr *tracing.Tracer) BaseConfig {
-	if tr == nil {
-		panic("nil Tracer")
-	}
+func MakeBaseConfig(st *cluster.Settings) BaseConfig {
 	baseCfg := BaseConfig{
-		Tracer:            tr,
-		AmbientCtx:        log.AmbientContext{Tracer: tr},
+		AmbientCtx:        log.AmbientContext{Tracer: st.Tracer},
 		Config:            new(base.Config),
 		Settings:          st,
 		MaxOffset:         MaxOffsetType(base.DefaultMaxClockOffset),
@@ -229,9 +211,9 @@ type KVConfig struct {
 	// NodeAttributes is the parsed representation of Attrs.
 	NodeAttributes roachpb.Attributes
 
-	// GossipBootstrapAddresses is a list of gossip addresses used
+	// GossipBootstrapResolvers is a list of gossip resolvers used
 	// to find bootstrap nodes for connecting to the gossip network.
-	GossipBootstrapAddresses []util.UnresolvedAddr
+	GossipBootstrapResolvers []resolver.Resolver
 
 	// The following values can only be set via environment variables and are
 	// for testing only. They are not meant to be set by the end user.
@@ -285,7 +267,7 @@ type KVConfig struct {
 	// do nontrivial work.
 	ReadyFn func(waitForInit bool)
 
-	// DelayedBootstrapFn is called if the bootstrap process does not complete
+	// DelayedBootstrapFn is called if the boostrap process does not complete
 	// in a timely fashion, typically 30s after the server starts listening.
 	DelayedBootstrapFn func()
 
@@ -325,6 +307,9 @@ type SQLConfig struct {
 	// The tenant that the SQL server runs on the behalf of.
 	TenantID roachpb.TenantID
 
+	// LeaseManagerConfig holds configuration values specific to the LeaseManager.
+	LeaseManagerConfig *base.LeaseManagerConfig
+
 	// SocketFile, if non-empty, sets up a TLS-free local listener using
 	// a unix datagram socket at the specified path.
 	SocketFile string
@@ -362,6 +347,7 @@ func MakeSQLConfig(tenID roachpb.TenantID, tempStorageCfg base.TempStorageConfig
 		TableStatCacheSize: defaultSQLTableStatCacheSize,
 		QueryCacheSize:     defaultSQLQueryCacheSize,
 		TempStorageConfig:  tempStorageCfg,
+		LeaseManagerConfig: base.NewLeaseManagerConfig(),
 	}
 	return sqlCfg
 }
@@ -404,13 +390,7 @@ func MakeConfig(ctx context.Context, st *cluster.Settings) Config {
 		ctx, st, storeSpec, "" /* parentDir */, base.DefaultTempStorageMaxSizeBytes)
 
 	sqlCfg := MakeSQLConfig(roachpb.SystemTenantID, tempStorageCfg)
-	tr := tracing.NewTracerWithOpt(ctx, tracing.WithClusterSettings(&st.SV))
-	// NB: The OnChange callback will be called on server startup when the version
-	// is initialized.
-	st.Version.SetOnChange(func(ctx context.Context, newVersion clusterversion.ClusterVersion) {
-		tr.SetBackwardsCompatibilityWith211(!newVersion.IsActive(clusterversion.TraceIDDoesntImplyStructuredRecording))
-	})
-	baseCfg := MakeBaseConfig(st, tr)
+	baseCfg := MakeBaseConfig(st)
 	kvCfg := MakeKVConfig(storeSpec)
 
 	cfg := Config{
@@ -436,9 +416,6 @@ func (cfg *Config) String() string {
 	fmt.Fprintln(w, "event log enabled\t", cfg.EventLogEnabled)
 	if cfg.Linearizable {
 		fmt.Fprintln(w, "linearizable\t", cfg.Linearizable)
-	}
-	if cfg.SpanConfigsEnabled {
-		fmt.Fprintln(w, "span configs enabled\t", cfg.SpanConfigsEnabled)
 	}
 	_ = w.Flush()
 
@@ -484,7 +461,7 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 		return Engines{}, errors.Errorf("engines already created")
 	}
 	cfg.enginesCreated = true
-	details := []redact.RedactableString{redact.Sprintf("Pebble cache size: %s", humanizeutil.IBytes(cfg.CacheSize))}
+	details := []string{fmt.Sprintf("Pebble cache size: %s", humanizeutil.IBytes(cfg.CacheSize))}
 	pebbleCache := pebble.NewCache(cfg.CacheSize)
 	defer pebbleCache.Unref()
 
@@ -501,17 +478,8 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 
 	log.Event(ctx, "initializing engines")
 
-	var tableCache *pebble.TableCache
-	if physicalStores > 0 {
-		perStoreLimit := pebble.TableCacheSize(int(openFileLimitPerStore))
-		totalFileLimit := perStoreLimit * physicalStores
-		tableCache = pebble.NewTableCache(pebbleCache, runtime.GOMAXPROCS(0), totalFileLimit)
-	}
-
 	skipSizeCheck := cfg.TestingKnobs.Store != nil &&
 		cfg.TestingKnobs.Store.(*kvserver.StoreTestingKnobs).SkipMinSizeCheck
-	disableSeparatedIntents := cfg.TestingKnobs.Store != nil &&
-		cfg.TestingKnobs.Store.(*kvserver.StoreTestingKnobs).StorageKnobs.DisableSeparatedIntents
 	for i, spec := range cfg.Stores.Specs {
 		log.Eventf(ctx, "initializing %+v", spec)
 		var sizeInBytes = spec.Size.InBytes
@@ -527,7 +495,7 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 				return Engines{}, errors.Errorf("%f%% of memory is only %s bytes, which is below the minimum requirement of %s",
 					spec.Size.Percent, humanizeutil.IBytes(sizeInBytes), humanizeutil.IBytes(base.MinimumStoreSize))
 			}
-			details = append(details, redact.Sprintf("store %d: in-memory, size %s",
+			details = append(details, fmt.Sprintf("store %d: in-memory, size %s",
 				i, humanizeutil.IBytes(sizeInBytes)))
 			if spec.StickyInMemoryEngineID != "" {
 				if cfg.TestingKnobs.Server == nil {
@@ -545,57 +513,39 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 				if err != nil {
 					return Engines{}, err
 				}
-				details = append(details, redact.Sprintf("store %d: %+v", i, e.Properties()))
 				engines = append(engines, e)
 			} else {
-				e, err := storage.Open(ctx,
-					storage.InMemory(),
-					storage.Attributes(spec.Attributes),
-					storage.CacheSize(cfg.CacheSize),
-					storage.MaxSize(sizeInBytes),
-					storage.EncryptionAtRest(spec.EncryptionOptions),
-					storage.Settings(cfg.Settings),
-					storage.SetSeparatedIntents(disableSeparatedIntents))
-				if err != nil {
-					return Engines{}, err
-				}
-				engines = append(engines, e)
+				engines = append(engines, storage.NewInMem(ctx, spec.Attributes, cfg.CacheSize, sizeInBytes, cfg.Settings))
 			}
 		} else {
-			if err := vfs.Default.MkdirAll(spec.Path, 0755); err != nil {
-				return Engines{}, errors.Wrap(err, "creating store directory")
-			}
-			du, err := vfs.Default.GetDiskUsage(spec.Path)
-			if err != nil {
-				return Engines{}, errors.Wrap(err, "retrieving disk usage")
-			}
 			if spec.Size.Percent > 0 {
-				sizeInBytes = int64(float64(du.TotalBytes) * spec.Size.Percent / 100)
+				fileSystemUsage := gosigar.FileSystemUsage{}
+				if err := fileSystemUsage.Get(spec.Path); err != nil {
+					return Engines{}, err
+				}
+				sizeInBytes = int64(float64(fileSystemUsage.Total) * spec.Size.Percent / 100)
 			}
 			if sizeInBytes != 0 && !skipSizeCheck && sizeInBytes < base.MinimumStoreSize {
 				return Engines{}, errors.Errorf("%f%% of %s's total free space is only %s bytes, which is below the minimum requirement of %s",
 					spec.Size.Percent, spec.Path, humanizeutil.IBytes(sizeInBytes), humanizeutil.IBytes(base.MinimumStoreSize))
 			}
 
-			details = append(details, redact.Sprintf("store %d: max size %s, max open file limit %d",
+			details = append(details, fmt.Sprintf("store %d: RocksDB, max size %s, max open file limit %d",
 				i, humanizeutil.IBytes(sizeInBytes), openFileLimitPerStore))
 
 			storageConfig := base.StorageConfig{
-				Attrs:                   spec.Attributes,
-				Dir:                     spec.Path,
-				MaxSize:                 sizeInBytes,
-				BallastSize:             storage.BallastSizeBytes(spec, du),
-				Settings:                cfg.Settings,
-				UseFileRegistry:         spec.UseFileRegistry,
-				DisableSeparatedIntents: disableSeparatedIntents,
-				EncryptionOptions:       spec.EncryptionOptions,
+				Attrs:           spec.Attributes,
+				Dir:             spec.Path,
+				MaxSize:         sizeInBytes,
+				Settings:        cfg.Settings,
+				UseFileRegistry: spec.UseFileRegistry,
+				ExtraOptions:    spec.ExtraOptions,
 			}
 			pebbleConfig := storage.PebbleConfig{
 				StorageConfig: storageConfig,
 				Opts:          storage.DefaultPebbleOptions(),
 			}
 			pebbleConfig.Opts.Cache = pebbleCache
-			pebbleConfig.Opts.TableCache = tableCache
 			pebbleConfig.Opts.MaxOpenFiles = int(openFileLimitPerStore)
 			// If the spec contains Pebble options, set those too.
 			if len(spec.PebbleOptions) > 0 {
@@ -611,15 +561,7 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 			if err != nil {
 				return Engines{}, err
 			}
-			details = append(details, redact.Sprintf("store %d: %+v", i, eng.Properties()))
 			engines = append(engines, eng)
-		}
-	}
-
-	if tableCache != nil {
-		// Unref the table cache now that the engines hold references to it.
-		if err := tableCache.Unref(); err != nil {
-			return nil, err
 		}
 	}
 
@@ -633,46 +575,47 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 	return enginesCopy, nil
 }
 
-// InitNode parses node attributes and bootstrap addresses.
+// InitNode parses node attributes and initializes the gossip bootstrap
+// resolvers.
 func (cfg *Config) InitNode(ctx context.Context) error {
 	cfg.readEnvironmentVariables()
 
 	// Initialize attributes.
 	cfg.NodeAttributes = parseAttributes(cfg.Attrs)
 
-	// Get the gossip bootstrap addresses.
-	addresses, err := cfg.parseGossipBootstrapAddresses(ctx)
+	// Get the gossip bootstrap resolvers.
+	resolvers, err := cfg.parseGossipBootstrapResolvers(ctx)
 	if err != nil {
 		return err
 	}
-	if len(addresses) > 0 {
-		cfg.GossipBootstrapAddresses = addresses
+	if len(resolvers) > 0 {
+		cfg.GossipBootstrapResolvers = resolvers
 	}
 
 	return nil
 }
 
-// FilterGossipBootstrapAddresses removes any gossip bootstrap addresses which
+// FilterGossipBootstrapResolvers removes any gossip bootstrap resolvers which
 // match either this node's listen address or its advertised host address.
-func (cfg *Config) FilterGossipBootstrapAddresses(ctx context.Context) []util.UnresolvedAddr {
+func (cfg *Config) FilterGossipBootstrapResolvers(ctx context.Context) []resolver.Resolver {
 	var listen, advert net.Addr
 	listen = util.NewUnresolvedAddr("tcp", cfg.Addr)
 	advert = util.NewUnresolvedAddr("tcp", cfg.AdvertiseAddr)
-	filtered := make([]util.UnresolvedAddr, 0, len(cfg.GossipBootstrapAddresses))
-	addrs := make([]string, 0, len(cfg.GossipBootstrapAddresses))
+	filtered := make([]resolver.Resolver, 0, len(cfg.GossipBootstrapResolvers))
+	addrs := make([]string, 0, len(cfg.GossipBootstrapResolvers))
 
-	for _, addr := range cfg.GossipBootstrapAddresses {
-		if addr.String() == advert.String() || addr.String() == listen.String() {
+	for _, r := range cfg.GossipBootstrapResolvers {
+		if r.Addr() == advert.String() || r.Addr() == listen.String() {
 			if log.V(1) {
-				log.Infof(ctx, "skipping -join address %q, because a node cannot join itself", addr)
+				log.Infof(ctx, "skipping -join address %q, because a node cannot join itself", r.Addr())
 			}
 		} else {
-			filtered = append(filtered, addr)
-			addrs = append(addrs, addr.String())
+			filtered = append(filtered, r)
+			addrs = append(addrs, r.Addr())
 		}
 	}
 	if log.V(1) {
-		log.Infof(ctx, "initial addresses: %v", addrs)
+		log.Infof(ctx, "initial resolvers: %v", addrs)
 	}
 	return filtered
 }
@@ -687,53 +630,53 @@ func (cfg *Config) RequireWebSession() bool {
 // variable based. Note that this only happens when initializing a node and not
 // when NewContext is called.
 func (cfg *Config) readEnvironmentVariables() {
-	cfg.SpanConfigsEnabled = envutil.EnvOrDefaultBool("COCKROACH_EXPERIMENTAL_SPAN_CONFIGS", cfg.SpanConfigsEnabled)
 	cfg.Linearizable = envutil.EnvOrDefaultBool("COCKROACH_EXPERIMENTAL_LINEARIZABLE", cfg.Linearizable)
 	cfg.ScanInterval = envutil.EnvOrDefaultDuration("COCKROACH_SCAN_INTERVAL", cfg.ScanInterval)
 	cfg.ScanMinIdleTime = envutil.EnvOrDefaultDuration("COCKROACH_SCAN_MIN_IDLE_TIME", cfg.ScanMinIdleTime)
 	cfg.ScanMaxIdleTime = envutil.EnvOrDefaultDuration("COCKROACH_SCAN_MAX_IDLE_TIME", cfg.ScanMaxIdleTime)
 }
 
-// parseGossipBootstrapAddresses parses list of gossip bootstrap addresses.
-func (cfg *Config) parseGossipBootstrapAddresses(
-	ctx context.Context,
-) ([]util.UnresolvedAddr, error) {
-	var bootstrapAddresses []util.UnresolvedAddr
+// parseGossipBootstrapResolvers parses list of gossip bootstrap resolvers.
+func (cfg *Config) parseGossipBootstrapResolvers(ctx context.Context) ([]resolver.Resolver, error) {
+	var bootstrapResolvers []resolver.Resolver
 	for _, address := range cfg.JoinList {
-		if address == "" {
-			continue
-		}
-
 		if cfg.JoinPreferSRVRecords {
 			// The following code substitutes the entry in --join by the
 			// result of SRV resolution, if suitable SRV records are found
 			// for that name.
 			//
-			// TODO(knz): Delay this lookup. The logic for "regular" addresses
+			// TODO(knz): Delay this lookup. The logic for "regular" resolvers
 			// is delayed until the point the connection is attempted, so that
 			// fresh DNS records are used for a new connection. This makes
 			// it possible to update DNS records without restarting the node.
 			// The SRV logic here does not have this property (yet).
-			srvAddrs, err := netutil.SRV(ctx, address)
+			srvAddrs, err := resolver.SRV(ctx, address)
 			if err != nil {
 				return nil, err
 			}
 
 			if len(srvAddrs) > 0 {
 				for _, sa := range srvAddrs {
-					bootstrapAddresses = append(bootstrapAddresses,
-						util.MakeUnresolvedAddrWithDefaults("tcp", sa, base.DefaultPort))
+					resolver, err := resolver.NewResolver(sa)
+					if err != nil {
+						return nil, err
+					}
+					bootstrapResolvers = append(bootstrapResolvers, resolver)
 				}
+
 				continue
 			}
 		}
 
 		// Otherwise, use the address.
-		bootstrapAddresses = append(bootstrapAddresses,
-			util.MakeUnresolvedAddrWithDefaults("tcp", address, base.DefaultPort))
+		resolver, err := resolver.NewResolver(address)
+		if err != nil {
+			return nil, err
+		}
+		bootstrapResolvers = append(bootstrapResolvers, resolver)
 	}
 
-	return bootstrapAddresses, nil
+	return bootstrapResolvers, nil
 }
 
 // parseAttributes parses a colon-separated list of strings,

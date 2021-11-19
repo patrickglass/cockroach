@@ -119,10 +119,12 @@ func TestTypes(t *testing.T) {
 		{MakeCollatedString(MakeChar(20), enCollate),
 			MakeScalar(CollatedStringFamily, oid.T_bpchar, 0, 20, enCollate)},
 
-		{MakeCollatedString(QChar, enCollate), &T{InternalType: InternalType{
-			Family: CollatedStringFamily, Oid: oid.T_char, Width: 1, Locale: &enCollate}}},
-		{MakeCollatedString(QChar, enCollate),
-			MakeScalar(CollatedStringFamily, oid.T_char, 0, 1, enCollate)},
+		{MakeCollatedString(typeQChar, enCollate), &T{InternalType: InternalType{
+			Family: CollatedStringFamily, Oid: oid.T_char, Locale: &enCollate}}},
+		{MakeCollatedString(MakeQChar(20), enCollate), &T{InternalType: InternalType{
+			Family: CollatedStringFamily, Oid: oid.T_char, Width: 20, Locale: &enCollate}}},
+		{MakeCollatedString(MakeQChar(20), enCollate),
+			MakeScalar(CollatedStringFamily, oid.T_char, 0, 20, enCollate)},
 
 		{MakeCollatedString(Name, enCollate), &T{InternalType: InternalType{
 			Family: CollatedStringFamily, Oid: oid.T_name, Locale: &enCollate}}},
@@ -357,8 +359,6 @@ func TestTypes(t *testing.T) {
 			Family: OidFamily, Oid: oid.T_regproc, Locale: &emptyLocale}}},
 		{RegProcedure, &T{InternalType: InternalType{
 			Family: OidFamily, Oid: oid.T_regprocedure, Locale: &emptyLocale}}},
-		{RegRole, &T{InternalType: InternalType{
-			Family: OidFamily, Oid: oid.T_regrole, Locale: &emptyLocale}}},
 		{RegType, &T{InternalType: InternalType{
 			Family: OidFamily, Oid: oid.T_regtype, Locale: &emptyLocale}}},
 		{Oid, MakeScalar(OidFamily, oid.T_oid, 0, 0, emptyLocale)},
@@ -379,15 +379,19 @@ func TestTypes(t *testing.T) {
 			Family: StringFamily, Oid: oid.T_varchar, Width: 20, Locale: &emptyLocale}}},
 		{MakeVarChar(20), MakeScalar(StringFamily, oid.T_varchar, 0, 20, emptyLocale)},
 
-		{MakeChar(1), &T{InternalType: InternalType{
-			Family: StringFamily, Oid: oid.T_bpchar, Width: 1, Locale: &emptyLocale}}},
+		{MakeChar(0), typeBpChar},
+		{MakeChar(0), &T{InternalType: InternalType{
+			Family: StringFamily, Oid: oid.T_bpchar, Locale: &emptyLocale}}},
 		{MakeChar(20), &T{InternalType: InternalType{
 			Family: StringFamily, Oid: oid.T_bpchar, Width: 20, Locale: &emptyLocale}}},
 		{MakeChar(20), MakeScalar(StringFamily, oid.T_bpchar, 0, 20, emptyLocale)},
 
-		{QChar, &T{InternalType: InternalType{
-			Family: StringFamily, Oid: oid.T_char, Width: 1, Locale: &emptyLocale}}},
-		{QChar, MakeScalar(StringFamily, oid.T_char, 0, 1, emptyLocale)},
+		{MakeQChar(0), typeQChar},
+		{MakeQChar(0), &T{InternalType: InternalType{
+			Family: StringFamily, Oid: oid.T_char, Locale: &emptyLocale}}},
+		{MakeQChar(20), &T{InternalType: InternalType{
+			Family: StringFamily, Oid: oid.T_char, Width: 20, Locale: &emptyLocale}}},
+		{MakeQChar(20), MakeScalar(StringFamily, oid.T_char, 0, 20, emptyLocale)},
 
 		{Name, &T{InternalType: InternalType{
 			Family: StringFamily, Oid: oid.T_name, Locale: &emptyLocale}}},
@@ -685,7 +689,7 @@ func TestMarshalCompat(t *testing.T) {
 		{MakeString(10), InternalType{Family: StringFamily, Oid: oid.T_text, Width: 10}},
 		{VarChar, InternalType{Family: StringFamily, Oid: oid.T_varchar, VisibleType: visibleVARCHAR}},
 		{MakeChar(10), InternalType{Family: StringFamily, Oid: oid.T_bpchar, Width: 10, VisibleType: visibleCHAR}},
-		{QChar, InternalType{Family: StringFamily, Oid: oid.T_char, Width: 1, VisibleType: visibleQCHAR}},
+		{MakeQChar(1), InternalType{Family: StringFamily, Oid: oid.T_char, Width: 1, VisibleType: visibleQCHAR}},
 		{Name, InternalType{Family: name, Oid: oid.T_name}},
 	}
 
@@ -749,7 +753,7 @@ func TestUnmarshalCompat(t *testing.T) {
 		{InternalType{Family: StringFamily, VisibleType: visibleVARCHAR}, VarChar},
 		{InternalType{Family: StringFamily, VisibleType: visibleVARCHAR, Width: 20}, MakeVarChar(20)},
 		{InternalType{Family: StringFamily, VisibleType: visibleCHAR}, typeBpChar},
-		{InternalType{Family: StringFamily, VisibleType: visibleQCHAR, Width: 1}, QChar},
+		{InternalType{Family: StringFamily, VisibleType: visibleQCHAR}, typeQChar},
 	}
 
 	for _, tc := range testCases {
@@ -977,118 +981,5 @@ func TestSQLStandardName(t *testing.T) {
 		t.Run(typ.Name(), func(t *testing.T) {
 			require.NotEmpty(t, typ.SQLStandardName())
 		})
-	}
-}
-
-func TestCanonicalType(t *testing.T) {
-	testCases := []struct {
-		typ      *T
-		expected *T
-	}{
-		// BOOL
-		{Bool, Bool},
-
-		// INT
-		{Int, Int},
-		{Int4, Int},
-		{Int2, Int},
-
-		// FLOAT
-		{Float, Float},
-		{Float4, Float},
-
-		// DECIMAL
-		{Decimal, Decimal},
-		{MakeDecimal(10, 0), Decimal},
-		{MakeDecimal(5, 1), Decimal},
-
-		// DATE
-		{Date, Date},
-
-		// TIMESTAMP
-		{Timestamp, Timestamp},
-		{MakeTimestamp(10), Timestamp},
-
-		// TIMESTAMPTZ
-		{TimestampTZ, TimestampTZ},
-		{MakeTimestampTZ(10), TimestampTZ},
-
-		// TIME
-		{Time, Time},
-		{MakeTime(10), Time},
-
-		// TIMETZ
-		{TimeTZ, TimeTZ},
-		{MakeTimeTZ(10), TimeTZ},
-
-		// INTERVAL
-		{Interval, Interval},
-		{MakeInterval(IntervalTypeMetadata{Precision: 10, PrecisionIsSet: true}), Interval},
-
-		// STRING
-		{String, String},
-		{MakeString(10), String},
-
-		// BYTES
-		{Bytes, Bytes},
-
-		// COLLATEDSTRING
-		// Collated strings do not have a canonical type.
-		{MakeCollatedString(String, "en-US"), MakeCollatedString(String, "en-US")},
-
-		// OID
-		{Oid, Oid},
-
-		// UNKNOWN
-		{Unknown, Unknown},
-
-		// UUID
-		{Uuid, Uuid},
-
-		// INET
-		{INet, INet},
-
-		// JSON
-		{Jsonb, Jsonb},
-
-		// BIT
-		{VarBit, VarBit},
-		{MakeVarBit(10), VarBit},
-		{MakeBit(10), VarBit},
-
-		// GEOMETRY
-		{Geometry, Geometry},
-		{MakeGeometry(geopb.ShapeType_MultiPoint, 4325), Geometry},
-
-		// GEOGRAPHY
-		{Geography, Geography},
-		{MakeGeography(geopb.ShapeType_MultiPoint, 4325), Geography},
-
-		// ENUM
-		// Enums do not have a canonical type.
-		{MakeEnum(15210, 15213), MakeEnum(15210, 15213)},
-
-		// BOX2D
-		{Box2D, Box2D},
-
-		// ANY
-		{Any, Any},
-
-		// ARRAY
-		{IntArray, IntArray},
-		{MakeArray(Int4), IntArray},
-		{DecimalArray, DecimalArray},
-		{MakeArray(MakeDecimal(10, 2)), DecimalArray},
-
-		// TUPLE
-		{MakeTuple([]*T{Int, Decimal}), MakeTuple([]*T{Int, Decimal})},
-		{MakeTuple([]*T{Int4, MakeDecimal(10, 2)}), MakeTuple([]*T{Int, Decimal})},
-	}
-
-	for _, tc := range testCases {
-		actual := tc.typ.CanonicalType()
-		if !actual.Identical(tc.expected) {
-			t.Errorf("expect <%v>, got <%v>", tc.expected.DebugString(), actual.DebugString())
-		}
 	}
 }

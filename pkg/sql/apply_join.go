@@ -16,8 +16,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -44,10 +44,10 @@ type applyJoinNode struct {
 	// columns contains the metadata for the results of this node.
 	columns colinfo.ResultColumns
 
-	// rightTypes is the schema of the rows produced by the right side of the
-	// join, as built in the optimization phase. Later on, every re-planning of
-	// the right side will emit these same columns.
-	rightTypes []*types.T
+	// rightCols contains the metadata for the result of the right side of this
+	// apply join, as built in the optimization phase. Later on, every re-planning
+	// of the right side will emit these same columns.
+	rightCols colinfo.ResultColumns
 
 	planRightSideFn exec.ApplyJoinPlanRightSideFn
 
@@ -62,9 +62,10 @@ type applyJoinNode struct {
 		leftRowFoundAMatch bool
 		// rightRows will be populated with the result of the right side of the join
 		// each time it's run.
-		rightRows rowContainerHelper
-		// rightRowsIterator, if non-nil, is the iterator into rightRows.
-		rightRowsIterator *rowContainerIterator
+		rightRows *rowcontainer.RowContainer
+		// curRightRow is the index into rightRows of the current right row being
+		// processed.
+		curRightRow int
 		// out is the full result row, populated on each call to Next.
 		out tree.Datums
 		// done is true if the left side has been exhausted.
@@ -72,6 +73,7 @@ type applyJoinNode struct {
 	}
 }
 
+// Set to true to enable ultra verbose debug logging.
 func newApplyJoinNode(
 	joinType descpb.JoinType,
 	left planDataSource,
@@ -92,7 +94,7 @@ func newApplyJoinNode(
 		joinType:        joinType,
 		input:           left,
 		pred:            pred,
-		rightTypes:      getTypesFromResultColumns(rightCols),
+		rightCols:       rightCols,
 		planRightSideFn: planRightSideFn,
 		columns:         pred.cols,
 	}, nil
@@ -102,13 +104,15 @@ func (a *applyJoinNode) startExec(params runParams) error {
 	// If needed, pre-allocate a right row of NULL tuples for when the
 	// join predicate fails to match.
 	if a.joinType == descpb.LeftOuterJoin {
-		a.run.emptyRight = make(tree.Datums, len(a.rightTypes))
+		a.run.emptyRight = make(tree.Datums, len(a.rightCols))
 		for i := range a.run.emptyRight {
 			a.run.emptyRight[i] = tree.DNull
 		}
 	}
 	a.run.out = make(tree.Datums, len(a.columns))
-	a.run.rightRows.Init(a.rightTypes, params.extendedEvalCtx, "apply-join" /* opName */)
+	ci := colinfo.ColTypeInfoFromResCols(a.rightCols)
+	acc := params.EvalContext().Mon.MakeBoundAccount()
+	a.run.rightRows = rowcontainer.NewRowContainer(acc, ci)
 	return nil
 }
 
@@ -118,50 +122,37 @@ func (a *applyJoinNode) Next(params runParams) (bool, error) {
 	}
 
 	for {
-		if a.run.rightRowsIterator != nil {
+		for a.run.curRightRow < a.run.rightRows.Len() {
 			// We have right rows set up - check the next one for a match.
-			for {
-				// Note that if a.rightTypes has zero length, non-nil rrow is
-				// returned the correct number of times.
-				rrow, err := a.run.rightRowsIterator.Next()
-				if err != nil {
-					return false, err
-				}
-				if rrow == nil {
-					// We have exhausted all rows from the right side.
-					break
-				}
-				// Compute join.
-				predMatched, err := a.pred.eval(params.EvalContext(), a.run.leftRow, rrow)
-				if err != nil {
-					return false, err
-				}
-				if !predMatched {
-					// Didn't match? Try with the next right-side row.
-					continue
-				}
-
-				a.run.leftRowFoundAMatch = true
-				if a.joinType == descpb.LeftAntiJoin ||
-					a.joinType == descpb.LeftSemiJoin {
-					// We found a match, but we're doing an anti or semi join,
-					// so we're done with this left row.
-					break
-				}
-				// We're doing an ordinary join, so prep the row and emit it.
-				a.pred.prepareRow(a.run.out, a.run.leftRow, rrow)
-				return true, nil
+			var rrow tree.Datums
+			if len(a.rightCols) != 0 {
+				rrow = a.run.rightRows.At(a.run.curRightRow)
 			}
-
-			// We're either out of right side rows or we broke out of the loop
-			// before consuming all right rows because we found a match for an
-			// anti or semi join. Clear the right rows to prepare them for the
-			// next left row.
-			if err := a.clearRightRows(params); err != nil {
+			a.run.curRightRow++
+			// Compute join.
+			predMatched, err := a.pred.eval(params.EvalContext(), a.run.leftRow, rrow)
+			if err != nil {
 				return false, err
 			}
+			if !predMatched {
+				// Didn't match? Try with the next right-side row.
+				continue
+			}
+
+			a.run.leftRowFoundAMatch = true
+			if a.joinType == descpb.LeftAntiJoin ||
+				a.joinType == descpb.LeftSemiJoin {
+				// We found a match, but we're doing an anti or semi join, so we're
+				// done with this left row.
+				break
+			}
+			// We're doing an ordinary join, so prep the row and emit it.
+			a.pred.prepareRow(a.run.out, a.run.leftRow, rrow)
+			return true, nil
 		}
-		// We're out of right side rows. Reset the match state for next time.
+		// We're out of right side rows. Clear them, and reset the match state for
+		// next time.
+		a.run.rightRows.Clear(params.ctx)
 		foundAMatch := a.run.leftRowFoundAMatch
 		a.run.leftRowFoundAMatch = false
 
@@ -226,36 +217,25 @@ func (a *applyJoinNode) Next(params runParams) (bool, error) {
 	}
 }
 
-// clearRightRows clears rightRows and resets rightRowsIterator. This function
-// must be called before reusing rightRows and rightRowIterator.
-func (a *applyJoinNode) clearRightRows(params runParams) error {
-	if err := a.run.rightRows.Clear(params.ctx); err != nil {
-		return err
-	}
-	a.run.rightRowsIterator.Close()
-	a.run.rightRowsIterator = nil
-	return nil
-}
-
 // runRightSidePlan runs a planTop that's been generated based on the
 // re-optimized right hand side of the apply join, stashing the result in
 // a.run.rightRows, ready for retrieval. An error indicates that something went
 // wrong during execution of the right hand side of the join, and that we should
 // completely give up on the outer join.
 func (a *applyJoinNode) runRightSidePlan(params runParams, plan *planComponents) error {
-	rowResultWriter := NewRowResultWriter(&a.run.rightRows)
-	if err := runPlanInsidePlan(params, plan, rowResultWriter); err != nil {
-		return err
-	}
-	a.run.rightRowsIterator = newRowContainerIterator(params.ctx, a.run.rightRows, a.rightTypes)
-	return nil
+	a.run.curRightRow = 0
+	a.run.rightRows.Clear(params.ctx)
+	return runPlanInsidePlan(params, plan, a.run.rightRows)
 }
 
-// runPlanInsidePlan is used to run a plan and gather the results in the
-// resultWriter, as part of the execution of an "outer" plan.
-func runPlanInsidePlan(params runParams, plan *planComponents, resultWriter rowResultWriter) error {
+// runPlanInsidePlan is used to run a plan and gather the results in a row
+// container, as part of the execution of an "outer" plan.
+func runPlanInsidePlan(
+	params runParams, plan *planComponents, rowContainer *rowcontainer.RowContainer,
+) error {
+	rowResultWriter := NewRowResultWriter(rowContainer)
 	recv := MakeDistSQLReceiver(
-		params.ctx, resultWriter, tree.Rows,
+		params.ctx, rowResultWriter, tree.Rows,
 		params.ExecCfg().RangeDescriptorCache,
 		params.p.Txn(),
 		params.ExecCfg().Clock,
@@ -296,7 +276,10 @@ func runPlanInsidePlan(params runParams, plan *planComponents, resultWriter rowR
 			recv,
 			&subqueryResultMemAcc,
 		) {
-			return resultWriter.Err()
+			if err := rowResultWriter.Err(); err != nil {
+				return err
+			}
+			return recv.commErr
 		}
 	}
 
@@ -304,7 +287,8 @@ func runPlanInsidePlan(params runParams, plan *planComponents, resultWriter rowR
 	evalCtx := params.p.ExtendedEvalContextCopy()
 	plannerCopy := *params.p
 	distributePlan := getPlanDistribution(
-		params.ctx, &plannerCopy, plannerCopy.execCfg.NodeID, plannerCopy.SessionData().DistSQLMode, plan.main,
+		params.ctx, &plannerCopy, plannerCopy.execCfg.NodeID, plannerCopy.SessionData().DistSQLMode,
+		&evalCtx.Settings.SV, plan.main,
 	)
 	planCtx := params.p.extendedEvalCtx.ExecCfg.DistSQLPlanner.NewPlanningCtx(
 		params.ctx, evalCtx, &plannerCopy, params.p.txn, distributePlan.WillDistribute(),
@@ -316,7 +300,10 @@ func runPlanInsidePlan(params runParams, plan *planComponents, resultWriter rowR
 	params.p.extendedEvalCtx.ExecCfg.DistSQLPlanner.PlanAndRun(
 		params.ctx, evalCtx, planCtx, params.p.Txn(), plan.main, recv,
 	)()
-	return resultWriter.Err()
+	if recv.commErr != nil {
+		return recv.commErr
+	}
+	return rowResultWriter.err
 }
 
 func (a *applyJoinNode) Values() tree.Datums {
@@ -325,9 +312,7 @@ func (a *applyJoinNode) Values() tree.Datums {
 
 func (a *applyJoinNode) Close(ctx context.Context) {
 	a.input.plan.Close(ctx)
-	a.run.rightRows.Close(ctx)
-	if a.run.rightRowsIterator != nil {
-		a.run.rightRowsIterator.Close()
-		a.run.rightRowsIterator = nil
+	if a.run.rightRows != nil {
+		a.run.rightRows.Close(ctx)
 	}
 }

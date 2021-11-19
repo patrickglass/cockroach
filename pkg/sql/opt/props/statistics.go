@@ -81,15 +81,6 @@ func (s *Statistics) Init(relProps *Relational) (zeroCardinality bool) {
 	return false
 }
 
-// RowCountIfAvailable returns the RowCount if the stats were available and a
-// negative number otherwise.
-func (s *Statistics) RowCountIfAvailable() float64 {
-	if s.Available {
-		return s.RowCount
-	}
-	return -1
-}
-
 // CopyFrom copies a Statistics object which can then be modified independently.
 func (s *Statistics) CopyFrom(other *Statistics) {
 	s.Available = other.Available
@@ -150,18 +141,7 @@ func (s *Statistics) UnionWith(other *Statistics) {
 	s.Selectivity.Add(other.Selectivity)
 }
 
-// String returns a string representation of the statistics.
 func (s *Statistics) String() string {
-	return s.stringImpl(true)
-}
-
-// StringWithoutHistograms is like String, but all histograms are omitted from
-// the returned string.
-func (s *Statistics) StringWithoutHistograms() string {
-	return s.stringImpl(false)
-}
-
-func (s *Statistics) stringImpl(includeHistograms bool) string {
 	var buf bytes.Buffer
 
 	fmt.Fprintf(&buf, "[rows=%.9g", s.RowCount)
@@ -175,19 +155,17 @@ func (s *Statistics) stringImpl(includeHistograms bool) string {
 		fmt.Fprintf(&buf, ", null%s=%.9g", col.Cols.String(), col.NullCount)
 	}
 	buf.WriteString("]")
-	if includeHistograms {
-		for _, col := range colStats {
-			if col.Histogram != nil {
-				label := fmt.Sprintf("histogram%s=", col.Cols.String())
-				indent := strings.Repeat(" ", tablewriter.DisplayWidth(label))
-				fmt.Fprintf(&buf, "\n%s", label)
-				histLines := strings.Split(strings.TrimRight(col.Histogram.String(), "\n"), "\n")
-				for i, line := range histLines {
-					if i != 0 {
-						fmt.Fprintf(&buf, "\n%s", indent)
-					}
-					fmt.Fprintf(&buf, "%s", strings.TrimRight(line, " "))
+	for _, col := range colStats {
+		if col.Histogram != nil {
+			label := fmt.Sprintf("histogram%s=", col.Cols.String())
+			indent := strings.Repeat(" ", tablewriter.DisplayWidth(label))
+			fmt.Fprintf(&buf, "\n%s", label)
+			histLines := strings.Split(strings.TrimRight(col.Histogram.String(), "\n"), "\n")
+			for i, line := range histLines {
+				if i != 0 {
+					fmt.Fprintf(&buf, "\n%s", indent)
 				}
+				fmt.Fprintf(&buf, "%s", strings.TrimRight(line, " "))
 			}
 		}
 	}
@@ -275,14 +253,14 @@ func (c ColumnStatistics) Less(i, j int) bool {
 
 	prev := opt.ColumnID(0)
 	for {
-		nextI, ok := c[i].Cols.Next(prev + 1)
+		nextI, ok := c[i].Cols.Next(prev)
 		if !ok {
 			return false
 		}
 
 		// No need to check if ok since both ColSets are the same length and
 		// so far have had the same elements.
-		nextJ, _ := c[j].Cols.Next(prev + 1)
+		nextJ, _ := c[j].Cols.Next(prev)
 
 		if nextI != nextJ {
 			return nextI < nextJ

@@ -17,12 +17,11 @@ import (
 	"os"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/blobs"
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl"
-	"github.com/cockroachdb/cockroach/pkg/cloud"
-	"github.com/cockroachdb/cockroach/pkg/cloud/nodelocal"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -38,6 +37,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
@@ -114,9 +116,7 @@ func TestConverterFlushesBatches(t *testing.T) {
 				}
 
 				kvCh := make(chan row.KVBatch, batchSize)
-				semaCtx := tree.MakeSemaContext()
-				conv, err := makeInputConverter(ctx, &semaCtx, converterSpec, &evalCtx, kvCh,
-					nil /* seqChunkProvider */)
+				conv, err := makeInputConverter(ctx, converterSpec, &evalCtx, kvCh, nil /* seqChunkProvider */)
 				if err != nil {
 					t.Fatalf("makeInputConverter() error = %v", err)
 				}
@@ -190,11 +190,14 @@ func (r *errorReportingRowReceiver) Push(
 }
 
 func (r *errorReportingRowReceiver) ProducerDone() {}
+func (r *errorReportingRowReceiver) Types() []*types.T {
+	return nil
+}
 
 // A do nothing bulk adder implementation.
 type doNothingKeyAdder struct {
 	onKeyAdd func(key roachpb.Key)
-	onFlush  func(summary roachpb.BulkOpSummary)
+	onFlush  func()
 }
 
 var _ kvserverbase.BulkAdder = &doNothingKeyAdder{}
@@ -207,16 +210,16 @@ func (a *doNothingKeyAdder) Add(_ context.Context, k roachpb.Key, _ []byte) erro
 }
 func (a *doNothingKeyAdder) Flush(_ context.Context) error {
 	if a.onFlush != nil {
-		a.onFlush(roachpb.BulkOpSummary{})
+		a.onFlush()
 	}
 	return nil
 }
 
-func (*doNothingKeyAdder) IsEmpty() bool                                { return true }
-func (*doNothingKeyAdder) CurrentBufferFill() float32                   { return 0 }
-func (*doNothingKeyAdder) GetSummary() roachpb.BulkOpSummary            { return roachpb.BulkOpSummary{} }
-func (*doNothingKeyAdder) Close(_ context.Context)                      {}
-func (a *doNothingKeyAdder) SetOnFlush(f func(_ roachpb.BulkOpSummary)) { a.onFlush = f }
+func (*doNothingKeyAdder) IsEmpty() bool                     { return true }
+func (*doNothingKeyAdder) CurrentBufferFill() float32        { return 0 }
+func (*doNothingKeyAdder) GetSummary() roachpb.BulkOpSummary { return roachpb.BulkOpSummary{} }
+func (*doNothingKeyAdder) Close(_ context.Context)           {}
+func (a *doNothingKeyAdder) SetOnFlush(f func())             { a.onFlush = f }
 
 var eofOffset int64 = math.MaxInt64
 
@@ -642,11 +645,12 @@ func TestCSVImportCanBeResumed(t *testing.T) {
 	const batchSize = 5
 	defer TestingSetParallelImporterReaderBatchSize(batchSize)()
 	defer row.TestingSetDatumRowConverterBatchSize(2 * batchSize)()
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	s, db, _ := serverutils.StartServer(t,
 		base.TestServerArgs{
 			Knobs: base.TestingKnobs{
-				JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
+				RegistryLiveness: jobs.NewFakeNodeLiveness(1),
 				DistSQL: &execinfra.TestingKnobs{
 					BulkAdderFlushesEveryBatch: true,
 				},
@@ -672,6 +676,7 @@ func TestCSVImportCanBeResumed(t *testing.T) {
 		jobspb.TypeImport: func(raw jobs.Resumer) jobs.Resumer {
 
 			resumer := raw.(*importResumer)
+			resumer.testingKnobs.ignoreProtectedTimestamps = true
 			resumer.testingKnobs.alwaysFlushJobProgress = true
 			resumer.testingKnobs.afterImport = func(summary backupccl.RowCount) error {
 				importSummary = summary
@@ -715,7 +720,7 @@ func TestCSVImportCanBeResumed(t *testing.T) {
 	js := queryJobUntil(t, sqlDB.DB, jobID, func(js jobState) bool { return js.prog.ResumePos[0] > 0 })
 
 	// Pause the job;
-	if err := registry.PauseRequested(ctx, nil, jobID, ""); err != nil {
+	if err := registry.PauseRequested(ctx, nil, jobID); err != nil {
 		t.Fatal(err)
 	}
 	// Send cancellation and unblock breakpoint.
@@ -747,11 +752,12 @@ func TestCSVImportMarksFilesFullyProcessed(t *testing.T) {
 	const batchSize = 5
 	defer TestingSetParallelImporterReaderBatchSize(batchSize)()
 	defer row.TestingSetDatumRowConverterBatchSize(2 * batchSize)()
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	s, db, _ := serverutils.StartServer(t,
 		base.TestServerArgs{
 			Knobs: base.TestingKnobs{
-				JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
+				RegistryLiveness: jobs.NewFakeNodeLiveness(1),
 				DistSQL: &execinfra.TestingKnobs{
 					BulkAdderFlushesEveryBatch: true,
 				},
@@ -778,6 +784,7 @@ func TestCSVImportMarksFilesFullyProcessed(t *testing.T) {
 		jobspb.TypeImport: func(raw jobs.Resumer) jobs.Resumer {
 			resumer := raw.(*importResumer)
 			resumer.testingKnobs.alwaysFlushJobProgress = true
+			resumer.testingKnobs.ignoreProtectedTimestamps = true
 			resumer.testingKnobs.afterImport = func(summary backupccl.RowCount) error {
 				importSummary = summary
 				return nil
@@ -816,7 +823,7 @@ func TestCSVImportMarksFilesFullyProcessed(t *testing.T) {
 	proceedImport := controllerBarrier.Enter()
 
 	// Pause the job;
-	if err := registry.PauseRequested(ctx, nil, jobID, ""); err != nil {
+	if err := registry.PauseRequested(ctx, nil, jobID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -847,6 +854,7 @@ func TestImportWithPartialIndexesErrs(t *testing.T) {
 	s, db, _ := serverutils.StartServer(t,
 		base.TestServerArgs{
 			Knobs: base.TestingKnobs{
+				RegistryLiveness: jobs.NewFakeNodeLiveness(1),
 				DistSQL: &execinfra.TestingKnobs{
 					BulkAdderFlushesEveryBatch: true,
 				},
@@ -887,7 +895,7 @@ func externalStorageFactory(
 	if err != nil {
 		return nil, err
 	}
-	return cloud.MakeExternalStorage(ctx, dest, base.ExternalIODirConfig{},
+	return cloudimpl.MakeExternalStorage(ctx, dest, base.ExternalIODirConfig{},
 		nil, blobs.TestBlobServiceClient(workdir), nil, nil)
 }
 
@@ -938,7 +946,7 @@ func newTestSpec(
 	}
 
 	for id, path := range inputs {
-		spec.inputs[int32(id)] = nodelocal.MakeLocalStorageURI(path)
+		spec.inputs[int32(id)] = cloudimpl.MakeLocalStorageURI(path)
 	}
 
 	return spec

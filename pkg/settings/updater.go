@@ -11,7 +11,6 @@
 package settings
 
 import (
-	"context"
 	"strconv"
 	"time"
 
@@ -50,18 +49,18 @@ type updater struct {
 // wrapped atomic settings values as we go and note which settings were updated,
 // then set the rest to default in ResetRemaining().
 type Updater interface {
-	Set(ctx context.Context, k, rawValue, valType string) error
-	ResetRemaining(ctx context.Context)
+	Set(k, rawValue, valType string) error
+	ResetRemaining()
 }
 
 // A NoopUpdater ignores all updates.
 type NoopUpdater struct{}
 
 // Set implements Updater. It is a no-op.
-func (u NoopUpdater) Set(ctx context.Context, k, rawValue, valType string) error { return nil }
+func (u NoopUpdater) Set(_, _, _ string) error { return nil }
 
 // ResetRemaining implements Updater. It is a no-op.
-func (u NoopUpdater) ResetRemaining(context.Context) {}
+func (u NoopUpdater) ResetRemaining() {}
 
 // NewUpdater makes an Updater.
 func NewUpdater(sv *Values) Updater {
@@ -72,7 +71,7 @@ func NewUpdater(sv *Values) Updater {
 }
 
 // Set attempts to parse and update a setting and notes that it was updated.
-func (u updater) Set(ctx context.Context, key, rawValue string, vt string) error {
+func (u updater) Set(key, rawValue string, vt string) error {
 	d, ok := registry[key]
 	if !ok {
 		if _, ok := retiredSettings[key]; ok {
@@ -90,38 +89,38 @@ func (u updater) Set(ctx context.Context, key, rawValue string, vt string) error
 
 	switch setting := d.(type) {
 	case *StringSetting:
-		return setting.set(ctx, u.sv, rawValue)
+		return setting.set(u.sv, rawValue)
 	case *BoolSetting:
 		b, err := strconv.ParseBool(rawValue)
 		if err != nil {
 			return err
 		}
-		setting.set(ctx, u.sv, b)
+		setting.set(u.sv, b)
 		return nil
 	case numericSetting: // includes *EnumSetting
 		i, err := strconv.Atoi(rawValue)
 		if err != nil {
 			return err
 		}
-		return setting.set(ctx, u.sv, int64(i))
+		return setting.set(u.sv, int64(i))
 	case *FloatSetting:
 		f, err := strconv.ParseFloat(rawValue, 64)
 		if err != nil {
 			return err
 		}
-		return setting.set(ctx, u.sv, f)
+		return setting.set(u.sv, f)
 	case *DurationSetting:
 		d, err := time.ParseDuration(rawValue)
 		if err != nil {
 			return err
 		}
-		return setting.set(ctx, u.sv, d)
+		return setting.set(u.sv, d)
 	case *DurationSettingWithExplicitUnit:
 		d, err := time.ParseDuration(rawValue)
 		if err != nil {
 			return err
 		}
-		return setting.set(ctx, u.sv, d)
+		return setting.set(u.sv, d)
 	case *VersionSetting:
 		// We intentionally avoid updating the setting through this code path.
 		// The specific setting backed by VersionSetting is the cluster version
@@ -134,10 +133,10 @@ func (u updater) Set(ctx context.Context, key, rawValue string, vt string) error
 }
 
 // ResetRemaining sets all settings not updated by the updater to their default values.
-func (u updater) ResetRemaining(ctx context.Context) {
+func (u updater) ResetRemaining() {
 	for k, v := range registry {
 		if _, ok := u.m[k]; !ok {
-			v.setToDefault(ctx, u.sv)
+			v.setToDefault(u.sv)
 		}
 	}
 }

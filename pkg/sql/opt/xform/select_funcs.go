@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
 )
 
@@ -98,49 +97,42 @@ func (c *CustomFuncs) GeneratePartialIndexScans(
 	grp memo.RelExpr, scanPrivate *memo.ScanPrivate, filters memo.FiltersExpr,
 ) {
 	// Iterate over all partial indexes.
-	var pkCols opt.ColSet
 	var iter scanIndexIter
-	iter.Init(c.e.evalCtx, c.e.f, c.e.mem, &c.im, scanPrivate, filters, rejectNonPartialIndexes|rejectInvertedIndexes)
-	iter.ForEach(func(index cat.Index, remainingFilters memo.FiltersExpr, indexCols opt.ColSet, isCovering bool, constProj memo.ProjectionsExpr) {
+	iter.Init(c.e.mem, &c.im, scanPrivate, filters, rejectNonPartialIndexes|rejectInvertedIndexes)
+	iter.ForEach(func(index cat.Index, remainingFilters memo.FiltersExpr, indexCols opt.ColSet, isCovering bool) {
 		var sb indexScanBuilder
-		sb.Init(c, scanPrivate.Table)
+		sb.init(c, scanPrivate.Table)
 		newScanPrivate := *scanPrivate
 		newScanPrivate.Index = index.Ordinal()
-		newScanPrivate.Cols = indexCols.Intersection(scanPrivate.Cols)
 
 		// If index is covering, just add a Select with the remaining filters,
 		// if there are any.
 		if isCovering {
-			sb.SetScan(&newScanPrivate)
-			sb.AddConstProjections(constProj)
-			sb.AddSelect(remainingFilters)
-			sb.Build(grp)
+			sb.setScan(&newScanPrivate)
+			sb.addSelect(remainingFilters)
+			sb.build(grp)
 			return
-		}
-
-		// Calculate the PK columns once.
-		if pkCols.Empty() {
-			pkCols = c.PrimaryKeyCols(scanPrivate.Table)
 		}
 
 		// If the index is not covering, scan the needed index columns plus
 		// primary key columns.
-		newScanPrivate.Cols.UnionWith(pkCols)
-		sb.SetScan(&newScanPrivate)
+		newScanPrivate.Cols = indexCols.Intersection(scanPrivate.Cols)
+		newScanPrivate.Cols.UnionWith(sb.primaryKeyCols())
+		sb.setScan(&newScanPrivate)
 
 		// Add a Select with any remaining filters that can be filtered before
 		// the IndexJoin. If there are no remaining filters this is a no-op. If
 		// all or parts of the remaining filters cannot be applied until after
 		// the IndexJoin, the new value of remainingFilters will contain those
 		// filters.
-		remainingFilters = sb.AddSelectAfterSplit(remainingFilters, newScanPrivate.Cols)
+		remainingFilters = sb.addSelectAfterSplit(remainingFilters, newScanPrivate.Cols)
 
 		// Add an IndexJoin to retrieve the columns not provided by the Scan.
-		sb.AddIndexJoin(scanPrivate.Cols)
+		sb.addIndexJoin(scanPrivate.Cols)
 
 		// Add a Select with any remaining filters.
-		sb.AddSelect(remainingFilters)
-		sb.Build(grp)
+		sb.addSelect(remainingFilters)
+		sb.build(grp)
 	})
 }
 
@@ -210,9 +202,8 @@ func (c *CustomFuncs) GeneratePartialIndexScans(
 func (c *CustomFuncs) GenerateConstrainedScans(
 	grp memo.RelExpr, scanPrivate *memo.ScanPrivate, explicitFilters memo.FiltersExpr,
 ) {
-	var pkCols opt.ColSet
 	var sb indexScanBuilder
-	sb.Init(c, scanPrivate.Table)
+	sb.init(c, scanPrivate.Table)
 
 	// Generate implicit filters from constraints and computed columns as
 	// optional filters to help constrain an index scan.
@@ -227,8 +218,8 @@ func (c *CustomFuncs) GenerateConstrainedScans(
 	md := c.e.mem.Metadata()
 	tabMeta := md.TableMeta(scanPrivate.Table)
 	var iter scanIndexIter
-	iter.Init(c.e.evalCtx, c.e.f, c.e.mem, &c.im, scanPrivate, explicitFilters, rejectInvertedIndexes)
-	iter.ForEach(func(index cat.Index, filters memo.FiltersExpr, indexCols opt.ColSet, isCovering bool, constProj memo.ProjectionsExpr) {
+	iter.Init(c.e.mem, &c.im, scanPrivate, explicitFilters, rejectInvertedIndexes)
+	iter.ForEach(func(index cat.Index, filters memo.FiltersExpr, indexCols opt.ColSet, isCovering bool) {
 		// We only consider the partition values when a particular index can otherwise
 		// not be constrained. For indexes that are constrained, the partitioned values
 		// add no benefit as they don't really constrain anything.
@@ -338,26 +329,21 @@ func (c *CustomFuncs) GenerateConstrainedScans(
 		// Construct new constrained ScanPrivate.
 		newScanPrivate := *scanPrivate
 		newScanPrivate.Index = index.Ordinal()
-		newScanPrivate.Cols = indexCols.Intersection(scanPrivate.Cols)
-		newScanPrivate.SetConstraint(c.e.evalCtx, constraint)
+		newScanPrivate.Constraint = constraint
 		// Record whether we were able to use partitions to constrain the scan.
 		newScanPrivate.PartitionConstrainedScan = (len(partitionFilters) > 0)
 
-		// If the alternate index includes the set of needed columns, then
-		// construct a new Scan operator using that index.
+		// If the alternate index includes the set of needed columns, then construct
+		// a new Scan operator using that index.
 		if isCovering {
-			sb.SetScan(&newScanPrivate)
-
-			// Project constants from partial index predicate filters, if there
-			// are any.
-			sb.AddConstProjections(constProj)
+			sb.setScan(&newScanPrivate)
 
 			// If there are remaining filters, then the constrained Scan operator
 			// will be created in a new group, and a Select operator will be added
 			// to the same group as the original operator.
-			sb.AddSelect(remainingFilters)
+			sb.addSelect(remainingFilters)
 
-			sb.Build(grp)
+			sb.build(grp)
 			return
 		}
 
@@ -367,23 +353,19 @@ func (c *CustomFuncs) GenerateConstrainedScans(
 			return
 		}
 
-		// Calculate the PK columns once.
-		if pkCols.Empty() {
-			pkCols = c.PrimaryKeyCols(scanPrivate.Table)
-		}
-
-		// If the index is not covering, scan the needed index columns plus
-		// primary key columns.
-		newScanPrivate.Cols.UnionWith(pkCols)
-		sb.SetScan(&newScanPrivate)
+		// Scan whatever columns we need which are available from the index, plus
+		// the PK columns.
+		newScanPrivate.Cols = indexCols.Intersection(scanPrivate.Cols)
+		newScanPrivate.Cols.UnionWith(sb.primaryKeyCols())
+		sb.setScan(&newScanPrivate)
 
 		// If remaining filter exists, split it into one part that can be pushed
 		// below the IndexJoin, and one part that needs to stay above.
-		remainingFilters = sb.AddSelectAfterSplit(remainingFilters, newScanPrivate.Cols)
-		sb.AddIndexJoin(scanPrivate.Cols)
-		sb.AddSelect(remainingFilters)
+		remainingFilters = sb.addSelectAfterSplit(remainingFilters, newScanPrivate.Cols)
+		sb.addIndexJoin(scanPrivate.Cols)
+		sb.addSelect(remainingFilters)
 
-		sb.Build(grp)
+		sb.build(grp)
 	})
 }
 
@@ -391,9 +373,8 @@ func (c *CustomFuncs) GenerateConstrainedScans(
 // ID into a constant value, by evaluating it with respect to a set of other
 // columns that are constant. If the computed column is constant, enter it into
 // the constCols map and return false. Otherwise, return false.
-//
 func (c *CustomFuncs) tryFoldComputedCol(
-	tabMeta *opt.TableMeta, computedColID opt.ColumnID, constCols constColsMap,
+	tabMeta *opt.TableMeta, computedColID opt.ColumnID, constCols map[opt.ColumnID]opt.ScalarExpr,
 ) bool {
 	// Check whether computed column has already been folded.
 	if _, ok := constCols[computedColID]; ok {
@@ -425,11 +406,6 @@ func (c *CustomFuncs) tryFoldComputedCol(
 	}
 
 	computedCol := tabMeta.ComputedCols[computedColID]
-	if memo.CanBeCompositeSensitive(c.e.mem.Metadata(), computedCol) {
-		// The computed column expression can return different values for logically
-		// equal outer columns (e.g. d::STRING where d is a DECIMAL).
-		return false
-	}
 	replaced := replace(computedCol).(opt.ScalarExpr)
 
 	// If the computed column is constant, enter it into the constCols map.
@@ -735,9 +711,8 @@ func (c *CustomFuncs) partitionValuesFilters(
 func (c *CustomFuncs) GenerateInvertedIndexScans(
 	grp memo.RelExpr, scanPrivate *memo.ScanPrivate, filters memo.FiltersExpr,
 ) {
-	var pkCols opt.ColSet
 	var sb indexScanBuilder
-	sb.Init(c, scanPrivate.Table)
+	sb.init(c, scanPrivate.Table)
 	tabMeta := c.e.mem.Metadata().TableMeta(scanPrivate.Table)
 
 	// Generate implicit filters from constraints and computed columns as
@@ -748,8 +723,8 @@ func (c *CustomFuncs) GenerateInvertedIndexScans(
 
 	// Iterate over all inverted indexes.
 	var iter scanIndexIter
-	iter.Init(c.e.evalCtx, c.e.f, c.e.mem, &c.im, scanPrivate, filters, rejectNonInvertedIndexes)
-	iter.ForEach(func(index cat.Index, filters memo.FiltersExpr, indexCols opt.ColSet, _ bool, _ memo.ProjectionsExpr) {
+	iter.Init(c.e.mem, &c.im, scanPrivate, filters, rejectNonInvertedIndexes)
+	iter.ForEach(func(index cat.Index, filters memo.FiltersExpr, indexCols opt.ColSet, isCovering bool) {
 		// Check whether the filter can constrain the index.
 		spanExpr, constraint, remainingFilters, pfState, ok := invertedidx.TryFilterInvertedIndex(
 			c.e.evalCtx, c.e.f, filters, optionalFilters, scanPrivate.Table, index, tabMeta.ComputedCols,
@@ -783,23 +758,19 @@ func (c *CustomFuncs) GenerateInvertedIndexScans(
 		// Construct new ScanOpDef with the new index and constraint.
 		newScanPrivate := *scanPrivate
 		newScanPrivate.Index = index.Ordinal()
-		newScanPrivate.SetConstraint(c.e.evalCtx, constraint)
+		newScanPrivate.Constraint = constraint
 		newScanPrivate.InvertedConstraint = spansToRead
-
-		// Calculate the PK columns once.
-		if pkCols.Empty() {
-			pkCols = c.PrimaryKeyCols(scanPrivate.Table)
-		}
 
 		// We will need an inverted filter above the scan if the spanExpr might
 		// produce duplicate primary keys or requires at least one UNION or
 		// INTERSECTION. In this case, we must scan both the primary key columns
 		// and the inverted key column.
 		needInvertedFilter := !spanExpr.Unique || spanExpr.Operator != inverted.None
+		pkCols := sb.primaryKeyCols()
 		newScanPrivate.Cols = pkCols.Copy()
 		var invertedCol opt.ColumnID
 		if needInvertedFilter {
-			invertedCol = scanPrivate.Table.ColumnID(index.InvertedColumn().Ordinal())
+			invertedCol = scanPrivate.Table.ColumnID(index.VirtualInvertedColumn().Ordinal())
 			newScanPrivate.Cols.Add(invertedCol)
 		}
 
@@ -810,20 +781,20 @@ func (c *CustomFuncs) GenerateInvertedIndexScans(
 		// index join will be removed by EliminateIndexJoinInsideProject, but
 		// it'd be more efficient to not create the index join in the first
 		// place.
-		sb.SetScan(&newScanPrivate)
+		sb.setScan(&newScanPrivate)
 
 		// Add an inverted filter if needed.
 		if needInvertedFilter {
-			sb.AddInvertedFilter(spanExpr, pfState, invertedCol)
+			sb.addInvertedFilter(spanExpr, pfState, invertedCol)
 		}
 
 		// If remaining filter exists, split it into one part that can be pushed
 		// below the IndexJoin, and one part that needs to stay above.
-		filters = sb.AddSelectAfterSplit(filters, pkCols)
-		sb.AddIndexJoin(scanPrivate.Cols)
-		sb.AddSelect(filters)
+		filters = sb.addSelectAfterSplit(filters, pkCols)
+		sb.addIndexJoin(scanPrivate.Cols)
+		sb.addSelect(filters)
 
-		sb.Build(grp)
+		sb.build(grp)
 	})
 }
 
@@ -914,18 +885,19 @@ func (c *CustomFuncs) canMaybeConstrainNonInvertedIndex(
 func (c *CustomFuncs) GenerateZigzagJoins(
 	grp memo.RelExpr, scanPrivate *memo.ScanPrivate, filters memo.FiltersExpr,
 ) {
+	tab := c.e.mem.Metadata().Table(scanPrivate.Table)
+
 	// Short circuit unless zigzag joins are explicitly enabled.
-	if !c.e.evalCtx.SessionData().ZigzagJoinEnabled || scanPrivate.Flags.NoZigzagJoin {
+	if !c.e.evalCtx.SessionData.ZigzagJoinEnabled {
 		return
 	}
 
 	fixedCols := memo.ExtractConstColumns(filters, c.e.evalCtx)
+
 	if fixedCols.Len() < 2 {
 		// Zigzagging requires at least 2 columns to have fixed values.
 		return
 	}
-
-	tab := c.e.mem.Metadata().Table(scanPrivate.Table)
 
 	// Zigzag joins aren't currently equipped to produce system columns, so
 	// don't generate any if some system columns are requested.
@@ -968,8 +940,8 @@ func (c *CustomFuncs) GenerateZigzagJoins(
 	// TODO(mgartner): We should consider primary indexes when it has multiple
 	// columns and only the first is being constrained.
 	var iter scanIndexIter
-	iter.Init(c.e.evalCtx, c.e.f, c.e.mem, &c.im, scanPrivate, filters, rejectPrimaryIndex|rejectInvertedIndexes)
-	iter.ForEach(func(leftIndex cat.Index, outerFilters memo.FiltersExpr, leftCols opt.ColSet, _ bool, _ memo.ProjectionsExpr) {
+	iter.Init(c.e.mem, &c.im, scanPrivate, filters, rejectPrimaryIndex|rejectInvertedIndexes)
+	iter.ForEach(func(leftIndex cat.Index, outerFilters memo.FiltersExpr, leftCols opt.ColSet, _ bool) {
 		leftFixed := c.indexConstrainedCols(leftIndex, scanPrivate.Table, fixedCols)
 		// Short-circuit quickly if the first column in the index is not a fixed
 		// column.
@@ -978,18 +950,9 @@ func (c *CustomFuncs) GenerateZigzagJoins(
 		}
 
 		var iter2 scanIndexIter
-		iter2.Init(c.e.evalCtx, c.e.f, c.e.mem, &c.im, scanPrivate, outerFilters, rejectPrimaryIndex|rejectInvertedIndexes)
+		iter2.Init(c.e.mem, &c.im, scanPrivate, outerFilters, rejectPrimaryIndex|rejectInvertedIndexes)
 		iter2.SetOriginalFilters(filters)
-		iter2.ForEachStartingAfter(leftIndex.Ordinal(), func(rightIndex cat.Index, innerFilters memo.FiltersExpr, rightCols opt.ColSet, _ bool, _ memo.ProjectionsExpr) {
-			// Check if we have zigzag hints.
-			if scanPrivate.Flags.ForceZigzag {
-				indexes := util.MakeFastIntSet(leftIndex.Ordinal(), rightIndex.Ordinal())
-				forceIndexes := scanPrivate.Flags.ZigzagIndexes
-				if !forceIndexes.SubsetOf(indexes) {
-					return
-				}
-			}
-
+		iter2.ForEachStartingAfter(leftIndex.Ordinal(), func(rightIndex cat.Index, innerFilters memo.FiltersExpr, rightCols opt.ColSet, _ bool) {
 			rightFixed := c.indexConstrainedCols(rightIndex, scanPrivate.Table, fixedCols)
 			// If neither side contributes a fixed column not contributed by the
 			// other, then there's no reason to zigzag on this pair of indexes.
@@ -1286,22 +1249,17 @@ func (c *CustomFuncs) GenerateInvertedIndexZigzagJoins(
 	grp memo.RelExpr, scanPrivate *memo.ScanPrivate, filters memo.FiltersExpr,
 ) {
 	// Short circuit unless zigzag joins are explicitly enabled.
-	if !c.e.evalCtx.SessionData().ZigzagJoinEnabled || scanPrivate.Flags.NoZigzagJoin {
+	if !c.e.evalCtx.SessionData.ZigzagJoinEnabled {
 		return
 	}
 
 	var sb indexScanBuilder
-	sb.Init(c, scanPrivate.Table)
+	sb.init(c, scanPrivate.Table)
 
 	// Iterate over all inverted indexes.
 	var iter scanIndexIter
-	iter.Init(c.e.evalCtx, c.e.f, c.e.mem, &c.im, scanPrivate, filters, rejectNonInvertedIndexes)
-	iter.ForEach(func(index cat.Index, filters memo.FiltersExpr, indexCols opt.ColSet, _ bool, _ memo.ProjectionsExpr) {
-		// Check if we have zigzag hints.
-		if !scanPrivate.Flags.ZigzagIndexes.Empty() && !scanPrivate.Flags.ZigzagIndexes.Contains(index.Ordinal()) {
-			return
-		}
-
+	iter.Init(c.e.mem, &c.im, scanPrivate, filters, rejectNonInvertedIndexes)
+	iter.ForEach(func(index cat.Index, filters memo.FiltersExpr, indexCols opt.ColSet, _ bool) {
 		if index.NonInvertedPrefixColumnCount() > 0 {
 			// TODO(mgartner): We don't yet support using multi-column inverted
 			//  indexes with zigzag joins.
@@ -1412,7 +1370,7 @@ func (c *CustomFuncs) GenerateInvertedIndexZigzagJoins(
 		leftTypes[invertedColIdx] = leftVal.ResolvedType()
 		rightVals[invertedColIdx] = c.e.f.ConstructConstVal(&rightVal, rightVal.ResolvedType())
 		rightTypes[invertedColIdx] = rightVal.ResolvedType()
-		invertedCol := scanPrivate.Table.ColumnID(index.InvertedColumn().Ordinal())
+		invertedCol := scanPrivate.Table.ColumnID(index.VirtualInvertedColumn().Ordinal())
 		zigzagJoin.LeftFixedCols[invertedColIdx] = invertedCol
 		zigzagJoin.RightFixedCols[invertedColIdx] = invertedCol
 
@@ -1506,30 +1464,62 @@ func (c *CustomFuncs) GenerateInvertedIndexZigzagJoins(
 	})
 }
 
-// SplitDisjunction finds the first disjunction in the filters that can be split
-// into an interesting pair of expressions. It returns the pair of expressions
-// and the Filters item they were a part of. If an "interesting" disjunction is
-// not found, ok=false is returned.
+// ExprPair stores a left and right ScalarExpr. ExprPairForSplitDisjunction
+// returns ExprPair, which can be deconstructed later, to avoid extra
+// computation in determining the left and right expression groups.
+type ExprPair struct {
+	left          opt.ScalarExpr
+	right         opt.ScalarExpr
+	itemToReplace *memo.FiltersItem
+}
+
+// ExprPairLeft returns the left ScalarExpr in an ExprPair.
+func (c *CustomFuncs) ExprPairLeft(ep ExprPair) opt.ScalarExpr {
+	return ep.left
+}
+
+// ExprPairRight returns the right ScalarExpr in an ExprPair.
+func (c *CustomFuncs) ExprPairRight(ep ExprPair) opt.ScalarExpr {
+	return ep.right
+}
+
+// ExprPairFiltersItemToReplace returns the original FiltersItem that the
+// ExprPair was generated from. This FiltersItem should be replaced by
+// ExprPairLeft and ExprPairRight in the newly generated filters in
+// SplitDisjunction(AddKey).
+func (c *CustomFuncs) ExprPairFiltersItemToReplace(ep ExprPair) *memo.FiltersItem {
+	return ep.itemToReplace
+}
+
+// ExprPairSucceeded returns true if the ExprPair is not nil.
+func (c *CustomFuncs) ExprPairSucceeded(ep ExprPair) bool {
+	return ep != ExprPair{}
+}
+
+// ExprPairForSplitDisjunction finds the first "interesting" ExprPair in the
+// filters and returns it. If an "interesting" ExprPair is not found, an empty
+// ExprPair is returned.
 //
-// For details on what makes an "interesting" disjunction, see
-// findInterestingDisjunctionPair.
-func (c *CustomFuncs) SplitDisjunction(
+// For details on what makes an ExprPair "interesting", see
+// buildExprPairForSplitDisjunction.
+func (c *CustomFuncs) ExprPairForSplitDisjunction(
 	sp *memo.ScanPrivate, filters memo.FiltersExpr,
-) (left opt.ScalarExpr, right opt.ScalarExpr, itemToReplace *memo.FiltersItem, ok bool) {
+) ExprPair {
 	for i := range filters {
 		if filters[i].Condition.Op() == opt.OrOp {
-			if left, right, ok := c.findInterestingDisjunctionPair(sp, &filters[i]); ok {
-				return left, right, &filters[i], true
+			ep := c.buildExprPairForSplitDisjunction(sp, &filters[i])
+			if (ep != ExprPair{}) {
+				return ep
 			}
 		}
 	}
-	return nil, nil, nil, false
+	return ExprPair{}
 }
 
-// findInterestingDisjunctionPair groups disjunction sub-expressions into an
-// "interesting" pair of expressions.
+// buildExprPairForSplitDisjunction groups disjuction sub-expressions into an
+// "interesting" ExprPair.
 //
-// An "interesting" pair of expressions is one where:
+// An "interesting" ExprPair is one where:
 //
 //   1. The column sets of both expressions in the pair are not
 //      equal.
@@ -1540,18 +1530,18 @@ func (c *CustomFuncs) SplitDisjunction(
 //
 //   u = 1 OR v = 2
 //
-// If an index exists on u and another on v, an "interesting" pair exists, ("u =
-// 1", "v = 1"). If both indexes do not exist, there is no "interesting" pair
-// possible.
+// If an index exists on u and another on v, an "interesting" ExprPair exists,
+// ("u = 1", "v = 1"). If both indexes do not exist, there is no "interesting"
+// ExprPair possible.
 //
 // Now consider the expression:
 //
 //   u = 1 OR u = 2
 //
-// There is no possible "interesting" pair here because the left and right sides
-// of the disjunction share the same columns.
+// There is no possible "interesting" ExprPair here because the left and right
+// sides of the disjunction share the same columns.
 //
-// findInterestingDisjunctionPair groups all sub-expressions adjacent to the
+// buildExprPairForSplitDisjunction groups all sub-expressions adjacent to the
 // input's top-level OrExpr into left and right expression groups. These two
 // groups form the new filter expressions on the left and right side of the
 // generated UnionAll in SplitDisjunction(AddKey).
@@ -1560,13 +1550,14 @@ func (c *CustomFuncs) SplitDisjunction(
 // are grouped in the left group. All other sub-expressions are grouped in the
 // right group.
 //
-// findInterestingDisjunctionPair returns an ok=false if all sub-expressions
-// have the same columns. It also returns ok=false if either expression of the
-// pair is likely to constrain an index scan. See canMaybeConstrainIndexWithCols
-// for details on how this is determined.
-func (c *CustomFuncs) findInterestingDisjunctionPair(
+// buildExprPairForSplitDisjunction returns an empty ExprPair if all
+// sub-expressions have the same columns. It also returns an empty ExprPair if
+// either expression in the pair found is not likely to constrain an index
+// scan. See canMaybeConstrainIndexWithCols for details on how this is
+// determined.
+func (c *CustomFuncs) buildExprPairForSplitDisjunction(
 	sp *memo.ScanPrivate, filter *memo.FiltersItem,
-) (left opt.ScalarExpr, right opt.ScalarExpr, ok bool) {
+) ExprPair {
 	var leftExprs memo.ScalarListExpr
 	var rightExprs memo.ScalarListExpr
 	var leftColSet opt.ColSet
@@ -1607,10 +1598,14 @@ func (c *CustomFuncs) findInterestingDisjunctionPair(
 		len(rightExprs) == 0 ||
 		!c.canMaybeConstrainIndexWithCols(sp, leftColSet) ||
 		!c.canMaybeConstrainIndexWithCols(sp, rightColSet) {
-		return nil, nil, false
+		return ExprPair{}
 	}
 
-	return c.constructOr(leftExprs), c.constructOr(rightExprs), true
+	return ExprPair{
+		left:          c.constructOr(leftExprs),
+		right:         c.constructOr(rightExprs),
+		itemToReplace: filter,
+	}
 }
 
 // canMaybeConstrainIndexWithCols returns true if any indexes on the
@@ -1658,7 +1653,7 @@ func (c *CustomFuncs) canMaybeConstrainIndexWithCols(
 		for j, n := 0, index.KeyColumnCount(); j < n; j++ {
 			col := index.Column(j)
 			ord := col.Ordinal()
-			if col.Kind() == cat.Inverted {
+			if col.Kind() == cat.VirtualInverted {
 				ord = col.InvertedSourceColumnOrdinal()
 			}
 			if cols.Contains(tabMeta.MetaID.ColumnID(ord)) {

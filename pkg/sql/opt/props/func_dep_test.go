@@ -1192,22 +1192,6 @@ func TestFuncDeps_MakeLeftOuter(t *testing.T) {
 	verifyFD(t, &loj, "(1)-->(2-5), (2,3)~~>(1,4,5), (1,12,13)-->(14)")
 	loj.MakeLeftOuter(abcde, &props.FuncDepSet{}, preservedCols, nullExtendedCols, c(1))
 	verifyFD(t, &loj, "(1)-->(2-5), (2,3)~~>(1,4,5)")
-
-	// Special case where left side has at most one row.
-	abcde = makeAbcdeFD(t)
-	abcde.MakeMax1Row(abcde.ColSet())
-	verifyFD(t, abcde, "key(); ()-->(1-5)")
-	mnpq = makeMnpqFD(t)
-	verifyFD(t, mnpq, "key(10,11); (10,11)-->(12,13)")
-	filterFDs := &props.FuncDepSet{}
-	filterFDs.AddEquivalency(2, 12)
-	filterFDs.AddSynthesizedCol(c(1, 2, 3), 13)
-	loj.CopyFrom(abcde)
-	loj.MakeProduct(mnpq)
-	verifyFD(t, &loj, "key(10,11); ()-->(1-5), (10,11)-->(12,13)")
-	loj.MakeLeftOuter(abcde, filterFDs, abcde.ColSet(), mnpq.ColSet(), c())
-	// 12 and 13 should be constant columns.
-	verifyFD(t, &loj, "key(10,11); ()-->(1-5,12,13)")
 }
 
 func TestFuncDeps_MakeFullOuter(t *testing.T) {
@@ -1238,28 +1222,6 @@ func TestFuncDeps_MakeFullOuter(t *testing.T) {
 	mnpq.MakeMax1Row(mnpq.ColSet())
 	outer = mk(abcde, mnpq, c())
 	verifyFD(t, outer, "")
-}
-
-func TestFuncDeps_RemapFrom(t *testing.T) {
-	var res props.FuncDepSet
-	abcde := makeAbcdeFD(t)
-	mnpq := makeMnpqFD(t)
-
-	from := opt.ColList{1, 2, 3, 4, 5, 10, 11, 12, 13}
-	to := make(opt.ColList, len(from))
-	for i := range from {
-		to[i] = from[i] * 10
-	}
-	res.RemapFrom(abcde, from, to)
-	verifyFD(t, &res, "key(10); (10)-->(20,30,40,50), (20,30)~~>(10,40,50)")
-	res.RemapFrom(mnpq, from, to)
-	verifyFD(t, &res, "key(100,110); (100,110)-->(120,130)")
-
-	// Test where not all columns in the FD are present in the mapping.
-	from = opt.ColList{1, 3, 4, 5}
-	to = opt.ColList{10, 30, 40, 50}
-	res.RemapFrom(abcde, from, to)
-	verifyFD(t, &res, "key(10); (10)-->(30,40,50)")
 }
 
 // Construct base table FD from figure 3.3, page 114:

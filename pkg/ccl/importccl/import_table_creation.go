@@ -11,25 +11,24 @@ package importccl
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/faketreeeval"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
-	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
@@ -44,6 +43,40 @@ const (
 	defaultCSVTableID  descpb.ID = defaultCSVParentID + 1
 )
 
+func readCreateTableFromStore(
+	ctx context.Context,
+	filename string,
+	externalStorageFromURI cloud.ExternalStorageFromURIFactory,
+	user security.SQLUsername,
+) (*tree.CreateTable, error) {
+	store, err := externalStorageFromURI(ctx, filename, user)
+	if err != nil {
+		return nil, err
+	}
+	defer store.Close()
+	reader, err := store.ReadFile(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	tableDefStr, err := ioutil.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	stmts, err := parser.Parse(string(tableDefStr))
+	if err != nil {
+		return nil, err
+	}
+	if len(stmts) != 1 {
+		return nil, errors.Errorf("expected 1 create table statement, found %d", len(stmts))
+	}
+	create, ok := stmts[0].AST.(*tree.CreateTable)
+	if !ok {
+		return nil, errors.New("expected CREATE TABLE statement in table file")
+	}
+	return create, nil
+}
+
 type fkHandler struct {
 	allowed  bool
 	skip     bool
@@ -55,47 +88,16 @@ var NoFKs = fkHandler{resolver: fkResolver{
 	tableNameToDesc: make(map[string]*tabledesc.Mutable),
 }}
 
-// MakeTestingSimpleTableDescriptor is like MakeSimpleTableDescriptor but it
-// uses parentID and parentSchemaID instead of descriptors.
-func MakeTestingSimpleTableDescriptor(
-	ctx context.Context,
-	semaCtx *tree.SemaContext,
-	st *cluster.Settings,
-	create *tree.CreateTable,
-	parentID, parentSchemaID, tableID descpb.ID,
-	fks fkHandler,
-	walltime int64,
-) (*tabledesc.Mutable, error) {
-	db := dbdesc.NewInitial(parentID, "foo", security.RootUserName())
-	var sc catalog.SchemaDescriptor
-	if parentSchemaID == keys.PublicSchemaID {
-		sc = schemadesc.GetPublicSchema()
-	} else {
-		sc = schemadesc.NewBuilder(&descpb.SchemaDescriptor{
-			Name:     "foo",
-			ID:       parentSchemaID,
-			Version:  1,
-			ParentID: parentID,
-			Privileges: descpb.NewPrivilegeDescriptor(
-				security.PublicRoleName(),
-				privilege.SchemaPrivileges,
-				security.RootUserName(),
-			),
-		}).BuildCreatedMutableSchema()
-	}
-	return MakeSimpleTableDescriptor(ctx, semaCtx, st, create, db, sc, tableID, fks, walltime)
-}
-
 func makeSemaCtxWithoutTypeResolver(semaCtx *tree.SemaContext) *tree.SemaContext {
 	semaCtxCopy := *semaCtx
 	semaCtxCopy.TypeResolver = nil
 	return &semaCtxCopy
 }
 
-// MakeSimpleTableDescriptor creates a tabledesc.Mutable from a CreateTable
-// parse node without the full machinery. Many parts of the syntax are
-// unsupported (see the implementation and TestMakeSimpleTableDescriptorErrors
-// for details), but this is enough for our csv IMPORT and for some unit tests.
+// MakeSimpleTableDescriptor creates a Mutable from a CreateTable parse
+// node without the full machinery. Many parts of the syntax are unsupported
+// (see the implementation and TestMakeSimpleTableDescriptorErrors for details),
+// but this is enough for our csv IMPORT and for some unit tests.
 //
 // Any occurrence of SERIAL in the column definitions is handled using
 // the CockroachDB legacy behavior, i.e. INT NOT NULL DEFAULT
@@ -105,15 +107,16 @@ func MakeSimpleTableDescriptor(
 	semaCtx *tree.SemaContext,
 	st *cluster.Settings,
 	create *tree.CreateTable,
-	db catalog.DatabaseDescriptor,
-	sc catalog.SchemaDescriptor,
-	tableID descpb.ID,
+	parentID, parentSchemaID, tableID descpb.ID,
 	fks fkHandler,
 	walltime int64,
 ) (*tabledesc.Mutable, error) {
 	create.HoistConstraints()
 	if create.IfNotExists {
 		return nil, unimplemented.NewWithIssueDetailf(42846, "import.if-no-exists", "unsupported IF NOT EXISTS")
+	}
+	if create.Interleave != nil {
+		return nil, unimplemented.NewWithIssueDetailf(42846, "import.interleave", "interleaved not supported")
 	}
 	if create.AsSource != nil {
 		return nil, unimplemented.NewWithIssueDetailf(42846, "import.create-as", "CREATE AS not supported")
@@ -124,16 +127,9 @@ func MakeSimpleTableDescriptor(
 		switch def := create.Defs[i].(type) {
 		case *tree.CheckConstraintTableDef,
 			*tree.FamilyTableDef,
+			*tree.IndexTableDef,
 			*tree.UniqueConstraintTableDef:
 			// ignore
-		case *tree.IndexTableDef:
-			for i := range def.Columns {
-				if def.Columns[i].Expr != nil {
-					return nil, unimplemented.NewWithIssueDetail(56002, "import.expression-index",
-						"to import into a table with expression indexes, use IMPORT INTO")
-				}
-			}
-
 		case *tree.ColumnTableDef:
 			if def.IsComputed() && def.IsVirtual() {
 				return nil, unimplemented.NewWithIssueDetail(56002, "import.computed",
@@ -164,12 +160,9 @@ func MakeSimpleTableDescriptor(
 	create.Defs = filteredDefs
 
 	evalCtx := tree.EvalContext{
-		Context:            ctx,
-		Sequence:           &importSequenceOperators{},
-		Regions:            makeImportRegionOperator(""),
-		SessionDataStack:   sessiondata.NewStack(&sessiondata.SessionData{}),
-		ClientNoticeSender: &faketreeeval.DummyClientNoticeSender{},
-		Settings:           st,
+		Context:     ctx,
+		Sequence:    &importSequenceOperators{},
+		SessionData: &sessiondata.SessionData{},
 	}
 	affected := make(map[descpb.ID]*tabledesc.Mutable)
 
@@ -179,16 +172,16 @@ func MakeSimpleTableDescriptor(
 		&fks.resolver,
 		st,
 		create,
-		db,
-		sc,
+		parentID,
+		parentSchemaID,
 		tableID,
 		nil, /* regionConfig */
 		hlc.Timestamp{WallTime: walltime},
-		descpb.NewBasePrivilegeDescriptor(security.AdminRoleName()),
+		descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName()),
 		affected,
 		semaCtx,
 		&evalCtx,
-		evalCtx.SessionData(), /* sessionData */
+		&sessiondata.SessionData{}, /* sessionData */
 		tree.PersistencePermanent,
 		// We need to bypass the LOCALITY on non multi-region check here because
 		// we cannot access the database region config at import level.
@@ -211,7 +204,7 @@ func MakeSimpleTableDescriptor(
 // and mark references an validated. This function sets the table to PUBLIC
 // and the FKs to unvalidated.
 func fixDescriptorFKState(tableDesc *tabledesc.Mutable) error {
-	tableDesc.SetPublic()
+	tableDesc.State = descpb.DescriptorState_PUBLIC
 	for i := range tableDesc.OutboundFKs {
 		tableDesc.OutboundFKs[i].Validity = descpb.ConstraintValidity_Unvalidated
 	}
@@ -220,70 +213,12 @@ func fixDescriptorFKState(tableDesc *tabledesc.Mutable) error {
 
 var (
 	errSequenceOperators = errors.New("sequence operations unsupported")
-	errRegionOperator    = errors.New("region operations unsupported")
 	errSchemaResolver    = errors.New("schema resolver unsupported")
 )
 
-// Implements the tree.RegionOperator interface.
-type importRegionOperator struct {
-	primaryRegion descpb.RegionName
-}
-
-func makeImportRegionOperator(primaryRegion descpb.RegionName) *importRegionOperator {
-	return &importRegionOperator{primaryRegion: primaryRegion}
-}
-
-// importDatabaseRegionConfig is a stripped down version of
-// multiregion.RegionConfig that is used by import.
-type importDatabaseRegionConfig struct {
-	primaryRegion descpb.RegionName
-}
-
-// IsValidRegionNameString implements the tree.DatabaseRegionConfig interface.
-func (i importDatabaseRegionConfig) IsValidRegionNameString(_ string) bool {
-	// Unimplemented.
-	return false
-}
-
-// PrimaryRegionString implements the tree.DatabaseRegionConfig interface.
-func (i importDatabaseRegionConfig) PrimaryRegionString() string {
-	return string(i.primaryRegion)
-}
-
-var _ tree.DatabaseRegionConfig = &importDatabaseRegionConfig{}
-
-// CurrentDatabaseRegionConfig is part of the tree.EvalDatabase interface.
-func (so *importRegionOperator) CurrentDatabaseRegionConfig(
-	_ context.Context,
-) (tree.DatabaseRegionConfig, error) {
-	return importDatabaseRegionConfig{primaryRegion: so.primaryRegion}, nil
-}
-
-// ValidateAllMultiRegionZoneConfigsInCurrentDatabase is part of the tree.EvalDatabase interface.
-func (so *importRegionOperator) ValidateAllMultiRegionZoneConfigsInCurrentDatabase(
-	_ context.Context,
-) error {
-	return errors.WithStack(errRegionOperator)
-}
-
-// ResetMultiRegionZoneConfigsForTable is part of the tree.EvalDatabase
-// interface.
-func (so *importRegionOperator) ResetMultiRegionZoneConfigsForTable(
-	_ context.Context, _ int64,
-) error {
-	return errors.WithStack(errRegionOperator)
-}
-
-// ResetMultiRegionZoneConfigsForDatabase is part of the tree.EvalDatabase
-// interface.
-func (so *importRegionOperator) ResetMultiRegionZoneConfigsForDatabase(
-	_ context.Context, _ int64,
-) error {
-	return errors.WithStack(errRegionOperator)
-}
-
 // Implements the tree.SequenceOperators interface.
-type importSequenceOperators struct{}
+type importSequenceOperators struct {
+}
 
 // GetSerialSequenceNameFromColumn is part of the tree.SequenceOperators interface.
 func (so *importSequenceOperators) GetSerialSequenceNameFromColumn(
@@ -292,7 +227,21 @@ func (so *importSequenceOperators) GetSerialSequenceNameFromColumn(
 	return nil, errors.WithStack(errSequenceOperators)
 }
 
-// ParseQualifiedTableName implements the tree.EvalDatabase interface.
+// CurrentDatabaseRegionConfig is part of the tree.EvalDatabase interface.
+func (so *importSequenceOperators) CurrentDatabaseRegionConfig(
+	_ context.Context,
+) (tree.DatabaseRegionConfig, error) {
+	return nil, errors.WithStack(errSequenceOperators)
+}
+
+// ValidateAllMultiRegionZoneConfigsInCurrentDatabase is part of the tree.EvalDatabase interface.
+func (so *importSequenceOperators) ValidateAllMultiRegionZoneConfigsInCurrentDatabase(
+	_ context.Context,
+) error {
+	return errors.WithStack(errSequenceOperators)
+}
+
+// Implements the tree.EvalDatabase interface.
 func (so *importSequenceOperators) ParseQualifiedTableName(sql string) (*tree.TableName, error) {
 	name, err := parser.ParseTableName(sql)
 	if err != nil {
@@ -302,18 +251,18 @@ func (so *importSequenceOperators) ParseQualifiedTableName(sql string) (*tree.Ta
 	return &tn, nil
 }
 
-// ResolveTableName implements the tree.EvalDatabase interface.
+// Implements the tree.EvalDatabase interface.
 func (so *importSequenceOperators) ResolveTableName(
 	ctx context.Context, tn *tree.TableName,
 ) (tree.ID, error) {
 	return 0, errSequenceOperators
 }
 
-// SchemaExists implements the tree.EvalDatabase interface.
-func (so *importSequenceOperators) SchemaExists(
+// Implements the tree.EvalDatabase interface.
+func (so *importSequenceOperators) LookupSchema(
 	ctx context.Context, dbName, scName string,
-) (bool, error) {
-	return false, errSequenceOperators
+) (bool, tree.SchemaMeta, error) {
+	return false, nil, errSequenceOperators
 }
 
 // IsTableVisible is part of the tree.EvalDatabase interface.
@@ -330,33 +279,44 @@ func (so *importSequenceOperators) IsTypeVisible(
 	return false, false, errors.WithStack(errSequenceOperators)
 }
 
-// HasPrivilege is part of the tree.EvalDatabase interface.
-func (so *importSequenceOperators) HasPrivilege(
-	ctx context.Context,
-	specifier tree.HasPrivilegeSpecifier,
-	user security.SQLUsername,
-	kind privilege.Kind,
-) (bool, error) {
-	return false, errors.WithStack(errSequenceOperators)
+// Implements the tree.SequenceOperators interface.
+func (so *importSequenceOperators) IncrementSequence(
+	ctx context.Context, seqName *tree.TableName,
+) (int64, error) {
+	return 0, errSequenceOperators
 }
 
-// IncrementSequenceByID implements the tree.SequenceOperators interface.
+// Implements the tree.SequenceOperators interface.
 func (so *importSequenceOperators) IncrementSequenceByID(
 	ctx context.Context, seqID int64,
 ) (int64, error) {
 	return 0, errSequenceOperators
 }
 
-// GetLatestValueInSessionForSequenceByID implements the tree.SequenceOperators interface.
+// Implements the tree.SequenceOperators interface.
+func (so *importSequenceOperators) GetLatestValueInSessionForSequence(
+	ctx context.Context, seqName *tree.TableName,
+) (int64, error) {
+	return 0, errSequenceOperators
+}
+
+// Implements the tree.SequenceOperators interface.
 func (so *importSequenceOperators) GetLatestValueInSessionForSequenceByID(
 	ctx context.Context, seqID int64,
 ) (int64, error) {
 	return 0, errSequenceOperators
 }
 
-// SetSequenceValueByID implements the tree.SequenceOperators interface.
+// Implements the tree.SequenceOperators interface.
+func (so *importSequenceOperators) SetSequenceValue(
+	ctx context.Context, seqName *tree.TableName, newVal int64, isCalled bool,
+) error {
+	return errSequenceOperators
+}
+
+// Implements the tree.SequenceOperators interface.
 func (so *importSequenceOperators) SetSequenceValueByID(
-	ctx context.Context, seqID uint32, newVal int64, isCalled bool,
+	ctx context.Context, seqID int64, newVal int64, isCalled bool,
 ) error {
 	return errSequenceOperators
 }
@@ -368,35 +328,47 @@ type fkResolver struct {
 
 var _ resolver.SchemaResolver = &fkResolver{}
 
-// Accessor implements the resolver.SchemaResolver interface.
-func (r *fkResolver) Accessor() catalog.Accessor {
+// Implements the sql.SchemaResolver interface.
+func (r *fkResolver) Txn() *kv.Txn {
 	return nil
 }
 
-// CurrentDatabase implements the resolver.SchemaResolver interface.
+// Implements the sql.SchemaResolver interface.
+func (r *fkResolver) LogicalSchemaAccessor() catalog.Accessor {
+	return nil
+}
+
+// Implements the sql.SchemaResolver interface.
 func (r *fkResolver) CurrentDatabase() string {
 	return ""
 }
 
-// CurrentSearchPath implements the resolver.SchemaResolver interface.
+// Implements the sql.SchemaResolver interface.
 func (r *fkResolver) CurrentSearchPath() sessiondata.SearchPath {
 	return sessiondata.SearchPath{}
 }
 
-// CommonLookupFlags implements the resolver.SchemaResolver interface.
+// Implements the sql.SchemaResolver interface.
 func (r *fkResolver) CommonLookupFlags(required bool) tree.CommonLookupFlags {
 	return tree.CommonLookupFlags{}
 }
 
-// LookupObject implements the tree.ObjectNameExistingResolver interface.
+// Implements the sql.SchemaResolver interface.
+func (r *fkResolver) ObjectLookupFlags(required bool, requireMutable bool) tree.ObjectLookupFlags {
+	return tree.ObjectLookupFlags{
+		CommonLookupFlags: tree.CommonLookupFlags{Required: required, RequireMutable: requireMutable},
+	}
+}
+
+// Implements the tree.ObjectNameExistingResolver interface.
 func (r *fkResolver) LookupObject(
-	ctx context.Context, flags tree.ObjectLookupFlags, dbName, scName, obName string,
-) (found bool, prefix catalog.ResolvedObjectPrefix, objMeta catalog.Descriptor, err error) {
+	_ context.Context, _ tree.ObjectLookupFlags, catalogName, scName, obName string,
+) (found bool, objMeta tree.NameResolutionResult, err error) {
 	// PGDUMP supports non-public schemas so respect the schema name.
 	var lookupName string
 	if r.format.Format == roachpb.IOFileFormat_PgDump {
-		if scName == "" || dbName == "" {
-			return false, prefix, nil, errors.Errorf("expected catalog and schema name to be set when resolving"+
+		if scName == "" || catalogName == "" {
+			return false, nil, errors.Errorf("expected catalog and schema name to be set when resolving"+
 				" table %q in PGDUMP", obName)
 		}
 		lookupName = fmt.Sprintf("%s.%s", scName, obName)
@@ -407,37 +379,44 @@ func (r *fkResolver) LookupObject(
 	}
 	tbl, ok := r.tableNameToDesc[lookupName]
 	if ok {
-		return true, prefix, tbl, nil
+		return true, tbl, nil
 	}
 	names := make([]string, 0, len(r.tableNameToDesc))
 	for k := range r.tableNameToDesc {
 		names = append(names, k)
 	}
 	suggestions := strings.Join(names, ",")
-	return false, prefix, nil, errors.Errorf("referenced table %q not found in tables being imported (%s)",
+	return false, nil, errors.Errorf("referenced table %q not found in tables being imported (%s)",
 		lookupName, suggestions)
 }
 
-// LookupSchema implements the resolver.ObjectNameTargetResolver interface.
+// Implements the tree.ObjectNameTargetResolver interface.
 func (r fkResolver) LookupSchema(
 	ctx context.Context, dbName, scName string,
-) (found bool, scMeta catalog.ResolvedObjectPrefix, err error) {
-	return false, scMeta, errSchemaResolver
+) (found bool, scMeta tree.SchemaMeta, err error) {
+	return false, nil, errSchemaResolver
 }
 
-// ResolveTypeByOID implements the resolver.SchemaResolver interface.
+// Implements the sql.SchemaResolver interface.
+func (r fkResolver) LookupTableByID(
+	ctx context.Context, id descpb.ID,
+) (catalog.TableDescriptor, error) {
+	return nil, errSchemaResolver
+}
+
+// Implements the sql.SchemaResolver interface.
 func (r fkResolver) ResolveTypeByOID(ctx context.Context, oid oid.Oid) (*types.T, error) {
 	return nil, errSchemaResolver
 }
 
-// ResolveType implements the resolver.SchemaResolver interface.
+// Implements the sql.SchemaResolver interface.
 func (r fkResolver) ResolveType(
 	ctx context.Context, name *tree.UnresolvedObjectName,
 ) (*types.T, error) {
 	return nil, errSchemaResolver
 }
 
-// GetQualifiedTableNameByID implements the resolver.SchemaResolver interface.
+// Implements the sql.SchemaResolver interface.
 func (r fkResolver) GetQualifiedTableNameByID(
 	ctx context.Context, id int64, requiredType tree.RequiredTableKind,
 ) (*tree.TableName, error) {

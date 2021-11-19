@@ -12,11 +12,11 @@
 package tabledesc
 
 import (
+	"fmt"
+
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/errors"
 )
@@ -42,6 +42,9 @@ type wrapper struct {
 	postDeserializationChanges PostDeserializationTableDescriptorChanges
 }
 
+// NameResolutionResult implements the tree.NameResolutionResult interface.
+func (*wrapper) NameResolutionResult() {}
+
 // IsUncommittedVersion implements the catalog.Descriptor interface.
 func (*wrapper) IsUncommittedVersion() bool {
 	return false
@@ -53,17 +56,9 @@ func (desc *wrapper) GetPostDeserializationChanges() PostDeserializationTableDes
 	return desc.postDeserializationChanges
 }
 
-// HasPostDeserializationChanges returns if the MutableDescriptor was changed after running
-// RunPostDeserializationChanges.
-func (desc *wrapper) HasPostDeserializationChanges() bool {
-	return desc.postDeserializationChanges.UpgradedForeignKeyRepresentation ||
-		desc.postDeserializationChanges.UpgradedFormatVersion ||
-		desc.postDeserializationChanges.UpgradedIndexFormatVersion ||
-		desc.postDeserializationChanges.UpgradedNamespaceName ||
-		desc.postDeserializationChanges.UpgradedPrivileges
-}
-
-// ActiveChecks implements the TableDescriptor interface.
+// ActiveChecks returns a list of all check constraints that should be enforced
+// on writes (including constraints being added/validated). The columns
+// referenced by the returned checks are writable, but not necessarily public.
 func (desc *wrapper) ActiveChecks() []descpb.TableDescriptor_CheckConstraint {
 	checks := make([]descpb.TableDescriptor_CheckConstraint, len(desc.Checks))
 	for i, c := range desc.Checks {
@@ -94,24 +89,19 @@ func (desc *immutable) IsUncommittedVersion() bool {
 	return desc.isUncommittedVersion
 }
 
-// DescriptorProto implements the Descriptor interface.
+// DescriptorProto prepares desc for serialization.
 func (desc *wrapper) DescriptorProto() *descpb.Descriptor {
 	return &descpb.Descriptor{
 		Union: &descpb.Descriptor_Table{Table: &desc.TableDescriptor},
 	}
 }
 
-// NewBuilder implements the catalog.Descriptor interface.
-func (desc *wrapper) NewBuilder() catalog.DescriptorBuilder {
-	return NewBuilder(desc.TableDesc())
-}
-
-// GetPrimaryIndexID implements the TableDescriptor interface.
+// GetPrimaryIndexID returns the ID of the primary index.
 func (desc *wrapper) GetPrimaryIndexID() descpb.IndexID {
 	return desc.PrimaryIndex.ID
 }
 
-// IsTemporary implements the TableDescriptor interface.
+// IsTemporary returns true if this is a temporary table.
 func (desc *wrapper) IsTemporary() bool {
 	return desc.GetTemporary()
 }
@@ -130,8 +120,6 @@ func (desc *Mutable) IsUncommittedVersion() bool {
 }
 
 // SetDrainingNames implements the MutableDescriptor interface.
-//
-// Deprecated: Do not use.
 func (desc *Mutable) SetDrainingNames(names []descpb.NameInfo) {
 	desc.DrainingNames = names
 }
@@ -166,70 +154,8 @@ func (desc *Mutable) SetPublicNonPrimaryIndex(indexOrdinal int, index descpb.Ind
 	desc.Indexes[indexOrdinal-1] = index
 }
 
-// UpdateIndexPartitioning applies the new partition and adjusts the column info
-// for the specified index descriptor. Returns false iff this was a no-op.
-func UpdateIndexPartitioning(
-	idx *descpb.IndexDescriptor,
-	isIndexPrimary bool,
-	newImplicitCols []catalog.Column,
-	newPartitioning descpb.PartitioningDescriptor,
-) bool {
-	oldNumImplicitCols := int(idx.Partitioning.NumImplicitColumns)
-	isNoOp := oldNumImplicitCols == len(newImplicitCols) && idx.Partitioning.Equal(newPartitioning)
-	numCols := len(idx.KeyColumnIDs)
-	newCap := numCols + len(newImplicitCols) - oldNumImplicitCols
-	newColumnIDs := make([]descpb.ColumnID, len(newImplicitCols), newCap)
-	newColumnNames := make([]string, len(newImplicitCols), newCap)
-	newColumnDirections := make([]descpb.IndexDescriptor_Direction, len(newImplicitCols), newCap)
-	for i, col := range newImplicitCols {
-		newColumnIDs[i] = col.GetID()
-		newColumnNames[i] = col.GetName()
-		newColumnDirections[i] = descpb.IndexDescriptor_ASC
-		if isNoOp &&
-			(idx.KeyColumnIDs[i] != newColumnIDs[i] ||
-				idx.KeyColumnNames[i] != newColumnNames[i] ||
-				idx.KeyColumnDirections[i] != newColumnDirections[i]) {
-			isNoOp = false
-		}
-	}
-	if isNoOp {
-		return false
-	}
-	idx.KeyColumnIDs = append(newColumnIDs, idx.KeyColumnIDs[oldNumImplicitCols:]...)
-	idx.KeyColumnNames = append(newColumnNames, idx.KeyColumnNames[oldNumImplicitCols:]...)
-	idx.KeyColumnDirections = append(newColumnDirections, idx.KeyColumnDirections[oldNumImplicitCols:]...)
-	idx.Partitioning = newPartitioning
-	if !isIndexPrimary {
-		return true
-	}
-
-	newStoreColumnIDs := make([]descpb.ColumnID, 0, len(idx.StoreColumnIDs))
-	newStoreColumnNames := make([]string, 0, len(idx.StoreColumnNames))
-	for i := range idx.StoreColumnIDs {
-		id := idx.StoreColumnIDs[i]
-		name := idx.StoreColumnNames[i]
-		found := false
-		for _, newColumnName := range newColumnNames {
-			if newColumnName == name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			newStoreColumnIDs = append(newStoreColumnIDs, id)
-			newStoreColumnNames = append(newStoreColumnNames, name)
-		}
-	}
-	idx.StoreColumnIDs = newStoreColumnIDs
-	idx.StoreColumnNames = newStoreColumnNames
-	if len(idx.StoreColumnNames) == 0 {
-		idx.StoreColumnIDs = nil
-		idx.StoreColumnNames = nil
-	}
-	return true
-}
-
-// GetPrimaryIndex implements the TableDescriptor interface.
+// GetPrimaryIndex returns the primary index in the form of a catalog.Index
+// interface.
 func (desc *wrapper) GetPrimaryIndex() catalog.Index {
 	return desc.getExistingOrNewIndexCache().primary
 }
@@ -363,68 +289,85 @@ func (desc *wrapper) getExistingOrNewColumnCache() *columnCache {
 	return newColumnCache(desc.TableDesc(), desc.getExistingOrNewMutationCache())
 }
 
-// AllColumns implements the TableDescriptor interface.
+// AllColumns returns a slice of Column interfaces containing the
+// table's public columns and column mutations, in the canonical order:
+// - all public columns in the same order as in the underlying
+//   desc.TableDesc().Columns slice;
+// - all column mutations in the same order as in the underlying
+//   desc.TableDesc().Mutations slice.
+// - all system columns defined in colinfo.AllSystemColumnDescs.
 func (desc *wrapper) AllColumns() []catalog.Column {
 	return desc.getExistingOrNewColumnCache().all
 }
 
-// PublicColumns implements the TableDescriptor interface.
+// PublicColumns returns a slice of Column interfaces containing the
+// table's public columns, in the canonical order.
 func (desc *wrapper) PublicColumns() []catalog.Column {
 	return desc.getExistingOrNewColumnCache().public
 }
 
-// WritableColumns implements the TableDescriptor interface.
+// WritableColumns returns a slice of Column interfaces containing the
+// table's public columns and DELETE_AND_WRITE_ONLY mutations, in the canonical
+// order.
 func (desc *wrapper) WritableColumns() []catalog.Column {
 	return desc.getExistingOrNewColumnCache().writable
 }
 
-// DeletableColumns implements the TableDescriptor interface.
+// DeletableColumns returns a slice of Column interfaces containing the
+// table's public columns and mutations, in the canonical order.
 func (desc *wrapper) DeletableColumns() []catalog.Column {
 	return desc.getExistingOrNewColumnCache().deletable
 }
 
-// NonDropColumns implements the TableDescriptor interface.
+// NonDropColumns returns a slice of Column interfaces containing the
+// table's public columns and ADD mutations, in the canonical order.
 func (desc *wrapper) NonDropColumns() []catalog.Column {
 	return desc.getExistingOrNewColumnCache().nonDrop
 }
 
-// VisibleColumns implements the TableDescriptor interface.
+// VisibleColumns returns a slice of Column interfaces containing the
+// table's visible columns , in the canonical order.
 func (desc *wrapper) VisibleColumns() []catalog.Column {
 	return desc.getExistingOrNewColumnCache().visible
 }
 
-// AccessibleColumns implements the TableDescriptor interface.
-func (desc *wrapper) AccessibleColumns() []catalog.Column {
-	return desc.getExistingOrNewColumnCache().accessible
-}
-
-// UserDefinedTypeColumns implements the TableDescriptor interface.
+// UserDefinedTypeColumns returns a slice of Column interfaces
+// containing the table's columns with user defined types, in the
+// canonical order.
 func (desc *wrapper) UserDefinedTypeColumns() []catalog.Column {
 	return desc.getExistingOrNewColumnCache().withUDTs
 }
 
-// ReadableColumns implements the TableDescriptor interface.
+// ReadableColumns is a list of columns (including those undergoing a schema
+// change) which can be scanned. Columns in the process of a schema change
+// are all set to nullable while column backfilling is still in
+// progress, as mutation columns may have NULL values.
 func (desc *wrapper) ReadableColumns() []catalog.Column {
 	return desc.getExistingOrNewColumnCache().readable
 }
 
-// SystemColumns implements the TableDescriptor interface.
+// SystemColumns returns a slice of Column interfaces
+// containing the table's system columns, as defined in
+// colinfo.AllSystemColumnDescs.
 func (desc *wrapper) SystemColumns() []catalog.Column {
 	return desc.getExistingOrNewColumnCache().system
 }
 
-// FindColumnWithID implements the TableDescriptor interface.
+// FindColumnWithID returns the first column found whose ID matches the
+// provided target ID, in the canonical order.
+// If no column is found then an error is also returned.
 func (desc *wrapper) FindColumnWithID(id descpb.ColumnID) (catalog.Column, error) {
 	for _, col := range desc.AllColumns() {
 		if col.GetID() == id {
 			return col, nil
 		}
 	}
-
-	return nil, pgerror.Newf(pgcode.UndefinedColumn, "column-id \"%d\" does not exist", id)
+	return nil, fmt.Errorf("column-id \"%d\" does not exist", id)
 }
 
-// FindColumnWithName implements the TableDescriptor interface.
+// FindColumnWithName returns the first column found whose name matches the
+// provided target ID, in the canonical order.
+// If no column is found then an error is also returned.
 func (desc *wrapper) FindColumnWithName(name tree.Name) (catalog.Column, error) {
 	for _, col := range desc.AllColumns() {
 		if col.ColName() == name {
@@ -443,7 +386,7 @@ func (desc *wrapper) getExistingOrNewMutationCache() *mutationCache {
 	return newMutationCache(desc.TableDesc())
 }
 
-// AllMutations implements the TableDescriptor interface.
+// AllMutations returns all of the table descriptor's mutations.
 func (desc *wrapper) AllMutations() []catalog.Mutation {
 	return desc.getExistingOrNewMutationCache().all
 }

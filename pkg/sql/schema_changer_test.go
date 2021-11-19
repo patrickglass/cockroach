@@ -39,19 +39,20 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/gcjob"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltestutils"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
-	"github.com/cockroachdb/cockroach/pkg/startupmigrations"
+	"github.com/cockroachdb/cockroach/pkg/sqlmigrations"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/jobutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -90,6 +91,7 @@ func TestSchemaChangeProcess(t *testing.T) {
 	var id = descpb.ID(keys.MinNonPredefinedUserDescID + 1 /* skip over DB ID */)
 	var instance = base.SQLInstanceID(2)
 	stopper := stop.NewStopper()
+	cfg := base.NewLeaseManagerConfig()
 	execCfg := s.ExecutorConfig().(sql.ExecutorConfig)
 	rf, err := rangefeed.NewFactory(stopper, kvDB, nil /* knobs */)
 	require.NoError(t, err)
@@ -104,6 +106,7 @@ func TestSchemaChangeProcess(t *testing.T) {
 		lease.ManagerTestingKnobs{},
 		stopper,
 		rf,
+		cfg,
 	)
 	jobRegistry := s.JobRegistry().(*jobs.Registry)
 	defer stopper.Stop(context.Background())
@@ -428,7 +431,7 @@ func TestRollbackOfAddingTable(t *testing.T) {
 				defer mu.Unlock()
 				if shouldError {
 					shouldError = false
-					return jobs.MarkAsPermanentJobError(errors.New("boom"))
+					return errors.New("boom")
 				}
 				return nil
 			},
@@ -685,7 +688,7 @@ func TestDropWhileBackfill(t *testing.T) {
 			},
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -934,7 +937,7 @@ func TestAbortSchemaChangeBackfill(t *testing.T) {
 			BulkAdderFlushesEveryBatch: true,
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -1215,7 +1218,7 @@ CREATE TABLE t.test (
 		t.Fatal(err)
 	}
 	if _, err := txn.Exec(`ALTER TABLE t.test DROP b`); !testutils.IsError(err,
-		"pq: unimplemented: constraint \"check_bk\" in the middle of being added, try again later") {
+		"referencing constraint \"check_bk\" in the middle of being added") {
 		t.Fatalf("err = %+v", err)
 	}
 	if err := txn.Rollback(); err != nil {
@@ -1229,6 +1232,9 @@ CREATE TABLE t.test (
 func TestSchemaChangeRetry(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+
+	// Decrease the adopt loop interval so that retries happen quickly.
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 
 	params, _ := tests.CreateTestServerParams()
 
@@ -1271,13 +1277,10 @@ func TestSchemaChangeRetry(t *testing.T) {
 			SerializeIndexBackfillCreationAndIngestion: make(chan struct{}, 1),
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
-
 	s, sqlDB, kvDB := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())
 
@@ -1314,6 +1317,9 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v INT);
 func TestSchemaChangeRetryOnVersionChange(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+
+	// Decrease the adopt loop interval so that retries happen quickly.
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 
 	params, _ := tests.CreateTestServerParams()
 	var upTableVersion func()
@@ -1360,13 +1366,10 @@ func TestSchemaChangeRetryOnVersionChange(t *testing.T) {
 			SerializeIndexBackfillCreationAndIngestion: make(chan struct{}, 1),
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
-
 	s, sqlDB, kvDB := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())
 
@@ -1383,34 +1386,29 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v INT);
 
 	upTableVersion = func() {
 		leaseMgr := s.LeaseManager().(*lease.Manager)
+		ie := s.InternalExecutor().(sqlutil.InternalExecutor)
 		var version descpb.DescriptorVersion
-		if err := kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-			table, err := catalogkv.MustGetMutableTableDescByID(
-				ctx, txn, keys.SystemSQLCodec, tableDesc.GetID())
+		if err := descs.Txn(ctx, s.ClusterSettings(), leaseMgr, ie, kvDB, func(
+			ctx context.Context, txn *kv.Txn, descsCol *descs.Collection,
+		) error {
+			table, err := descsCol.GetMutableTableVersionByID(ctx, id, txn)
 			if err != nil {
 				return err
 			}
-			table.MaybeIncrementVersion()
-			ba := txn.NewBatch()
-			if err := catalogkv.WriteDescToBatch(
-				ctx, false /* kvTrace */, s.ClusterSettings(), ba,
-				keys.SystemSQLCodec, table.GetID(), table,
-			); err != nil {
-				return err
-			}
-			version = table.GetVersion()
-			return txn.Run(ctx, ba)
+			return descsCol.WriteDesc(ctx, false /* kvTrace */, table, txn)
 		}); err != nil {
 			t.Error(err)
 		}
 
 		// Grab a lease at the latest version so that we are confident
 		// that all future leases will be taken at the latest version.
-		table, err := leaseMgr.TestingAcquireAndAssertMinVersion(ctx, s.Clock().Now(), id, version)
+		table, _, err := leaseMgr.TestingAcquireAndAssertMinVersion(ctx, s.Clock().Now(), id, version+1)
 		if err != nil {
 			t.Error(err)
 		}
-		table.Release(ctx)
+		if err := leaseMgr.Release(table); err != nil {
+			t.Error(err)
+		}
 	}
 
 	// Bulk insert.
@@ -1474,7 +1472,7 @@ func TestSchemaChangePurgeFailure(t *testing.T) {
 			BulkAdderFlushesEveryBatch: true,
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -1617,7 +1615,7 @@ func TestSchemaChangeFailureAfterCheckpointing(t *testing.T) {
 		},
 		// Disable backfill migrations so it doesn't interfere with the
 		// backfill in this test.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -1712,7 +1710,7 @@ func TestSchemaChangeReverseMutations(t *testing.T) {
 			BackfillChunkSize: chunkSize,
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -2097,7 +2095,7 @@ func TestAddColumnDuringColumnDrop(t *testing.T) {
 			},
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -2147,7 +2145,6 @@ CREATE TABLE t.test (
 func TestSchemaUniqueColumnDropFailure(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	waitUntilRevert := make(chan struct{})
 	params, _ := tests.CreateTestServerParams()
 	const chunkSize = 200
 	attempts := 0
@@ -2169,11 +2166,6 @@ func TestSchemaUniqueColumnDropFailure(t *testing.T) {
 			// Aggressively checkpoint, so that a schema change
 			// failure happens after a checkpoint has been written.
 			WriteCheckpointInterval: time.Nanosecond,
-			RunBeforeOnFailOrCancel: func(jobID jobspb.JobID) error {
-				waitUntilRevert <- struct{}{}
-				<-waitUntilRevert
-				return nil
-			},
 		},
 		// Disable GC job.
 		GCJob: &sql.GCJobTestingKnobs{RunBeforeResume: func(_ jobspb.JobID) error { select {} }},
@@ -2190,10 +2182,9 @@ func TestSchemaUniqueColumnDropFailure(t *testing.T) {
 		},
 		// Disable backfill migrations so it doesn't interfere with the
 		// backfill in this test.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
 	server, sqlDB, kvDB := serverutils.StartServer(t, params)
 	defer server.Stopper().Stop(context.Background())
@@ -2215,13 +2206,9 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v INT UNIQUE DEFAULT 23 CREATE FAMILY F3
 	}
 
 	// A schema change that fails.
-	go func() {
-		// This query stays blocked until the end of the test.
-		_, _ = sqlDB.Exec(`ALTER TABLE t.test DROP column v`)
-	}()
-
-	// Wait until the job is reverted.
-	<-waitUntilRevert
+	if _, err := sqlDB.Exec(`ALTER TABLE t.test DROP column v`); !testutils.IsError(err, `permanent failure`) {
+		t.Fatalf("err = %s", err)
+	}
 
 	// The index is not regenerated.
 	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "test")
@@ -2241,8 +2228,6 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v INT UNIQUE DEFAULT 23 CREATE FAMILY F3
 	} else if len(tableDesc.AllMutations()) != 2 {
 		t.Fatalf("mutations %+v", tableDesc.AllMutations())
 	}
-
-	close(waitUntilRevert)
 }
 
 // TestVisibilityDuringPrimaryKeyChange tests visibility of different indexes
@@ -2250,6 +2235,8 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v INT UNIQUE DEFAULT 23 CREATE FAMILY F3
 func TestVisibilityDuringPrimaryKeyChange(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 
 	ctx := context.Background()
 	swapNotification := make(chan struct{})
@@ -2264,7 +2251,6 @@ func TestVisibilityDuringPrimaryKeyChange(t *testing.T) {
 				<-waitBeforeContinuing
 			},
 		},
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
@@ -2297,7 +2283,7 @@ INSERT INTO t.test VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
 	x INT8 NOT NULL,
 	y INT8 NOT NULL,
 	z INT8 NULL,
-	CONSTRAINT test_pkey PRIMARY KEY (x ASC),
+	CONSTRAINT "primary" PRIMARY KEY (x ASC),
 	INDEX i (z ASC),
 	FAMILY "primary" (x, y, z)
 )`
@@ -2318,7 +2304,7 @@ INSERT INTO t.test VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
 	x INT8 NOT NULL,
 	y INT8 NOT NULL,
 	z INT8 NULL,
-	CONSTRAINT test_pkey PRIMARY KEY (y ASC),
+	CONSTRAINT "primary" PRIMARY KEY (y ASC),
 	UNIQUE INDEX test_x_key (x ASC),
 	INDEX i (z ASC),
 	FAMILY "primary" (x, y, z)
@@ -2333,6 +2319,8 @@ INSERT INTO t.test VALUES (1, 1, 1), (2, 2, 2), (3, 3, 3);
 func TestPrimaryKeyChangeWithPrecedingIndexCreation(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 
 	ctx := context.Background()
 
@@ -2379,8 +2367,6 @@ func TestPrimaryKeyChangeWithPrecedingIndexCreation(t *testing.T) {
 				return nil
 			},
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
 	s, sqlDB, kvDB := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
@@ -2725,7 +2711,7 @@ UPDATE t.test SET z = NULL, a = $1, b = NULL, c = NULL, d = $1 WHERE y = $2`, 2*
 
 	// Ensure that the count of rows is correct along both indexes.
 	var count int
-	row := sqlDB.QueryRow(`SELECT count(*) FROM t.test@test_pkey`)
+	row := sqlDB.QueryRow(`SELECT count(*) FROM t.test@primary`)
 	if err := row.Scan(&count); err != nil {
 		t.Fatal(err)
 	}
@@ -2842,7 +2828,6 @@ func TestPrimaryKeyChangeKVOps(t *testing.T) {
 	}
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
-	defer close(waitBeforeContinuing)
 
 	if _, err := sqlDB.Exec(`
 CREATE DATABASE t;
@@ -2985,9 +2970,10 @@ func TestPrimaryKeyIndexRewritesGetRemoved(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
 
-	params, _ := tests.CreateTestServerParams()
 	// Decrease the adopt loop interval so that retries happen quickly.
-	params.Knobs.JobsTestingKnobs = jobs.NewTestingKnobsWithShortIntervals()
+	defer sqltestutils.SetTestJobsAdoptInterval()()
+
+	params, _ := tests.CreateTestServerParams()
 
 	s, sqlDB, kvDB := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
@@ -3019,6 +3005,9 @@ ALTER TABLE t.test ALTER PRIMARY KEY USING COLUMNS (v);
 func TestPrimaryKeyChangeWithCancel(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+
+	// Decrease the adopt loop interval so that retries happen quickly.
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 
 	var chunkSize int64 = 100
 	var maxValue = 4000
@@ -3053,10 +3042,7 @@ func TestPrimaryKeyChangeWithCancel(t *testing.T) {
 				return nil
 			},
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
-
 	s, sqlDB, kvDB := serverutils.StartServer(t, params)
 	db = sqlDB
 	defer s.Stopper().Stop(ctx)
@@ -3086,7 +3072,7 @@ CREATE TABLE t.test (k INT NOT NULL, v INT);
 		if len(tableDesc.AllMutations()) != 0 {
 			return errors.Errorf("expected 0 mutations after cancellation, found %d", len(tableDesc.AllMutations()))
 		}
-		if tableDesc.GetPrimaryIndex().NumKeyColumns() != 1 || tableDesc.GetPrimaryIndex().GetKeyColumnName(0) != "rowid" {
+		if tableDesc.GetPrimaryIndex().NumColumns() != 1 || tableDesc.GetPrimaryIndex().GetColumnName(0) != "rowid" {
 			return errors.Errorf("expected primary key change to not succeed after cancellation")
 		}
 		return nil
@@ -3167,12 +3153,13 @@ func TestMultiplePrimaryKeyChanges(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	// Decrease the adopt loop interval so that retries happen quickly.
+	defer sqltestutils.SetTestJobsAdoptInterval()()
+
 	ctx := context.Background()
 	params, _ := tests.CreateTestServerParams()
 	params.Knobs = base.TestingKnobs{
 		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
@@ -3208,6 +3195,7 @@ func TestGrantRevokeWhileIndexBackfill(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 	backfillNotification := make(chan bool)
 
 	backfillCompleteNotification := make(chan bool)
@@ -3238,13 +3226,10 @@ func TestGrantRevokeWhileIndexBackfill(t *testing.T) {
 			BulkAdderFlushesEveryBatch: true,
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
-
 	server, db, _ := serverutils.StartServer(t, params)
 	defer server.Stopper().Stop(context.Background())
 	sqlDB := sqlutils.MakeSQLRunner(db)
@@ -3305,6 +3290,7 @@ func TestCRUDWhileColumnBackfill(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 	backfillNotification := make(chan bool)
 
 	backfillCompleteNotification := make(chan bool)
@@ -3334,11 +3320,9 @@ func TestCRUDWhileColumnBackfill(t *testing.T) {
 			},
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
 	server, sqlDB, kvDB := serverutils.StartServer(t, params)
 	defer server.Stopper().Stop(context.Background())
@@ -3649,6 +3633,13 @@ INSERT INTO t.kv VALUES ('a', 'b');
 		secondStmt  string
 		expectedErr string
 	}{
+		// DROP TABLE followed by CREATE TABLE case.
+		{
+			name:        `drop-create`,
+			firstStmt:   `DROP TABLE t.kv`,
+			secondStmt:  `CREATE TABLE t.kv (k CHAR PRIMARY KEY, v CHAR)`,
+			expectedErr: `table "kv" is being dropped, try again later`,
+		},
 		// schema change followed by another statement works.
 		{
 			name:        `createindex-insert`,
@@ -3760,14 +3751,14 @@ CREATE TABLE d.t (
 	// Verify that this descriptor uses the new STORING encoding. Overwrite it
 	// with one that uses the old encoding.
 	for _, index := range tableDesc.PublicNonPrimaryIndexes() {
-		if index.NumKeySuffixColumns() != 1 {
-			t.Fatalf("KeySuffixColumnIDs not set properly: %s", tableDesc)
+		if index.NumExtraColumns() != 1 {
+			t.Fatalf("ExtraColumnIDs not set properly: %s", tableDesc)
 		}
-		if index.NumSecondaryStoredColumns() != 1 {
+		if index.NumStoredColumns() != 1 {
 			t.Fatalf("StoreColumnIDs not set properly: %s", tableDesc)
 		}
-		newIndexDesc := index.IndexDescDeepCopy()
-		newIndexDesc.KeySuffixColumnIDs = append(newIndexDesc.KeySuffixColumnIDs, newIndexDesc.StoreColumnIDs...)
+		newIndexDesc := *index.IndexDesc()
+		newIndexDesc.ExtraColumnIDs = append(newIndexDesc.ExtraColumnIDs, newIndexDesc.StoreColumnIDs...)
 		newIndexDesc.StoreColumnIDs = nil
 		tableDesc.SetPublicNonPrimaryIndex(index.Ordinal(), newIndexDesc)
 	}
@@ -4116,11 +4107,10 @@ func TestTruncateCompletion(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	const maxValue = 2000
 
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 	defer gcjob.SetSmallMaxGCIntervalForTest()()
 
 	params, _ := tests.CreateTestServerParams()
-	// Decrease the adopt loop interval so that retries happen quickly.
-	params.Knobs.JobsTestingKnobs = jobs.NewTestingKnobsWithShortIntervals()
 
 	s, sqlDB, kvDB := serverutils.StartServer(t, params)
 	ctx := context.Background()
@@ -4242,6 +4232,64 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v INT, pi DECIMAL REFERENCES t.pi (d) DE
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestTruncateInterleavedTables(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	defer sqltestutils.SetTestJobsAdoptInterval()()
+	defer gcjob.SetSmallMaxGCIntervalForTest()()
+
+	params, _ := tests.CreateTestServerParams()
+
+	s, sqlDBRaw, kvDB := serverutils.StartServer(t, params)
+	ctx := context.Background()
+	defer s.Stopper().Stop(ctx)
+	sqlDB := sqlutils.SQLRunner{DB: sqlDBRaw}
+
+	// Disable strict GC TTL enforcement because we're going to shove a zero-value
+	// TTL into the system with AddImmediateGCZoneConfig.
+	defer sqltestutils.DisableGCTTLStrictEnforcement(t, sqlDBRaw)()
+
+	sqlDB.Exec(t, `
+CREATE DATABASE t;
+CREATE TABLE t.parent (x INT PRIMARY KEY);
+CREATE TABLE t.child (x INT, y INT, PRIMARY KEY (x, y)) INTERLEAVE IN PARENT t.parent (x);
+INSERT INTO t.parent VALUES (1), (2), (3);
+INSERT INTO t.child VALUES (1, 2), (2, 3), (3, 4);
+`)
+
+	// Get the table descriptors before truncation.
+	parent := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "parent")
+	child := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "child")
+
+	// Add zone configs for the parent and child tables.
+	_, err := sqltestutils.AddImmediateGCZoneConfig(sqlDBRaw, parent.GetID())
+	require.NoError(t, err)
+	_, err = sqltestutils.AddImmediateGCZoneConfig(sqlDBRaw, child.GetID())
+	require.NoError(t, err)
+
+	// Truncate the parent now, which should cascade truncate the child.
+	sqlDB.Exec(t, `TRUNCATE TABLE t.parent CASCADE`)
+
+	// SQL should think that both the parent and child tables are empty.
+	sqlDB.CheckQueryResults(t, `SELECT count(*) FROM t.parent`, [][]string{{"0"}})
+	sqlDB.CheckQueryResults(t, `SELECT count(*) FROM t.child`, [][]string{{"0"}})
+
+	// The GC should kick in and actually delete all of the data in each table.
+	testutils.SucceedsSoon(t, func() error {
+		// We only need to scan the parent's table span to verify that
+		// the index data is deleted, since child is interleaved in it.
+		start := keys.SystemSQLCodec.TablePrefix(uint32(parent.GetID()))
+		end := start.PrefixEnd()
+		kvs, err := kvDB.Scan(ctx, start, end, 0)
+		require.NoError(t, err)
+		if len(kvs) != 0 {
+			return errors.Newf("expected 0 kvs, found %d", len(kvs))
+		}
+		return nil
+	})
 }
 
 // Test TRUNCATE during a column backfill.
@@ -4411,6 +4459,9 @@ func TestIndexBackfillAfterGC(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	// Decrease the adopt loop interval so that retries happen quickly.
+	defer sqltestutils.SetTestJobsAdoptInterval()()
+
 	var tc serverutils.TestClusterInterface
 	ctx := context.Background()
 	var gcAt hlc.Timestamp
@@ -4441,8 +4492,6 @@ func TestIndexBackfillAfterGC(t *testing.T) {
 				return nil
 			},
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
 
 	tc = serverutils.StartNewTestCluster(t, 1, base.TestClusterArgs{ServerArgs: params})
@@ -5016,6 +5065,8 @@ func TestSchemaChangeGRPCError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	defer sqltestutils.SetTestJobsAdoptInterval()()
+
 	const maxValue = 100
 	params, _ := tests.CreateTestServerParams()
 	seenNodeUnavailable := false
@@ -5029,10 +5080,7 @@ func TestSchemaChangeGRPCError(t *testing.T) {
 				return nil
 			},
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
-
 	s, db, kvDB := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())
 	sqlDB := sqlutils.MakeSQLRunner(db)
@@ -5164,7 +5212,7 @@ func TestIndexBackfillValidation(t *testing.T) {
 			BulkAdderFlushesEveryBatch: true,
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -5235,7 +5283,7 @@ func TestInvertedIndexBackfillValidation(t *testing.T) {
 			BulkAdderFlushesEveryBatch: true,
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -5289,7 +5337,7 @@ func TestMultipleIndexBackfills(t *testing.T) {
 			BackfillChunkSize: maxValue / 5,
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -5428,7 +5476,7 @@ func TestTableValidityWhileAddingFK(t *testing.T) {
 			},
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -5515,7 +5563,7 @@ func TestTableValidityWhileAddingUniqueConstraint(t *testing.T) {
 			},
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -5600,7 +5648,7 @@ func TestWritesWithChecksBeforeDefaultColumnBackfill(t *testing.T) {
 			},
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -5699,7 +5747,7 @@ func TestWritesWithChecksBeforeComputedColumnBackfill(t *testing.T) {
 			},
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -5914,7 +5962,7 @@ func TestSchemaChangeJobRunningStatusValidation(t *testing.T) {
 			},
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
 	}
@@ -5957,6 +6005,7 @@ func TestFKReferencesAddedOnlyOnceOnRetry(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 	params, _ := tests.CreateTestServerParams()
 	var runBeforeConstraintValidation func() error
 	errorReturned := false
@@ -5967,13 +6016,10 @@ func TestFKReferencesAddedOnlyOnceOnRetry(t *testing.T) {
 			},
 		},
 		// Disable backfill migrations, we still need the jobs table migration.
-		StartupMigrationManager: &startupmigrations.MigrationManagerTestingKnobs{
+		SQLMigrationManager: &sqlmigrations.MigrationManagerTestingKnobs{
 			DisableBackfillMigrations: true,
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
-
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())
 	if _, err := sqlDB.Exec(`
@@ -6115,6 +6161,7 @@ CREATE TABLE t.test (k INT PRIMARY KEY, v INT8);
 func TestMultipleRevert(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	shouldBlockBackfill := true
 	ranCancelCommand := false
@@ -6123,7 +6170,6 @@ func TestMultipleRevert(t *testing.T) {
 	params, _ := tests.CreateTestServerParams()
 	var db *gosql.DB
 	params.Knobs = base.TestingKnobs{
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
 			RunBeforeBackfill: func() error {
 				if !shouldBlockBackfill {
@@ -6143,7 +6189,7 @@ func TestMultipleRevert(t *testing.T) {
 					ranCancelCommand = true
 				}
 				// Keep returning a retryable error until the job was actually canceled.
-				return jobs.MarkAsRetryJobError(errors.New("retry until cancel"))
+				return jobs.NewRetryJobError("retry until cancel")
 			},
 			RunBeforeOnFailOrCancel: func(_ jobspb.JobID) error {
 				// Allow the backfill to proceed normally once the job was actually
@@ -6159,7 +6205,7 @@ func TestMultipleRevert(t *testing.T) {
 				}
 				shouldRetryAfterReversingMutations = false
 				// After cancelation, the job should get one more retryable error.
-				return jobs.MarkAsRetryJobError(errors.New("retry once after cancel"))
+				return jobs.NewRetryJobError("retry once after cancel")
 			},
 		},
 	}
@@ -6191,16 +6237,6 @@ ALTER TABLE t.public.test DROP COLUMN v;
 	require.Equal(t, [][]string{
 		{"1", "2"},
 	}, rows)
-
-	// Validate the job cancellation metrics.
-	rows = runner.QueryStr(t, "SELECT * FROM crdb_internal.feature_usage WHERE feature_name LIKE 'job.%.canceled'")
-	if len(rows) != 1 ||
-		len(rows[0]) != 2 ||
-		rows[0][0] != "job.schema_change.canceled" {
-		require.Failf(t, "Unexpected result set", "Rows: %s", rows)
-	} else if val, err := strconv.ParseInt(rows[0][1], 10, 32); err != nil || val < 0 {
-		require.Failf(t, "Invalid integer or value", "Error: %s Val: %d", err, val)
-	}
 }
 
 // TestRetriableErrorDuringRollback tests that a retriable error while rolling
@@ -6208,6 +6244,7 @@ ALTER TABLE t.public.test DROP COLUMN v;
 func TestRetriableErrorDuringRollback(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 	ctx := context.Background()
 
 	runTest := func(params base.TestServerArgs) {
@@ -6275,8 +6312,6 @@ SELECT usage_count
 					return context.Canceled
 				},
 			},
-			// Decrease the adopt loop interval so that retries happen quickly.
-			JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 		}
 		runTest(params)
 	})
@@ -6302,8 +6337,6 @@ SELECT usage_count
 					return context.Canceled
 				},
 			},
-			// Decrease the adopt loop interval so that retries happen quickly.
-			JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 		}
 		runTest(params)
 	})
@@ -6314,6 +6347,7 @@ SELECT usage_count
 func TestDropTableWhileSchemaChangeReverting(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 	ctx := context.Background()
 
 	// Closed when we enter the RunBeforeOnFailOrCancel knob, at which point the
@@ -6330,13 +6364,10 @@ func TestDropTableWhileSchemaChangeReverting(t *testing.T) {
 				// Return a retry error, so that we can be sure to test the path where
 				// the job is marked as failed by the DROP TABLE instead of running to
 				// completion and ending up in the failed state on its own.
-				return jobs.MarkAsRetryJobError(errors.New("injected retry error"))
+				return jobs.NewRetryJobError("injected retry error")
 			},
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
-
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
 
@@ -6372,12 +6403,13 @@ SELECT status, error FROM crdb_internal.jobs WHERE description LIKE '%CREATE UNI
 	require.Regexp(t, "violates unique constraint", jobError)
 }
 
-// TestRetryOnAllErrorsWhenReverting tests that a permanent error while rolling
-// back a schema change causes the job to revert, and that the appropriate error
+// TestPermanentErrorDuringRollback tests that a permanent error while rolling
+// back a schema change causes the job to fail, and that the appropriate error
 // is displayed in the jobs table.
-func TestRetryOnAllErrorsWhenReverting(t *testing.T) {
+func TestPermanentErrorDuringRollback(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 	ctx := context.Background()
 
 	runTest := func(t *testing.T, params base.TestServerArgs, gcJobRecord bool) {
@@ -6401,7 +6433,7 @@ CREATE UNIQUE INDEX i ON t.test(v);
 		var jobErr string
 		row := sqlDB.QueryRow("SELECT job_id, error FROM [SHOW JOBS] WHERE job_type = 'SCHEMA CHANGE'")
 		require.NoError(t, row.Scan(&jobID, &jobErr))
-		require.Regexp(t, `violates unique constraint "i"`, jobErr)
+		require.Regexp(t, "cannot be reverted, manual cleanup may be required: permanent error", jobErr)
 
 		if gcJobRecord {
 			_, err := sqlDB.Exec(`DELETE FROM system.jobs WHERE id = $1`, jobID)
@@ -6434,8 +6466,6 @@ CREATE UNIQUE INDEX i ON t.test(v);
 					return errors.New("permanent error")
 				},
 			},
-			// Decrease the adopt loop interval so that retries happen quickly.
-			JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 		}
 		// Don't GC the job record after the schema change, so we can test dropping
 		// the table with a failed mutation job.
@@ -6463,8 +6493,6 @@ CREATE UNIQUE INDEX i ON t.test(v);
 					return errors.New("permanent error")
 				},
 			},
-			// Decrease the adopt loop interval so that retries happen quickly.
-			JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 		}
 		// GC the job record after the schema change, so we can test dropping the
 		// table with a nonexistent mutation job.
@@ -6512,6 +6540,61 @@ CREATE INDEX i ON t.test (a) WHERE b > 2
 	}
 }
 
+// TestDrainingNamesCannotBeResolved tests that during the draining names state
+// for renamed descriptors, old names cannot be used via the uncached name
+// resolution path.
+func TestDrainingNamesCannotBeResolved(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	params, _ := tests.CreateTestServerParams()
+	params.Knobs = base.TestingKnobs{
+		// Don't drain names. This also means that we don't wait for leases to
+		// drain before returning, which is fine since we're testing the non-
+		// leased name resolution path.
+		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
+			SchemaChangeJobNoOp: func() bool { return true },
+		},
+		SQLTypeSchemaChanger: &sql.TypeSchemaChangerTestingKnobs{
+			TypeSchemaChangeJobNoOp: func() bool { return true },
+		},
+	}
+
+	ctx := context.Background()
+	s, sqlDB, _ := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(ctx)
+	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
+
+	// Create descriptors and rename them so that the old names get stuck as
+	// draining names.
+	sqlRun.Exec(t, `
+CREATE TABLE tbl();
+ALTER TABLE tbl RENAME TO tbl2;
+
+CREATE TYPE typ AS ENUM();
+ALTER TYPE typ RENAME TO typ2;
+
+CREATE SCHEMA sc;
+ALTER SCHEMA sc RENAME TO sc2;
+
+CREATE DATABASE db;
+ALTER DATABASE db RENAME TO db2;
+`)
+
+	// Ensure that the old namespace entries still exist.
+	sqlRun.CheckQueryResults(t, `SELECT count(*) FROM system.namespace WHERE name = 'tbl'`, [][]string{{"1"}})
+	sqlRun.CheckQueryResults(t, `SELECT count(*) FROM system.namespace WHERE name = 'typ'`, [][]string{{"1"}})
+	sqlRun.CheckQueryResults(t, `SELECT count(*) FROM system.namespace WHERE name = 'sc'`, [][]string{{"1"}})
+	sqlRun.CheckQueryResults(t, `SELECT count(*) FROM system.namespace WHERE name = 'db'`, [][]string{{"1"}})
+
+	// Test uncached name resolution by attempting schema changes. As of 20.2 we
+	// have some internal inconsistency in error messages.
+	sqlRun.ExpectErr(t, `relation "tbl" does not exist`, `ALTER TABLE tbl RENAME TO tbl3`)
+	sqlRun.ExpectErr(t, `type "typ" does not exist`, `ALTER TYPE typ RENAME TO typ3`)
+	sqlRun.ExpectErr(t, `unknown schema "sc"`, `ALTER SCHEMA sc RENAME TO sc3`)
+	sqlRun.ExpectErr(t, `database "db" does not exist`, `ALTER DATABASE db RENAME TO db3`)
+}
+
 // TestAddingTableResolution tests that table names cannot be resolved in the
 // adding state.
 func TestAddingTableResolution(t *testing.T) {
@@ -6549,7 +6632,7 @@ func TestAddingTableResolution(t *testing.T) {
 // descriptor.
 func TestFailureToMarkCanceledReversalLeadsToCanceledStatus(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 	ctx := context.Background()
 
 	canProceed := make(chan struct{})
@@ -6565,16 +6648,6 @@ func TestFailureToMarkCanceledReversalLeadsToCanceledStatus(t *testing.T) {
 		defer jobCancellationsToFail.Unlock()
 		f(jobCancellationsToFail.jobs)
 	}
-	jobKnobs := jobs.NewTestingKnobsWithShortIntervals()
-	jobKnobs.BeforeUpdate = func(orig, updated jobs.JobMetadata) (err error) {
-		withJobsToFail(func(m map[jobspb.JobID]struct{}) {
-			if _, ok := m[orig.ID]; ok && updated.Status == jobs.StatusCanceled {
-				delete(m, orig.ID)
-				err = errors.Errorf("boom")
-			}
-		})
-		return err
-	}
 	params.Knobs = base.TestingKnobs{
 		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
 			RunBeforeBackfill: func() error {
@@ -6582,7 +6655,17 @@ func TestFailureToMarkCanceledReversalLeadsToCanceledStatus(t *testing.T) {
 				return nil
 			},
 		},
-		JobsTestingKnobs: jobKnobs,
+		JobsTestingKnobs: &jobs.TestingKnobs{
+			BeforeUpdate: func(orig, updated jobs.JobMetadata) (err error) {
+				withJobsToFail(func(m map[jobspb.JobID]struct{}) {
+					if _, ok := m[orig.ID]; ok && updated.Status == jobs.StatusCanceled {
+						delete(m, orig.ID)
+						err = errors.Errorf("boom")
+					}
+				})
+				return err
+			},
+		},
 	}
 
 	s, sqlDB, _ := serverutils.StartServer(t, params)
@@ -6636,23 +6719,13 @@ SELECT job_id FROM crdb_internal.jobs
 	withJobsToFail(func(m map[jobspb.JobID]struct{}) {
 		require.Len(t, m, 0)
 	})
-
-	// Validate the job cancellation metrics.
-	rows := tdb.QueryStr(t, "SELECT * FROM crdb_internal.feature_usage WHERE feature_name LIKE 'job.%.canceled'")
-	if len(rows) != 1 ||
-		len(rows[0]) != 2 ||
-		rows[0][0] != "job.schema_change.canceled" {
-		require.Failf(t, "Unexpected result set", "Rows: %s", rows)
-	} else if val, err := strconv.ParseInt(rows[0][1], 10, 32); err != nil || val < 2 {
-		require.Failf(t, "Invalid integer or value", "Error: %s Val: %d", err, val)
-	}
 }
 
 // TestCancelMultipleQueued tests that canceling schema changes when there are
 // multiple queued schema changes works as expected.
 func TestCancelMultipleQueued(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 	ctx := context.Background()
 
 	canProceed := make(chan struct{})
@@ -6664,8 +6737,6 @@ func TestCancelMultipleQueued(t *testing.T) {
 				return nil
 			},
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
@@ -6732,16 +6803,6 @@ SELECT job_id FROM crdb_internal.jobs
 			tdb.Exec(t, "CANCEL JOB $1", id)
 		}
 	}
-
-	// Validate the job cancellation metrics.
-	rows := tdb.QueryStr(t, "SELECT * FROM crdb_internal.feature_usage WHERE feature_name LIKE 'job.%.canceled'")
-	if len(rows) != 1 ||
-		len(rows[0]) != 2 ||
-		rows[0][0] != "job.schema_change.canceled" {
-		require.Failf(t, "Unexpected result set", "Rows: %s", rows)
-	} else if val, err := strconv.ParseInt(rows[0][1], 10, 32); err != nil || val < 2 {
-		require.Failf(t, "Invalid integer or value", "Error: %s Val: %d", err, val)
-	}
 }
 
 // TestRollbackForeignKeyAddition tests that rolling back a schema change to add
@@ -6749,7 +6810,7 @@ SELECT job_id FROM crdb_internal.jobs
 // works correctly (#57596).
 func TestRollbackForeignKeyAddition(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 	ctx := context.Background()
 
 	// Track whether we've attempted the backfill already, since there's a second
@@ -6772,10 +6833,7 @@ func TestRollbackForeignKeyAddition(t *testing.T) {
 				return nil
 			},
 		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 	}
-
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
 
@@ -6819,7 +6877,7 @@ AND descriptor_ids[1] = 'db.t2'::regclass::int`,
 // tests that such jobs are not cancelable. Regression test for #59415.
 func TestRevertingJobsOnDatabasesAndSchemas(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 
 	testCases := []struct {
 		name       string
@@ -6868,7 +6926,6 @@ func TestRevertingJobsOnDatabasesAndSchemas(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("failed due to injected error", func(t *testing.T) {
-		var injectedError bool
 		var s serverutils.TestServerInterface
 		params, _ := tests.CreateTestServerParams()
 		params.Knobs = base.TestingKnobs{
@@ -6885,24 +6942,13 @@ func TestRevertingJobsOnDatabasesAndSchemas(t *testing.T) {
 					}
 					for _, s := range []string{"DROP", "RENAME", "updating privileges"} {
 						if strings.Contains(pl.Description, s) {
-							if !injectedError {
-								injectedError = true
-								// Return a non-permanent error. The job will be retried in
-								// running state as the job is non-cancelable.
-								return errors.New("injected error")
-							} else {
-								// Return a permanent error to transition to reverting.
-								return jobs.MarkAsPermanentJobError(errors.New("injected permanent error"))
-							}
+							return errors.New("injected permanent error")
 						}
 					}
 					return nil
 				},
 			},
-			// Decrease the adopt-loop interval so that retries happen quickly.
-			JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 		}
-
 		var db *gosql.DB
 		s, db, _ = serverutils.StartServer(t, params)
 		defer s.Stopper().Stop(ctx)
@@ -6910,17 +6956,18 @@ func TestRevertingJobsOnDatabasesAndSchemas(t *testing.T) {
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				injectedError = false
 				sqlDB.Exec(t, tc.setupStmts)
-
-				go func() {
-					// This transaction will not return until the server is shutdown. Therefore,
-					// we run it in a separate goroutine and don't check the returned error.
-					_, _ = db.Exec(tc.scStmt)
-				}()
-				// Verify that the job is in retry state while reverting.
-				const query = `SELECT num_runs > 3 FROM crdb_internal.jobs WHERE status = '` + string(jobs.StatusReverting) + `' AND description ~ '%s'`
-				sqlDB.CheckQueryResultsRetry(t, fmt.Sprintf(query, tc.jobRegex), [][]string{{"true"}})
+				sqlDB.ExpectErr(t, "injected permanent error", tc.scStmt)
+				result := sqlDB.QueryStr(t,
+					`SELECT status, error FROM crdb_internal.jobs WHERE description ~ $1`,
+					tc.jobRegex)
+				require.Len(t, result, 1)
+				status, jobError := result[0][0], result[0][1]
+				require.Equal(t, string(jobs.StatusFailed), status)
+				require.Regexp(t,
+					"cannot be reverted, manual cleanup may be required: "+
+						"schema change jobs on databases and schemas cannot be reverted",
+					jobError)
 			})
 		}
 	})
@@ -6976,8 +7023,6 @@ func TestRevertingJobsOnDatabasesAndSchemas(t *testing.T) {
 					return nil
 				},
 			},
-			// Decrease the adopt-loop interval so that retries happen quickly.
-			JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 		}
 		var db *gosql.DB
 		s, db, _ = serverutils.StartServer(t, params)
@@ -7006,24 +7051,22 @@ func TestRevertingJobsOnDatabasesAndSchemas(t *testing.T) {
 	})
 }
 
-// TestDropColumnAfterMutations tests the impact of a drop column
-// after an existing mutation on the column.
+// TestDropColumnAfterMutations tests the imapct of a drop column
+// after an existing a mutation on the column
 func TestDropColumnAfterMutations(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
+	defer sqltestutils.SetTestJobsAdoptInterval()()
 	ctx := context.Background()
 	var jobControlMu syncutil.Mutex
 	var delayJobList []string
 	var delayJobChannels []chan struct{}
 	delayNotify := make(chan struct{})
-	jobIDs := make([]jobspb.JobID, 2)
 
 	proceedBeforeBackfill := make(chan error)
 	params, _ := tests.CreateTestServerParams()
 
 	var s serverutils.TestServerInterface
 	params.Knobs = base.TestingKnobs{
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
 			RunBeforeResume: func(jobID jobspb.JobID) error {
 				lockHeld := true
@@ -7033,16 +7076,14 @@ func TestDropColumnAfterMutations(t *testing.T) {
 					return err
 				}
 				pl := scJob.Payload()
-				// Check if we are blocking the correct job.
+				// Check if we are blocking the correct job
 				for idx, s := range delayJobList {
 					if strings.Contains(pl.Description, s) {
-						jobIDs[idx] = jobID
 						delayNotify <- struct{}{}
 						channel := delayJobChannels[idx]
 						jobControlMu.Unlock()
 						lockHeld = false
 						<-channel
-						break
 					}
 				}
 				if lockHeld {
@@ -7055,7 +7096,6 @@ func TestDropColumnAfterMutations(t *testing.T) {
 			},
 		},
 	}
-
 	s, sqlDB, _ := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
 
@@ -7068,7 +7108,7 @@ CREATE TABLE t (i INT8 PRIMARY KEY, j INT8);
 INSERT INTO t VALUES (1, 1);
 `)
 
-	// Test 1: with concurrent drop and mutations.
+	// Test 1: with concurrent drop and mutations
 	t.Run("basic-concurrent-drop-mutations", func(t *testing.T) {
 		jobControlMu.Lock()
 		delayJobList = []string{"ALTER TABLE defaultdb.public.t ADD COLUMN k INT8 NOT NULL UNIQUE DEFAULT 42",
@@ -7110,11 +7150,11 @@ COMMIT;
 
 		// Allow jobs to proceed once both are concurrent.
 		delayJobChannels[0] <- struct{}{}
-		// Allow both backfill jobs to proceed.
+		// Allow both back fill jobs to proceed
 		proceedBeforeBackfill <- nil
-		// Allow the second job to proceed.
+		// Allow the second job to proceed
 		delayJobChannels[1] <- struct{}{}
-		// Second job will also do backfill next.
+		// Second job will also do back fill next
 		proceedBeforeBackfill <- nil
 
 		schemaChangeWaitGroup.Wait()
@@ -7123,7 +7163,7 @@ COMMIT;
 	})
 
 	// Test 2: with concurrent drop and mutations, where
-	// the drop column will be failed intentionally.
+	// the drop column will be failed intentionally
 	t.Run("failed-concurrent-drop-mutations", func(t *testing.T) {
 		jobControlMu.Lock()
 		delayJobList = []string{"ALTER TABLE defaultdb.public.t ALTER COLUMN j SET NOT NULL",
@@ -7136,26 +7176,33 @@ COMMIT;
 	   CREATE TABLE t (i INT8 PRIMARY KEY, j INT8);
 	   INSERT INTO t VALUES (1, 1);
 	   `)
+		schemaChangeWaitGroup.Add(1)
 		go func() {
-			// This transaction will not complete. Therefore, we don't check the returned error.
-			_, _ = conn2.DB.ExecContext(context.Background(),
+			defer schemaChangeWaitGroup.Done()
+			_, err := conn2.DB.ExecContext(context.Background(),
 				`
-	   SET application_name='failed-concurrent-drop-mutations';
 	   BEGIN;
 	   ALTER TABLE t ALTER COLUMN j SET NOT NULL;
 	   ALTER TABLE t ADD COLUMN k INT8 DEFAULT 42 NOT NULL UNIQUE;
 	   COMMIT;
 	   `)
+			failureError := "pq: transaction committed but schema change aborted with error: (XXUUU): A dependent transaction failed for this schema change: Bogus error for drop column transaction"
+			if err != nil &&
+				!strings.Contains(err.Error(), failureError) {
+				t.Error(err.Error())
+			} else if err == nil {
+				t.Error("Expected error was not hit")
+			}
 		}()
 
-		// Wait for the alter to get submitted first.
+		// Wait for the alter to get submitted first
 		<-delayNotify
 
+		schemaChangeWaitGroup.Add(1)
 		go func() {
-			// This transaction will not complete. Therefore, we don't check the returned error.
-			_, _ = conn1.DB.ExecContext(context.Background(),
+			defer schemaChangeWaitGroup.Done()
+			_, err := conn1.DB.ExecContext(context.Background(),
 				`
-	   SET application_name='failed-concurrent-drop-mutations';
 	   SET sql_safe_updates = false;
 	   BEGIN;
 	   ALTER TABLE t DROP COLUMN j;
@@ -7164,6 +7211,13 @@ COMMIT;
 	   ALTER TABLE t ADD COLUMN o INT8 DEFAULT 42 NOT NULL UNIQUE;
 	   COMMIT;
 	   `)
+			failureError := "pq: transaction committed but schema change aborted with error: (XXUUU): Bogus error for drop column transaction"
+			if err != nil &&
+				!strings.Contains(err.Error(), failureError) {
+				t.Error(err.Error())
+			} else if err == nil {
+				t.Error("Expected error was not hit")
+			}
 		}()
 		<-delayNotify
 
@@ -7176,27 +7230,10 @@ COMMIT;
 		delayJobChannels[1] <- struct{}{}
 		// Second job will also do backfill next
 		proceedBeforeBackfill <- errors.Newf("Bogus error for drop column transaction")
+		// Rollback attempt after failure
+		proceedBeforeBackfill <- nil
 
-		// We expect the first job to be stuck in running state.
-		// At this point, first job is now waiting for second to complete. However, first job
-		// is in an infinite-loop due to retries while reverting. Therefore, we don't wait
-		// for the jobs to complete. Instead, we validate their current status before completing
-		// the test.
-
-		// Second job should be in reverting state and retrying.
-		conn1.CheckQueryResultsRetry(t,
-			fmt.Sprintf("SELECT num_runs > 3 FROM system.jobs WHERE id = %d AND status = '%s'", jobIDs[1], jobs.StatusReverting),
-			[][]string{{"true"}},
-		)
-		// First job should be in running state.
-		conn1.CheckQueryResults(t, fmt.Sprintf("SELECT status from system.jobs WHERE id = %d", jobIDs[0]), [][]string{{string(jobs.StatusRunning)}})
-		// Both jobs should be stuck in COMMIT, waiting for jobs to complete.
-		conn1.CheckQueryResults(t,
-			"SELECT count(*) FROM [SHOW SESSIONS] WHERE last_active_query LIKE '%COMMIT%' AND session_id != (SELECT * FROM [SHOW session_id]) "+
-				"AND application_name='failed-concurrent-drop-mutations'",
-			[][]string{{"2"}},
-		)
-
+		schemaChangeWaitGroup.Wait()
 		close(delayJobChannels[0])
 		close(delayJobChannels[1])
 	})
@@ -7216,27 +7253,33 @@ COMMIT;
 	   INSERT INTO t VALUES (1, 1);
 	   `)
 
+		schemaChangeWaitGroup.Add(1)
 		go func() {
-			// Two possibilities exist based on timing, either the following transaction
-			// will fail during backfill or the dependent one with the drop will fail.
-
-			// This transaction will not complete. Therefore, we don't check the returned error.
-			_, _ = conn2.DB.ExecContext(context.Background(),
+			defer schemaChangeWaitGroup.Done()
+			_, err := conn2.DB.ExecContext(context.Background(),
 				`
-	   SET application_name='concurrent-drop-mutations-insert-fail';
 	   BEGIN;
 	   ALTER TABLE t ALTER COLUMN j SET NOT NULL;
 	   ALTER TABLE t ADD COLUMN k INT8 DEFAULT 42 NOT NULL;
 	   COMMIT;
 	   	   `)
+			// Two possibilities exist based on timing, either the current transaction
+			// will fail during backfill or the dependent one with the drop will fail.
+			failureError := "pq: transaction committed but schema change aborted with error: (23505): A dependent transaction failed for this schema change: failed to ingest index entries during backfill: duplicate key value violates unique constraint \"t_o_key\""
+			if err != nil &&
+				!strings.Contains(err.Error(), failureError) {
+				t.Error(err.Error())
+			} else if err == nil {
+				t.Error("Expected error was not hit")
+			}
 		}()
 		<-delayNotify
 
+		schemaChangeWaitGroup.Add(1)
 		go func() {
-			// This transaction will not complete. Therefore, we don't check the returned error.
-			_, _ = conn1.DB.ExecContext(context.Background(),
+			defer schemaChangeWaitGroup.Done()
+			_, err := conn1.DB.ExecContext(context.Background(),
 				`
-	   SET application_name='concurrent-drop-mutations-insert-fail';
 	   SET sql_safe_updates = false;
 	   BEGIN;
 	   ALTER TABLE t DROP COLUMN j;
@@ -7246,6 +7289,13 @@ COMMIT;
 	   INSERT INTO t VALUES (2);
 	   COMMIT;
 	   	   `)
+			failureError := "pq: transaction committed but schema change aborted with error: (23505): failed to ingest index entries during backfill: duplicate key value violates unique constraint \"t_o_key\""
+			if err != nil &&
+				!strings.Contains(err.Error(), failureError) {
+				t.Error(err.Error())
+			} else if err == nil {
+				t.Error("Expected error was not hit")
+			}
 		}()
 		<-delayNotify
 
@@ -7257,40 +7307,9 @@ COMMIT;
 		proceedBeforeBackfill <- nil
 		// Allow the second job to proceed
 		delayJobChannels[1] <- struct{}{}
-
-		var revertingJobID jobspb.JobID
-		testutils.SucceedsSoon(t, func() error {
-			// In this test, depending on the concurrent execution schedule, one of the jobs
-			// will be stuck in running state while the other job will be stuck in reverting state.
-			// Here we check that this statement is valid. Moreover, we also get the ID of the
-			// reverting job to ensure that it is retrying. Furthermore, we prevent the running
-			// job to backfill to validate this test's correctness assumptions.
-			firstJobID := jobIDs[0]
-			secondJobID := jobIDs[1]
-			res := conn1.QueryStr(t, "SELECT status from system.jobs where id in ($1, $2)", firstJobID, secondJobID)
-			require.Len(t, res, 2)
-			firstJobStatus := jobs.Status(res[0][0])
-			secondJobStatus := jobs.Status(res[1][0])
-			if firstJobStatus == jobs.StatusRunning && secondJobStatus == jobs.StatusReverting {
-				revertingJobID = secondJobID
-				return nil
-			} else if firstJobStatus == jobs.StatusReverting && secondJobStatus == jobs.StatusRunning {
-				revertingJobID = firstJobID
-				return nil
-			}
-			return errors.New("one job should be running while the other job should be reverting")
-		})
-		// Ensure that the reverting job is retrying.
-		conn1.CheckQueryResultsRetry(t,
-			fmt.Sprintf("SELECT num_runs > 3 FROM system.jobs WHERE id = %d", revertingJobID),
-			[][]string{{"true"}},
-		)
-		// Both jobs should be stuck in COMMIT, waiting for jobs to complete.
-		conn1.CheckQueryResults(t,
-			"SELECT count(*) FROM [SHOW SESSIONS] WHERE last_active_query LIKE '%COMMIT%' AND session_id != (SELECT * FROM [SHOW session_id]) "+
-				"AND application_name='concurrent-drop-mutations-insert-fail'",
-			[][]string{{"2"}},
-		)
+		// Second job will also do backfill next
+		proceedBeforeBackfill <- nil
+		schemaChangeWaitGroup.Wait()
 
 		close(delayJobChannels[0])
 		close(delayJobChannels[1])
@@ -7300,177 +7319,50 @@ COMMIT;
 	close(proceedBeforeBackfill)
 }
 
-// TestCheckConstraintDropAndColumn tests for Issue #61749 which uncovered
-// that checks would be incorrectly activated if a drop column occurred, even
-// if they weren't fully validated.
-func TestCheckConstraintDropAndColumn(t *testing.T) {
+// TestDeinterleaveRevert tests that schema changes which fail during an alter
+// primary key to remove an interleave successfully reverts.
+func TestDeinterleaveRevert(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
-	var jobControlMu syncutil.Mutex
-	var delayJobList []string
-	var delayJobChannels []chan struct{}
-	delayNotify := make(chan struct{})
-	routineResults := make(chan error)
 
-	params, _ := tests.CreateTestServerParams()
-	var s serverutils.TestServerInterface
-	params.Knobs = base.TestingKnobs{
-		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
-			RunBeforeResume: func(jobID jobspb.JobID) error {
-				lockHeld := true
-				jobControlMu.Lock()
-				scJob, err := s.JobRegistry().(*jobs.Registry).LoadJob(ctx, jobID)
-				if err != nil {
-					return err
-				}
-				pl := scJob.Payload()
-				// Check if we are blocking the correct job
-				for idx, s := range delayJobList {
-					if strings.Contains(pl.Description, s) {
-						delayNotify <- struct{}{}
-						channel := delayJobChannels[idx]
-						jobControlMu.Unlock()
-						lockHeld = false
-						<-channel
-						break
-					}
-				}
-				if lockHeld {
-					jobControlMu.Unlock()
-				}
-				return nil
-			},
-		},
-		// Decrease the adopt loop interval so that retries happen quickly.
-		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
-	}
+	const shortInterval = 100 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(shortInterval, shortInterval)()
 
-	s, sqlDB, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(ctx)
-
-	conn1 := sqlutils.MakeSQLRunner(sqlDB)
-	conn2 := sqlutils.MakeSQLRunner(sqlDB)
-
-	conn1.Exec(t, `
-CREATE TABLE t (i INT8 PRIMARY KEY, j INT8);
-INSERT INTO t VALUES (1, 1);
-`)
-
-	// Issue #61749 uncovered that checks would be incorrectly
-	// activated if a drop column occurred, even if they weren't
-	// fully validate.
-	t.Run("drop-column-and-check-constraint", func(t *testing.T) {
-		jobControlMu.Lock()
-		delayJobList = []string{"ALTER TABLE defaultdb.public.t ADD CHECK (i > 0)",
-			"ALTER TABLE defaultdb.public.t DROP COLUMN j"}
-		delayJobChannels = []chan struct{}{make(chan struct{}), make(chan struct{})}
-		jobControlMu.Unlock()
-
-		go func() {
-			_, err := conn2.DB.ExecContext(ctx,
-				`
-ALTER TABLE t ADD CHECK (i > 0);
-`)
-			routineResults <- errors.Wrap(err, "alter table add check")
-		}()
-		<-delayNotify
-
-		go func() {
-			_, err := conn2.DB.ExecContext(ctx,
-				`
-SET sql_safe_updates = false;
-BEGIN;
-ALTER TABLE t DROP COLUMN j;
-INSERT INTO t VALUES(-5);
-DELETE FROM t WHERE i=-5;
-COMMIT;
-`)
-			routineResults <- errors.Wrap(err, "alter table drop column")
-		}()
-		<-delayNotify
-
-		// Allow jobs in expected order.
-		delayJobChannels[0] <- struct{}{}
-		delayJobChannels[1] <- struct{}{}
-		close(delayJobChannels[0])
-		close(delayJobChannels[1])
-		// Check for the results from the routines
-		for range delayJobChannels {
-			require.NoError(t, <-routineResults)
-		}
-	})
-
-}
-
-// Ensures that errors coming from hlc due to clocks being out of sync are not
-// treated as permanent failures.
-func TestClockSyncErrorsAreNotPermanent(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	var tc serverutils.TestClusterInterface
-	ctx := context.Background()
-	var updatedClock int64 // updated with atomics
-	tc = testcluster.StartTestCluster(t, 1, base.TestClusterArgs{
-		ServerArgs: base.TestServerArgs{
-			Knobs: base.TestingKnobs{
-				DistSQL: &execinfra.TestingKnobs{
-					RunBeforeBackfillChunk: func(sp roachpb.Span) error {
-						if atomic.AddInt64(&updatedClock, 1) > 1 {
-							return nil
-						}
-						clock := tc.Server(0).Clock()
-						now := clock.Now()
-						farInTheFuture := now.Add(time.Hour.Nanoseconds(), 0)
-
-						return clock.UpdateAndCheckMaxOffset(ctx, farInTheFuture.UnsafeToClockTimestamp())
-					},
+	settings := cluster.MakeTestingClusterSettings()
+	sql.InterleavedTablesEnabled.Override(&settings.SV, true)
+	s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{
+		Settings: settings,
+		Knobs: base.TestingKnobs{
+			DistSQL: &execinfra.TestingKnobs{
+				RunBeforeBackfillChunk: func(sp roachpb.Span) error {
+					return errors.New("boom")
 				},
 			},
 		},
 	})
-	defer tc.Stopper().Stop(ctx)
-
-	tdb := sqlutils.MakeSQLRunner(tc.ServerConn(0))
-	tdb.Exec(t, `CREATE TABLE t (i INT PRIMARY KEY)`)
-	// Before the commit which added this test, the below command would fail
-	// due to a permanent error.
-	tdb.Exec(t, `ALTER TABLE t ADD COLUMN j INT NOT NULL DEFAULT 42`)
-}
-
-// TestJobsWithoutMutationsAreCancelable validates that the jobs, which are created
-// when a schema-change does not have mutations, are cancelable.
-func TestJobsWithoutMutationsAreCancelable(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-
-	var registry *jobs.Registry
-	var scJobID jobspb.JobID
-	s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{
-		Knobs: base.TestingKnobs{SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
-			RunBeforeResume: func(jobID jobspb.JobID) error {
-				job, err := registry.LoadJob(ctx, jobID)
-				assert.NoError(t, err)
-				pl := job.Payload()
-				// Validate that the job is cancelable and has an invalid mutation ID.
-				assert.False(t, pl.Noncancelable)
-				assert.Equal(t, pl.GetSchemaChange().TableMutationID, descpb.InvalidMutationID)
-				scJobID = jobID
-				return nil
-			},
-		}},
-	})
 	defer s.Stopper().Stop(ctx)
 	tdb := sqlutils.MakeSQLRunner(sqlDB)
-	registry = s.JobRegistry().(*jobs.Registry)
+	tdb.Exec(t, `
+CREATE TABLE parent (i INT PRIMARY KEY);
+CREATE TABLE child (i INT, j INT, k INT, PRIMARY KEY (i, j)) INTERLEAVE IN PARENT "parent" (i);
+INSERT INTO parent VALUES (1);
+INSERT INTO child VALUES (1, 1, 1);
+`)
 
-	// This query results in a schema-change job that doesn't have mutations.
-	tdb.Exec(t, "CREATE TABLE t (x PRIMARY KEY) AS VALUES (1)")
-	var id jobspb.JobID
-	tdb.QueryRow(t,
-		`SELECT job_id FROM crdb_internal.jobs WHERE job_type = 'SCHEMA CHANGE'`,
-	).Scan(&id)
-	require.Equal(t, scJobID, id)
+	errCh := make(chan error)
+	go func() {
+		_, err := sqlDB.Exec(`ALTER TABLE child ALTER PRIMARY KEY USING COLUMNS (i, j)`)
+		errCh <- err
+	}()
+
+	const errMsg = `failed to construct index entries during backfill: boom`
+	tdb.CheckQueryResultsRetry(t, `
+SELECT status, error
+  FROM crdb_internal.jobs
+ WHERE job_type = 'SCHEMA CHANGE' AND description LIKE '%ALTER PRIMARY KEY%';
+`, [][]string{
+		{"failed", errMsg},
+	})
+	require.EqualError(t, <-errCh, `pq: `+errMsg)
 }

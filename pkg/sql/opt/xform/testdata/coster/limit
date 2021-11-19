@@ -22,7 +22,7 @@ offset
  ├── internal-ordering: +4,-1 opt(2)
  ├── cardinality: [0 - 20]
  ├── stats: [rows=1]
- ├── cost: 85.9929294
+ ├── cost: 86.5876049
  ├── key: (1)
  ├── fd: ()-->(2), (1)-->(3,4)
  ├── ordering: +4,-1 opt(2) [actual: +4,-1]
@@ -30,7 +30,7 @@ offset
  │    ├── columns: x:1!null y:2!null z:3 s:4!null
  │    ├── cardinality: [0 - 1020]
  │    ├── stats: [rows=10]
- │    ├── cost: 85.9729294
+ │    ├── cost: 86.5676049
  │    ├── key: (1)
  │    ├── fd: ()-->(2), (1)-->(3,4)
  │    ├── ordering: +4,-1 opt(2) [actual: +4,-1]
@@ -39,25 +39,24 @@ offset
  │         ├── internal-ordering: +4,-1 opt(2)
  │         ├── cardinality: [0 - 1020]
  │         ├── stats: [rows=10]
- │         ├── cost: 25.3629294
+ │         ├── cost: 25.9576049
  │         ├── key: (1)
  │         ├── fd: ()-->(2), (1)-->(4)
  │         ├── ordering: +4,-1 opt(2) [actual: +4,-1]
- │         ├── sort (segmented)
+ │         ├── sort
  │         │    ├── columns: x:1!null y:2!null s:4!null
- │         │    ├── stats: [rows=10, distinct(2)=1, null(2)=0, distinct(4)=9.5617925, null(4)=0]
- │         │    ├── cost: 25.2529294
+ │         │    ├── stats: [rows=10, distinct(2)=1, null(2)=0]
+ │         │    ├── cost: 25.8476049
  │         │    ├── key: (1)
  │         │    ├── fd: ()-->(2), (1)-->(4)
  │         │    ├── ordering: +4,-1 opt(2) [actual: +4,-1]
  │         │    ├── limit hint: 1020.00
- │         │    └── scan a@a_y_s_idx
+ │         │    └── scan a@secondary
  │         │         ├── columns: x:1!null y:2!null s:4!null
  │         │         ├── constraint: /2/4/1: [/10 - /10]
- │         │         ├── stats: [rows=10, distinct(2)=1, null(2)=0, distinct(4)=9.5617925, null(4)=0]
+ │         │         ├── stats: [rows=10, distinct(2)=1, null(2)=0]
  │         │         ├── cost: 24.62
  │         │         ├── key: (1)
- │         │         ├── fd: ()-->(2), (1)-->(4)
- │         │         └── ordering: +4 opt(2) [actual: +4]
+ │         │         └── fd: ()-->(2), (1)-->(4)
  │         └── 1020
  └── 1000

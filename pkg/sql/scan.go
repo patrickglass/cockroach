@@ -46,10 +46,10 @@ type scanNode struct {
 	_ util.NoCopy
 
 	desc  catalog.TableDescriptor
-	index catalog.Index
+	index *descpb.IndexDescriptor
 
 	// Set if an index was explicitly specified.
-	specifiedIndex catalog.Index
+	specifiedIndex *descpb.IndexDescriptor
 	// Set if the NO_INDEX_JOIN hint was given.
 	noIndexJoin bool
 
@@ -123,12 +123,11 @@ type scanColumnsConfig struct {
 	// columns are not included here.
 	wantedColumnsOrdinals []uint32
 
-	// invertedColumn maps the column ID of the inverted column (if it exists)
-	// to the column type actually stored in the index. For example, the
-	// inverted column of an inverted index has type bytes, even though the
-	// column descriptor matches the source column (Geometry, Geography, JSON or
-	// Array).
-	invertedColumn *struct {
+	// virtualColumn maps the column ID of the virtual column (if it exists) to
+	// the column type actually stored in the index. For example, the inverted
+	// column of an inverted index has type bytes, even though the column
+	// descriptor matches the source column (Geometry, Geography, JSON or Array).
+	virtualColumn *struct {
 		colID tree.ColumnID
 		typ   *types.T
 	}
@@ -232,14 +231,14 @@ func (n *scanNode) lookupSpecifiedIndex(indexFlags *tree.IndexFlags) error {
 		if foundIndex == nil || !foundIndex.Public() {
 			return errors.Errorf("index %q not found", tree.ErrString(&indexFlags.Index))
 		}
-		n.specifiedIndex = foundIndex
+		n.specifiedIndex = foundIndex.IndexDesc()
 	} else if indexFlags.IndexID != 0 {
 		// Search index by ID.
 		foundIndex, _ := n.desc.FindIndexWithID(descpb.IndexID(indexFlags.IndexID))
 		if foundIndex == nil || !foundIndex.Public() {
 			return errors.Errorf("index [%d] not found", indexFlags.IndexID)
 		}
-		n.specifiedIndex = foundIndex
+		n.specifiedIndex = foundIndex.IndexDesc()
 	}
 	return nil
 }
@@ -267,9 +266,9 @@ func initColsForScan(
 			}
 		}
 
-		// If this is an inverted column, create a new descriptor with the
-		// correct type.
-		if vc := colCfg.invertedColumn; vc != nil && vc.colID == wc && !vc.typ.Identical(col.GetType()) {
+		// If this is a virtual column, create a new descriptor with the correct
+		// type.
+		if vc := colCfg.virtualColumn; vc != nil && vc.colID == wc && !vc.typ.Identical(col.GetType()) {
 			col = col.DeepCopy()
 			col.ColumnDesc().Type = vc.typ
 		}
@@ -302,7 +301,7 @@ func initColsForScan(
 // Initializes the column structures.
 func (n *scanNode) initDescDefaults(colCfg scanColumnsConfig) error {
 	n.colCfg = colCfg
-	n.index = n.desc.GetPrimaryIndex()
+	n.index = n.desc.GetPrimaryIndex().IndexDesc()
 
 	var err error
 	n.cols, err = initColsForScan(n.desc, n.colCfg)

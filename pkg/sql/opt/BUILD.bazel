@@ -31,7 +31,6 @@ go_library(
         "//pkg/sql/sqltelemetry",
         "//pkg/sql/types",
         "//pkg/util",
-        "//pkg/util/buildutil",
         "//pkg/util/log",
         "@com_github_cockroachdb_errors//:errors",
         "@com_github_lib_pq//oid",
@@ -76,7 +75,7 @@ genrule(
     cmd = """
       $(location //pkg/sql/opt/optgen/cmd/optgen) -out $@ ops $(locations :ops)
     """,
-    exec_tools = ["//pkg/sql/opt/optgen/cmd/optgen"],
+    tools = ["//pkg/sql/opt/optgen/cmd/optgen"],
 )
 
 # Define the generator for the enumeration of rulenames.
@@ -92,7 +91,7 @@ genrule(
       $(location //pkg/sql/opt/optgen/cmd/optgen) -out $@ rulenames \
           $(locations :ops) $(locations //pkg/sql/opt/norm:rules) $(locations //pkg/sql/opt/xform:rules)
     """,
-    exec_tools = ["//pkg/sql/opt/optgen/cmd/optgen"],
+    tools = ["//pkg/sql/opt/optgen/cmd/optgen"],
 )
 
 # Define the generator for the stringification of rulenames.
@@ -115,13 +114,12 @@ genrule(
       cp $(location rule_name.go) `dirname $(location :gen-rulenames)`/rule_name.go
       GO_REL_PATH=`dirname $(location @go_sdk//:bin/go)`
       GO_ABS_PATH=`cd $$GO_REL_PATH && pwd`
-      # Set GOPATH to something to workaround https://github.com/golang/go/issues/43938
-      env PATH=$$GO_ABS_PATH HOME=$(GENDIR) GOPATH=/nonexist-gopath \
-      $(location @com_github_cockroachdb_tools//cmd/stringer:stringer) -output=$@ \
+      env PATH=$$GO_ABS_PATH HOME=$(GENDIR) \
+      $(location @org_golang_x_tools//cmd/stringer:stringer) -output=$@ \
       -type=RuleName `dirname $(location :gen-rulenames)`/rule_name.go $(location :gen-rulenames)
     """,
-    exec_tools = [
+    tools = [
         "@go_sdk//:bin/go",
-        "@com_github_cockroachdb_tools//cmd/stringer",
+        "@org_golang_x_tools//cmd/stringer",
     ],
 )

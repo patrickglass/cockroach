@@ -57,6 +57,20 @@ var (
 	searchLabel = issueLabels[1]
 )
 
+// Replace resolved AuthorGithubHandles according to this map.
+// Helpful to avoid pinging former employees. The zero value
+// pings nobody.
+var oldFriendsMap = map[string]string{
+	"a-robinson":   "andreimatei",
+	"benesch":      "nvanbenschoten",
+	"georgeutsin":  "yuzefovich",
+	"tamird":       "tbg",
+	"rohany":       "solongordon",
+	"vivekmenezes": "",
+	"lucy-zhang":   "ajwerner",
+	"mjibson":      "rafiss",
+}
+
 // context augments context.Context with a logger.
 type postCtx struct {
 	context.Context
@@ -68,6 +82,42 @@ func (ctx *postCtx) Printf(format string, args ...interface{}) {
 		format += "\n"
 	}
 	fmt.Fprintf(&ctx.Builder, format, args...)
+}
+
+func (p *poster) getAuthorGithubHandle(ctx *postCtx, authorEmail string) string {
+	if authorEmail == "" {
+		return ""
+	}
+	commits, _, err := p.listCommits(ctx, p.Org, p.Repo, &github.CommitsListOptions{
+		Author: authorEmail,
+		ListOptions: github.ListOptions{
+			PerPage: 1,
+		},
+	})
+	if err != nil {
+		ctx.Printf("unable list commits by %s: %v", authorEmail, err)
+		return ""
+	}
+	if len(commits) == 0 {
+		ctx.Printf("no GitHub commits found for email %s", authorEmail)
+		return ""
+	}
+
+	if commits[0].Author == nil {
+		ctx.Printf("no Author found for user email %s", authorEmail)
+		return ""
+	}
+	authorHandle := *commits[0].Author.Login
+
+	if newAuthorHandle, ok := oldFriendsMap[authorHandle]; ok {
+		if newAuthorHandle == "" {
+			ctx.Printf("%s marked as alumn{us,a}; ignoring", authorHandle)
+			return ""
+		}
+		ctx.Printf("%s marked as alumn{us/a}; resolving to %s instead", authorHandle, newAuthorHandle)
+		return newAuthorHandle
+	}
+	return authorHandle
 }
 
 func getLatestTag() (string, error) {
@@ -140,7 +190,7 @@ func newPoster(client *github.Client, opts *Options) *poster {
 
 // Options configures the issue poster.
 type Options struct {
-	Token        string // GitHub API token
+	Token        string // Github API token
 	Org          string
 	Repo         string
 	SHA          string
@@ -221,7 +271,7 @@ type TemplateData struct {
 	CondensedMessage CondensedMessage
 	// The commit SHA.
 	Commit string
-	// Link to the commit on GitHub.
+	// Link to the commit on Github.
 	CommitURL string
 	// The branch.
 	Branch string
@@ -260,6 +310,12 @@ func (p *poster) templateData(
 
 func (p *poster) post(origCtx context.Context, formatter IssueFormatter, req PostRequest) error {
 	ctx := &postCtx{Context: origCtx}
+
+	authorHandle := p.getAuthorGithubHandle(ctx, req.AuthorEmail)
+	if authorHandle != "" {
+		req.Mention = append(req.Mention, "@"+authorHandle)
+	}
+
 	data := p.templateData(
 		ctx,
 		req,
@@ -312,9 +368,6 @@ func (p *poster) post(origCtx context.Context, formatter IssueFormatter, req Pos
 	if len(rExisting.Issues) > 0 {
 		// We found an existing issue to post a comment into.
 		foundIssue = rExisting.Issues[0].Number
-		// We are not going to create an issue, so don't show
-		// MentionOnCreate to the formatter.Body call below.
-		data.MentionOnCreate = nil
 	}
 
 	data.RelatedIssues = rRelated.Issues
@@ -415,13 +468,15 @@ type PostRequest struct {
 	// A path to the test artifacts relative to the artifacts root. If nonempty,
 	// allows the poster formatter to construct a direct URL to this directory.
 	Artifacts string
-	// MentionOnCreate is a slice of GitHub handles (@foo, @cockroachdb/some-team, etc)
-	// that should be mentioned in the message when creating a new issue. These are
-	// *not* mentioned when posting to an existing issue.
-	MentionOnCreate []string
-	// A help section of the issue, for example with links to documentation or
-	// instructions on how to reproduce the issue.
-	HelpCommand func(*Renderer)
+	// The email of the author. It will be translated into a Github handle and
+	// appended to the Mention slice below. This increases the chances of the
+	// "right person" seeing the failure early.
+	AuthorEmail string
+	// Mention is a slice of Github handles (@foo, @cockroachdb/some-team, etc)
+	// that should be mentioned in the message.
+	Mention []string
+	// The instructions to reproduce the failure.
+	ReproductionCommand string
 	// Additional labels that will be added to the issue. They will be created
 	// as necessary (as a side effect of creating an issue with them). An
 	// existing issue may be adopted even if it does not have these labels.
@@ -433,7 +488,7 @@ type PostRequest struct {
 }
 
 // Post either creates a new issue for a failed test, or posts a comment to an
-// existing open issue. GITHUB_API_TOKEN must be set to a valid GitHub token
+// existing open issue. GITHUB_API_TOKEN must be set to a valid Github token
 // that has permissions to search and create issues and comments or an error
 // will be returned.
 func Post(ctx context.Context, formatter IssueFormatter, req PostRequest) error {
@@ -446,29 +501,4 @@ func Post(ctx context.Context, formatter IssueFormatter, req PostRequest) error 
 		&oauth2.Token{AccessToken: opts.Token},
 	)))
 	return newPoster(client, opts).post(ctx, formatter, req)
-}
-
-// ReproductionCommandFromString returns a value for the
-// PostRequest.HelpCommand field that is a command to run. It is
-// formatted as a bash code block.
-func ReproductionCommandFromString(repro string) func(*Renderer) {
-	if repro == "" {
-		return func(*Renderer) {}
-	}
-	return func(r *Renderer) {
-		r.Escaped("To reproduce, try:\n")
-		r.CodeBlock("bash", repro)
-	}
-}
-
-// HelpCommandAsLink returns a value for the PostRequest.HelpCommand field
-// that prints a link to documentation to refer to.
-func HelpCommandAsLink(title, href string) func(r *Renderer) {
-	return func(r *Renderer) {
-		// Bit of weird formatting here but apparently markdown links don't work inside
-		// of a line that also has a <p> tag. Putting it on its own line makes it work.
-		r.Escaped("\n\nSee: ")
-		r.A(title, href)
-		r.Escaped("\n\n")
-	}
 }

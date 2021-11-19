@@ -12,7 +12,6 @@ package geomfn
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/geo"
-	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/cockroach/pkg/geo/geos"
 	"github.com/cockroachdb/errors"
 	"github.com/twpayne/go-geom"
@@ -26,19 +25,6 @@ func Covers(a geo.Geometry, b geo.Geometry) (bool, error) {
 	if !a.CartesianBoundingBox().Covers(b.CartesianBoundingBox()) {
 		return false, nil
 	}
-
-	// Optimization for point in polygon calculations.
-	pointPolygonPair, pointKind, polygonKind := PointKindAndPolygonKind(a, b)
-	switch pointPolygonPair {
-	case PointAndPolygon:
-		// A point cannot cover a polygon.
-		return false, nil
-	case PolygonAndPoint:
-		// Computing whether a polygon covers a point is equivalent
-		// to computing whether the point is covered by the polygon.
-		return PointKindCoveredByPolygonKind(pointKind, polygonKind)
-	}
-
 	return geos.Covers(a.EWKB(), b.EWKB())
 }
 
@@ -50,17 +36,6 @@ func CoveredBy(a geo.Geometry, b geo.Geometry) (bool, error) {
 	if !b.CartesianBoundingBox().Covers(a.CartesianBoundingBox()) {
 		return false, nil
 	}
-
-	// Optimization for point in polygon calculations.
-	pointPolygonPair, pointKind, polygonKind := PointKindAndPolygonKind(a, b)
-	switch pointPolygonPair {
-	case PolygonAndPoint:
-		// A polygon cannot be covered by a point.
-		return false, nil
-	case PointAndPolygon:
-		return PointKindCoveredByPolygonKind(pointKind, polygonKind)
-	}
-
 	return geos.CoveredBy(a.EWKB(), b.EWKB())
 }
 
@@ -72,19 +47,6 @@ func Contains(a geo.Geometry, b geo.Geometry) (bool, error) {
 	if !a.CartesianBoundingBox().Covers(b.CartesianBoundingBox()) {
 		return false, nil
 	}
-
-	// Optimization for point in polygon calculations.
-	pointPolygonPair, pointKind, polygonKind := PointKindAndPolygonKind(a, b)
-	switch pointPolygonPair {
-	case PointAndPolygon:
-		// A point cannot contain a polygon.
-		return false, nil
-	case PolygonAndPoint:
-		// Computing whether a polygon contains a point is equivalent
-		// to computing whether the point is contained within the polygon.
-		return PointKindWithinPolygonKind(pointKind, polygonKind)
-	}
-
 	return geos.Contains(a.EWKB(), b.EWKB())
 }
 
@@ -143,14 +105,6 @@ func Intersects(a geo.Geometry, b geo.Geometry) (bool, error) {
 	if !a.CartesianBoundingBox().Intersects(b.CartesianBoundingBox()) {
 		return false, nil
 	}
-
-	// Optimization for point in polygon calculations.
-	pointPolygonPair, pointKind, polygonKind := PointKindAndPolygonKind(a, b)
-	switch pointPolygonPair {
-	case PointAndPolygon, PolygonAndPoint:
-		return PointKindIntersectsPolygonKind(pointKind, polygonKind)
-	}
-
 	return geos.Intersects(a.EWKB(), b.EWKB())
 }
 
@@ -271,43 +225,6 @@ func Overlaps(a geo.Geometry, b geo.Geometry) (bool, error) {
 	return geos.Overlaps(a.EWKB(), b.EWKB())
 }
 
-// PointPolygonOrder represents the order of a point and a polygon
-// in an ordered pair of geometries.
-type PointPolygonOrder int
-
-const (
-	// NotPointAndPolygon signifies that a pair of geometries is
-	// not a point and a polygon.
-	NotPointAndPolygon PointPolygonOrder = iota
-	// PointAndPolygon signifies that the point appears first
-	// in an ordered pair of a point and a polygon.
-	PointAndPolygon
-	// PolygonAndPoint signifies that the polygon appears first
-	// in an ordered pair of a point and a polygon.
-	PolygonAndPoint
-)
-
-// PointKindAndPolygonKind returns whether a pair of geometries contains
-// a (multi)point and a (multi)polygon. It is used to determine if the
-// point in polygon optimization can be applied.
-func PointKindAndPolygonKind(
-	a geo.Geometry, b geo.Geometry,
-) (PointPolygonOrder, geo.Geometry, geo.Geometry) {
-	switch a.ShapeType2D() {
-	case geopb.ShapeType_Point, geopb.ShapeType_MultiPoint:
-		switch b.ShapeType2D() {
-		case geopb.ShapeType_Polygon, geopb.ShapeType_MultiPolygon:
-			return PointAndPolygon, a, b
-		}
-	case geopb.ShapeType_Polygon, geopb.ShapeType_MultiPolygon:
-		switch b.ShapeType2D() {
-		case geopb.ShapeType_Point, geopb.ShapeType_MultiPoint:
-			return PolygonAndPoint, b, a
-		}
-	}
-	return NotPointAndPolygon, a, b
-}
-
 // Touches returns whether geometry A touches geometry B.
 func Touches(a geo.Geometry, b geo.Geometry) (bool, error) {
 	if a.SRID() != b.SRID() {
@@ -327,16 +244,5 @@ func Within(a geo.Geometry, b geo.Geometry) (bool, error) {
 	if !b.CartesianBoundingBox().Covers(a.CartesianBoundingBox()) {
 		return false, nil
 	}
-
-	// Optimization for point in polygon calculations.
-	pointPolygonPair, pointKind, polygonKind := PointKindAndPolygonKind(a, b)
-	switch pointPolygonPair {
-	case PolygonAndPoint:
-		// A polygon cannot be contained within a point.
-		return false, nil
-	case PointAndPolygon:
-		return PointKindWithinPolygonKind(pointKind, polygonKind)
-	}
-
 	return geos.Within(a.EWKB(), b.EWKB())
 }

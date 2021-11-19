@@ -22,7 +22,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/sysutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
 )
@@ -79,9 +78,9 @@ const (
 	_ PemUsage = iota
 	// CAPem describes the main CA certificate.
 	CAPem
-	// TenantCAPem describes the CA certificate used to broker authN/Z for SQL
+	// TenantClientCAPem describes the CA certificate used to broker authN/Z for SQL
 	// tenants wishing to access the KV layer.
-	TenantCAPem
+	TenantClientCAPem
 	// ClientCAPem describes the CA certificate used to verify client certificates.
 	ClientCAPem
 	// UICAPem describes the CA certificate used to verify the Admin UI server certificate.
@@ -93,16 +92,12 @@ const (
 	UIPem
 	// ClientPem describes a client certificate.
 	ClientPem
-	// TenantPem describes a SQL tenant client certificate.
-	TenantPem
+	// TenantClientPem describes a SQL tenant client certificate.
+	TenantClientPem
 
 	// Maximum allowable permissions.
 	maxKeyPermissions os.FileMode = 0700
-
-	// Maximum allowable permissions if file is owned by root.
-	maxGroupKeyPermissions os.FileMode = 0740
-
-	// Filename extensions.
+	// Filename extenstions.
 	certExtension = `.crt`
 	keyExtension  = `.key`
 	// Certificate directory permissions.
@@ -110,7 +105,7 @@ const (
 )
 
 func isCA(usage PemUsage) bool {
-	return usage == CAPem || usage == ClientCAPem || usage == TenantCAPem || usage == UICAPem
+	return usage == CAPem || usage == ClientCAPem || usage == TenantClientCAPem || usage == UICAPem
 }
 
 func (p PemUsage) String() string {
@@ -119,7 +114,7 @@ func (p PemUsage) String() string {
 		return "CA"
 	case ClientCAPem:
 		return "Client CA"
-	case TenantCAPem:
+	case TenantClientCAPem:
 		return "Tenant Client CA"
 	case UICAPem:
 		return "UI CA"
@@ -129,7 +124,7 @@ func (p PemUsage) String() string {
 		return "UI"
 	case ClientPem:
 		return "Client"
-	case TenantPem:
+	case TenantClientPem:
 		return "Tenant Client"
 	default:
 		return "unknown"
@@ -172,6 +167,11 @@ type CertInfo struct {
 	Error error
 }
 
+func exceedsPermissions(objectMode, allowedMode os.FileMode) bool {
+	mask := os.FileMode(0777) ^ allowedMode
+	return mask&objectMode != 0
+}
+
 func isCertificateFile(filename string) bool {
 	return strings.HasSuffix(filename, certExtension)
 }
@@ -201,7 +201,7 @@ func CertInfoFromFilename(filename string) (*CertInfo, error) {
 			return nil, errors.Errorf("client CA certificate filename should match ca-client%s", certExtension)
 		}
 	case `ca-client-tenant`:
-		fileUsage = TenantCAPem
+		fileUsage = TenantClientCAPem
 		if numParts != 2 {
 			return nil, errors.Errorf("tenant CA certificate filename should match ca%s", certExtension)
 		}
@@ -228,7 +228,7 @@ func CertInfoFromFilename(filename string) (*CertInfo, error) {
 			return nil, errors.Errorf("client certificate filename should match client.<user>%s", certExtension)
 		}
 	case `client-tenant`:
-		fileUsage = TenantPem
+		fileUsage = TenantClientPem
 		// Strip prefix and suffix and re-join middle parts.
 		name = strings.Join(parts[1:numParts-1], `.`)
 		if len(name) == 0 {
@@ -390,9 +390,11 @@ func (cl *CertificateLoader) findKey(ci *CertInfo) error {
 	}
 
 	if !cl.skipPermissionChecks {
-		aclInfo := sysutil.GetFileACLInfo(info)
-		if err = checkFilePermissions(os.Getgid(), fullKeyPath, aclInfo); err != nil {
-			return err
+		// Check permissions bits.
+		filePerm := fileMode.Perm()
+		if exceedsPermissions(filePerm, maxKeyPermissions) {
+			return errors.Errorf("key file %s has permissions %s, exceeds %s",
+				fullKeyPath, filePerm, maxKeyPermissions)
 		}
 	}
 

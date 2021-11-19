@@ -13,7 +13,6 @@ package blobs
 import (
 	"bytes"
 	"context"
-	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -23,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/errors"
 )
 
 // filesize should be at least 1 GB when running these benchmarks.
@@ -90,14 +88,8 @@ func benchmarkStreamingReadFile(b *testing.B, tc *benchmarkTestCase) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		w, err := writeTo.Writer(context.Background(), tc.fileName)
+		err = writeTo.WriteFile(tc.fileName, reader)
 		if err != nil {
-			b.Fatal(err)
-		}
-		if _, err := io.Copy(w, reader); err != nil {
-			b.Fatal(errors.CombineErrors(err, w.Close()))
-		}
-		if err := w.Close(); err != nil {
 			b.Fatal(err)
 		}
 		stat, err := writeTo.Stat(tc.fileName)
@@ -142,14 +134,8 @@ func benchmarkStreamingWriteFile(b *testing.B, tc *benchmarkTestCase) {
 	b.ResetTimer()
 	b.SetBytes(tc.fileSize)
 	for i := 0; i < b.N; i++ {
-		w, err := tc.blobClient.Writer(context.Background(), tc.fileName)
+		err := tc.blobClient.WriteFile(context.Background(), tc.fileName, bytes.NewReader(content))
 		if err != nil {
-			b.Fatal(err)
-		}
-		if _, err := io.Copy(w, bytes.NewReader(content)); err != nil {
-			b.Fatal(errors.CombineErrors(w.Close(), err))
-		}
-		if err := w.Close(); err != nil {
 			b.Fatal(err)
 		}
 	}

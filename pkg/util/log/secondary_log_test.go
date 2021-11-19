@@ -35,10 +35,8 @@ func installSessionsFileSink(sc *TestLogScope, t *testing.T) func() {
 	bt := true
 	cfg.Sinks.FileGroups = map[string]*logconfig.FileSinkConfig{
 		"sessions": {
-			FileDefaults: logconfig.FileDefaults{
-				CommonSinkConfig: logconfig.CommonSinkConfig{Auditable: &bt},
-			},
-			Channels: logconfig.SelectChannels(channel.SESSIONS)},
+			CommonSinkConfig: logconfig.CommonSinkConfig{Auditable: &bt},
+			Channels:         logconfig.ChannelList{Channels: []Channel{channel.SESSIONS}}},
 	}
 
 	// Derive a full config using the same directory as the

@@ -21,6 +21,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/ctpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -62,6 +64,8 @@ var (
 	// someone else has already incremented the epoch to the desired
 	// value.
 	ErrEpochAlreadyIncremented = errors.New("epoch already incremented")
+
+	errLiveClockNotLive = errors.New("not live")
 )
 
 type errRetryLiveness struct {
@@ -74,24 +78,6 @@ func (e *errRetryLiveness) Cause() error {
 
 func (e *errRetryLiveness) Error() string {
 	return fmt.Sprintf("%T: %s", *e, e.error)
-}
-
-func isErrRetryLiveness(ctx context.Context, err error) bool {
-	if errors.HasType(err, (*roachpb.AmbiguousResultError)(nil)) {
-		// We generally want to retry ambiguous errors immediately, except if the
-		// ctx is canceled - in which case the ambiguous error is probably caused
-		// by the cancellation (and in any case it's pointless to retry with a
-		// canceled ctx).
-		return ctx.Err() == nil
-	} else if errors.HasType(err, (*roachpb.TransactionStatusError)(nil)) {
-		// 21.2 nodes can return a TransactionStatusError when they should have
-		// returned an AmbiguousResultError.
-		// TODO(andrei): Remove this in 22.2.
-		return true
-	} else if errors.Is(err, kv.OnePCNotAllowedError{}) {
-		return true
-	}
-	return false
 }
 
 // Node liveness metrics counter names.
@@ -545,50 +531,41 @@ type livenessUpdate struct {
 // NB: An existing liveness record is not overwritten by this method, we return
 // an error instead.
 func (nl *NodeLiveness) CreateLivenessRecord(ctx context.Context, nodeID roachpb.NodeID) error {
-	for r := retry.StartWithCtx(ctx, base.DefaultRetryOptions()); r.Next(); {
-		// We start off at epoch=0, entrusting the initial heartbeat to increment it
-		// to epoch=1 to signal the very first time the node is up and running.
-		liveness := livenesspb.Liveness{NodeID: nodeID, Epoch: 0}
+	// We start off at epoch=0, entrusting the initial heartbeat to increment it
+	// to epoch=1 to signal the very first time the node is up and running.
+	liveness := livenesspb.Liveness{NodeID: nodeID, Epoch: 0}
 
-		// We skip adding an expiration, we only really care about the liveness
-		// record existing within KV.
+	// We skip adding an expiration, we only really care about the liveness
+	// record existing within KV.
 
-		v := new(roachpb.Value)
-		err := nl.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-			b := txn.NewBatch()
-			key := keys.NodeLivenessKey(nodeID)
-			if err := v.SetProto(&liveness); err != nil {
-				log.Fatalf(ctx, "failed to marshall proto: %s", err)
-			}
-			// Given we're looking to create a new liveness record here, we don't
-			// expect to find anything.
-			b.CPut(key, v, nil)
+	v := new(roachpb.Value)
+	if err := nl.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		b := txn.NewBatch()
+		key := keys.NodeLivenessKey(nodeID)
+		if err := v.SetProto(&liveness); err != nil {
+			log.Fatalf(ctx, "failed to marshall proto: %s", err)
+		}
+		// Given we're looking to create a new liveness record here, we don't
+		// expect to find anything.
+		b.CPut(key, v, nil)
 
-			// We don't bother adding a gossip trigger, that'll happen with the
-			// first heartbeat. We still keep it as a 1PC commit to avoid leaving
-			// write intents.
-			b.AddRawRequest(&roachpb.EndTxnRequest{
-				Commit:     true,
-				Require1PC: true,
-			})
-			return txn.Run(ctx, b)
+		// We don't bother adding a gossip trigger, that'll happen with the
+		// first heartbeat. We still keep it as a 1PC commit to avoid leaving
+		// write intents.
+		b.AddRawRequest(&roachpb.EndTxnRequest{
+			Commit:     true,
+			Require1PC: true,
 		})
-
-		if err == nil {
-			// We'll learn about this liveness record through gossip eventually, so we
-			// don't bother updating our in-memory view of node liveness.
-			log.Infof(ctx, "created liveness record for n%d", nodeID)
-			return nil
-		}
-		if !isErrRetryLiveness(ctx, err) {
-			return err
-		}
-		log.VEventf(ctx, 2, "failed to create liveness record for node %d, because of %s. retrying...", nodeID, err)
-	}
-	if err := ctx.Err(); err != nil {
+		return txn.Run(ctx, b)
+	}); err != nil {
 		return err
 	}
-	return errors.AssertionFailedf("unexpected problem while creating liveness record for node %d", nodeID)
+
+	// We'll learn about this liveness record through gossip eventually, so we
+	// don't bother updating our in-memory view of node liveness.
+
+	log.Infof(ctx, "created liveness record for n%d", nodeID)
+	return nil
 }
 
 func (nl *NodeLiveness) setMembershipStatusInternal(
@@ -718,7 +695,7 @@ func (nl *NodeLiveness) Start(ctx context.Context, opts NodeLivenessStartOptions
 	nl.mu.engines = opts.Engines
 	nl.mu.Unlock()
 
-	_ = opts.Stopper.RunAsyncTaskEx(ctx, stop.TaskOpts{TaskName: "liveness-hb", SpanOpt: stop.SterileRootSpan}, func(context.Context) {
+	_ = opts.Stopper.RunAsyncTask(ctx, "liveness-hb", func(context.Context) {
 		ambient := nl.ambientCtx
 		ambient.AddLogTag("liveness-hb", nil)
 		ctx, cancel := opts.Stopper.WithCancelOnQuiesce(context.Background())
@@ -862,7 +839,7 @@ func (nl *NodeLiveness) heartbeatInternal(
 	ctx, sp := tracing.EnsureChildSpan(ctx, nl.ambientCtx.Tracer, "liveness heartbeat")
 	defer sp.Finish()
 	defer func(start time.Time) {
-		dur := timeutil.Since(start)
+		dur := timeutil.Now().Sub(start)
 		nl.metrics.HeartbeatLatency.RecordValue(dur.Nanoseconds())
 		if dur > time.Second {
 			log.Warningf(ctx, "slow heartbeat took %s; err=%v", dur, err)
@@ -1240,7 +1217,8 @@ func (nl *NodeLiveness) RegisterCallback(cb IsLiveCallback) {
 // on commit.
 //
 // updateLiveness terminates certain errors that are expected to occur
-// sporadically, such as ambiguous results.
+// sporadically, such as TransactionStatusError (due to the 1PC requirement of
+// the liveness txn, and ambiguous results).
 //
 // If the CPut is successful (i.e. no error is returned and handleCondFailed is
 // not called), the value that has been written is returned as a Record.
@@ -1249,7 +1227,12 @@ func (nl *NodeLiveness) RegisterCallback(cb IsLiveCallback) {
 func (nl *NodeLiveness) updateLiveness(
 	ctx context.Context, update livenessUpdate, handleCondFailed func(actual Record) error,
 ) (Record, error) {
-	for r := retry.StartWithCtx(ctx, base.DefaultRetryOptions()); r.Next(); {
+	for {
+		// Before each attempt, ensure that the context has not expired.
+		if err := ctx.Err(); err != nil {
+			return Record{}, err
+		}
+
 		nl.mu.RLock()
 		engines := nl.mu.engines
 		nl.mu.RUnlock()
@@ -1272,10 +1255,6 @@ func (nl *NodeLiveness) updateLiveness(
 		}
 		return written, nil
 	}
-	if err := ctx.Err(); err != nil {
-		return Record{}, err
-	}
-	panic("unreachable; should retry until ctx canceled")
 }
 
 func (nl *NodeLiveness) updateLivenessAttempt(
@@ -1345,7 +1324,8 @@ func (nl *NodeLiveness) updateLivenessAttempt(
 				return Record{}, errors.Wrapf(err, "couldn't update node liveness from CPut actual value")
 			}
 			return Record{}, handleCondFailed(Record{Liveness: actualLiveness, raw: tErr.ActualValue.TagAndDataBytes()})
-		} else if isErrRetryLiveness(ctx, err) {
+		} else if errors.HasType(err, (*roachpb.TransactionStatusError)(nil)) ||
+			errors.HasType(err, (*roachpb.AmbiguousResultError)(nil)) {
 			return Record{}, &errRetryLiveness{err}
 		}
 		return Record{}, err
@@ -1476,6 +1456,23 @@ func (nl *NodeLiveness) numLiveNodes() int64 {
 		}
 	}
 	return liveNodes
+}
+
+// AsLiveClock returns a closedts.LiveClockFn that takes a current timestamp off
+// the clock and returns it only if node liveness indicates that the node is live
+// at that timestamp and the returned epoch.
+func (nl *NodeLiveness) AsLiveClock() closedts.LiveClockFn {
+	return func(nodeID roachpb.NodeID) (hlc.Timestamp, ctpb.Epoch, error) {
+		now := nl.clock.Now()
+		liveness, ok := nl.GetLiveness(nodeID)
+		if !ok {
+			return hlc.Timestamp{}, 0, ErrRecordCacheMiss
+		}
+		if !liveness.IsLive(now.GoTime()) {
+			return hlc.Timestamp{}, 0, errLiveClockNotLive
+		}
+		return now, ctpb.Epoch(liveness.Epoch), nil
+	}
 }
 
 // GetNodeCount returns a count of the number of nodes in the cluster,

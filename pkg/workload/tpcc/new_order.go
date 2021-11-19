@@ -18,11 +18,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cockroachdb/cockroach-go/v2/crdb/crdbpgx"
+	"github.com/cockroachdb/cockroach-go/crdb"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload"
 	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgx/v4"
 	"github.com/lib/pq"
 	"golang.org/x/exp/rand"
 )
@@ -212,9 +211,13 @@ func (n *newOrder) run(ctx context.Context, wID int) (interface{}, error) {
 
 	d.oEntryD = timeutil.Now()
 
-	err := crdbpgx.ExecuteTx(
-		ctx, n.mcp.Get(), n.config.txOpts,
-		func(tx pgx.Tx) error {
+	tx, err := n.mcp.Get().BeginEx(ctx, n.config.txOpts)
+	if err != nil {
+		return nil, err
+	}
+	err = crdb.ExecuteInTx(
+		ctx, (*workload.PgxTx)(tx),
+		func() error {
 			// Select the district tax rate and next available order number, bumping it.
 			var dNextOID int
 			if err := n.updateDistrict.QueryRowTx(
@@ -245,7 +248,7 @@ func (n *newOrder) run(ctx context.Context, wID int) (interface{}, error) {
 			for i, item := range d.items {
 				itemIDs[i] = fmt.Sprint(item.olIID)
 			}
-			rows, err := tx.Query(
+			rows, err := tx.QueryEx(
 				ctx,
 				fmt.Sprintf(`
 					SELECT i_price, i_name, i_data
@@ -254,6 +257,7 @@ func (n *newOrder) run(ctx context.Context, wID int) (interface{}, error) {
 					ORDER BY i_id`,
 					strings.Join(itemIDs, ", "),
 				),
+				nil, /* options */
 			)
 			if err != nil {
 				return err
@@ -297,7 +301,7 @@ func (n *newOrder) run(ctx context.Context, wID int) (interface{}, error) {
 			for i, item := range d.items {
 				stockIDs[i] = fmt.Sprintf("(%d, %d)", item.olIID, item.olSupplyWID)
 			}
-			rows, err = tx.Query(
+			rows, err = tx.QueryEx(
 				ctx,
 				fmt.Sprintf(`
 					SELECT s_quantity, s_ytd, s_order_cnt, s_remote_cnt, s_data, s_dist_%02[1]d
@@ -306,6 +310,7 @@ func (n *newOrder) run(ctx context.Context, wID int) (interface{}, error) {
 					ORDER BY s_i_id`,
 					d.dID, strings.Join(stockIDs, ", "),
 				),
+				nil, /* options */
 			)
 			if err != nil {
 				return err
@@ -376,7 +381,7 @@ func (n *newOrder) run(ctx context.Context, wID int) (interface{}, error) {
 			}
 
 			// Update the stock table for each item.
-			if _, err := tx.Exec(
+			if _, err := tx.ExecEx(
 				ctx,
 				fmt.Sprintf(`
 					UPDATE stock
@@ -392,6 +397,7 @@ func (n *newOrder) run(ctx context.Context, wID int) (interface{}, error) {
 					strings.Join(sRemoteCntUpdateCases, " "),
 					strings.Join(stockIDs, ", "),
 				),
+				nil, /* options */
 			); err != nil {
 				return err
 			}
@@ -415,13 +421,14 @@ func (n *newOrder) run(ctx context.Context, wID int) (interface{}, error) {
 					distInfos[i],     // ol_dist_info
 				)
 			}
-			if _, err := tx.Exec(
+			if _, err := tx.ExecEx(
 				ctx,
 				fmt.Sprintf(`
 					INSERT INTO order_line(ol_o_id, ol_d_id, ol_w_id, ol_number, ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_dist_info)
 					VALUES %s`,
 					strings.Join(olValsStrings, ", "),
 				),
+				nil, /* options */
 			); err != nil {
 				return err
 			}

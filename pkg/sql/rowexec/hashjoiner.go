@@ -82,7 +82,7 @@ type hashJoiner struct {
 	}
 
 	// Context cancellation checker.
-	cancelChecker cancelchecker.CancelChecker
+	cancelChecker *cancelchecker.CancelChecker
 }
 
 var _ execinfra.Processor = &hashJoiner{}
@@ -134,7 +134,7 @@ func newHashJoiner(
 	ctx := h.FlowCtx.EvalCtx.Ctx()
 	// Limit the memory use by creating a child monitor with a hard limit.
 	// The hashJoiner will overflow to disk if this limit is not enough.
-	h.MemMonitor = execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx, "hashjoiner-limited")
+	h.MemMonitor = execinfra.NewLimitedMonitor(ctx, flowCtx.EvalCtx.Mon, flowCtx.Cfg, "hashjoiner-limited")
 	h.diskMonitor = execinfra.NewMonitor(ctx, flowCtx.DiskMonitor, "hashjoiner-disk")
 	h.hashTable = rowcontainer.NewHashDiskBackedRowContainer(
 		h.EvalCtx, h.MemMonitor, h.diskMonitor, h.FlowCtx.Cfg.TempStorage,
@@ -161,7 +161,7 @@ func (h *hashJoiner) Start(ctx context.Context) {
 	ctx = h.StartInternal(ctx, hashJoinerProcName)
 	h.leftSource.Start(ctx)
 	h.rightSource.Start(ctx)
-	h.cancelChecker.Reset(ctx)
+	h.cancelChecker = cancelchecker.NewCancelChecker(ctx)
 	h.runningState = hjBuilding
 }
 
@@ -569,7 +569,7 @@ func (h *hashJoiner) execStatsForTrace() *execinfrapb.ComponentStats {
 			MaxAllocatedMem:  optional.MakeUint(uint64(h.MemMonitor.MaximumBytes())),
 			MaxAllocatedDisk: optional.MakeUint(uint64(h.diskMonitor.MaximumBytes())),
 		},
-		Output: h.OutputHelper.Stats(),
+		Output: h.Out.Stats(),
 	}
 }
 

@@ -25,23 +25,11 @@ import (
 func (s *statusServer) Statements(
 	ctx context.Context, req *serverpb.StatementsRequest,
 ) (*serverpb.StatementsResponse, error) {
-	if req.Combined {
-		combinedRequest := serverpb.CombinedStatementsStatsRequest{
-			Start: req.Start,
-			End:   req.End,
-		}
-		return s.CombinedStatementStats(ctx, &combinedRequest)
-	}
-
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
 	if _, err := s.privilegeChecker.requireViewActivityPermission(ctx); err != nil {
 		return nil, err
-	}
-
-	if s.gossip.NodeID.Get() == 0 {
-		return nil, status.Errorf(codes.Unavailable, "nodeID not set")
 	}
 
 	response := &serverpb.StatementsResponse{
@@ -60,7 +48,7 @@ func (s *statusServer) Statements(
 			return nil, status.Errorf(codes.InvalidArgument, err.Error())
 		}
 		if local {
-			return statementsLocal(ctx, s.gossip.NodeID.Get(), s.admin.server.sqlServer)
+			return s.StatementsLocal()
 		}
 		status, err := s.dialNode(ctx, requestedNodeID)
 		if err != nil {
@@ -99,20 +87,10 @@ func (s *statusServer) Statements(
 	return response, nil
 }
 
-func statementsLocal(
-	ctx context.Context, nodeID roachpb.NodeID, sqlServer *SQLServer,
-) (*serverpb.StatementsResponse, error) {
-	stmtStats, err := sqlServer.pgServer.SQLServer.GetUnscrubbedStmtStats(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	txnStats, err := sqlServer.pgServer.SQLServer.GetUnscrubbedTxnStats(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	lastReset := sqlServer.pgServer.SQLServer.GetStmtStatsLastReset()
+func (s *statusServer) StatementsLocal() (*serverpb.StatementsResponse, error) {
+	stmtStats := s.admin.server.sqlServer.pgServer.SQLServer.GetUnscrubbedStmtStats()
+	txnStats := s.admin.server.sqlServer.pgServer.SQLServer.GetUnscrubbedTxnStats()
+	lastReset := s.admin.server.sqlServer.pgServer.SQLServer.GetStmtStatsLastReset()
 
 	resp := &serverpb.StatementsResponse{
 		Statements:            make([]serverpb.StatementsResponse_CollectedStatementStatistics, len(stmtStats)),
@@ -124,7 +102,7 @@ func statementsLocal(
 	for i, txn := range txnStats {
 		resp.Transactions[i] = serverpb.StatementsResponse_ExtendedCollectedTransactionStatistics{
 			StatsData: txn,
-			NodeID:    nodeID,
+			NodeID:    s.gossip.NodeID.Get(),
 		}
 	}
 
@@ -132,7 +110,7 @@ func statementsLocal(
 		resp.Statements[i] = serverpb.StatementsResponse_CollectedStatementStatistics{
 			Key: serverpb.StatementsResponse_ExtendedStatementStatisticsKey{
 				KeyData: stmt.Key,
-				NodeID:  nodeID,
+				NodeID:  s.gossip.NodeID.Get(),
 			},
 			ID:    stmt.ID,
 			Stats: stmt.Stats,

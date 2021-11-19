@@ -50,7 +50,6 @@ type TxnCoordSenderFactoryConfig struct {
 	Clock    *hlc.Clock
 	Stopper  *stop.Stopper
 
-	// -1 to disable transaction heartbeats.
 	HeartbeatInterval time.Duration
 	Linearizable      bool
 	Metrics           TxnMetrics

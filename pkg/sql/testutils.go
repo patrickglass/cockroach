@@ -14,16 +14,12 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
 )
@@ -46,15 +42,14 @@ func CreateTestTableDescriptor(
 	evalCtx := tree.MakeTestingEvalContext(st)
 	switch n := stmt.AST.(type) {
 	case *tree.CreateTable:
-		db := dbdesc.NewInitial(parentID, "test", security.RootUserName())
 		desc, err := NewTableDesc(
 			ctx,
 			nil, /* txn */
 			nil, /* vs */
 			st,
 			n,
-			db,
-			schemadesc.GetPublicSchema(),
+			parentID,
+			keys.PublicSchemaID,
 			id,
 			nil,             /* regionConfig */
 			hlc.Timestamp{}, /* creationTime */
@@ -63,9 +58,8 @@ func CreateTestTableDescriptor(
 			&semaCtx,
 			&evalCtx,
 			&sessiondata.SessionData{
-				LocalOnlySessionData: sessiondatapb.LocalOnlySessionData{
+				LocalOnlySessionData: sessiondata.LocalOnlySessionData{
 					EnableUniqueWithoutIndexConstraints: true,
-					HashShardedIndexesEnabled:           true,
 				},
 			}, /* sessionData */
 			tree.PersistencePermanent,
@@ -112,6 +106,11 @@ func (r *StmtBufReader) AdvanceOne() {
 	r.buf.AdvanceOne()
 }
 
+// SeekToNextBatch skips to the beginning of the next batch of commands.
+func (r *StmtBufReader) SeekToNextBatch() error {
+	return r.buf.seekToNextBatch()
+}
+
 // Exec is a test utility function that takes a localPlanner (of type
 // interface{} so that external packages can call NewInternalPlanner and pass
 // the result) and executes a sql statement through the DistSQLPlanner.
@@ -127,7 +126,7 @@ func (dsp *DistSQLPlanner) Exec(
 	if err := p.makeOptimizerPlan(ctx); err != nil {
 		return err
 	}
-	rw := NewCallbackResultWriter(func(ctx context.Context, row tree.Datums) error {
+	rw := newCallbackResultWriter(func(ctx context.Context, row tree.Datums) error {
 		return nil
 	})
 	execCfg := p.ExecCfg()

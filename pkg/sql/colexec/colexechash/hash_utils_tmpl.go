@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for hash_utils.eg.go. It's formatted in a
 // special way, so it's both valid Go and a valid text/template input. This
@@ -22,6 +20,8 @@
 package colexechash
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
@@ -29,9 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/errors"
 )
 
@@ -39,9 +37,7 @@ import (
 // pick up the right packages when run within the bazel sandbox.
 var (
 	_ = typeconv.DatumVecCanonicalTypeFamily
-	_ = coldataext.Hash
-	_ json.JSON
-	_ tree.Datum
+	_ coldataext.Datum
 )
 
 // {{/*
@@ -65,6 +61,7 @@ func _ASSIGN_HASH(_, _, _, _ interface{}) uint64 {
 
 // {{/*
 func _REHASH_BODY(
+	ctx context.Context,
 	buckets []uint64,
 	keys _GOTYPESLICE,
 	nulls *coldata.Nulls,
@@ -104,7 +101,7 @@ func _REHASH_BODY(
 		//gcassert:bce
 		buckets[i] = uint64(p)
 	}
-	cancelChecker.CheckEveryCall()
+	cancelChecker.CheckEveryCall(ctx)
 	// {{end}}
 
 	// {{/*
@@ -116,12 +113,13 @@ func _REHASH_BODY(
 // column values) at a given column and computes a new hash by applying a
 // transformation to the existing hash.
 func rehash(
+	ctx context.Context,
 	buckets []uint64,
 	col coldata.Vec,
 	nKeys int,
 	sel []int,
 	cancelChecker colexecutils.CancelChecker,
-	overloadHelper *execgen.OverloadHelper,
+	overloadHelper execgen.OverloadHelper,
 	datumAlloc *rowenc.DatumAlloc,
 ) {
 	// In order to inline the templated code of overloads, we need to have a
@@ -136,15 +134,15 @@ func rehash(
 			keys, nulls := col.TemplateType(), col.Nulls()
 			if col.MaybeHasNulls() {
 				if sel != nil {
-					_REHASH_BODY(buckets, keys, nulls, nKeys, sel, true, true)
+					_REHASH_BODY(ctx, buckets, keys, nulls, nKeys, sel, true, true)
 				} else {
-					_REHASH_BODY(buckets, keys, nulls, nKeys, sel, false, true)
+					_REHASH_BODY(ctx, buckets, keys, nulls, nKeys, sel, false, true)
 				}
 			} else {
 				if sel != nil {
-					_REHASH_BODY(buckets, keys, nulls, nKeys, sel, true, false)
+					_REHASH_BODY(ctx, buckets, keys, nulls, nKeys, sel, true, false)
 				} else {
-					_REHASH_BODY(buckets, keys, nulls, nKeys, sel, false, false)
+					_REHASH_BODY(ctx, buckets, keys, nulls, nKeys, sel, false, false)
 				}
 			}
 			// {{end}}

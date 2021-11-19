@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -27,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -42,27 +42,37 @@ type initFetcherArgs struct {
 	tableDesc       catalog.TableDescriptor
 	indexIdx        int
 	valNeededForCol util.FastIntSet
+	spans           roachpb.Spans
 }
 
-func makeFetcherArgs(entry initFetcherArgs) FetcherTableArgs {
-	index := entry.tableDesc.ActiveIndexes()[entry.indexIdx]
-	return FetcherTableArgs{
-		Desc:             entry.tableDesc,
-		Index:            index,
-		ColIdxMap:        catalog.ColumnIDToOrdinalMap(entry.tableDesc.PublicColumns()),
-		IsSecondaryIndex: !index.Primary(),
-		Cols:             entry.tableDesc.PublicColumns(),
-		ValNeededForCol:  entry.valNeededForCol,
+func makeFetcherArgs(entries []initFetcherArgs) []FetcherTableArgs {
+	fetcherArgs := make([]FetcherTableArgs, len(entries))
+
+	for i, entry := range entries {
+		index := entry.tableDesc.ActiveIndexes()[entry.indexIdx]
+		fetcherArgs[i] = FetcherTableArgs{
+			Spans:            entry.spans,
+			Desc:             entry.tableDesc,
+			Index:            index.IndexDesc(),
+			ColIdxMap:        catalog.ColumnIDToOrdinalMap(entry.tableDesc.PublicColumns()),
+			IsSecondaryIndex: !index.Primary(),
+			Cols:             make([]descpb.ColumnDescriptor, len(entry.tableDesc.PublicColumns())),
+			ValNeededForCol:  entry.valNeededForCol,
+		}
+		for j, col := range entry.tableDesc.PublicColumns() {
+			fetcherArgs[i].Cols[j] = *col.ColumnDesc()
+		}
 	}
+	return fetcherArgs
 }
 
 func initFetcher(
-	entry initFetcherArgs, reverseScan bool, alloc *rowenc.DatumAlloc, memMon *mon.BytesMonitor,
+	entries []initFetcherArgs, reverseScan bool, alloc *rowenc.DatumAlloc, memMon *mon.BytesMonitor,
 ) (fetcher *Fetcher, err error) {
 	fetcher = &Fetcher{}
 
 	fetcherCodec := keys.SystemSQLCodec
-	fetcherArgs := makeFetcherArgs(entry)
+	fetcherArgs := makeFetcherArgs(entries)
 
 	if err := fetcher.Init(
 		context.Background(),
@@ -70,11 +80,10 @@ func initFetcher(
 		reverseScan,
 		descpb.ScanLockingStrength_FOR_NONE,
 		descpb.ScanLockingWaitPolicy_BLOCK,
-		0,     /* lockTimeout */
 		false, /* isCheck */
 		alloc,
 		memMon,
-		fetcherArgs,
+		fetcherArgs...,
 	); err != nil {
 		return nil, err
 	}
@@ -83,12 +92,18 @@ func initFetcher(
 }
 
 type fetcherEntryArgs struct {
-	modFactor int // Useful modulo to apply for value columns
-	schema    string
-	nRows     int
-	nCols     int // Number of columns in the table
-	nVals     int // Number of values requested from scan
-	genValue  sqlutils.GenRowFn
+	tableName        string
+	indexName        string // Specify if this entry is an index
+	indexIdx         int    // 0 for primary index (default)
+	modFactor        int    // Useful modulo to apply for value columns
+	schema           string
+	interleaveSchema string // Specify if this entry is to be interleaved into another table
+	indexSchema      string // Specify if this entry is to be created as an index
+	nRows            int
+	nCols            int // Number of columns in the table
+	nVals            int // Number of values requested from scan
+	valNeededForCol  util.FastIntSet
+	genValue         sqlutils.GenRowFn
 }
 
 func TestNextRowSingle(t *testing.T) {
@@ -141,10 +156,12 @@ func TestNextRowSingle(t *testing.T) {
 			var valNeededForCol util.FastIntSet
 			valNeededForCol.AddRange(0, table.nCols-1)
 
-			args := initFetcherArgs{
-				tableDesc:       tableDesc,
-				indexIdx:        0,
-				valNeededForCol: valNeededForCol,
+			args := []initFetcherArgs{
+				{
+					tableDesc:       tableDesc,
+					indexIdx:        0,
+					valNeededForCol: valNeededForCol,
+				},
 			}
 
 			rf, err := initFetcher(args, false /*reverseScan*/, alloc, nil /* memMon */)
@@ -156,8 +173,8 @@ func TestNextRowSingle(t *testing.T) {
 				context.Background(),
 				kv.NewTxn(ctx, kvDB, 0),
 				roachpb.Spans{tableDesc.IndexSpan(keys.SystemSQLCodec, tableDesc.GetPrimaryIndexID())},
-				rowinfra.NoBytesLimit,
-				rowinfra.NoRowLimit,
+				false, /*limitBatches*/
+				0,     /*limitHint*/
 				false, /*traceKV*/
 				false, /*forceProductionKVBatchSize*/
 			); err != nil {
@@ -178,11 +195,11 @@ func TestNextRowSingle(t *testing.T) {
 
 				count++
 
-				if desc.GetID() != tableDesc.GetID() || index.GetID() != tableDesc.GetPrimaryIndexID() {
+				if desc.GetID() != tableDesc.GetID() || index.ID != tableDesc.GetPrimaryIndexID() {
 					t.Fatalf(
 						"unexpected row retrieved from fetcher.\nnexpected:  table %s - index %s\nactual: table %s - index %s",
 						tableDesc.GetName(), tableDesc.GetPrimaryIndex().GetName(),
-						desc.GetName(), index.GetName(),
+						desc.GetName(), index.Name,
 					)
 				}
 
@@ -260,10 +277,12 @@ func TestNextRowBatchLimiting(t *testing.T) {
 			var valNeededForCol util.FastIntSet
 			valNeededForCol.AddRange(0, table.nCols-1)
 
-			args := initFetcherArgs{
-				tableDesc:       tableDesc,
-				indexIdx:        0,
-				valNeededForCol: valNeededForCol,
+			args := []initFetcherArgs{
+				{
+					tableDesc:       tableDesc,
+					indexIdx:        0,
+					valNeededForCol: valNeededForCol,
+				},
 			}
 
 			rf, err := initFetcher(args, false /*reverseScan*/, alloc, nil /*memMon*/)
@@ -275,7 +294,7 @@ func TestNextRowBatchLimiting(t *testing.T) {
 				context.Background(),
 				kv.NewTxn(ctx, kvDB, 0),
 				roachpb.Spans{tableDesc.IndexSpan(keys.SystemSQLCodec, tableDesc.GetPrimaryIndexID())},
-				rowinfra.DefaultBatchBytesLimit,
+				true,  /*limitBatches*/
 				10,    /*limitHint*/
 				false, /*traceKV*/
 				false, /*forceProductionKVBatchSize*/
@@ -297,11 +316,11 @@ func TestNextRowBatchLimiting(t *testing.T) {
 
 				count++
 
-				if desc.GetID() != tableDesc.GetID() || index.GetID() != tableDesc.GetPrimaryIndexID() {
+				if desc.GetID() != tableDesc.GetID() || index.ID != tableDesc.GetPrimaryIndexID() {
 					t.Fatalf(
 						"unexpected row retrieved from fetcher.\nnexpected:  table %s - index %s\nactual: table %s - index %s",
 						tableDesc.GetName(), tableDesc.GetPrimaryIndex().GetName(),
-						desc.GetName(), index.GetName(),
+						desc.GetName(), index.Name,
 					)
 				}
 
@@ -358,10 +377,12 @@ func TestRowFetcherMemoryLimits(t *testing.T) {
 	var valNeededForCol util.FastIntSet
 	valNeededForCol.AddRange(0, 1)
 
-	args := initFetcherArgs{
-		tableDesc:       tableDesc,
-		indexIdx:        0,
-		valNeededForCol: valNeededForCol,
+	args := []initFetcherArgs{
+		{
+			tableDesc:       tableDesc,
+			indexIdx:        0,
+			valNeededForCol: valNeededForCol,
+		},
 	}
 
 	alloc := &rowenc.DatumAlloc{}
@@ -384,8 +405,8 @@ func TestRowFetcherMemoryLimits(t *testing.T) {
 		context.Background(),
 		kv.NewTxn(ctx, kvDB, 0),
 		roachpb.Spans{tableDesc.IndexSpan(keys.SystemSQLCodec, tableDesc.GetPrimaryIndexID())},
-		rowinfra.NoBytesLimit,
-		rowinfra.NoRowLimit,
+		false, /*limitBatches*/
+		0,     /*limitHint*/
 		false, /*traceKV*/
 		false, /*forceProductionKVBatchSize*/
 	)
@@ -435,10 +456,12 @@ INDEX(c)
 	var valNeededForCol util.FastIntSet
 	valNeededForCol.AddRange(0, table.nCols-1)
 
-	args := initFetcherArgs{
-		tableDesc:       tableDesc,
-		indexIdx:        0,
-		valNeededForCol: valNeededForCol,
+	args := []initFetcherArgs{
+		{
+			tableDesc:       tableDesc,
+			indexIdx:        0,
+			valNeededForCol: valNeededForCol,
+		},
 	}
 
 	rf, err := initFetcher(args, false /*reverseScan*/, alloc, nil /*memMon*/)
@@ -468,7 +491,7 @@ INDEX(c)
 		roachpb.Spans{indexSpan,
 			roachpb.Span{Key: midKey, EndKey: endKey},
 		},
-		rowinfra.DefaultBatchBytesLimit,
+		true, /*limitBatches*/
 		// Set a limitHint of 1 to more quickly end the first batch, causing a
 		// batch that ends between rows.
 		1,     /*limitHint*/
@@ -613,11 +636,13 @@ func TestNextRowSecondaryIndex(t *testing.T) {
 			var valNeededForCol util.FastIntSet
 			valNeededForCol.AddRange(0, table.nVals-1)
 
-			args := initFetcherArgs{
-				tableDesc: tableDesc,
-				// We scan from the first secondary index.
-				indexIdx:        1,
-				valNeededForCol: valNeededForCol,
+			args := []initFetcherArgs{
+				{
+					tableDesc: tableDesc,
+					// We scan from the first secondary index.
+					indexIdx:        1,
+					valNeededForCol: valNeededForCol,
+				},
 			}
 
 			rf, err := initFetcher(args, false /*reverseScan*/, alloc, nil /*memMon*/)
@@ -629,8 +654,8 @@ func TestNextRowSecondaryIndex(t *testing.T) {
 				context.Background(),
 				kv.NewTxn(ctx, kvDB, 0),
 				roachpb.Spans{tableDesc.IndexSpan(keys.SystemSQLCodec, tableDesc.PublicNonPrimaryIndexes()[0].GetID())},
-				rowinfra.NoBytesLimit,
-				rowinfra.NoRowLimit,
+				false, /*limitBatches*/
+				0,     /*limitHint*/
 				false, /*traceKV*/
 				false, /*forceProductionKVBatchSize*/
 			); err != nil {
@@ -651,11 +676,11 @@ func TestNextRowSecondaryIndex(t *testing.T) {
 
 				count++
 
-				if desc.GetID() != tableDesc.GetID() || index.GetID() != tableDesc.PublicNonPrimaryIndexes()[0].GetID() {
+				if desc.GetID() != tableDesc.GetID() || index.ID != tableDesc.PublicNonPrimaryIndexes()[0].GetID() {
 					t.Fatalf(
 						"unexpected row retrieved from fetcher.\nnexpected:  table %s - index %s\nactual: table %s - index %s",
 						tableDesc.GetName(), tableDesc.PublicNonPrimaryIndexes()[0].GetName(),
-						desc.GetName(), index.GetName(),
+						desc.GetName(), index.Name,
 					)
 				}
 
@@ -724,6 +749,345 @@ func TestNextRowSecondaryIndex(t *testing.T) {
 	}
 }
 
+// Appends all non-empty subsets of indices in [0, maxIdx).
+func generateIdxSubsets(maxIdx int, subsets [][]int) [][]int {
+	if maxIdx < 0 {
+		return subsets
+	}
+	subsets = generateIdxSubsets(maxIdx-1, subsets)
+	curLength := len(subsets)
+	for i := 0; i < curLength; i++ {
+		// Keep original subsets by duplicating them.
+		dupe := make([]int, len(subsets[i]))
+		copy(dupe, subsets[i])
+		subsets = append(subsets, dupe)
+		// Generate new subsets with the current index.
+		subsets[i] = append(subsets[i], maxIdx)
+	}
+	return append(subsets, []int{maxIdx})
+}
+
+// We test reading rows from six tables in a database that contains two
+// interleave hierarchies.
+// The tables are structured as follows:
+// parent1
+// parent2
+//   child1
+//      grandchild1
+//	      grandgrandchild1
+//   child2
+//   grandgrandchild1@ggc1_unique_idx
+// parent3
+// We test reading rows from every non-empty subset for completeness.
+func TestNextRowInterleaved(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	ctx := context.Background()
+
+	s, sqlDB, kvDB := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop(ctx)
+
+	tableArgs := map[string]*fetcherEntryArgs{
+		"parent1": {
+			tableName: "parent1",
+			modFactor: 12,
+			schema:    "p1 INT PRIMARY KEY, v INT",
+			nRows:     100,
+			nCols:     2,
+			nVals:     2,
+		},
+		"parent2": {
+			tableName: "parent2",
+			modFactor: 3,
+			schema:    "p2 INT PRIMARY KEY, v INT",
+			nRows:     400,
+			nCols:     2,
+			nVals:     2,
+		},
+		"child1": {
+			tableName:        "child1",
+			modFactor:        5,
+			schema:           "p2 INT, c1 INT, v INT, PRIMARY KEY (p2, c1)",
+			interleaveSchema: "parent2 (p2)",
+			// child1 has more rows than parent2, thus some parent2
+			// rows will have multiple child1.
+			nRows: 500,
+			nCols: 3,
+			nVals: 3,
+		},
+		"grandchild1": {
+			tableName:        "grandchild1",
+			modFactor:        7,
+			schema:           "p2 INT, c1 INT, gc1 INT, v INT, PRIMARY KEY (p2, c1, gc1)",
+			interleaveSchema: "child1 (p2, c1)",
+			nRows:            2000,
+			nCols:            4,
+			nVals:            4,
+		},
+		"grandgrandchild1": {
+			tableName:        "grandgrandchild1",
+			modFactor:        12,
+			schema:           "p2 INT, c1 INT, gc1 INT, ggc1 INT, v INT, PRIMARY KEY (p2, c1, gc1, ggc1)",
+			interleaveSchema: "grandchild1 (p2, c1, gc1)",
+			nRows:            350,
+			nCols:            5,
+			nVals:            5,
+		},
+		"child2": {
+			tableName:        "child2",
+			modFactor:        42,
+			schema:           "p2 INT, c2 INT, v INT, PRIMARY KEY (p2, c2)",
+			interleaveSchema: "parent2 (p2)",
+			// child2 has less rows than parent2, thus not all
+			// parent2 rows will have a nested child2 row.
+			nRows: 100,
+			nCols: 3,
+			nVals: 3,
+		},
+		"parent3": {
+			tableName: "parent3",
+			modFactor: 42,
+			schema:    "p3 INT PRIMARY KEY, v INT",
+			nRows:     1,
+			nCols:     2,
+			nVals:     2,
+		},
+	}
+
+	for _, table := range tableArgs {
+		table.valNeededForCol.AddRange(0, table.nVals-1)
+	}
+
+	// Initialize generating value functions for each table.
+	tableArgs["parent1"].genValue = sqlutils.ToRowFn(
+		sqlutils.RowIdxFn,
+		sqlutils.RowModuloFn(tableArgs["parent1"].modFactor),
+	)
+
+	tableArgs["parent2"].genValue = sqlutils.ToRowFn(
+		sqlutils.RowIdxFn,
+		sqlutils.RowModuloFn(tableArgs["parent2"].modFactor),
+	)
+
+	tableArgs["child1"].genValue = sqlutils.ToRowFn(
+		// Foreign key needs a shifted modulo.
+		sqlutils.RowModuloShiftedFn(tableArgs["parent2"].nRows),
+		sqlutils.RowIdxFn,
+		sqlutils.RowModuloFn(tableArgs["child1"].modFactor),
+	)
+
+	tableArgs["grandchild1"].genValue = sqlutils.ToRowFn(
+		// Foreign keys need a shifted modulo.
+		sqlutils.RowModuloShiftedFn(
+			tableArgs["child1"].nRows,
+			tableArgs["parent2"].nRows,
+		),
+		sqlutils.RowModuloShiftedFn(tableArgs["child1"].nRows),
+		sqlutils.RowIdxFn,
+		sqlutils.RowModuloFn(tableArgs["grandchild1"].modFactor),
+	)
+
+	tableArgs["grandgrandchild1"].genValue = sqlutils.ToRowFn(
+		// Foreign keys need a shifted modulo.
+		sqlutils.RowModuloShiftedFn(
+			tableArgs["grandchild1"].nRows,
+			tableArgs["child1"].nRows,
+			tableArgs["parent2"].nRows,
+		),
+		sqlutils.RowModuloShiftedFn(
+			tableArgs["grandchild1"].nRows,
+			tableArgs["child1"].nRows,
+		),
+		sqlutils.RowModuloShiftedFn(tableArgs["grandchild1"].nRows),
+		sqlutils.RowIdxFn,
+		sqlutils.RowModuloFn(tableArgs["grandgrandchild1"].modFactor),
+	)
+
+	tableArgs["child2"].genValue = sqlutils.ToRowFn(
+		// Foreign key needs a shifted modulo.
+		sqlutils.RowModuloShiftedFn(tableArgs["parent2"].nRows),
+		sqlutils.RowIdxFn,
+		sqlutils.RowModuloFn(tableArgs["child2"].modFactor),
+	)
+
+	tableArgs["parent3"].genValue = sqlutils.ToRowFn(
+		sqlutils.RowIdxFn,
+		sqlutils.RowModuloFn(tableArgs["parent3"].modFactor),
+	)
+
+	ggc1idx := *tableArgs["grandgrandchild1"]
+	// This is only possible since nrows(ggc1) < nrows(p2) thus c1 is
+	// unique.
+	ggc1idx.indexSchema = fmt.Sprintf(
+		`CREATE UNIQUE INDEX ggc1_unique_idx ON %s.grandgrandchild1 (p2) INTERLEAVE IN PARENT %s.parent2 (p2);`,
+		sqlutils.TestDB,
+		sqlutils.TestDB,
+	)
+	ggc1idx.indexName = "ggc1_unique_idx"
+	ggc1idx.indexIdx = 1
+	// Last column v (idx 4) is not stored in this index.
+	ggc1idx.valNeededForCol = ggc1idx.valNeededForCol.Copy()
+	ggc1idx.valNeededForCol.Remove(4)
+	ggc1idx.nVals = 4
+
+	// We need an ordering of the tables in order to execute the interleave
+	// DDL statements.
+	interleaveEntries := []fetcherEntryArgs{
+		*tableArgs["parent1"],
+		*tableArgs["parent2"],
+		*tableArgs["child1"],
+		*tableArgs["grandchild1"],
+		*tableArgs["grandgrandchild1"],
+		*tableArgs["child2"],
+		ggc1idx,
+		*tableArgs["parent3"],
+	}
+
+	for _, table := range interleaveEntries {
+		if table.indexSchema != "" {
+			// Create interleaved secondary indexes.
+			r := sqlutils.MakeSQLRunner(sqlDB)
+			r.Exec(t, table.indexSchema)
+		} else {
+			// Create tables (primary indexes).
+			sqlutils.CreateTableInterleaved(
+				t, sqlDB, table.tableName,
+				table.schema,
+				table.interleaveSchema,
+				table.nRows,
+				table.genValue,
+			)
+		}
+	}
+
+	alloc := &rowenc.DatumAlloc{}
+	// Retrieve rows from every non-empty subset of the tables/indexes.
+	for _, idxs := range generateIdxSubsets(len(interleaveEntries)-1, nil) {
+		// Initialize our subset of tables/indexes.
+		entries := make([]*fetcherEntryArgs, len(idxs))
+		testNames := make([]string, len(entries))
+		for i, idx := range idxs {
+			entries[i] = &interleaveEntries[idx]
+			testNames[i] = entries[i].tableName
+			// Use the index name instead if we're scanning an index.
+			if entries[i].indexName != "" {
+				testNames[i] = entries[i].indexName
+			}
+		}
+
+		testName := strings.Join(testNames, "-")
+
+		t.Run(testName, func(t *testing.T) {
+			// Initialize the RowFetcher.
+			args := make([]initFetcherArgs, len(entries))
+			lookupSpans := make([]roachpb.Span, len(entries))
+			// Used during NextRow to see if tableID << 32 |
+			// indexID (key) are with what we initialize
+			// RowFetcher.
+			idLookups := make(map[uint64]*fetcherEntryArgs, len(entries))
+			for i, entry := range entries {
+				tableDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, entry.tableName)
+				indexID := tableDesc.ActiveIndexes()[entry.indexIdx].GetID()
+				idLookups[idLookupKey(tableDesc.GetID(), indexID)] = entry
+
+				// We take every entry's index span (primary or
+				// secondary) and use it to start our scan.
+				lookupSpans[i] = tableDesc.IndexSpan(keys.SystemSQLCodec, indexID)
+
+				args[i] = initFetcherArgs{
+					tableDesc:       tableDesc,
+					indexIdx:        entry.indexIdx,
+					valNeededForCol: entry.valNeededForCol,
+					spans:           roachpb.Spans{lookupSpans[i]},
+				}
+			}
+
+			lookupSpans, _ = roachpb.MergeSpans(lookupSpans)
+
+			rf, err := initFetcher(args, false /*reverseScan*/, alloc, nil /*memMon*/)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := rf.StartScan(
+				context.Background(),
+				kv.NewTxn(ctx, kvDB, 0),
+				lookupSpans,
+				false, /*limitBatches*/
+				0,     /*limitHint*/
+				false, /*traceKV*/
+				false, /*forceProductionKVBatchSize*/
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			// Running count of rows processed for each table-index.
+			count := make(map[string]int, len(entries))
+
+			for {
+				datums, desc, index, err := rf.NextRowDecoded(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if datums == nil {
+					break
+				}
+
+				entry, found := idLookups[idLookupKey(desc.GetID(), index.ID)]
+				if !found {
+					t.Fatalf(
+						"unexpected row from table %s - index %s",
+						desc.GetName(), index.Name,
+					)
+				}
+
+				tableIdxName := fmt.Sprintf("%s@%s", entry.tableName, entry.indexName)
+				count[tableIdxName]++
+
+				// Check that the correct # of columns is returned.
+				if entry.nCols != len(datums) {
+					t.Fatalf("for table %s expected %d columns, got %d columns", tableIdxName, entry.nCols, len(datums))
+				}
+
+				// Verify that the correct # of values are returned.
+				numVals := 0
+				for _, datum := range datums {
+					if datum != tree.DNull {
+						numVals++
+					}
+				}
+				if entry.nVals != numVals {
+					t.Fatalf("for table %s expected %d non-NULL values, got %d", tableIdxName, entry.nVals, numVals)
+				}
+
+				// Verify the value in the value column is
+				// correct if it is requested.
+				if entry.nVals == entry.nCols {
+					id := int64(*datums[entry.nCols-2].(*tree.DInt))
+					val := int64(*datums[entry.nCols-1].(*tree.DInt))
+
+					if id%int64(entry.modFactor) != val {
+						t.Fatalf("for table %s row id %d, expected %d value, got %d", tableIdxName, id, id%int64(entry.modFactor), val)
+					}
+				}
+			}
+
+			for _, entry := range entries {
+				lookup := fmt.Sprintf("%s@%s", entry.tableName, entry.indexName)
+
+				actual, ok := count[lookup]
+				if !ok {
+					t.Errorf("no rows were retrieved for table %s, expected %d rows", entry.tableName, entry.nRows)
+					continue
+				}
+
+				if entry.nRows != actual {
+					t.Errorf("for table %s expected %d rows, got %d rows", entry.tableName, entry.nRows, actual)
+				}
+			}
+		})
+	}
+}
+
 func TestRowFetcherReset(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	ctx := context.Background()
@@ -739,10 +1103,12 @@ func TestRowFetcherReset(t *testing.T) {
 	tableDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, "foo")
 	var valNeededForCol util.FastIntSet
 	valNeededForCol.AddRange(0, 1)
-	args := initFetcherArgs{
-		tableDesc:       tableDesc,
-		indexIdx:        0,
-		valNeededForCol: valNeededForCol,
+	args := []initFetcherArgs{
+		{
+			tableDesc:       tableDesc,
+			indexIdx:        0,
+			valNeededForCol: valNeededForCol,
+		},
 	}
 	da := rowenc.DatumAlloc{}
 	fetcher, err := initFetcher(args, false, &da, nil /*memMon*/)
@@ -756,6 +1122,9 @@ func TestRowFetcherReset(t *testing.T) {
 	}
 
 	resetFetcher.Reset()
+	if len(resetFetcher.tables) != 0 || cap(resetFetcher.tables) != 1 {
+		t.Fatal("Didn't find saved slice:", resetFetcher.tables)
+	}
 
 	// Now re-init the reset fetcher and make sure its the same as the fetcher we
 	// didn't reset.
@@ -767,11 +1136,10 @@ func TestRowFetcherReset(t *testing.T) {
 		false, /*reverse*/
 		descpb.ScanLockingStrength_FOR_NONE,
 		descpb.ScanLockingWaitPolicy_BLOCK,
-		0,     /* lockTimeout */
 		false, /* isCheck */
 		&da,
 		nil, /* memMonitor */
-		fetcherArgs,
+		fetcherArgs...,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -780,6 +1148,10 @@ func TestRowFetcherReset(t *testing.T) {
 		t.Fatal("unequal before and after reset", resetFetcher, fetcher)
 	}
 
+}
+
+func idLookupKey(tableID descpb.ID, indexID descpb.IndexID) uint64 {
+	return (uint64(tableID) << 32) | uint64(indexID)
 }
 
 func TestFetcherUninitialized(t *testing.T) {

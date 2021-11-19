@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
@@ -232,10 +233,10 @@ func (r *Replica) CheckConsistency(
 			// are consistent. Verify this only for clusters that started out on 19.1 or
 			// higher.
 			if !v.Less(roachpb.Version{Major: 19, Minor: 1}) {
-				// If version >= 19.1 but < 20.1-14 (AbortSpanBytes before its removal),
-				// we want to ignore any delta in AbortSpanBytes when comparing stats
-				// since older versions will not be tracking abort span bytes.
-				if v.Less(roachpb.Version{Major: 20, Minor: 1, Internal: 14}) {
+				// If version >= 19.1 but < AbortSpanBytes, we want to ignore any delta
+				// in AbortSpanBytes when comparing stats since older versions will not be
+				// tracking abort span bytes.
+				if v.Less(clusterversion.ByKey(clusterversion.AbortSpanBytes)) {
 					delta.AbortSpanBytes = 0
 					haveDelta = delta != enginepb.MVCCStats{}
 				}
@@ -632,9 +633,9 @@ func (r *Replica) sha512(
 		// using MVCCKeyAndIntentsIterKind and consider all locks here.
 		for _, span := range rditer.MakeReplicatedKeyRangesExceptLockTable(&desc) {
 			iter := snap.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind,
-				storage.IterOptions{UpperBound: span.End})
+				storage.IterOptions{UpperBound: span.End.Key})
 			spanMS, err := storage.ComputeStatsForRange(
-				iter, span.Start, span.End, 0 /* nowNanos */, visitor,
+				iter, span.Start.Key, span.End.Key, 0 /* nowNanos */, visitor,
 			)
 			iter.Close()
 			if err != nil {
@@ -651,10 +652,17 @@ func (r *Replica) sha512(
 	if err != nil {
 		return nil, err
 	}
+	if rangeAppliedState == nil {
+		// This error is transient: the range applied state is used in v2.1 already
+		// but is migrated into on a per-range basis for clusters bootstrapped before
+		// v2.1. Clusters bootstrapped at v2.1 or higher will never hit this path since
+		// there's always an applied state.
+		return nil, errors.New("no range applied state found")
+	}
 	result.PersistedMS = rangeAppliedState.RangeStats.ToStats()
 
 	if statsOnly {
-		b, err := protoutil.Marshal(&rangeAppliedState)
+		b, err := protoutil.Marshal(rangeAppliedState)
 		if err != nil {
 			return nil, err
 		}
@@ -665,7 +673,7 @@ func (r *Replica) sha512(
 			}
 			kv.Key = keys.RangeAppliedStateKey(desc.RangeID)
 			var v roachpb.Value
-			if err := v.SetProto(&rangeAppliedState); err != nil {
+			if err := v.SetProto(rangeAppliedState); err != nil {
 				return nil, err
 			}
 			kv.Value = v.RawBytes

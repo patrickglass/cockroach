@@ -13,7 +13,6 @@ package typedesc_test
 import (
 	"context"
 	"fmt"
-	"math"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -23,12 +22,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
-	"github.com/cockroachdb/cockroach/pkg/sql/oidext"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/lib/pq/oid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -373,8 +370,8 @@ func TestValidateTypeDesc(t *testing.T) {
 		},
 	}).BuildImmutable()
 
-	defaultPrivileges := descpb.NewBasePrivilegeDescriptor(security.RootUserName())
-	invalidPrivileges := descpb.NewBasePrivilegeDescriptor(security.RootUserName())
+	defaultPrivileges := descpb.NewDefaultPrivilegeDescriptor(security.RootUserName())
+	invalidPrivileges := descpb.NewDefaultPrivilegeDescriptor(security.RootUserName())
 	// Make the PrivilegeDescriptor invalid by granting SELECT to a type.
 	invalidPrivileges.Grant(security.TestUserName(), privilege.List{privilege.SELECT})
 	typeDescID := descpb.ID(keys.MaxReservedDescID + 1)
@@ -683,7 +680,7 @@ func TestValidateTypeDesc(t *testing.T) {
 			},
 		},
 		{
-			`user testuser must not have SELECT privileges on type "t"`,
+			"user testuser must not have SELECT privileges on type with ID=50",
 			descpb.TypeDescriptor{
 				Name:           "t",
 				ID:             typeDescID,
@@ -786,45 +783,4 @@ func TestValidateTypeDesc(t *testing.T) {
 			t.Errorf("#%d expected err: %s but found: %s", i, expectedErr, err)
 		}
 	}
-}
-
-func TestOIDToIDConversion(t *testing.T) {
-	tests := []struct {
-		oid  oid.Oid
-		ok   bool
-		name string
-	}{
-		{oid.Oid(0), false, "default OID"},
-		{oid.Oid(1), false, "Standard OID"},
-		{oid.Oid(oidext.CockroachPredefinedOIDMax), false, "max standard OID"},
-		{oid.Oid(oidext.CockroachPredefinedOIDMax + 1), true, "user-defined OID"},
-		{oid.Oid(math.MaxUint32), true, "max user-defined OID"},
-	}
-
-	for _, test := range tests {
-		t.Run(fmt.Sprint(test.oid), func(t *testing.T) {
-			_, err := typedesc.UserDefinedTypeOIDToID(test.oid)
-			if test.ok {
-				require.NoError(t, err)
-			} else {
-				require.Error(t, err)
-			}
-		})
-	}
-}
-
-func TestTableImplicitTypeDescCannotBeSerializedOrValidated(t *testing.T) {
-	td := &descpb.TypeDescriptor{
-		Name:           "foo",
-		ID:             10,
-		ParentID:       1,
-		ParentSchemaID: 1,
-		Kind:           descpb.TypeDescriptor_TABLE_IMPLICIT_RECORD_TYPE,
-	}
-
-	desc := typedesc.NewBuilder(td).BuildImmutable()
-
-	ctx := context.Background()
-	err := catalog.Validate(ctx, nil, catalog.NoValidationTelemetry, catalog.ValidationLevelSelfOnly, desc).CombinedError()
-	require.Contains(t, err.Error(), "kind TABLE_IMPLICIT_RECORD_TYPE should never be serialized")
 }

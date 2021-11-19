@@ -1,21 +1,21 @@
-load("//build:STRINGER.bzl", "stringer")
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "sidetransport",
     srcs = [
+        "cantclosereason_string.go",
         "debug.go",
         "receiver.go",
         "sender.go",
-        ":gen-cantclosereason-stringer",  # keep
     ],
     importpath = "github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/sidetransport",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/base",
+        "//pkg/clusterversion",
         "//pkg/kv/kvserver/closedts",
         "//pkg/kv/kvserver/closedts/ctpb",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/rpc",
         "//pkg/rpc/nodedialer",
         "//pkg/settings/cluster",
@@ -41,7 +41,7 @@ go_test(
         "//pkg/base",
         "//pkg/kv/kvserver/closedts",
         "//pkg/kv/kvserver/closedts/ctpb",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/rpc",
         "//pkg/settings/cluster",
         "//pkg/util/hlc",
@@ -53,10 +53,4 @@ go_test(
         "@com_github_stretchr_testify//require",
         "@org_golang_google_grpc//:go_default_library",
     ],
-)
-
-stringer(
-    name = "gen-cantclosereason-stringer",
-    src = "sender.go",
-    typ = "CantCloseReason",
 )

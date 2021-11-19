@@ -16,7 +16,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/memsize"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -75,7 +74,7 @@ type aggregatorBase struct {
 	row              rowenc.EncDatumRow
 	scratch          []byte
 
-	cancelChecker cancelchecker.CancelChecker
+	cancelChecker *cancelchecker.CancelChecker
 }
 
 // init initializes the aggregatorBase.
@@ -163,7 +162,7 @@ func (ag *aggregatorBase) execStatsForTrace() *execinfrapb.ComponentStats {
 		Exec: execinfrapb.ExecStats{
 			MaxAllocatedMem: optional.MakeUint(uint64(ag.MemMonitor.MaximumBytes())),
 		},
-		Output: ag.OutputHelper.Stats(),
+		Output: ag.Out.Stats(),
 	}
 }
 
@@ -190,6 +189,11 @@ const (
 	// hashAggregatorBucketsInitialLen is a guess on how many "items" the
 	// 'buckets' map of hashAggregator has the capacity for initially.
 	hashAggregatorBucketsInitialLen = 8
+	// hashAggregatorSizeOfBucketsItem is a guess on how much space (in bytes)
+	// each item added to 'buckets' map of hashAggregator takes up in the map
+	// (i.e. it is memory internal to the map, orthogonal to "key-value" pair
+	// that we're adding to the map).
+	hashAggregatorSizeOfBucketsItem = 64
 )
 
 // hashAggregator is a specialization of aggregatorBase that must keep track of
@@ -335,7 +339,7 @@ func (ag *orderedAggregator) Start(ctx context.Context) {
 func (ag *aggregatorBase) start(ctx context.Context, procName string) {
 	ctx = ag.StartInternal(ctx, procName)
 	ag.input.Start(ctx)
-	ag.cancelChecker.Reset(ctx)
+	ag.cancelChecker = cancelchecker.NewCancelChecker(ctx)
 	ag.runningState = aggAccumulating
 }
 
@@ -453,7 +457,7 @@ func (ag *hashAggregator) accumulateRows() (
 
 	// Note that, for simplicity, we're ignoring the overhead of the slice of
 	// strings.
-	if err := ag.bucketsAcc.Grow(ag.Ctx, int64(len(ag.buckets))*memsize.String); err != nil {
+	if err := ag.bucketsAcc.Grow(ag.Ctx, int64(len(ag.buckets))*sizeOfString); err != nil {
 		ag.MoveToDraining(err)
 		return aggStateUnknown, nil, nil
 	}
@@ -581,10 +585,10 @@ func (ag *hashAggregator) emitRow() (
 		}
 		// Before we create a new 'buckets' map below, we need to "release" the
 		// already accounted for memory of the current map.
-		ag.bucketsAcc.Shrink(ag.Ctx, int64(ag.alreadyAccountedFor)*memsize.MapEntryOverhead)
+		ag.bucketsAcc.Shrink(ag.Ctx, int64(ag.alreadyAccountedFor)*hashAggregatorSizeOfBucketsItem)
 		// Note that, for simplicity, we're ignoring the overhead of the slice of
 		// strings.
-		ag.bucketsAcc.Shrink(ag.Ctx, int64(len(ag.buckets))*memsize.String)
+		ag.bucketsAcc.Shrink(ag.Ctx, int64(len(ag.buckets))*sizeOfString)
 		ag.bucketsIter = nil
 		ag.buckets = make(map[string]aggregateFuncs)
 		ag.bucketsLenGrowThreshold = hashAggregatorBucketsInitialLen
@@ -844,7 +848,7 @@ func (ag *hashAggregator) accumulateRow(row rowenc.EncDatumRow) error {
 		ag.buckets[s] = bucket
 		if len(ag.buckets) == ag.bucketsLenGrowThreshold {
 			toAccountFor := ag.bucketsLenGrowThreshold - ag.alreadyAccountedFor
-			if err := ag.bucketsAcc.Grow(ag.Ctx, int64(toAccountFor)*memsize.MapEntryOverhead); err != nil {
+			if err := ag.bucketsAcc.Grow(ag.Ctx, int64(toAccountFor)*hashAggregatorSizeOfBucketsItem); err != nil {
 				return err
 			}
 			ag.alreadyAccountedFor = ag.bucketsLenGrowThreshold
@@ -885,6 +889,7 @@ type aggregateFuncHolder struct {
 }
 
 const (
+	sizeOfString         = int64(unsafe.Sizeof(""))
 	sizeOfAggregateFuncs = int64(unsafe.Sizeof(aggregateFuncs{}))
 	sizeOfAggregateFunc  = int64(unsafe.Sizeof(tree.AggregateFunc(nil)))
 )

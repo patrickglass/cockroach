@@ -37,11 +37,11 @@ ok defaultdb
 
 connect user=testuser
 ----
-ERROR: no server.host_based_authentication.configuration entry for host "127.0.0.1", user "testuser" (SQLSTATE 28000)
+ERROR: no server.host_based_authentication.configuration entry for host "127.0.0.1", user "testuser"
 
 connect user=passworduser password=pass
 ----
-ERROR: no server.host_based_authentication.configuration entry for host "127.0.0.1", user "passworduser" (SQLSTATE 28000)
+ERROR: no server.host_based_authentication.configuration entry for host "127.0.0.1", user "passworduser"
 
 subtest end root
 
@@ -71,7 +71,7 @@ ok defaultdb
 
 connect user=passworduser password=pass
 ----
-ERROR: no server.host_based_authentication.configuration entry for host "127.0.0.1", user "passworduser" (SQLSTATE 28000)
+ERROR: no server.host_based_authentication.configuration entry for host "127.0.0.1", user "passworduser"
 
 # Although this is not completely true. "root" can always log in nonetheless.
 
@@ -204,7 +204,7 @@ ok defaultdb
 
 connect user=passworduser password=pass
 ----
-ERROR: no TLS peer certificates, but required for auth (SQLSTATE 28000)
+ERROR: no TLS peer certificates, but required for auth
 
 # The special keyword "all" only matches when it is unquoted.
 

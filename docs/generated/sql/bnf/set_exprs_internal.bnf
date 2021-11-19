@@ -1,2 +1,0 @@
-set_exprs_internal ::=
-	'SET' 'ROW' '(' expr_list ')'

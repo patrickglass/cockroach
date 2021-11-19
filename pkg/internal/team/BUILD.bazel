@@ -16,9 +16,7 @@ go_test(
     name = "team_test",
     size = "small",
     srcs = ["team_test.go"],
-    data = [
-        "//:TEAMS.yaml",
-    ],
     embed = [":team"],
+    tags = ["broken_in_bazel"],
     deps = ["@com_github_stretchr_testify//require"],
 )

@@ -16,7 +16,6 @@ import (
 	"io"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
@@ -39,7 +38,7 @@ cluster settings. After the first stage completes, the server process is shut
 down.
 `,
 	Args: cobra.NoArgs,
-	RunE: clierrorplus.MaybeDecorateError(runQuit),
+	RunE: MaybeDecorateGRPCError(runQuit),
 	Deprecated: `see 'cockroach node drain' instead to drain a 
 server without terminating the server process (which can in turn be done using 
 an orchestration layer or a process manager, or by sending a termination signal
@@ -113,8 +112,7 @@ func doDrain(
 	})
 	if errors.HasType(err, (*contextutil.TimeoutError)(nil)) || grpcutil.IsTimeout(err) {
 		log.Infof(ctx, "drain timed out: %v", err)
-		err = errors.New("drain timeout, consider adjusting --drain-wait, especially under " +
-			"custom server.shutdown.{drain,query,lease_transfer}_wait cluster settings")
+		err = errors.New("drain timeout")
 	}
 	return
 }

@@ -35,11 +35,11 @@ func TestEncryptDecrypt(t *testing.T) {
 		for _, textCopies := range []int{0, 1, 3, 10, 100, 10000} {
 			plaintext := bytes.Repeat([]byte("hello world\n"), textCopies)
 			t.Run(fmt.Sprintf("copies=%d", textCopies), func(t *testing.T) {
-				for _, chunkSize := range []int{1, 7, 64, 1 << 10, 1 << 20} {
+				for _, chunkSize := range []int{0, 1, 7, 64, 1 << 10, 1 << 20} {
 					encryptionChunkSizeV2 = chunkSize
 
-					t.Run("chunk="+string(humanizeutil.IBytes(int64(chunkSize))), func(t *testing.T) {
-						ciphertext, err := EncryptFile(plaintext, key)
+					t.Run("chunk="+humanizeutil.IBytes(int64(chunkSize)), func(t *testing.T) {
+						ciphertext, err := encryptFile(plaintext, key, chunkSize > 0)
 						require.NoError(t, err)
 						require.True(t, AppearsEncrypted(ciphertext), "cipher text should appear encrypted")
 
@@ -58,14 +58,14 @@ func TestEncryptDecrypt(t *testing.T) {
 	})
 
 	t.Run("ReadAt", func(t *testing.T) {
-		rng, _ := randutil.NewTestRand()
+		rng, _ := randutil.NewTestPseudoRand()
 
 		encryptionChunkSizeV2 = 32
 
 		plaintext := randutil.RandBytes(rng, 256)
 		plainReader := bytes.NewReader(plaintext)
 
-		ciphertext, err := EncryptFile(plaintext, key)
+		ciphertext, err := encryptFile(plaintext, key, true)
 		require.NoError(t, err)
 
 		r, err := decryptingReader(bytes.NewReader(ciphertext), key)
@@ -151,25 +151,29 @@ func TestEncryptDecrypt(t *testing.T) {
 	})
 
 	t.Run("Random", func(t *testing.T) {
-		rng, _ := randutil.NewTestRand()
+		rng, _ := randutil.NewTestPseudoRand()
 		t.Run("DecryptFile", func(t *testing.T) {
-			// For some number of randomly chosen chunk-sizes, generate a number
-			// of random length plaintexts of random bytes and ensure they each
-			// round-trip.
-			for i := 0; i < 10; i++ {
-				encryptionChunkSizeV2 = rng.Intn(1024*24) + 1
-				for j := 0; j < 100; j++ {
-					plaintext := randutil.RandBytes(rng, rng.Intn(1024*32))
-					ciphertext, err := EncryptFile(plaintext, key)
-					require.NoError(t, err)
-					decrypted, err := DecryptFile(ciphertext, key)
-					require.NoError(t, err)
-					if len(plaintext) == 0 {
-						require.Equal(t, len(plaintext), len(decrypted))
-					} else {
-						require.Equal(t, plaintext, decrypted)
+			for _, chunked := range []bool{false, true} {
+				t.Run(fmt.Sprintf("chunked=%v", chunked), func(t *testing.T) {
+					// For some number of randomly chosen chunk-sizes, generate a number
+					// of random length plaintexts of random bytes and ensure they each
+					// round-trip.
+					for i := 0; i < 10; i++ {
+						encryptionChunkSizeV2 = rng.Intn(1024*24) + 1
+						for j := 0; j < 100; j++ {
+							plaintext := randutil.RandBytes(rng, rng.Intn(1024*32))
+							ciphertext, err := encryptFile(plaintext, key, chunked)
+							require.NoError(t, err)
+							decrypted, err := DecryptFile(ciphertext, key)
+							require.NoError(t, err)
+							if len(plaintext) == 0 {
+								require.Equal(t, len(plaintext), len(decrypted))
+							} else {
+								require.Equal(t, plaintext, decrypted)
+							}
+						}
 					}
-				}
+				})
 			}
 		})
 
@@ -182,7 +186,7 @@ func TestEncryptDecrypt(t *testing.T) {
 				for j := 0; j < textSizes; j++ {
 					plaintext := randutil.RandBytes(rng, rng.Intn(1024*32))
 					plainReader := bytes.NewReader(plaintext)
-					ciphertext, err := EncryptFile(plaintext, key)
+					ciphertext, err := encryptFile(plaintext, key, encryptionChunkSizeV2 > 0)
 					require.NoError(t, err)
 					r, err := decryptingReader(bytes.NewReader(ciphertext), key)
 					require.NoError(t, err)
@@ -204,6 +208,7 @@ func TestEncryptDecrypt(t *testing.T) {
 			}
 		})
 	})
+	_ = EncryptFileChunked // suppress unused warning.
 }
 
 func BenchmarkEncryption(b *testing.B) {
@@ -216,7 +221,7 @@ func BenchmarkEncryption(b *testing.B) {
 	salt, err := GenerateSalt()
 	require.NoError(b, err)
 	key := GenerateKey(passphrase, salt)
-	chunkSizes := []int{100, 4096, 512 << 10, 1 << 20}
+	chunkSizes := []int{0, 100, 4096, 512 << 10, 1 << 20}
 	ciphertext1KB := make([][]byte, len(chunkSizes))
 	ciphertext100KB := make([][]byte, len(chunkSizes))
 	ciphertext1MB := make([][]byte, len(chunkSizes))
@@ -225,12 +230,12 @@ func BenchmarkEncryption(b *testing.B) {
 
 	b.Run("EncryptFile", func(b *testing.B) {
 		for _, plaintext := range [][]byte{plaintext1KB, plaintext100KB, plaintext1MB, plaintext64MB} {
-			b.Run(string(humanizeutil.IBytes(int64(len(plaintext)))), func(b *testing.B) {
+			b.Run(humanizeutil.IBytes(int64(len(plaintext))), func(b *testing.B) {
 				for _, chunkSize := range chunkSizes {
 					encryptionChunkSizeV2 = chunkSize
-					b.Run("chunk="+string(humanizeutil.IBytes(int64(chunkSize))), func(b *testing.B) {
+					b.Run("chunk="+humanizeutil.IBytes(int64(chunkSize)), func(b *testing.B) {
 						for i := 0; i < b.N; i++ {
-							_, err := EncryptFile(plaintext, key)
+							_, err := encryptFile(plaintext, key, chunkSize > 0)
 							if err != nil {
 								b.Fatal(err)
 							}
@@ -244,13 +249,13 @@ func BenchmarkEncryption(b *testing.B) {
 
 	for i, chunkSize := range chunkSizes {
 		encryptionChunkSizeV2 = chunkSize
-		ciphertext1KB[i], err = EncryptFile(plaintext1KB, key)
+		ciphertext1KB[i], err = encryptFile(plaintext1KB, key, chunkSize > 0)
 		require.NoError(b, err)
-		ciphertext100KB[i], err = EncryptFile(plaintext100KB, key)
+		ciphertext100KB[i], err = encryptFile(plaintext100KB, key, chunkSize > 0)
 		require.NoError(b, err)
-		ciphertext1MB[i], err = EncryptFile(plaintext1MB, key)
+		ciphertext1MB[i], err = encryptFile(plaintext1MB, key, chunkSize > 0)
 		require.NoError(b, err)
-		ciphertext64MB[i], err = EncryptFile(plaintext64MB, key)
+		ciphertext64MB[i], err = encryptFile(plaintext64MB, key, chunkSize > 0)
 		require.NoError(b, err)
 	}
 	b.ResetTimer()
@@ -258,11 +263,11 @@ func BenchmarkEncryption(b *testing.B) {
 	b.Run("DecryptFile", func(b *testing.B) {
 		for _, ciphertextOriginal := range [][][]byte{ciphertext1KB, ciphertext100KB, ciphertext1MB, ciphertext64MB} {
 			// Decrypt reuses/clobbers the original ciphertext slice.
-			b.Run(string(humanizeutil.IBytes(int64(len(ciphertextOriginal[0])))), func(b *testing.B) {
+			b.Run(humanizeutil.IBytes(int64(len(ciphertextOriginal[0]))), func(b *testing.B) {
 				for chunkSizeNum, chunkSize := range chunkSizes {
 					encryptionChunkSizeV2 = chunkSize
 
-					b.Run("chunk="+string(humanizeutil.IBytes(int64(chunkSize))), func(b *testing.B) {
+					b.Run("chunk="+humanizeutil.IBytes(int64(chunkSize)), func(b *testing.B) {
 						ciphertext := bytes.NewReader(ciphertextOriginal[chunkSizeNum])
 						for i := 0; i < b.N; i++ {
 							ciphertext.Reset(ciphertextOriginal[chunkSizeNum])

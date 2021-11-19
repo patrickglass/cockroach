@@ -14,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 )
 
@@ -56,7 +55,7 @@ func TestRequiredProps(t *testing.T) {
 	}
 
 	// Add ordering props.
-	ordering := props.ParseOrderingChoice("+1,+5")
+	ordering := physical.ParseOrderingChoice("+1,+5")
 	phys.Ordering = ordering
 	testRequiredProps(t, phys, "[presentation: a:1,b:2] [ordering: +1,+5]")
 }

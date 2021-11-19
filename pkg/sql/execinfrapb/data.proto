@@ -59,7 +59,7 @@ message Expression {
 }
 
 // Ordering defines an order - specifically a list of column indices and
-// directions. See colinfo.ColumnOrdering.
+// directions. See sqlbase.ColumnOrdering.
 message Ordering {
   option (gogoproto.equal) = true;
 
@@ -120,17 +120,12 @@ message StreamEndpointSpec {
 // to interleave rows from multiple input streams.
 message InputSyncSpec {
   enum Type {
-    // Rows from the input streams are interleaved arbitrarily. Each input
-    // stream runs in a separate goroutine in order to not block on the slow
-    // producers.
-    PARALLEL_UNORDERED = 0;
+    // Rows from the input streams are interleaved arbitrarily.
+    UNORDERED = 0;
     // The input streams are guaranteed to be ordered according to the column
     // ordering field; rows from the streams are interleaved to preserve that
     // ordering.
     ORDERED = 1;
-    // Each input stream is consumed fully, in turn, before the next input
-    // stream is received from.
-    SERIAL_UNORDERED = 2;
   }
   optional Type type = 1 [(gogoproto.nullable) = false];
 
@@ -285,7 +280,6 @@ message RemoteProducerMetadata {
     map<int32, int64> resume_pos = 3;
     // Used to stream back progress to the coordinator of a bulk job.
     optional google.protobuf.Any progress_details = 4 [(gogoproto.nullable) = false];
-    optional roachpb.BulkOpSummary bulk_summary = 5 [(gogoproto.nullable) = false];
   }
   // Metrics are unconditionally emitted by table readers.
   message Metrics {

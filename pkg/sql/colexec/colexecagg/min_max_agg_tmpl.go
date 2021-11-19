@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for min_max_agg.eg.go. It's formatted in a
 // special way, so it's both valid Go and a valid text/template input. This
@@ -34,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/errors"
 )
 
@@ -44,8 +41,6 @@ var (
 	_ tree.AggType
 	_ apd.Context
 	_ duration.Duration
-	_ json.JSON
-	_ = coldataext.CompareDatum
 )
 
 // Remove unused warning.
@@ -63,47 +58,89 @@ func _ASSIGN_CMP(_, _, _, _, _, _ string) bool {
 
 // */}}
 
-// {{range .}}
-// {{$agg := .Agg}}
-
-func new_AGG_TITLE_AGGKINDAggAlloc(
+func newMin_AGGKINDAggAlloc(
 	allocator *colmem.Allocator, t *types.T, allocSize int64,
 ) aggregateFuncAlloc {
 	allocBase := aggAllocBase{allocator: allocator, allocSize: allocSize}
 	switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
-	// {{range .Overloads}}
-	case _CANONICAL_TYPE_FAMILY:
+	case types.BoolFamily:
+		return &minBool_AGGKINDAggAlloc{aggAllocBase: allocBase}
+	case types.BytesFamily:
+		return &minBytes_AGGKINDAggAlloc{aggAllocBase: allocBase}
+	case types.DecimalFamily:
+		return &minDecimal_AGGKINDAggAlloc{aggAllocBase: allocBase}
+	case types.IntFamily:
 		switch t.Width() {
-		// {{range .WidthOverloads}}
-		case _TYPE_WIDTH:
-			return &_AGG_TYPE_AGGKINDAggAlloc{aggAllocBase: allocBase}
-			// {{end}}
+		case 16:
+			return &minInt16_AGGKINDAggAlloc{aggAllocBase: allocBase}
+		case 32:
+			return &minInt32_AGGKINDAggAlloc{aggAllocBase: allocBase}
+		default:
+			return &minInt64_AGGKINDAggAlloc{aggAllocBase: allocBase}
 		}
-		// {{end}}
+	case types.FloatFamily:
+		return &minFloat64_AGGKINDAggAlloc{aggAllocBase: allocBase}
+	case types.TimestampTZFamily:
+		return &minTimestamp_AGGKINDAggAlloc{aggAllocBase: allocBase}
+	case types.IntervalFamily:
+		return &minInterval_AGGKINDAggAlloc{aggAllocBase: allocBase}
+	default:
+		return &minDatum_AGGKINDAggAlloc{aggAllocBase: allocBase}
 	}
-	colexecerror.InternalError(errors.AssertionFailedf("unexpectedly didn't find _AGG overload for %s type family", t.Name()))
-	// This code is unreachable, but the compiler cannot infer that.
-	return nil
 }
 
+func newMax_AGGKINDAggAlloc(
+	allocator *colmem.Allocator, t *types.T, allocSize int64,
+) aggregateFuncAlloc {
+	allocBase := aggAllocBase{allocator: allocator, allocSize: allocSize}
+	switch typeconv.TypeFamilyToCanonicalTypeFamily(t.Family()) {
+	case types.BoolFamily:
+		return &maxBool_AGGKINDAggAlloc{aggAllocBase: allocBase}
+	case types.BytesFamily:
+		return &maxBytes_AGGKINDAggAlloc{aggAllocBase: allocBase}
+	case types.DecimalFamily:
+		return &maxDecimal_AGGKINDAggAlloc{aggAllocBase: allocBase}
+	case types.IntFamily:
+		switch t.Width() {
+		case 16:
+			return &maxInt16_AGGKINDAggAlloc{aggAllocBase: allocBase}
+		case 32:
+			return &maxInt32_AGGKINDAggAlloc{aggAllocBase: allocBase}
+		default:
+			return &maxInt64_AGGKINDAggAlloc{aggAllocBase: allocBase}
+		}
+	case types.FloatFamily:
+		return &maxFloat64_AGGKINDAggAlloc{aggAllocBase: allocBase}
+	case types.TimestampTZFamily:
+		return &maxTimestamp_AGGKINDAggAlloc{aggAllocBase: allocBase}
+	case types.IntervalFamily:
+		return &maxInterval_AGGKINDAggAlloc{aggAllocBase: allocBase}
+	default:
+		return &maxDatum_AGGKINDAggAlloc{aggAllocBase: allocBase}
+	}
+}
+
+// {{range .}}
+// {{$agg := .Agg}}
 // {{range .Overloads}}
 // {{range .WidthOverloads}}
 
 type _AGG_TYPE_AGGKINDAgg struct {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	orderedAggregateFuncBase
-	// {{else}}
-	unorderedAggregateFuncBase
 	// {{end}}
 	// col points to the output vector we are updating.
 	col _GOTYPESLICE
+	// {{if eq "_AGGKIND" "Hash"}}
+	hashAggregateFuncBase
+	// {{end}}
 	// curAgg holds the running min/max, so we can index into the slice once per
 	// group, instead of on each iteration.
-	// NOTE: if numNonNull is zero, curAgg is undefined.
+	// NOTE: if foundNonNullForCurrentGroup is false, curAgg is undefined.
 	curAgg _GOTYPE
-	// numNonNull tracks the number of non-null values we have seen for the group
-	// that is currently being aggregated.
-	numNonNull uint64
+	// foundNonNullForCurrentGroup tracks if we have seen any non-null values
+	// for the group that is currently being aggregated.
+	foundNonNullForCurrentGroup bool
 }
 
 var _ AggregateFunc = &_AGG_TYPE_AGGKINDAgg{}
@@ -112,18 +149,17 @@ func (a *_AGG_TYPE_AGGKINDAgg) SetOutput(vec coldata.Vec) {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	a.orderedAggregateFuncBase.SetOutput(vec)
 	// {{else}}
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	// {{end}}
 	a.col = vec._TYPE()
 }
 
 func (a *_AGG_TYPE_AGGKINDAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	execgen.SETVARIABLESIZE(oldCurAggSize, a.curAgg)
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec._TYPE(), vec.Nulls()
-	// {{if not (eq "_AGGKIND" "Window")}}
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		// {{if eq "_AGGKIND" "Ordered"}}
 		// Capture groups and col to force bounds check to work. See
@@ -136,21 +172,21 @@ func (a *_AGG_TYPE_AGGKINDAgg) Compute(
 		// sel to specify the tuples to be aggregated.
 		// */}}
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 					_ACCUMULATE_MINMAX(a, nulls, i, true, false)
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 					_ACCUMULATE_MINMAX(a, nulls, i, false, false)
 				}
 			}
 		} else
 		// {{end}}
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 					_ACCUMULATE_MINMAX(a, nulls, i, true, true)
@@ -163,21 +199,6 @@ func (a *_AGG_TYPE_AGGKINDAgg) Compute(
 		}
 	},
 	)
-	// {{else}}
-	// Unnecessary memory accounting can have significant overhead for window
-	// aggregate functions because Compute is called at least once for every row.
-	// For this reason, we do not use PerformOperation here.
-	_, _ = col.Get(endIdx-1), col.Get(startIdx)
-	if nulls.MaybeHasNulls() {
-		for i := startIdx; i < endIdx; i++ {
-			_ACCUMULATE_MINMAX(a, nulls, i, true, false)
-		}
-	} else {
-		for i := startIdx; i < endIdx; i++ {
-			_ACCUMULATE_MINMAX(a, nulls, i, false, false)
-		}
-	}
-	// {{end}}
 	execgen.SETVARIABLESIZE(newCurAggSize, a.curAgg)
 	if newCurAggSize != oldCurAggSize {
 		a.allocator.AdjustMemoryUsage(int64(newCurAggSize - oldCurAggSize))
@@ -194,21 +215,20 @@ func (a *_AGG_TYPE_AGGKINDAgg) Flush(outputIdx int) {
 	outputIdx = a.curIdx
 	a.curIdx++
 	// {{end}}
-	if a.numNonNull == 0 {
+	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		// {{if eq "_AGGKIND" "Window"}}
-		// We need to copy the value because window functions reuse the aggregation
-		// between rows.
-		execgen.COPYVAL(a.curAgg, a.curAgg)
-		// {{end}}
-		a.col.Set(outputIdx, a.curAgg)
+		execgen.SET(a.col, outputIdx, a.curAgg)
 	}
-	// {{if and (not (eq "_AGGKIND" "Window")) (or (.IsBytesLike) (eq .VecMethod "Datum"))}}
-	execgen.SETVARIABLESIZE(oldCurAggSize, a.curAgg)
-	// Release the reference to curAgg eagerly. We can't do this for the window
-	// variants because they may reuse curAgg between subsequent window frames.
-	a.allocator.AdjustMemoryUsage(-int64(oldCurAggSize))
+	// {{if or (eq .VecMethod "Bytes") (eq .VecMethod "Datum")}}
+	// Release the reference to curAgg eagerly.
+	// {{if eq .VecMethod "Bytes"}}
+	a.allocator.AdjustMemoryUsage(-int64(len(a.curAgg)))
+	// {{else}}
+	if d, ok := a.curAgg.(*coldataext.Datum); ok {
+		a.allocator.AdjustMemoryUsage(-int64(d.Size()))
+	}
+	// {{end}}
 	a.curAgg = nil
 	// {{end}}
 }
@@ -217,13 +237,7 @@ func (a *_AGG_TYPE_AGGKINDAgg) Reset() {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	a.orderedAggregateFuncBase.Reset()
 	// {{end}}
-	a.numNonNull = 0
-	// {{if or (.IsBytesLike) (eq .VecMethod "Datum")}}
-	execgen.SETVARIABLESIZE(oldCurAggSize, a.curAgg)
-	// Release the reference to curAgg.
-	a.allocator.AdjustMemoryUsage(-int64(oldCurAggSize))
-	a.curAgg = nil
-	// {{end}}
+	a.foundNonNullForCurrentGroup = false
 }
 
 type _AGG_TYPE_AGGKINDAggAlloc struct {
@@ -247,17 +261,6 @@ func (a *_AGG_TYPE_AGGKINDAggAlloc) newAggFunc() AggregateFunc {
 	return f
 }
 
-// {{if eq "_AGGKIND" "Window"}}
-
-// Remove implements the slidingWindowAggregateFunc interface (see
-// window_aggregator_tmpl.go). This allows min and max operators to be used when
-// the window frame only grows. For the case when the window frame can shrink,
-// a specialized implementation is needed (see min_max_removable_agg_tmpl.go).
-func (*_AGG_TYPE_AGGKINDAgg) Remove(vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int) {
-	colexecerror.InternalError(errors.AssertionFailedf("Remove called on _AGG_TYPE_AGGKINDAgg"))
-}
-
-// {{end}}
 // {{end}}
 // {{end}}
 // {{end}}
@@ -280,13 +283,15 @@ func _ACCUMULATE_MINMAX(
 		if !a.isFirstGroup {
 			// If we encounter a new group, and we haven't found any non-nulls for the
 			// current group, the output for this group should be null.
-			if a.numNonNull == 0 {
+			if !a.foundNonNullForCurrentGroup {
 				a.nulls.SetNull(a.curIdx)
 			} else {
-				a.col.Set(a.curIdx, a.curAgg)
+				// {{with .Global}}
+				execgen.SET(a.col, a.curIdx, a.curAgg)
+				// {{end}}
 			}
 			a.curIdx++
-			a.numNonNull = 0
+			a.foundNonNullForCurrentGroup = false
 		}
 		a.isFirstGroup = false
 	}
@@ -299,7 +304,7 @@ func _ACCUMULATE_MINMAX(
 	isNull = false
 	// {{end}}
 	if !isNull {
-		if a.numNonNull == 0 {
+		if !a.foundNonNullForCurrentGroup {
 			// {{if and (.Sliceable) (not .HasSel)}}
 			//gcassert:bce
 			// {{end}}
@@ -307,6 +312,7 @@ func _ACCUMULATE_MINMAX(
 			// {{with .Global}}
 			execgen.COPYVAL(a.curAgg, val)
 			// {{end}}
+			a.foundNonNullForCurrentGroup = true
 		} else {
 			var cmp bool
 			// {{if and (.Sliceable) (not .HasSel)}}
@@ -320,7 +326,6 @@ func _ACCUMULATE_MINMAX(
 			}
 			// {{end}}
 		}
-		a.numNonNull++
 	}
 	// {{end}}
 

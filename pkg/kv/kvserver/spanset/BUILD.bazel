@@ -11,7 +11,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/keys",
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/storage",
         "//pkg/storage/enginepb",
         "//pkg/util/hlc",
@@ -26,15 +26,11 @@ go_library(
 go_test(
     name = "spanset_test",
     size = "small",
-    srcs = [
-        "batch_test.go",
-        "spanset_test.go",
-    ],
+    srcs = ["spanset_test.go"],
     embed = [":spanset"],
     deps = [
         "//pkg/keys",
-        "//pkg/roachpb:with-mocks",
-        "//pkg/storage",
+        "//pkg/roachpb",
         "//pkg/testutils",
         "//pkg/util/hlc",
         "//pkg/util/leaktest",

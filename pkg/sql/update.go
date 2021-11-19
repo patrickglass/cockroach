@@ -16,6 +16,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
@@ -59,7 +60,7 @@ type updateRun struct {
 
 	// computedCols are the columns that need to be (re-)computed as
 	// the result of updating some of the columns in updateCols.
-	computedCols []catalog.Column
+	computedCols []descpb.ColumnDescriptor
 	// computeExprs are the expressions to evaluate to re-compute the
 	// columns in computedCols.
 	computeExprs []tree.TypedExpr
@@ -130,7 +131,7 @@ func (u *updateNode) startExec(params runParams) error {
 			colinfo.ColTypeInfoFromResCols(u.columns),
 		)
 	}
-	return u.run.tu.init(params.ctx, params.p.txn, params.EvalContext(), &params.EvalContext().Settings.SV)
+	return u.run.tu.init(params.ctx, params.p.txn, params.EvalContext())
 }
 
 // Next is required because batchedPlanNode inherits from planNode, but
@@ -192,7 +193,7 @@ func (u *updateNode) BatchedNext(params runParams) (bool, error) {
 	}
 
 	if lastBatch {
-		u.run.tu.setRowsWrittenLimit(params.extendedEvalCtx.SessionData())
+		u.run.tu.setRowsWrittenLimit(params.extendedEvalCtx.SessionData)
 		if err := u.run.tu.finalize(params.ctx); err != nil {
 			return false, err
 		}
@@ -201,7 +202,10 @@ func (u *updateNode) BatchedNext(params runParams) (bool, error) {
 	}
 
 	// Possibly initiate a run of CREATE STATISTICS.
-	params.ExecCfg().StatsRefresher.NotifyMutation(u.run.tu.tableDesc(), u.run.tu.lastBatchSize)
+	params.ExecCfg().StatsRefresher.NotifyMutation(
+		u.run.tu.tableDesc().GetID(),
+		u.run.tu.lastBatchSize,
+	)
 
 	return u.run.tu.lastBatchSize > 0, nil
 }
@@ -252,7 +256,7 @@ func (u *updateNode) processSourceRow(params runParams, sourceVals tree.Datums) 
 		// iVarContainerForComputedCols does this.
 		copy(u.run.iVarContainerForComputedCols.CurSourceRow, oldValues)
 		for i := range u.run.tu.ru.UpdateCols {
-			id := u.run.tu.ru.UpdateCols[i].GetID()
+			id := u.run.tu.ru.UpdateCols[i].ID
 			idx := u.run.tu.ru.FetchColIDtoRowIndex.GetDefault(id)
 			u.run.iVarContainerForComputedCols.CurSourceRow[idx] = u.run.
 				updateValues[i]
@@ -266,10 +270,9 @@ func (u *updateNode) processSourceRow(params runParams, sourceVals tree.Datums) 
 			d, err := u.run.computeExprs[i].Eval(params.EvalContext())
 			if err != nil {
 				params.EvalContext().IVarContainer = nil
-				name := u.run.computedCols[i].GetName()
-				return errors.Wrapf(err, "computed column %s", tree.ErrString((*tree.Name)(&name)))
+				return errors.Wrapf(err, "computed column %s", tree.ErrString((*tree.Name)(&u.run.computedCols[i].Name)))
 			}
-			idx := u.run.updateColsIdx.GetDefault(u.run.computedCols[i].GetID())
+			idx := u.run.updateColsIdx.GetDefault(u.run.computedCols[i].ID)
 			u.run.updateValues[idx] = d
 		}
 		params.EvalContext().PopIVarContainer()
@@ -278,11 +281,7 @@ func (u *updateNode) processSourceRow(params runParams, sourceVals tree.Datums) 
 	// Verify the schema constraints. For consistency with INSERT/UPSERT
 	// and compatibility with PostgreSQL, we must do this before
 	// processing the CHECK constraints.
-	if err := enforceLocalColumnConstraints(
-		u.run.updateValues,
-		u.run.tu.ru.UpdateCols,
-		true, /* isUpdate */
-	); err != nil {
+	if err := enforceLocalColumnConstraints(u.run.updateValues, u.run.tu.ru.UpdateCols); err != nil {
 		return err
 	}
 
@@ -292,7 +291,7 @@ func (u *updateNode) processSourceRow(params runParams, sourceVals tree.Datums) 
 	if !u.run.checkOrds.Empty() {
 		checkVals := sourceVals[len(u.run.tu.ru.FetchCols)+len(u.run.tu.ru.UpdateCols)+u.run.numPassthrough:]
 		if err := checkMutationInput(
-			params.ctx, &params.p.semaCtx, params.p.SessionData(), u.run.tu.tableDesc(), u.run.checkOrds, checkVals,
+			params.ctx, &params.p.semaCtx, u.run.tu.tableDesc(), u.run.checkOrds, checkVals,
 		); err != nil {
 			return err
 		}
@@ -400,7 +399,7 @@ type sourceSlot interface {
 }
 
 type scalarSlot struct {
-	column      catalog.Column
+	column      descpb.ColumnDescriptor
 	sourceIndex int
 }
 
@@ -411,26 +410,32 @@ func (ss scalarSlot) extractValues(row tree.Datums) tree.Datums {
 func (ss scalarSlot) checkColumnTypes(row []tree.TypedExpr) error {
 	renderedResult := row[ss.sourceIndex]
 	typ := renderedResult.ResolvedType()
-	return colinfo.CheckDatumTypeFitsColumnType(ss.column, typ)
+	return colinfo.CheckDatumTypeFitsColumnType(&ss.column, typ)
 }
 
-// enforceLocalColumnConstraints asserts the column constraints that do not
-// require data validation from other sources than the row data itself. This
-// currently only includes checking for null values in non-nullable columns.
-func enforceLocalColumnConstraints(row tree.Datums, cols []catalog.Column, isUpdate bool) error {
-	for i, col := range cols {
-		if !col.IsNullable() && row[i] == tree.DNull {
-			return sqlerrors.NewNonNullViolationError(col.GetName())
+// enforceLocalColumnConstraints asserts the column constraints that
+// do not require data validation from other sources than the row data
+// itself. This includes:
+// - rejecting null values in non-nullable columns;
+// - checking width constraints from the column type;
+// - truncating results to the requested precision (not width).
+// Note: the second point is what distinguishes this operation
+// from a regular SQL cast -- here widths are checked, not
+// used to truncate the value silently.
+//
+// The row buffer is modified in-place with the result of the
+// checks.
+func enforceLocalColumnConstraints(row tree.Datums, cols []descpb.ColumnDescriptor) error {
+	for i := range cols {
+		col := &cols[i]
+		if !col.Nullable && row[i] == tree.DNull {
+			return sqlerrors.NewNonNullViolationError(col.Name)
 		}
-		if isUpdate {
-			// TODO(mgartner): Remove this once assignment casts are supported
-			// for UPSERTs and UPDATEs.
-			outVal, err := tree.AdjustValueToType(col.GetType(), row[i])
-			if err != nil {
-				return err
-			}
-			row[i] = outVal
+		outVal, err := tree.AdjustValueToType(col.Type, row[i])
+		if err != nil {
+			return err
 		}
+		row[i] = outVal
 	}
 	return nil
 }

@@ -18,8 +18,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/distsqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -50,8 +50,8 @@ func TestAddColumnsNeededByOnExpr(t *testing.T) {
 		require.Equal(t, expected, neededCols)
 	}
 
-	leftTypes := types.ThreeIntCols
-	rightTypes := types.FourIntCols
+	leftTypes := rowenc.ThreeIntCols
+	rightTypes := rowenc.FourIntCols
 	for _, tc := range []struct {
 		onExpr         execinfrapb.Expression
 		neededFromLeft []int

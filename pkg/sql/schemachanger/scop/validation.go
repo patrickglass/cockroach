@@ -21,8 +21,9 @@ func (validationOp) Type() Type { return ValidationType }
 // ValidateUniqueIndex validates uniqueness of entries for a unique index.
 type ValidateUniqueIndex struct {
 	validationOp
-	TableID descpb.ID
-	IndexID descpb.IndexID
+	TableID        descpb.ID
+	PrimaryIndexID descpb.IndexID
+	IndexID        descpb.IndexID
 }
 
 // ValidateCheckConstraint validates a check constraint on a table's columns.
@@ -31,6 +32,3 @@ type ValidateCheckConstraint struct {
 	TableID descpb.ID
 	Name    string
 }
-
-// Make sure baseOp is used for linter.
-var _ = validationOp{baseOp: baseOp{}}

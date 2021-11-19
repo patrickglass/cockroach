@@ -47,17 +47,6 @@ func (a kvAuth) AuthStream() grpc.StreamServerInterceptor { return a.streamInter
 func (a kvAuth) unaryInterceptor(
 	ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler,
 ) (interface{}, error) {
-	// Allow unauthenticated requests for the inter-node CA public key as part
-	// of the Add/Join protocol. RFC: https://github.com/cockroachdb/cockroach/pull/51991
-	if info.FullMethod == "/cockroach.server.serverpb.Admin/RequestCA" {
-		return handler(ctx, req)
-	}
-	// Allow unauthenticated requests for the inter-node CA bundle as part
-	// of the Add/Join protocol. RFC: https://github.com/cockroachdb/cockroach/pull/51991
-	if info.FullMethod == "/cockroach.server.serverpb.Admin/RequestCertBundle" {
-		return handler(ctx, req)
-	}
-
 	tenID, err := a.authenticate(ctx)
 	if err != nil {
 		return nil, err
@@ -121,39 +110,13 @@ func (a kvAuth) authenticate(ctx context.Context) (roachpb.TenantID, error) {
 		return roachpb.TenantID{}, err
 	}
 
-	clientCert := tlsInfo.State.PeerCertificates[0]
-	if a.tenant.tenantID == roachpb.SystemTenantID {
-		// This node is a KV node.
-		//
-		// Is this a connection from a SQL tenant server?
-		if security.IsTenantCertificate(clientCert) {
-			// Incoming connection originating from a tenant SQL server,
-			// into a KV node.
-			// We extract the tenant ID to perform authorization
-			// of the RPC for this particular tenant.
-			return tenantFromCommonName(clientCert.Subject.CommonName)
-		}
-	} else {
-		// This node is a SQL tenant server.
-		//
-		// Is this a connection from another SQL tenant server?
-		if security.IsTenantCertificate(clientCert) {
-			// Incoming connection originating from a tenant SQL server,
-			// into a KV node. Let through. The other server
-			// is able to use any of this server's RPCs.
-			return roachpb.TenantID{}, nil
-		}
+	subj := tlsInfo.State.PeerCertificates[0].Subject
+	if security.Contains(subj.OrganizationalUnit, security.TenantsOU) {
+		// Tenant authentication.
+		return tenantFromCommonName(subj.CommonName)
 	}
 
-	// Here we handle the following cases:
-	//
-	// - incoming connection from a RPC admin client into either a KV
-	//   node or a SQL server, using a valid root or node client cert.
-	// - incoming connections from another KV node into a KV node, using
-	//   a node client cert.
-	//
-	// In both cases, we must check that the client cert is either root
-	// or node.
+	// KV auth.
 
 	// TODO(benesch): the vast majority of RPCs should be limited to just
 	// NodeUser. This is not a security concern, as RootUser has access to
@@ -163,6 +126,5 @@ func (a kvAuth) authenticate(ctx context.Context) (roachpb.TenantID, error) {
 		!security.Contains(certUsers, security.RootUser) {
 		return roachpb.TenantID{}, authErrorf("user %s is not allowed to perform this RPC", certUsers)
 	}
-
 	return roachpb.TenantID{}, nil
 }

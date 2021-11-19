@@ -158,12 +158,12 @@ func ParseDArrayFromString(
 ) (_ *DArray, dependsOnContext bool, _ error) {
 	ret, dependsOnContext, err := doParseDArrayFromString(ctx, s, t)
 	if err != nil {
-		return ret, false, MakeParseError(s, types.MakeArray(t), err)
+		return ret, false, makeParseError(s, types.MakeArray(t), err)
 	}
 	return ret, dependsOnContext, nil
 }
 
-// doParseDArrayFromString does most of the work of ParseDArrayFromString,
+// doParseDArraryFromString does most of the work of ParseDArrayFromString,
 // except the error it returns isn't prettified as a parsing error.
 //
 // The dependsOnContext return value indicates if we had to consult the

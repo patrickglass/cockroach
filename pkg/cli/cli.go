@@ -11,16 +11,16 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math/rand"
 	"os"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/cockroachdb/cockroach/pkg/build"
-	"github.com/cockroachdb/cockroach/pkg/cli/clierror"
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
-	_ "github.com/cockroachdb/cockroach/pkg/cloud/impl" // register cloud storage providers
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
@@ -60,7 +60,7 @@ func Main() {
 	errCode := exit.Success()
 	if err != nil {
 		// Display the error and its details/hints.
-		clierror.OutputError(stderr, err, true /*showSeverity*/, false /*verbose*/)
+		cliOutputError(stderr, err, true /*showSeverity*/, false /*verbose*/)
 
 		// Remind the user of which command was being run.
 		fmt.Fprintf(stderr, "Failed running %q\n", cmdName)
@@ -75,9 +75,9 @@ func Main() {
 
 func getExitCode(err error) (errCode exit.Code) {
 	errCode = exit.UnspecifiedError()
-	var cliErr *clierror.Error
+	var cliErr *cliError
 	if errors.As(err, &cliErr) {
-		errCode = cliErr.GetExitCode()
+		errCode = cliErr.exitCode
 	}
 	return errCode
 }
@@ -104,18 +104,14 @@ func doMain(cmd *cobra.Command, cmdName string) error {
 			// and PersistentPreRun in `(*cobra.Command) execute()`.)
 			wrapped := cmd.PreRunE
 			cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
-				// We call setupLogging before the PreRunE function since
-				// that function may perform logging.
-				err := setupLogging(context.Background(), cmd,
-					false /* isServerCmd */, true /* applyConfig */)
-
 				if wrapped != nil {
 					if err := wrapped(cmd, args); err != nil {
 						return err
 					}
 				}
 
-				return err
+				return setupLogging(context.Background(), cmd,
+					false /* isServerCmd */, true /* applyConfig */)
 			}
 		}
 	}
@@ -161,6 +157,28 @@ func commandName(cmd *cobra.Command) string {
 	return rootName
 }
 
+type cliError struct {
+	exitCode exit.Code
+	severity log.Severity
+	cause    error
+}
+
+func (e *cliError) Error() string { return e.cause.Error() }
+
+// Cause implements causer.
+func (e *cliError) Cause() error { return e.cause }
+
+// Format implements fmt.Formatter.
+func (e *cliError) Format(s fmt.State, verb rune) { errors.FormatError(e, s, verb) }
+
+// FormatError implements errors.Formatter.
+func (e *cliError) FormatError(p errors.Printer) error {
+	if p.Detail() {
+		p.Printf("error with exit code: %d", e.exitCode)
+	}
+	return e.cause
+}
+
 // stderr aliases log.OrigStderr; we use an alias here so that tests
 // in this package can redirect the output of CLI commands to stdout
 // to be captured.
@@ -186,7 +204,22 @@ Output build version information.
 
 func fullVersionString() string {
 	info := build.GetInfo()
-	return info.Long()
+	var buf bytes.Buffer
+	tw := tabwriter.NewWriter(&buf, 2, 1, 2, ' ', 0)
+	fmt.Fprintf(tw, "Build Tag:        %s\n", info.Tag)
+	fmt.Fprintf(tw, "Build Time:       %s\n", info.Time)
+	fmt.Fprintf(tw, "Distribution:     %s\n", info.Distribution)
+	fmt.Fprintf(tw, "Platform:         %s", info.Platform)
+	if info.CgoTargetTriple != "" {
+		fmt.Fprintf(tw, " (%s)", info.CgoTargetTriple)
+	}
+	fmt.Fprintln(tw)
+	fmt.Fprintf(tw, "Go Version:       %s\n", info.GoVersion)
+	fmt.Fprintf(tw, "C Compiler:       %s\n", info.CgoCompiler)
+	fmt.Fprintf(tw, "Build Commit ID:  %s\n", info.Revision)
+	fmt.Fprintf(tw, "Build Type:       %s", info.Type) // No final newline: cobra prints one for us.
+	_ = tw.Flush()
+	return buf.String()
 }
 
 var cockroachCmd = &cobra.Command{
@@ -222,7 +255,10 @@ func init() {
 			return err
 		}
 		fmt.Fprintln(c.OutOrStderr()) // provide a line break between usage and error
-		return clierror.NewError(err, exit.CommandLineFlagError())
+		return &cliError{
+			exitCode: exit.CommandLineFlagError(),
+			cause:    err,
+		}
 	})
 
 	cockroachCmd.AddCommand(
@@ -231,12 +267,15 @@ func init() {
 		connectCmd,
 		initCmd,
 		certCmd,
+		// TODO(bilal): Uncomment this when the connect command does something useful.
+		// connectCmd,
 		quitCmd,
 
 		sqlShellCmd,
 		stmtDiagCmd,
 		authCmd,
 		nodeCmd,
+		dumpCmd,
 		nodeLocalCmd,
 		userFileCmd,
 		importCmd,
@@ -244,12 +283,12 @@ func init() {
 		// Miscellaneous commands.
 		// TODO(pmattis): stats
 		demoCmd,
-		convertURLCmd,
 		genCmd,
 		versionCmd,
 		DebugCmd,
 		sqlfmtCmd,
 		workloadCmd,
+		systemBenchCmd,
 	)
 }
 
@@ -260,7 +299,7 @@ func isWorkloadCmd(cmd *cobra.Command) bool {
 
 // isDemoCmd returns true iff cmd is a sub-command of `demo`.
 func isDemoCmd(cmd *cobra.Command) bool {
-	return hasParentCmd(cmd, demoCmd) || hasParentCmd(cmd, debugStatementBundleCmd)
+	return hasParentCmd(cmd, demoCmd)
 }
 
 // hasParentCmd returns true iff cmd is a sub-command of refParent.
@@ -277,16 +316,21 @@ func hasParentCmd(cmd, refParent *cobra.Command) bool {
 	return hasParent
 }
 
+// AddCmd adds a command to the cli.
+func AddCmd(c *cobra.Command) {
+	cockroachCmd.AddCommand(c)
+}
+
 // Run ...
 func Run(args []string) error {
 	cockroachCmd.SetArgs(args)
 	return cockroachCmd.Execute()
 }
 
-// UsageAndErr informs the user about the usage of the command
+// usageAndErr informs the user about the usage of the command
 // and returns an error. This ensures that the top-level command
 // has a suitable exit status.
-func UsageAndErr(cmd *cobra.Command, args []string) error {
+func usageAndErr(cmd *cobra.Command, args []string) error {
 	if err := cmd.Usage(); err != nil {
 		return err
 	}

@@ -11,6 +11,8 @@
 package colexecbase
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
@@ -21,7 +23,7 @@ import (
 // ordinalityOp is an operator that implements WITH ORDINALITY, which adds
 // an additional column to the result with an ordinal number.
 type ordinalityOp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 
 	allocator *colmem.Allocator
 	// outputIdx is the index of the column in which ordinalityOp will write the
@@ -39,16 +41,20 @@ func NewOrdinalityOp(
 ) colexecop.Operator {
 	input = colexecutils.NewVectorTypeEnforcer(allocator, input, types.Int, outputIdx)
 	c := &ordinalityOp{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
-		allocator:      allocator,
-		outputIdx:      outputIdx,
-		counter:        1,
+		OneInputNode: colexecop.NewOneInputNode(input),
+		allocator:    allocator,
+		outputIdx:    outputIdx,
+		counter:      1,
 	}
 	return c
 }
 
-func (c *ordinalityOp) Next() coldata.Batch {
-	bat := c.Input.Next()
+func (c *ordinalityOp) Init() {
+	c.Input.Init()
+}
+
+func (c *ordinalityOp) Next(ctx context.Context) coldata.Batch {
+	bat := c.Input.Next(ctx)
 	if bat.Length() == 0 {
 		return coldata.ZeroBatch
 	}

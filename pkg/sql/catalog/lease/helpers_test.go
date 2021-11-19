@@ -107,22 +107,14 @@ func (w *LeaseRemovalTracker) LeaseRemovedNotification(
 	}
 }
 
-// ExpireLeases ia a hack for testing that manually sets expirations to a past
-// timestamp.
 func (m *Manager) ExpireLeases(clock *hlc.Clock) {
-	past := hlc.Timestamp{
-		WallTime: clock.Now().GoTime().Add(-time.Millisecond).UnixNano(),
-	}
+	past := clock.Now().GoTime().Add(-time.Millisecond)
 
 	m.names.mu.Lock()
-	defer m.names.mu.Unlock()
-	_ = m.names.descriptors.IterateByID(func(entry catalog.NameEntry) error {
-		desc := entry.(*descriptorVersionState)
-		desc.mu.Lock()
-		defer desc.mu.Unlock()
-		desc.mu.expiration = past
-		return nil
-	})
+	for _, desc := range m.names.descriptors {
+		desc.expiration = hlc.Timestamp{WallTime: past.UnixNano()}
+	}
+	m.names.mu.Unlock()
 }
 
 // PublishMultiple updates multiple descriptors, maintaining the invariant
@@ -161,7 +153,7 @@ func (m *Manager) PublishMultiple(
 			if err != nil {
 				return nil, err
 			}
-			expectedVersions[id] = expected.GetVersion()
+			expectedVersions[id] = expected
 		}
 
 		descs := make(map[descpb.ID]catalog.MutableDescriptor)
@@ -277,8 +269,7 @@ func (m *Manager) Publish(
 	updates := func(_ *kv.Txn, descs map[descpb.ID]catalog.MutableDescriptor) error {
 		desc, ok := descs[id]
 		if !ok {
-			return errors.AssertionFailedf(
-				"required descriptor with ID %d not provided to update closure", id)
+			return errors.AssertionFailedf("required descriptor with ID %d not provided to update closure", id)
 		}
 		return update(desc)
 	}

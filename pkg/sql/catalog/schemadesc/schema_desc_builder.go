@@ -14,9 +14,7 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catprivilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 )
 
@@ -24,15 +22,13 @@ import (
 // for schema descriptors.
 type SchemaDescriptorBuilder interface {
 	catalog.DescriptorBuilder
-	BuildImmutableSchema() catalog.SchemaDescriptor
+	BuildImmutableSchema() *Immutable
 	BuildExistingMutableSchema() *Mutable
 	BuildCreatedMutableSchema() *Mutable
 }
 
 type schemaDescriptorBuilder struct {
-	original      *descpb.SchemaDescriptor
-	maybeModified *descpb.SchemaDescriptor
-	changed       bool
+	original *descpb.SchemaDescriptor
 }
 
 var _ SchemaDescriptorBuilder = &schemaDescriptorBuilder{}
@@ -55,14 +51,8 @@ func (sdb *schemaDescriptorBuilder) DescriptorType() catalog.DescriptorType {
 func (sdb *schemaDescriptorBuilder) RunPostDeserializationChanges(
 	_ context.Context, _ catalog.DescGetter,
 ) error {
-	sdb.maybeModified = protoutil.Clone(sdb.original).(*descpb.SchemaDescriptor)
-	sdb.changed = catprivilege.MaybeFixPrivileges(
-		&sdb.maybeModified.Privileges,
-		sdb.maybeModified.GetParentID(),
-		descpb.InvalidID,
-		privilege.Schema,
-		sdb.maybeModified.GetName(),
-	)
+	privDesc := sdb.original.GetPrivileges()
+	descpb.MaybeFixSchemaPrivileges(&privDesc)
 	return nil
 }
 
@@ -72,12 +62,8 @@ func (sdb *schemaDescriptorBuilder) BuildImmutable() catalog.Descriptor {
 }
 
 // BuildImmutableSchema returns an immutable schema descriptor.
-func (sdb *schemaDescriptorBuilder) BuildImmutableSchema() catalog.SchemaDescriptor {
-	desc := sdb.maybeModified
-	if desc == nil {
-		desc = sdb.original
-	}
-	return &immutable{SchemaDescriptor: *desc}
+func (sdb *schemaDescriptorBuilder) BuildImmutableSchema() *Immutable {
+	return &Immutable{SchemaDescriptor: *sdb.original}
 }
 
 // BuildExistingMutable implements the catalog.DescriptorBuilder interface.
@@ -88,13 +74,10 @@ func (sdb *schemaDescriptorBuilder) BuildExistingMutable() catalog.MutableDescri
 // BuildExistingMutableSchema returns a mutable descriptor for a schema
 // which already exists.
 func (sdb *schemaDescriptorBuilder) BuildExistingMutableSchema() *Mutable {
-	if sdb.maybeModified == nil {
-		sdb.maybeModified = protoutil.Clone(sdb.original).(*descpb.SchemaDescriptor)
-	}
+	desc := protoutil.Clone(sdb.original).(*descpb.SchemaDescriptor)
 	return &Mutable{
-		immutable:      immutable{SchemaDescriptor: *sdb.maybeModified},
-		ClusterVersion: &immutable{SchemaDescriptor: *sdb.original},
-		changed:        sdb.changed,
+		Immutable:      Immutable{SchemaDescriptor: *desc},
+		ClusterVersion: &Immutable{SchemaDescriptor: *sdb.original},
 	}
 }
 
@@ -106,8 +89,5 @@ func (sdb *schemaDescriptorBuilder) BuildCreatedMutable() catalog.MutableDescrip
 // BuildCreatedMutableSchema returns a mutable descriptor for a schema
 // which is in the process of being created.
 func (sdb *schemaDescriptorBuilder) BuildCreatedMutableSchema() *Mutable {
-	return &Mutable{
-		immutable: immutable{SchemaDescriptor: *sdb.original},
-		changed:   sdb.changed,
-	}
+	return &Mutable{Immutable: Immutable{SchemaDescriptor: *sdb.original}}
 }

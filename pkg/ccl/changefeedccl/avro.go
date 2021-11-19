@@ -17,11 +17,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/bitarray"
-	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
 	"github.com/cockroachdb/errors"
@@ -134,9 +134,8 @@ type avroSchemaField struct {
 	// and the value either null or the actual encoded value.
 	// nativeEncoded is a map that's returned by encodeFn.  We allocate
 	// this map once to avoid repeated map allocations.  We simply update
-	// "union key" value. nativeEncodedSecondaryType supports unions of two types (plus null).
-	nativeEncoded              map[string]interface{}
-	nativeEncodedSecondaryType map[string]interface{}
+	// "union key" value.
+	nativeEncoded map[string]interface{}
 }
 
 // avroRecord is our representation of the schema of an avro record. Serializing
@@ -220,44 +219,6 @@ func typeToAvroSchema(typ *types.T) (*avroSchemaField, error) {
 				return tree.DNull, nil
 			}
 			return decoder(x.(map[string]interface{})[unionKey])
-		}
-	}
-
-	// Handles types that mostly encode to non-strings,
-	// but have special cases like Infinity that encode as strings.
-	setNullableWithStringFallback := func(
-		avroType avroSchemaType,
-		encoder datumToNativeFn,
-		decoder func(interface{}) (tree.Datum, error),
-	) {
-		schema.SchemaType = []avroSchemaType{avroSchemaNull, avroType, avroSchemaString}
-		mainUnionKey := avroUnionKey(avroType)
-		stringUnionKey := avroUnionKey(avroSchemaString)
-		schema.nativeEncoded = map[string]interface{}{mainUnionKey: nil}
-		schema.nativeEncodedSecondaryType = map[string]interface{}{stringUnionKey: nil}
-		schema.encodeDatum = encoder
-
-		schema.encodeFn = func(d tree.Datum) (interface{}, error) {
-			if d == tree.DNull {
-				return nil /* value */, nil
-			}
-			encoded, err := encoder(d, schema.nativeEncoded[mainUnionKey])
-			if err != nil {
-				return nil, err
-			}
-			_, isString := encoded.(string)
-			if isString {
-				schema.nativeEncodedSecondaryType[stringUnionKey] = encoded
-				return schema.nativeEncodedSecondaryType, nil
-			}
-			schema.nativeEncoded[mainUnionKey] = encoded
-			return schema.nativeEncoded, nil
-		}
-		schema.decodeFn = func(x interface{}) (tree.Datum, error) {
-			if x == nil {
-				return tree.DNull, nil
-			}
-			return decoder(x.(map[string]interface{}))
 		}
 	}
 
@@ -428,10 +389,9 @@ func typeToAvroSchema(typ *types.T) (*avroSchemaField, error) {
 				LogicalType: `time-micros`,
 			},
 			func(d tree.Datum, _ interface{}) (interface{}, error) {
-				// Time of day is stored in microseconds since midnight,
-				// which is also the avro format
-				time := d.(*tree.DTime)
-				return int64(*time), nil
+				// The avro library requires us to return this as a time.Duration.
+				duration := time.Duration(*d.(*tree.DTime)) * time.Microsecond
+				return duration, nil
 			},
 			func(x interface{}) (tree.Datum, error) {
 				// The avro library hands this back as a time.Duration.
@@ -495,7 +455,7 @@ func typeToAvroSchema(typ *types.T) (*avroSchemaField, error) {
 				return d.(*tree.DInterval).ValueAsISO8601String(), nil
 			},
 			func(x interface{}) (tree.Datum, error) {
-				return tree.ParseDInterval(duration.IntervalStyle_ISO_8601, x.(string))
+				return tree.ParseDInterval(x.(string))
 			},
 		)
 	case types.DecimalFamily:
@@ -506,20 +466,15 @@ func typeToAvroSchema(typ *types.T) (*avroSchemaField, error) {
 
 		width := int(typ.Width())
 		prec := int(typ.Precision())
-		decimalType := avroLogicalType{
-			SchemaType:  avroSchemaBytes,
-			LogicalType: `decimal`,
-			Precision:   prec,
-			Scale:       width,
-		}
-		setNullableWithStringFallback(
-			decimalType,
+		setNullable(
+			avroLogicalType{
+				SchemaType:  avroSchemaBytes,
+				LogicalType: `decimal`,
+				Precision:   prec,
+				Scale:       width,
+			},
 			func(d tree.Datum, _ interface{}) (interface{}, error) {
 				dec := d.(*tree.DDecimal).Decimal
-
-				if dec.Form != apd.Finite {
-					return d.String(), nil
-				}
 
 				// If the decimal happens to fit a smaller width than the
 				// column allows, add trailing zeroes so the scale is constant
@@ -544,12 +499,7 @@ func typeToAvroSchema(typ *types.T) (*avroSchemaField, error) {
 				return &rat, nil
 			},
 			func(x interface{}) (tree.Datum, error) {
-				unionMap := x.(map[string]interface{})
-				rat, ok := unionMap[avroUnionKey(decimalType)]
-				if ok {
-					return &tree.DDecimal{Decimal: ratToDecimal(*rat.(*big.Rat), int32(width))}, nil
-				}
-				return tree.ParseDDecimal(unionMap[avroUnionKey(avroSchemaString)].(string))
+				return &tree.DDecimal{Decimal: ratToDecimal(*x.(*big.Rat), int32(width))}, nil
 			},
 		)
 	case types.UuidFamily:
@@ -703,7 +653,10 @@ func columnToAvroSchema(col catalog.Column) (*avroSchemaField, error) {
 // record schema. The fields are kept in the same order as columns in the index.
 // sqlName can be any string but should uniquely identify a schema.
 func indexToAvroSchema(
-	tableDesc catalog.TableDescriptor, index catalog.Index, sqlName string, namespace string,
+	tableDesc catalog.TableDescriptor,
+	indexDesc *descpb.IndexDescriptor,
+	sqlName string,
+	namespace string,
 ) (*avroDataRecord, error) {
 	schema := &avroDataRecord{
 		avroRecord: avroRecord{
@@ -716,8 +669,7 @@ func indexToAvroSchema(
 		fieldIdxByColIdx: make(map[int]int),
 	}
 	colIdxByID := catalog.ColumnIDToOrdinalMap(tableDesc.PublicColumns())
-	for i := 0; i < index.NumKeyColumns(); i++ {
-		colID := index.GetKeyColumnID(i)
+	for _, colID := range indexDesc.ColumnIDs {
 		colIdx, ok := colIdxByID.Get(colID)
 		if !ok {
 			return nil, errors.Errorf(`unknown column id: %d`, colID)

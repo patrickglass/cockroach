@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/colcontainerutils"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
@@ -38,7 +37,7 @@ func TestSpillingQueue(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	for _, rewindable := range []bool{false, true} {
 		for _, memoryLimit := range []int64{
 			10 << 10,                        /* 10 KiB */
@@ -46,7 +45,7 @@ func TestSpillingQueue(t *testing.T) {
 			1 << 30,                         /* 1 GiB */
 		} {
 			alwaysCompress := rng.Float64() < 0.5
-			diskQueueCacheMode := colcontainer.DiskQueueCacheModeIntertwinedCalls
+			diskQueueCacheMode := colcontainer.DiskQueueCacheModeDefault
 			var dequeuedProbabilityBeforeAllEnqueuesAreDone float64
 			// testReuseCache will test the reuse cache modes.
 			testReuseCache := rng.Float64() < 0.5
@@ -103,10 +102,10 @@ func TestSpillingQueue(t *testing.T) {
 					tuples.AppendTuples(b, 0 /* startIdx */, b.Length())
 				},
 			})
-			op.Init(ctx)
 			typs := op.Typs()
 
-			queueCfg.SetCacheMode(diskQueueCacheMode)
+			queueCfg.CacheMode = diskQueueCacheMode
+			queueCfg.SetDefaultBufferSizeBytesForCacheMode()
 			queueCfg.TestingKnobs.AlwaysCompress = alwaysCompress
 
 			// We need to create a separate unlimited allocator for the spilling
@@ -173,14 +172,14 @@ func TestSpillingQueue(t *testing.T) {
 				// the desired value and restore it below.
 				numTuples := tuples.Length()
 				tuples.SetLength(numAlreadyDequeuedTuples + windowLen)
-				MakeWindowIntoBatch(windowedBatch, tuples, numAlreadyDequeuedTuples, numAlreadyDequeuedTuples+windowLen, typs)
+				MakeWindowIntoBatch(windowedBatch, tuples, numAlreadyDequeuedTuples, typs)
 				tuples.SetLength(numTuples)
 				numAlreadyDequeuedTuples += windowLen
 				return windowedBatch
 			}
 
 			for {
-				b = op.Next()
+				b = op.Next(ctx)
 				q.Enqueue(ctx, b)
 				if b.Length() == 0 {
 					break
@@ -257,9 +256,9 @@ func TestSpillingQueueDidntSpill(t *testing.T) {
 
 	queueCfg, cleanup := colcontainerutils.NewTestingDiskQueueCfg(t, true /* inMem */)
 	defer cleanup()
-	queueCfg.SetCacheMode(colcontainer.DiskQueueCacheModeIntertwinedCalls)
+	queueCfg.CacheMode = colcontainer.DiskQueueCacheModeDefault
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	numBatches := int(spillingQueueInitialItemsLen)*(1+rng.Intn(4)) + rng.Intn(int(spillingQueueInitialItemsLen))
 	op := coldatatestutils.NewRandomDataOp(testAllocator, rng, coldatatestutils.RandomDataOpArgs{
 		// TODO(yuzefovich): for some types (e.g. types.MakeArray(types.Int))
@@ -270,13 +269,12 @@ func TestSpillingQueueDidntSpill(t *testing.T) {
 		BatchSize:         1 + rng.Intn(coldata.BatchSize()),
 		Nulls:             true,
 	})
-	op.Init(ctx)
 
 	typs := op.Typs()
 	// Choose a memory limit such that at most two batches can be kept in the
 	// in-memory buffer at a time (single batch is not enough because the queue
 	// delays the release of the memory by one batch).
-	memoryLimit := 2 * colmem.EstimateBatchSizeBytes(typs, coldata.BatchSize())
+	memoryLimit := int64(2 * colmem.EstimateBatchSizeBytes(typs, coldata.BatchSize()))
 	if memoryLimit < mon.DefaultPoolAllocationSize {
 		memoryLimit = mon.DefaultPoolAllocationSize
 	}
@@ -300,7 +298,7 @@ func TestSpillingQueueDidntSpill(t *testing.T) {
 	)
 
 	for {
-		b := op.Next()
+		b := op.Next(ctx)
 		q.Enqueue(ctx, b)
 		b, err := q.Dequeue(ctx)
 		require.NoError(t, err)
@@ -321,6 +319,8 @@ func TestSpillingQueueDidntSpill(t *testing.T) {
 	require.Equal(t, 0, len(directories))
 }
 
+const defaultMemoryLimit = 64 << 20 /* 64 MiB */
+
 // TestSpillingQueueMemoryAccounting is a simple check of the memory accounting
 // of the spilling queue that performs a series of Enqueue() and Dequeue()
 // operations and verifies that the reported memory usage is as expected.
@@ -335,7 +335,7 @@ func TestSpillingQueueMemoryAccounting(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	typs := []*types.T{types.Int}
 	queueCfg, cleanup := colcontainerutils.NewTestingDiskQueueCfg(t, true /* inMem */)
 	defer cleanup()
@@ -358,7 +358,7 @@ func TestSpillingQueueMemoryAccounting(t *testing.T) {
 			newQueueArgs := &NewSpillingQueueArgs{
 				UnlimitedAllocator: spillingQueueUnlimitedAllocator,
 				Types:              typs,
-				MemoryLimit:        execinfra.DefaultMemoryLimit,
+				MemoryLimit:        defaultMemoryLimit,
 				DiskQueueCfg:       queueCfg,
 				FDSemaphore:        colexecop.NewTestingSemaphore(2),
 				DiskAcc:            testDiskAcc,
@@ -429,7 +429,7 @@ func TestSpillingQueueMovingTailWhenSpilling(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	typs := []*types.T{types.Int}
 	queueCfg, cleanup := colcontainerutils.NewTestingDiskQueueCfg(t, true /* inMem */)
 	defer cleanup()

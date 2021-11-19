@@ -136,7 +136,7 @@ func (r *Registry) poll(ctx context.Context) {
 			lastPoll = timeutil.Now()
 		}
 	)
-	pollingInterval.SetOnChange(&r.st.SV, func(ctx context.Context) {
+	pollingInterval.SetOnChange(&r.st.SV, func() {
 		select {
 		case pollIntervalChanged <- struct{}{}:
 		default:
@@ -271,8 +271,7 @@ func (r *Registry) insertRequestInternal(ctx context.Context, fprint string) (Re
 	return reqID, nil
 }
 
-// RemoveOngoing removes the given request from the list of ongoing queries.
-func (r *Registry) RemoveOngoing(requestID RequestID) {
+func (r *Registry) removeOngoing(requestID RequestID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// Remove the request from r.mu.ongoing.
@@ -288,13 +287,13 @@ func (r *Registry) RemoveOngoing(requestID RequestID) {
 // was collected and inserted (even if failures were encountered).
 func (r *Registry) ShouldCollectDiagnostics(
 	ctx context.Context, fingerprint string,
-) (shouldCollect bool, reqID RequestID) {
+) (shouldCollect bool, reqID RequestID, finishFn func()) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	// Return quickly if we have no requests to trace.
 	if len(r.mu.requestFingerprints) == 0 {
-		return false, 0
+		return false, 0, nil
 	}
 
 	for id, f := range r.mu.requestFingerprints {
@@ -304,7 +303,7 @@ func (r *Registry) ShouldCollectDiagnostics(
 		}
 	}
 	if reqID == 0 {
-		return false, 0
+		return false, 0, nil
 	}
 
 	// Remove the request.
@@ -314,7 +313,9 @@ func (r *Registry) ShouldCollectDiagnostics(
 	}
 
 	r.mu.ongoing[reqID] = struct{}{}
-	return true, reqID
+	return true, reqID, func() {
+		r.removeOngoing(reqID)
+	}
 }
 
 // InsertStatementDiagnostics inserts a trace into system.statement_diagnostics.
@@ -332,6 +333,7 @@ func (r *Registry) InsertStatementDiagnostics(
 	requestID RequestID,
 	stmtFingerprint string,
 	stmt string,
+	traceJSON tree.Datum,
 	bundle []byte,
 	collectionErr error,
 ) (CollectedInstanceID, error) {

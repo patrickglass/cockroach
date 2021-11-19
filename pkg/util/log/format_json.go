@@ -191,6 +191,8 @@ const (
 	tagVerbose tagChoice = 1
 )
 
+var programEscaped = strings.ReplaceAll(program, ".", "_")
+
 var channelNamesLowercase = func() map[Channel]string {
 	lnames := make(map[Channel]string, len(logpb.Channel_name))
 	for ch, s := range logpb.Channel_name {
@@ -208,11 +210,7 @@ func formatJSON(entry logEntry, forFluent bool, tags tagChoice) *buffer {
 		buf.WriteString(`"tag":"`)
 		// Note: fluent prefers if there is no period in the tag other
 		// than the one splitting the application and category.
-		// We rely on program having been processed by replacePeriods()
-		// already.
-		// Also use escapeString() in case program contains double
-		// quotes or other special JSON characters.
-		escapeString(buf, fileNameConstants.program)
+		buf.WriteString(programEscaped)
 		buf.WriteByte('.')
 		if !entry.header {
 			buf.WriteString(channelNamesLowercase[entry.ch])

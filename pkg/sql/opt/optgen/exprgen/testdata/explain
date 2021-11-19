@@ -81,11 +81,11 @@ expr
 explain
  ├── mode: opt
  ├── stats: [rows=10]
- ├── cost: 1324.12194
+ ├── cost: 1323.97569
  └── sort
       ├── columns: a:1(int)  [hidden: t.public.abc.b:2(int)]
       ├── stats: [rows=1000]
-      ├── cost: 1324.10194
+      ├── cost: 1323.95569
       ├── ordering: +2
       ├── interesting orderings: (+1,+2)
       └── scan t.public.abc

@@ -165,15 +165,12 @@ func TestRedactedDecodeFile(t *testing.T) {
 
 			// Prepare reading the entries from the file.
 			infoName := filepath.Base(info.file.Name())
-			reader, err := GetLogReader(infoName)
+			reader, err := GetLogReader(infoName, true /* restricted */)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer reader.Close()
-			decoder, err := NewEntryDecoder(reader, tc.redactMode)
-			if err != nil {
-				t.Fatal(err)
-			}
+			decoder := NewEntryDecoder(reader, tc.redactMode)
 
 			// Now verify we have what we want in the file.
 			foundMessage := false

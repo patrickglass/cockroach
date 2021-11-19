@@ -76,23 +76,6 @@ func NewScheduledJob(env scheduledjobs.JobSchedulerEnv) *ScheduledJob {
 	}
 }
 
-// scheduledJobNotFoundError is returned from load when the scheduled job does
-// not exist.
-type scheduledJobNotFoundError struct {
-	scheduleID int64
-}
-
-// Error makes scheduledJobNotFoundError an error.
-func (e *scheduledJobNotFoundError) Error() string {
-	return fmt.Sprintf("scheduled job with ID %d does not exist", e.scheduleID)
-}
-
-// HasScheduledJobNotFoundError returns true if the error contains a
-// scheduledJobNotFoundError.
-func HasScheduledJobNotFoundError(err error) bool {
-	return errors.HasType(err, (*scheduledJobNotFoundError)(nil))
-}
-
 // LoadScheduledJob loads scheduled job record from the database.
 func LoadScheduledJob(
 	ctx context.Context,
@@ -107,10 +90,10 @@ func LoadScheduledJob(
 			env.ScheduledJobsTableName(), id))
 
 	if err != nil {
-		return nil, errors.CombineErrors(err, &scheduledJobNotFoundError{scheduleID: id})
+		return nil, errors.Wrapf(err, "expected to find 1 schedule with schedule_id=%d", id)
 	}
 	if row == nil {
-		return nil, &scheduledJobNotFoundError{scheduleID: id}
+		return nil, errors.Newf("expected to find 1 schedule, found 0, with schedule_id=%d", id)
 	}
 
 	j := NewScheduledJob(env)

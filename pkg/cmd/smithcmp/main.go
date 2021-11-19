@@ -33,7 +33,8 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/cockroachdb/cockroach/pkg/cmd/cmpconn"
 	"github.com/cockroachdb/cockroach/pkg/internal/sqlsmith"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/mutations"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -65,9 +66,9 @@ type options struct {
 	}
 }
 
-var sqlMutators = []randgen.Mutator{randgen.ColumnFamilyMutator}
+var sqlMutators = []rowenc.Mutator{mutations.ColumnFamilyMutator}
 
-func enableMutations(shouldEnable bool, mutations []randgen.Mutator) []randgen.Mutator {
+func enableMutations(shouldEnable bool, mutations []rowenc.Mutator) []rowenc.Mutator {
 	if shouldEnable {
 		return mutations
 	}
@@ -75,7 +76,6 @@ func enableMutations(shouldEnable bool, mutations []randgen.Mutator) []randgen.M
 }
 
 func main() {
-	ctx := context.Background()
 	args := os.Args[1:]
 	if len(args) != 1 {
 		usage()
@@ -105,10 +105,10 @@ func main() {
 		var err error
 		mutators := enableMutations(opts.Databases[name].AllowMutations, sqlMutators)
 		if opts.Postgres {
-			mutators = append(mutators, randgen.PostgresMutator)
+			mutators = append(mutators, mutations.PostgresMutator)
 		}
 		conns[name], err = cmpconn.NewConnWithMutators(
-			ctx, db.Addr, rng, mutators, db.InitSQL, opts.InitSQL)
+			db.Addr, rng, mutators, db.InitSQL, opts.InitSQL)
 		if err != nil {
 			log.Fatalf("%s (%s): %+v", name, db.Addr, err)
 		}
@@ -143,12 +143,12 @@ func main() {
 	} else {
 		stmts = make([]statement, len(opts.SQL))
 		for i, stmt := range opts.SQL {
-			ps, err := conns[opts.Smither].PGX().Prepare(ctx, "", stmt)
+			ps, err := conns[opts.Smither].PGX().Prepare("", stmt)
 			if err != nil {
 				log.Fatalf("bad SQL statement on %s: %v\nSQL:\n%s", opts.Smither, stmt, err)
 			}
 			var placeholders []*types.T
-			for _, param := range ps.ParamOIDs {
+			for _, param := range ps.ParameterOIDs {
 				typ, ok := types.OidToType[oid.Oid(param)]
 				if !ok {
 					log.Fatalf("unknown oid: %v", param)
@@ -163,6 +163,7 @@ func main() {
 	}
 
 	var prep, exec string
+	ctx := context.Background()
 	done := time.After(timeout)
 	for i, ignoredErrCount := 0, 0; true; i++ {
 		select {
@@ -186,7 +187,7 @@ func main() {
 				} else {
 					sb.WriteString(" (")
 				}
-				d := randgen.RandDatum(rng, typ, true)
+				d := rowenc.RandDatum(rng, typ, true)
 				fmt.Println(i, typ, d, tree.Serialize(d))
 				sb.WriteString(tree.Serialize(d))
 			}
@@ -218,12 +219,12 @@ func main() {
 		for name, conn := range conns {
 			start := timeutil.Now()
 			fmt.Printf("pinging %s...", name)
-			if err := conn.Ping(ctx); err != nil {
+			if err := conn.Ping(); err != nil {
 				fmt.Printf("\n%s: ping failure: %v\nprevious SQL:\n%s;\n%s;\n", name, err, prep, exec)
 				// Try to reconnect.
 				db := opts.Databases[name]
 				newConn, err := cmpconn.NewConnWithMutators(
-					ctx, db.Addr, rng, enableMutations(db.AllowMutations, sqlMutators),
+					db.Addr, rng, enableMutations(db.AllowMutations, sqlMutators),
 					db.InitSQL, opts.InitSQL,
 				)
 				if err != nil {

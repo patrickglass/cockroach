@@ -30,7 +30,7 @@ import (
 type Grant struct {
 	Privileges privilege.List
 	Targets    TargetList
-	Grantees   RoleSpecList
+	Grantees   NameList
 }
 
 // TargetList represents a list of targets.
@@ -41,14 +41,12 @@ type TargetList struct {
 	Tables    TablePatterns
 	Tenant    roachpb.TenantID
 	Types     []*UnresolvedObjectName
-	// If the target is for all tables in a set of schemas.
-	AllTablesInSchema bool
 
 	// ForRoles and Roles are used internally in the parser and not used
 	// in the AST. Therefore they do not participate in pretty-printing,
 	// etc.
 	ForRoles bool
-	Roles    RoleSpecList
+	Roles    NameList
 }
 
 // Format implements the NodeFormatter interface.
@@ -56,9 +54,6 @@ func (tl *TargetList) Format(ctx *FmtCtx) {
 	if tl.Databases != nil {
 		ctx.WriteString("DATABASE ")
 		ctx.FormatNode(&tl.Databases)
-	} else if tl.AllTablesInSchema {
-		ctx.WriteString("ALL TABLES IN SCHEMA ")
-		ctx.FormatNode(&tl.Schemas)
 	} else if tl.Schemas != nil {
 		ctx.WriteString("SCHEMA ")
 		ctx.FormatNode(&tl.Schemas)
@@ -91,7 +86,7 @@ func (node *Grant) Format(ctx *FmtCtx) {
 // GrantRole represents a GRANT <role> statement.
 type GrantRole struct {
 	Roles       NameList
-	Members     RoleSpecList
+	Members     NameList
 	AdminOption bool
 }
 

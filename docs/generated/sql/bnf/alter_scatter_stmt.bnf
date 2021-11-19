@@ -1,3 +1,0 @@
-alter_scatter_stmt ::=
-	'ALTER' 'TABLE' table_name 'SCATTER'
-	| 'ALTER' 'TABLE' table_name 'SCATTER' 'FROM' '(' expr_list ')' 'TO' '(' expr_list ')'

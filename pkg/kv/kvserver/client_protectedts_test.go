@@ -53,10 +53,7 @@ func TestProtectedTimestamps(t *testing.T) {
 	skip.UnderShort(t)
 
 	args := base.TestClusterArgs{}
-	args.ServerArgs.Knobs.Store = &kvserver.StoreTestingKnobs{
-		DisableGCQueue:            true,
-		DisableLastProcessedCheck: true,
-	}
+	args.ServerArgs.Knobs.Store = &kvserver.StoreTestingKnobs{DisableGCQueue: true}
 	tc := testcluster.StartTestCluster(t, 3, args)
 	defer tc.Stopper().Stop(ctx)
 	s0 := tc.Server(0)
@@ -72,7 +69,7 @@ func TestProtectedTimestamps(t *testing.T) {
 		"gc.ttlseconds = 1, range_max_bytes = 1<<18, range_min_bytes = 1<<10;")
 	require.NoError(t, err)
 
-	rRand, _ := randutil.NewTestRand()
+	rRand, _ := randutil.NewPseudoRand()
 	upsertUntilBackpressure := func() {
 		for {
 			_, err := conn.Exec("UPSERT INTO foo VALUES (1, $1)",

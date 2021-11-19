@@ -15,7 +15,7 @@ SELECT f FROM a ORDER BY f DESC
 sort
  ├── columns: f:2!null
  ├── stats: [rows=1000]
- ├── cost: 1304.00194
+ ├── cost: 1303.85569
  ├── ordering: -2
  └── scan a
       ├── columns: f:2!null
@@ -53,7 +53,7 @@ SELECT * FROM abc ORDER BY b, c, a
 sort
  ├── columns: a:1 b:2 c:3
  ├── stats: [rows=1000]
- ├── cost: 1356.2643
+ ├── cost: 1356.11805
  ├── ordering: +2,+3,+1
  └── scan abc
       ├── columns: a:1 b:2 c:3
@@ -130,7 +130,7 @@ SELECT * FROM abc ORDER BY a, b, c
 sort (segmented)
  ├── columns: a:1 b:2 c:3
  ├── stats: [rows=10000, distinct(1,2)=10, null(1,2)=0]
- ├── cost: 13419.3594
+ ├── cost: 13417.8969
  ├── ordering: +1,+2,+3
  └── scan abc@ab
       ├── columns: a:1 b:2 c:3
@@ -144,16 +144,16 @@ SELECT * FROM abc  WHERE a = b ORDER BY b, a, c
 ----
 sort (segmented)
  ├── columns: a:1!null b:2!null c:3
- ├── stats: [rows=2000, distinct(1)=2, null(1)=0, distinct(2)=2, null(2)=0, distinct(1,2)=4, null(1,2)=0]
- ├── cost: 11292.8376
+ ├── stats: [rows=2000, distinct(1)=2, null(1)=0, distinct(2)=2, null(2)=0]
+ ├── cost: 11332.7014
  ├── fd: (1)==(2), (2)==(1)
  ├── ordering: +(1|2),+3 [actual: +1,+3]
  └── select
       ├── columns: a:1!null b:2!null c:3
-      ├── stats: [rows=2000, distinct(1)=2, null(1)=0, distinct(2)=2, null(2)=0, distinct(1,2)=4, null(1,2)=0]
+      ├── stats: [rows=2000, distinct(1)=2, null(1)=0, distinct(2)=2, null(2)=0]
       ├── cost: 10814.05
       ├── fd: (1)==(2), (2)==(1)
-      ├── ordering: +(1|2) [actual: +1]
+      ├── ordering: +1
       ├── scan abc@ab
       │    ├── columns: a:1!null b:2 c:3
       │    ├── constraint: /1/2/4: (/NULL - ]

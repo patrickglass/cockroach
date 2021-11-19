@@ -13,6 +13,8 @@ package sql
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
@@ -54,19 +56,26 @@ func (p *planner) ReparentDatabase(
 		return nil, err
 	}
 
+	// Ensure that the cluster version is high enough to create the schema.
+	if !p.ExecCfg().Settings.Version.IsActive(ctx, clusterversion.UserDefinedSchemas) {
+		return nil, pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+			`creating schemas requires all nodes to be upgraded to %s`,
+			clusterversion.ByKey(clusterversion.UserDefinedSchemas))
+	}
+
 	if string(n.Name) == p.CurrentDatabase() {
 		return nil, pgerror.DangerousStatementf("CONVERT TO SCHEMA on current database")
 	}
 
 	sqltelemetry.IncrementUserDefinedSchemaCounter(sqltelemetry.UserDefinedSchemaReparentDatabase)
 
-	db, err := p.Descriptors().GetMutableDatabaseByName(ctx, p.txn, string(n.Name),
+	_, db, err := p.Descriptors().GetMutableDatabaseByName(ctx, p.txn, string(n.Name),
 		tree.DatabaseLookupFlags{Required: true})
 	if err != nil {
 		return nil, err
 	}
 
-	parent, err := p.Descriptors().GetMutableDatabaseByName(ctx, p.txn, string(n.Parent),
+	_, parent, err := p.Descriptors().GetMutableDatabaseByName(ctx, p.txn, string(n.Parent),
 		tree.DatabaseLookupFlags{Required: true})
 	if err != nil {
 		return nil, err
@@ -127,11 +136,14 @@ func (n *reparentDatabaseNode) startExec(params runParams) error {
 	if n.newParent.Schemas == nil {
 		n.newParent.Schemas = make(map[string]descpb.DatabaseDescriptor_SchemaInfo)
 	}
-	n.newParent.Schemas[n.db.Name] = descpb.DatabaseDescriptor_SchemaInfo{ID: schema.GetID()}
+	n.newParent.Schemas[n.db.Name] = descpb.DatabaseDescriptor_SchemaInfo{
+		ID:      schema.GetID(),
+		Dropped: false,
+	}
 
 	if err := p.createDescriptorWithID(
 		ctx,
-		catalogkeys.MakeSchemaNameKey(p.ExecCfg().Codec, n.newParent.ID, schema.GetName()),
+		catalogkeys.NewSchemaKey(n.newParent.ID, schema.GetName()).Key(p.ExecCfg().Codec),
 		id,
 		schema,
 		params.ExecCfg().Settings,
@@ -143,7 +155,7 @@ func (n *reparentDatabaseNode) startExec(params runParams) error {
 	b := p.txn.NewBatch()
 
 	// Get all objects under the target database.
-	objNames, _, err := resolver.GetObjectNamesAndIDs(ctx, p.txn, p, codec, n.db, tree.PublicSchema, true /* explicitPrefix */)
+	objNames, err := resolver.GetObjectNames(ctx, p.txn, p, codec, n.db, tree.PublicSchema, true /* explicitPrefix */)
 	if err != nil {
 		return err
 	}
@@ -152,7 +164,7 @@ func (n *reparentDatabaseNode) startExec(params runParams) error {
 	// to the new parent DB and schema.
 	for _, objName := range objNames {
 		// First try looking up objName as a table.
-		found, _, desc, err := p.LookupObject(
+		found, desc, err := p.LookupObject(
 			ctx,
 			tree.ObjectLookupFlags{
 				// Note we set required to be false here in order to not error out
@@ -172,11 +184,6 @@ func (n *reparentDatabaseNode) startExec(params runParams) error {
 			return err
 		}
 		if found {
-			oldNameKey := descpb.NameInfo{
-				ParentID:       desc.GetParentID(),
-				ParentSchemaID: desc.GetParentSchemaID(),
-				Name:           desc.GetName(),
-			}
 			// Remap the ID's on the table.
 			tbl, ok := desc.(*tabledesc.Mutable)
 			if !ok {
@@ -211,15 +218,21 @@ func (n *reparentDatabaseNode) startExec(params runParams) error {
 				)
 			}
 
+			tbl.AddDrainingName(descpb.NameInfo{
+				ParentID:       tbl.ParentID,
+				ParentSchemaID: tbl.GetParentSchemaID(),
+				Name:           tbl.Name,
+			})
 			tbl.ParentID = n.newParent.ID
 			tbl.UnexposedParentSchemaID = schema.GetID()
-			p.renameNamespaceEntry(ctx, b, oldNameKey, tbl)
+			objKey := catalogkv.MakeObjectNameKey(ctx, p.ExecCfg().Settings, tbl.ParentID, tbl.GetParentSchemaID(), tbl.Name).Key(codec)
+			b.CPut(objKey, tbl.ID, nil /* expected */)
 			if err := p.writeSchemaChange(ctx, tbl, descpb.InvalidMutationID, tree.AsStringWithFQNames(n.n, params.Ann())); err != nil {
 				return err
 			}
 		} else {
 			// If we couldn't resolve objName as a table, try a type.
-			found, _, desc, err := p.LookupObject(
+			found, desc, err := p.LookupObject(
 				ctx,
 				tree.ObjectLookupFlags{
 					CommonLookupFlags: tree.CommonLookupFlags{
@@ -240,19 +253,20 @@ func (n *reparentDatabaseNode) startExec(params runParams) error {
 			if !found {
 				continue
 			}
-			oldNameKey := descpb.NameInfo{
-				ParentID:       desc.GetParentID(),
-				ParentSchemaID: desc.GetParentSchemaID(),
-				Name:           desc.GetName(),
-			}
 			// Remap the ID's on the type.
 			typ, ok := desc.(*typedesc.Mutable)
 			if !ok {
 				return errors.AssertionFailedf("%q was not a Mutable", objName.Object())
 			}
+			typ.AddDrainingName(descpb.NameInfo{
+				ParentID:       typ.ParentID,
+				ParentSchemaID: typ.ParentSchemaID,
+				Name:           typ.Name,
+			})
 			typ.ParentID = n.newParent.ID
 			typ.ParentSchemaID = schema.GetID()
-			p.renameNamespaceEntry(ctx, b, oldNameKey, typ)
+			objKey := catalogkv.MakeObjectNameKey(ctx, p.ExecCfg().Settings, typ.ParentID, typ.ParentSchemaID, typ.Name).Key(codec)
+			b.CPut(objKey, typ.ID, nil /* expected */)
 			if err := p.writeTypeSchemaChange(ctx, typ, tree.AsStringWithFQNames(n.n, params.Ann())); err != nil {
 				return err
 			}
@@ -261,13 +275,16 @@ func (n *reparentDatabaseNode) startExec(params runParams) error {
 
 	// Delete the public schema namespace entry for this database. Per our check
 	// during initialization, this is the only schema present under n.db.
-	b.Del(catalogkeys.MakePublicSchemaNameKey(codec, n.db.ID))
+	b.Del(catalogkv.MakeObjectNameKey(ctx, p.ExecCfg().Settings, n.db.ID, keys.RootNamespaceID, tree.PublicSchema).Key(codec))
 
 	// This command can only be run when database leasing is supported, so we don't
 	// have to handle the case where it isn't.
-	p.dropNamespaceEntry(ctx, b, n.db)
-
-	n.db.SetDropped()
+	n.db.AddDrainingName(descpb.NameInfo{
+		ParentID:       keys.RootNamespaceID,
+		ParentSchemaID: keys.RootNamespaceID,
+		Name:           n.db.Name,
+	})
+	n.db.State = descpb.DescriptorState_DROP
 	if err := p.writeDatabaseChangeToBatch(ctx, n.db, b); err != nil {
 		return err
 	}

@@ -11,7 +11,6 @@
 package tenantrate
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/multitenant"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/metric/aggmetric"
@@ -68,8 +67,12 @@ var (
 	}
 )
 
+// TenantIDLabel is the label used with metrics associated with a tenant.
+// The value will be the integer tenant ID.
+const TenantIDLabel = "tenant_id"
+
 func makeMetrics() Metrics {
-	b := aggmetric.MakeBuilder(multitenant.TenantIDLabel)
+	b := aggmetric.MakeBuilder(TenantIDLabel)
 	return Metrics{
 		Tenants:               metric.NewGauge(metaTenants),
 		CurrentBlocked:        b.Gauge(metaCurrentBlocked),

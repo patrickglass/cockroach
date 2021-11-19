@@ -34,11 +34,6 @@ import (
 type SendOptions struct {
 	class   rpc.ConnectionClass
 	metrics *DistSenderMetrics
-	// dontConsiderConnHealth, if set, makes the transport not take into
-	// consideration the connection health when deciding the ordering for
-	// replicas. When not set, replicas on nodes with unhealthy connections are
-	// deprioritized.
-	dontConsiderConnHealth bool
 }
 
 // TransportFactory encapsulates all interaction with the RPC
@@ -114,7 +109,6 @@ func grpcTransportFactoryImpl(
 	} else {
 		replicas = replicas[:len(rs)]
 	}
-
 	// We'll map the index of the replica descriptor in its slice to its health.
 	var health util.FastIntMap
 	for i, r := range rs {
@@ -127,11 +121,9 @@ func grpcTransportFactoryImpl(
 		}
 	}
 
-	if !opts.dontConsiderConnHealth {
-		// Put known-healthy clients first, while otherwise respecting the existing
-		// ordering of the replicas.
-		splitHealthy(replicas, health)
-	}
+	// Put known-healthy clients first, while otherwise respecting the existing
+	// ordering of the replicas.
+	splitHealthy(replicas, health)
 
 	*transport = grpcTransport{
 		opts:       opts,

@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
@@ -29,8 +28,7 @@ import (
 
 func TestInvertedJoinProvided(t *testing.T) {
 	tc := testcat.New()
-	st := cluster.MakeTestingClusterSettings()
-	evalCtx := tree.NewTestingEvalContext(st)
+	evalCtx := tree.NewTestingEvalContext(nil /* st */)
 	var f norm.Factory
 	f.Init(evalCtx, tc)
 	md := f.Metadata()
@@ -59,8 +57,8 @@ func TestInvertedJoinProvided(t *testing.T) {
 	tn = tree.NewUnqualifiedTableName("t2")
 	inputTab := md.AddTable(tc.Table(tn), tn)
 
-	if c7 := inputTab.ColumnID(0); c7 != 7 {
-		t.Fatalf("unexpected ID for column c7: %d\n", c7)
+	if c6 := inputTab.ColumnID(0); c6 != 6 {
+		t.Fatalf("unexpected ID for column c6: %d\n", c6)
 	}
 
 	c := func(cols ...opt.ColumnID) opt.ColSet {
@@ -73,30 +71,30 @@ func TestInvertedJoinProvided(t *testing.T) {
 		input    string
 		provided string
 	}{
-		// In these tests, the input (left side of the join) has columns 7,8 and the
+		// In these tests, the input (left side of the join) has columns 6,7 and the
 		// index (right side) has columns 1,2,5 (where 5 is the inverted key column
-		// representing 3) and the join has condition st_intersects(c8, c3) AND
-		// c2 = c7.
+		// representing 3) and the join has condition st_intersects(c7, c3) AND
+		// c2 = c6.
 		//
 		{ // case 1: the inverted join adds columns 1,2 from the table and retains the
 			// input columns.
-			outCols:  c(1, 2, 7, 8),
-			required: "+7,+8",
-			input:    "+7,+8",
-			provided: "+7,+8",
+			outCols:  c(1, 2, 6, 7),
+			required: "+6,+7",
+			input:    "+6,+7",
+			provided: "+6,+7",
 		},
 		{ // case 2: same output columns as case 1. The provided ordering
-			// on 7 is equivalent to an ordering on 2.
-			outCols:  c(1, 2, 7, 8),
+			// on 6 is equivalent to an ordering on 2.
+			outCols:  c(1, 2, 6, 7),
 			required: "+2",
-			input:    "+7",
-			provided: "+7",
+			input:    "+6",
+			provided: "+6",
 		},
-		{ // case 3: the inverted join does not produce input column 7; we must
+		{ // case 3: the inverted join does not produce input column 6; we must
 			// remap the input ordering to refer to output column 2 instead.
 			outCols:  c(1, 2),
 			required: "-2",
-			input:    "-7",
+			input:    "-6",
 			provided: "-2",
 		},
 	}
@@ -106,21 +104,21 @@ func TestInvertedJoinProvided(t *testing.T) {
 			input := &testexpr.Instance{
 				Rel: &props.Relational{},
 				Provided: &physical.Provided{
-					Ordering: props.ParseOrdering(tc.input),
+					Ordering: physical.ParseOrdering(tc.input),
 				},
 			}
 			args := memo.ScalarListExpr{
-				f.ConstructVariable(opt.ColumnID(8)), f.ConstructVariable(opt.ColumnID(3)),
+				f.ConstructVariable(opt.ColumnID(7)), f.ConstructVariable(opt.ColumnID(3)),
 			}
 			name := "st_intersects"
-			funcProps, overload, ok := memo.FindFunction(&args, name)
+			props, overload, ok := memo.FindFunction(&args, name)
 			if !ok {
 				panic(errors.AssertionFailedf("could not find overload for %s", name))
 			}
 			invertedExpr := f.ConstructFunction(args, &memo.FunctionPrivate{
 				Name:       name,
 				Typ:        types.Bool,
-				Properties: funcProps,
+				Properties: props,
 				Overload:   overload,
 			})
 
@@ -128,7 +126,7 @@ func TestInvertedJoinProvided(t *testing.T) {
 				input,
 				memo.FiltersExpr{
 					f.ConstructFiltersItem(f.ConstructEq(
-						f.ConstructVariable(opt.ColumnID(2)), f.ConstructVariable(opt.ColumnID(7)),
+						f.ConstructVariable(opt.ColumnID(2)), f.ConstructVariable(opt.ColumnID(6)),
 					)),
 				},
 				&memo.InvertedJoinPrivate{
@@ -139,7 +137,7 @@ func TestInvertedJoinProvided(t *testing.T) {
 					Cols:         tc.outCols,
 				},
 			)
-			req := props.ParseOrderingChoice(tc.required)
+			req := physical.ParseOrderingChoice(tc.required)
 			res := invertedJoinBuildProvided(invertedJoin, &req).String()
 			if res != tc.provided {
 				t.Errorf("expected '%s', got '%s'", tc.provided, res)

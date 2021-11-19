@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldatatestutils"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/colcontainer"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexectestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
@@ -51,7 +50,6 @@ type testUtils struct {
 	// testAllocator is an Allocator with an unlimited budget for use in tests.
 	testAllocator     *colmem.Allocator
 	testColumnFactory coldata.ColumnFactory
-	evalCtx           *tree.EvalContext
 
 	// testMemMonitor and testMemAcc are a test monitor with an unlimited budget
 	// and a memory account bound to it for use in tests.
@@ -76,7 +74,6 @@ func newTestUtils(ctx context.Context) *testUtils {
 	return &testUtils{
 		testAllocator:     testAllocator,
 		testColumnFactory: testColumnFactory,
-		evalCtx:           &evalCtx,
 		testMemMonitor:    testMemMonitor,
 		testMemAcc:        &memAcc,
 		testDiskMonitor:   testDiskMonitor,
@@ -204,7 +201,7 @@ func TestRouterOutputAddBatch(t *testing.T) {
 	// in this test.
 	unblockEventsChan := make(chan struct{})
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	queueCfg, cleanup, memoryTestCases := getDiskQueueCfgAndMemoryTestCases(t, rng)
 	defer cleanup()
 	tu := newTestUtils(ctx)
@@ -235,9 +232,9 @@ func TestRouterOutputAddBatch(t *testing.T) {
 				)
 				in := colexectestutils.NewOpTestInput(tu.testAllocator, tc.inputBatchSize, data, nil)
 				out := colexectestutils.NewOpTestOutput(o, data[:len(tc.selection)])
-				in.Init(ctx)
+				in.Init()
 				for {
-					b := in.Next()
+					b := in.Next(ctx)
 					pushSelectionIntoBatch(b, tc.selection)
 					o.addBatch(ctx, b)
 					if b.Length() == 0 {
@@ -277,11 +274,11 @@ func TestRouterOutputNext(t *testing.T) {
 		name         string
 	}{
 		{
-			// ReaderWaitsForData verifies that a reader blocks in Next() until there
+			// ReaderWaitsForData verifies that a reader blocks in Next(ctx) until there
 			// is data available.
 			unblockEvent: func(in colexecop.Operator, o *routerOutputOp) {
 				for {
-					b := in.Next()
+					b := in.Next(ctx)
 					pushSelectionIntoBatch(b, fullSelection)
 					o.addBatch(ctx, b)
 					if b.Length() == 0 {
@@ -316,7 +313,7 @@ func TestRouterOutputNext(t *testing.T) {
 	// never write to it in this test.
 	unblockedEventsChan := make(chan struct{})
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	queueCfg, cleanup, memoryTestCases := getDiskQueueCfgAndMemoryTestCases(t, rng)
 	defer cleanup()
 	tu := newTestUtils(ctx)
@@ -341,13 +338,12 @@ func TestRouterOutputNext(t *testing.T) {
 						unblockedEventsChan: unblockedEventsChan,
 					},
 				)
-				o.Init(ctx)
 				in := colexectestutils.NewOpTestInput(tu.testAllocator, coldata.BatchSize(), data, nil)
-				in.Init(ctx)
+				in.Init()
 				wg.Add(1)
 				go func() {
 					for {
-						b := o.Next()
+						b := o.Next(ctx)
 						batchChan <- b
 						if b.Length() == 0 {
 							break
@@ -403,9 +399,8 @@ func TestRouterOutputNext(t *testing.T) {
 				},
 			)
 			o.addBatch(ctx, coldata.ZeroBatch)
-			o.Init(ctx)
-			o.Next()
-			o.Next()
+			o.Next(ctx)
+			o.Next(ctx)
 			select {
 			case <-unblockedEventsChan:
 				t.Fatal("unexpected output state change")
@@ -455,19 +450,18 @@ func TestRouterOutputNext(t *testing.T) {
 					},
 				},
 			)
-			o.Init(ctx)
 			in := colexectestutils.NewOpTestInput(tu.testAllocator, smallBatchSize, data, nil)
 			out := colexectestutils.NewOpTestOutput(o, expected)
-			in.Init(ctx)
+			in.Init()
 
-			b := in.Next()
+			b := in.Next(ctx)
 			// Make sure the output doesn't consider itself blocked. We're right at the
 			// limit but not over.
 			pushSelectionIntoBatch(b, selection)
 			if o.addBatch(ctx, b) {
 				t.Fatal("unexpectedly blocked")
 			}
-			b = in.Next()
+			b = in.Next(ctx)
 			// This addBatch call should now block the output.
 			pushSelectionIntoBatch(b, selection)
 			if !o.addBatch(ctx, b) {
@@ -476,7 +470,7 @@ func TestRouterOutputNext(t *testing.T) {
 
 			// Add the rest of the data.
 			for {
-				b = in.Next()
+				b = in.Next(ctx)
 				pushSelectionIntoBatch(b, selection)
 				if o.addBatch(ctx, b) {
 					t.Fatal("should only return true when switching from unblocked to blocked")
@@ -503,7 +497,7 @@ func TestRouterOutputRandom(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	var (
 		maxValues        = coldata.BatchSize() * 4
@@ -548,7 +542,7 @@ func TestRouterOutputRandom(t *testing.T) {
 						},
 					},
 				)
-				inputs[0].Init(ctx)
+				inputs[0].Init()
 
 				expected := make(colexectestutils.Tuples, 0, len(data))
 
@@ -563,7 +557,7 @@ func TestRouterOutputRandom(t *testing.T) {
 					defer wg.Done()
 					lastBlockedState := false
 					for {
-						b := inputs[0].Next()
+						b := inputs[0].Next(ctx)
 						selection := b.Selection()
 						if selection == nil {
 							selection = coldatatestutils.RandomSel(rng, b.Length(), rng.Float64())
@@ -623,9 +617,8 @@ func TestRouterOutputRandom(t *testing.T) {
 				// Consumer.
 				wg.Add(1)
 				go func() {
-					o.Init(ctx)
 					for {
-						b := o.Next()
+						b := o.Next(ctx)
 						actual.Add(coldatatestutils.CopyBatch(b, typs, tu.testColumnFactory), typs)
 						if b.Length() == 0 {
 							wg.Done()
@@ -708,7 +701,7 @@ func TestHashRouterComputesDestination(t *testing.T) {
 	}
 
 	in := colexectestutils.NewOpTestInput(tu.testAllocator, batchSize, data, nil)
-	in.Init(ctx)
+	in.Init()
 
 	var (
 		// expectedNumVals is the number of expected values the output at the
@@ -744,12 +737,7 @@ func TestHashRouterComputesDestination(t *testing.T) {
 		}
 	}
 
-	r := newHashRouterWithOutputs(
-		colexecargs.OpWithMetaInfo{Root: in},
-		[]uint32{0}, /* hashCols */
-		nil,         /* unblockEventsChan */
-		outputs,
-	)
+	r := newHashRouterWithOutputs(in, []uint32{0}, nil /* ch */, outputs, nil /* getStats */, nil /* toDrain */, nil /* toClose */)
 	for r.processNextBatch(ctx) {
 	}
 
@@ -792,12 +780,7 @@ func TestHashRouterCancellation(t *testing.T) {
 	in := colexecop.NewRepeatableBatchSource(tu.testAllocator, batch, typs)
 
 	unbufferedCh := make(chan struct{})
-	r := newHashRouterWithOutputs(
-		colexecargs.OpWithMetaInfo{Root: in},
-		[]uint32{0}, /* hashCols */
-		unbufferedCh,
-		routerOutputs,
-	)
+	r := newHashRouterWithOutputs(in, []uint32{0}, unbufferedCh, routerOutputs, nil /* getStats */, nil /* toDrain */, nil /* toClose */)
 
 	t.Run("BeforeRun", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -876,7 +859,7 @@ func TestHashRouterOneOutput(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	sel := coldatatestutils.RandomSel(rng, coldata.BatchSize(), rng.Float64())
 
@@ -900,15 +883,16 @@ func TestHashRouterOneOutput(t *testing.T) {
 			defer diskAcc.Close(ctx)
 			r, routerOutputs := NewHashRouter(
 				[]*colmem.Allocator{tu.testAllocator},
-				colexecargs.OpWithMetaInfo{
-					Root: colexectestutils.NewOpFixedSelTestInput(tu.testAllocator, sel, len(sel), data, typs),
-				},
+				colexectestutils.NewOpFixedSelTestInput(tu.testAllocator, sel, len(sel), data, typs),
 				typs,
 				[]uint32{0}, /* hashCols */
 				mtc.bytes,
 				queueCfg,
 				colexecop.NewTestingSemaphore(2),
 				[]*mon.BoundAccount{&diskAcc},
+				nil, /* getStats */
+				nil, /* toDrain */
+				nil, /* toClose */
 			)
 
 			if len(routerOutputs) != 1 {
@@ -931,7 +915,7 @@ func TestHashRouterOneOutput(t *testing.T) {
 			}
 			wg.Wait()
 			// Expect no metadata, this should be a successful run.
-			unexpectedMetadata := ro.DrainMeta()
+			unexpectedMetadata := ro.DrainMeta(ctx)
 			if len(unexpectedMetadata) != 0 {
 				t.Fatalf("unexpected metadata when draining HashRouter output: %+v", unexpectedMetadata)
 			}
@@ -950,7 +934,7 @@ func TestHashRouterRandom(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 
 	var (
 		maxValues        = coldata.BatchSize() * 4
@@ -1077,14 +1061,14 @@ func TestHashRouterRandom(t *testing.T) {
 					switch injectErrorScenario {
 					case hashRouterOutputErrorOnAddBatch:
 						op.testingKnobs.addBatchTestInducedErrorCb = func() error {
-							addBatchRng, _ := randutil.NewTestRand()
+							addBatchRng, _ := randutil.NewPseudoRand()
 							// Sleep between 0 and ~5 milliseconds.
 							time.Sleep(time.Microsecond * time.Duration(addBatchRng.Intn(5000)))
 							return errors.New(addBatchErrMsg)
 						}
 					case hashRouterOutputErrorOnNext:
 						op.testingKnobs.nextTestInducedErrorCb = func() error {
-							nextRng, _ := randutil.NewTestRand()
+							nextRng, _ := randutil.NewPseudoRand()
 							// Sleep between 0 and ~5 milliseconds.
 							time.Sleep(time.Microsecond * time.Duration(nextRng.Intn(5000)))
 							return errors.New(nextErrMsg)
@@ -1096,19 +1080,19 @@ func TestHashRouterRandom(t *testing.T) {
 
 				const hashRouterMetadataMsg = "hash router test metadata"
 				r := newHashRouterWithOutputs(
-					colexecargs.OpWithMetaInfo{
-						Root: inputs[0],
-						MetadataSources: []colexecop.MetadataSource{
-							colexectestutils.CallbackMetadataSource{
-								DrainMetaCb: func() []execinfrapb.ProducerMetadata {
-									return []execinfrapb.ProducerMetadata{{Err: errors.New(hashRouterMetadataMsg)}}
-								},
-							},
-						},
-					},
+					inputs[0],
 					hashCols,
 					unblockEventsChan,
 					outputs,
+					nil, /* getStats */
+					[]execinfrapb.MetadataSource{
+						execinfrapb.CallbackMetadataSource{
+							DrainMetaCb: func(_ context.Context) []execinfrapb.ProducerMetadata {
+								return []execinfrapb.ProducerMetadata{{Err: errors.New(hashRouterMetadataMsg)}}
+							},
+						},
+					},
+					nil, /* toClose */
 				)
 
 				var (
@@ -1129,17 +1113,16 @@ func TestHashRouterRandom(t *testing.T) {
 				}{}
 				for i := range outputsAsOps {
 					go func(i int) {
-						outputRng, _ := randutil.NewTestRand()
-						outputsAsOps[i].Init(ctx)
+						outputRng, _ := randutil.NewPseudoRand()
 						for {
 							var b coldata.Batch
 							err := colexecerror.CatchVectorizedRuntimeError(func() {
-								b = outputsAsOps[i].Next()
+								b = outputsAsOps[i].Next(ctx)
 							})
 							if err != nil || b.Length() == 0 || isTerminationScenario(outputRng, 0.5, hashRouterPrematureDrainMeta) {
 								resultsByOp[i].err = err
 								metadataMu.Lock()
-								if meta := outputsAsOps[i].DrainMeta(); meta != nil {
+								if meta := outputsAsOps[i].DrainMeta(ctx); meta != nil {
 									metadataMu.metadata = append(metadataMu.metadata, meta)
 								}
 								metadataMu.Unlock()
@@ -1327,13 +1310,16 @@ func BenchmarkHashRouter(b *testing.B) {
 				}
 				r, outputs := NewHashRouter(
 					allocators,
-					colexecargs.OpWithMetaInfo{Root: input},
+					input,
 					typs,
 					[]uint32{0}, /* hashCols */
 					64<<20,      /* memoryLimit */
 					queueCfg,
 					&colexecop.TestingSemaphore{},
 					diskAccounts,
+					nil, /* getStats */
+					nil, /* toDrain */
+					nil, /* toClose */
 				)
 				b.SetBytes(8 * int64(coldata.BatchSize()) * int64(numInputBatches))
 				// We expect distribution to not change. This is a sanity check that
@@ -1350,12 +1336,11 @@ func BenchmarkHashRouter(b *testing.B) {
 					wg.Add(len(outputs))
 					for j := range outputs {
 						go func(j int) {
-							outputs[j].Init(ctx)
 							for {
-								oBatch := outputs[j].Next()
+								oBatch := outputs[j].Next(ctx)
 								actualDistribution[j] += oBatch.Length()
 								if oBatch.Length() == 0 {
-									_ = outputs[j].DrainMeta()
+									_ = outputs[j].DrainMeta(ctx)
 									break
 								}
 							}

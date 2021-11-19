@@ -235,11 +235,11 @@ func (c *CustomFuncs) mergeSortedAnds(left, right opt.ScalarExpr) opt.ScalarExpr
 		nextRight = and.Right
 	}
 
-	if nextLeft == nextRight {
+	if nextLeft.ID() == nextRight.ID() {
 		// Eliminate duplicates.
 		return c.mergeSortedAnds(left, remainingRight)
 	}
-	if nextLeft.Rank() < nextRight.Rank() {
+	if nextLeft.ID() < nextRight.ID() {
 		return c.f.ConstructAnd(c.mergeSortedAnds(left, remainingRight), nextRight)
 	}
 	return c.f.ConstructAnd(c.mergeSortedAnds(remainingLeft, right), nextLeft)
@@ -249,7 +249,7 @@ func (c *CustomFuncs) mergeSortedAnds(left, right opt.ScalarExpr) opt.ScalarExpr
 func (c *CustomFuncs) HasDuplicateFilters(f memo.FiltersExpr) bool {
 	for i := 0; i < len(f); i++ {
 		for j := i + 1; j < len(f); j++ {
-			if f[i].Condition == f[j].Condition {
+			if f[i].Condition.ID() == f[j].Condition.ID() {
 				return true
 			}
 		}
@@ -259,14 +259,10 @@ func (c *CustomFuncs) HasDuplicateFilters(f memo.FiltersExpr) bool {
 
 // DeduplicateFilters returns the input filters with duplicates removed.
 func (c *CustomFuncs) DeduplicateFilters(f memo.FiltersExpr) memo.FiltersExpr {
-	// Here we sort the filters by their scalar rank, though we don't really
-	// care that they are fully sorted. To remove duplicates we only care that
-	// duplicate expressions are grouped together, which they will be since
-	// their scalar rank must be equal.
 	result := c.SortFilters(f)
 	j := 1
 	for i := 1; i < len(result); i++ {
-		if result[i].Condition != result[i-1].Condition {
+		if result[i].Condition.ID() != result[i-1].Condition.ID() {
 			result[j] = result[i]
 			j++
 		}
@@ -275,10 +271,10 @@ func (c *CustomFuncs) DeduplicateFilters(f memo.FiltersExpr) memo.FiltersExpr {
 }
 
 // AreFiltersSorted determines whether the expressions in a FiltersExpr are
-// ordered by their expression ranks.
+// ordered by their expression IDs.
 func (c *CustomFuncs) AreFiltersSorted(f memo.FiltersExpr) bool {
 	for i := 1; i < len(f); i++ {
-		if f[i-1].Condition.Rank() > f[i].Condition.Rank() {
+		if f[i-1].Condition.ID() > f[i].Condition.ID() {
 			return false
 		}
 	}

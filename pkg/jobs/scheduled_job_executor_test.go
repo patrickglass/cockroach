@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
-	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -57,16 +56,6 @@ func (s *statusTrackingExecutor) NotifyJobTermination(
 
 func (s *statusTrackingExecutor) Metrics() metric.Struct {
 	return nil
-}
-
-func (s *statusTrackingExecutor) GetCreateScheduleStatement(
-	ctx context.Context,
-	env scheduledjobs.JobSchedulerEnv,
-	txn *kv.Txn,
-	sj *ScheduledJob,
-	ex sqlutil.InternalExecutor,
-) (string, error) {
-	return "", errors.AssertionFailedf("unimplemented method: 'GetCreateScheduleStatement'")
 }
 
 var _ ScheduledJobExecutor = &statusTrackingExecutor{}

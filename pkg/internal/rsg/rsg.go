@@ -17,7 +17,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/internal/rsg/yacc"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -54,7 +54,7 @@ func NewRSG(seed int64, y string, allowDuplicates bool) (*RSG, error) {
 
 // Generate generates a unique random syntax from the root node. At most depth
 // levels of token expansion are performed. An empty string is returned on
-// error or if depth is exceeded. Generate is safe to call from multiple
+// error or if depth is exceeded. Generate is safe to call from mulitipule
 // goroutines. If Generate is called more times than it can generate unique
 // output, it will block forever.
 func (r *RSG) Generate(root string, depth int) string {
@@ -178,7 +178,7 @@ func (r *RSG) GenerateRandomArg(typ *types.T) string {
 	}
 
 	r.lock.Lock()
-	datum := randgen.RandDatumWithNullChance(r.Rnd, typ, 0)
+	datum := rowenc.RandDatumWithNullChance(r.Rnd, typ, 0)
 	r.lock.Unlock()
 
 	return tree.Serialize(datum)

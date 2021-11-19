@@ -10,8 +10,6 @@
 
 package settings
 
-import "context"
-
 // BoolSetting is the interface of a setting variable that will be
 // updated automatically when the corresponding cluster-wide setting
 // of type "bool" is updated.
@@ -58,8 +56,8 @@ var _ = (*BoolSetting).Default
 // default value.
 //
 // For testing usage only.
-func (b *BoolSetting) Override(ctx context.Context, sv *Values, v bool) {
-	b.set(ctx, sv, v)
+func (b *BoolSetting) Override(sv *Values, v bool) {
+	b.set(sv, v)
 
 	vInt := int64(0)
 	if v {
@@ -68,22 +66,22 @@ func (b *BoolSetting) Override(ctx context.Context, sv *Values, v bool) {
 	sv.setDefaultOverrideInt64(b.slotIdx, vInt)
 }
 
-func (b *BoolSetting) set(ctx context.Context, sv *Values, v bool) {
+func (b *BoolSetting) set(sv *Values, v bool) {
 	vInt := int64(0)
 	if v {
 		vInt = 1
 	}
-	sv.setInt64(ctx, b.slotIdx, vInt)
+	sv.setInt64(b.slotIdx, vInt)
 }
 
-func (b *BoolSetting) setToDefault(ctx context.Context, sv *Values) {
+func (b *BoolSetting) setToDefault(sv *Values) {
 	// See if the default value was overridden.
 	ok, val, _ := sv.getDefaultOverride(b.slotIdx)
 	if ok {
-		b.set(ctx, sv, val > 0)
+		b.set(sv, val > 0)
 		return
 	}
-	b.set(ctx, sv, b.defaultValue)
+	b.set(sv, b.defaultValue)
 }
 
 // WithPublic sets public visibility and can be chained.
@@ -97,6 +95,9 @@ func (b *BoolSetting) WithSystemOnly() *BoolSetting {
 	b.common.systemOnly = true
 	return b
 }
+
+// Defeat the linter.
+var _ = (*BoolSetting).WithSystemOnly
 
 // RegisterBoolSetting defines a new setting with type bool.
 func RegisterBoolSetting(key, desc string, defaultValue bool) *BoolSetting {

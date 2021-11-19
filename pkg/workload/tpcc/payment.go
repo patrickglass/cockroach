@@ -16,12 +16,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cockroachdb/cockroach-go/v2/crdb/crdbpgx"
+	"github.com/cockroachdb/cockroach-go/crdb"
 	"github.com/cockroachdb/cockroach/pkg/util/bufalloc"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload"
 	"github.com/cockroachdb/errors"
-	"github.com/jackc/pgx/v4"
 	"golang.org/x/exp/rand"
 )
 
@@ -190,9 +189,13 @@ func (p *payment) run(ctx context.Context, wID int) (interface{}, error) {
 		d.cID = p.config.randCustomerID(rng)
 	}
 
-	if err := crdbpgx.ExecuteTx(
-		ctx, p.mcp.Get(), p.config.txOpts,
-		func(tx pgx.Tx) error {
+	tx, err := p.mcp.Get().BeginEx(ctx, p.config.txOpts)
+	if err != nil {
+		return nil, err
+	}
+	if err := crdb.ExecuteInTx(
+		ctx, (*workload.PgxTx)(tx),
+		func() error {
 			var wName, dName string
 			// Update warehouse with payment
 			if err := p.updateWarehouse.QueryRowTx(

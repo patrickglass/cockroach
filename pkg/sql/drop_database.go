@@ -12,14 +12,13 @@ package sql
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
@@ -29,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessioninit"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
@@ -64,12 +62,12 @@ func (p *planner) DropDatabase(ctx context.Context, n *tree.DropDatabase) (planN
 	}
 
 	// Check that the database exists.
-	dbDesc, err := p.Descriptors().GetMutableDatabaseByName(ctx, p.txn, string(n.Name),
+	found, dbDesc, err := p.Descriptors().GetMutableDatabaseByName(ctx, p.txn, string(n.Name),
 		tree.DatabaseLookupFlags{Required: !n.IfExists})
 	if err != nil {
 		return nil, err
 	}
-	if dbDesc == nil {
+	if !found {
 		// IfExists was specified and database was not found.
 		return newZeroNode(nil /* columns */), nil
 	}
@@ -86,16 +84,15 @@ func (p *planner) DropDatabase(ctx context.Context, n *tree.DropDatabase) (planN
 	d := newDropCascadeState()
 
 	for _, schema := range schemas {
-		res, err := p.Descriptors().GetSchemaByName(
-			ctx, p.txn, dbDesc, schema, tree.SchemaLookupFlags{
-				Required:       true,
-				RequireMutable: true,
-			},
-		)
+		found, res, err := p.ResolveMutableSchemaDescriptor(ctx, dbDesc.ID, schema, true /* required */)
 		if err != nil {
 			return nil, err
 		}
-		if err := d.collectObjectsInSchema(ctx, p, dbDesc, res); err != nil {
+		if !found {
+			log.Warningf(ctx, "could not find schema %s under database %d", schema, dbDesc.ID)
+			continue
+		}
+		if err := d.collectObjectsInSchema(ctx, p, dbDesc, &res); err != nil {
 			return nil, err
 		}
 	}
@@ -133,32 +130,32 @@ func (n *dropDatabaseNode) startExec(params runParams) error {
 	ctx := params.ctx
 	p := params.p
 
-	// Drop all of the collected objects.
-	if err := n.d.dropAllCollectedObjects(ctx, p); err != nil {
-		return err
-	}
-
 	var schemasIDsToDelete []descpb.ID
 	for _, schemaWithDbDesc := range n.d.schemasToDelete {
 		schemaToDelete := schemaWithDbDesc.schema
-		switch schemaToDelete.SchemaKind() {
+		switch schemaToDelete.Kind {
 		case catalog.SchemaTemporary, catalog.SchemaPublic:
 			// The public schema and temporary schemas are cleaned up by just removing
 			// the existing namespace entries.
-			key := catalogkeys.MakeSchemaNameKey(p.ExecCfg().Codec, n.dbDesc.GetID(), schemaToDelete.GetName())
-			if err := p.txn.Del(ctx, key); err != nil {
+			if err := catalogkv.RemoveSchemaNamespaceEntry(
+				ctx,
+				p.txn,
+				p.ExecCfg().Codec,
+				n.dbDesc.GetID(),
+				schemaToDelete.Name,
+			); err != nil {
 				return err
 			}
 		case catalog.SchemaUserDefined:
 			// For user defined schemas, we have to do a bit more work.
-			mutDesc, ok := schemaToDelete.(*schemadesc.Mutable)
+			mutDesc, ok := schemaToDelete.Desc.(*schemadesc.Mutable)
 			if !ok {
-				return errors.AssertionFailedf("expected Mutable, found %T", schemaToDelete)
+				return errors.AssertionFailedf("expected Mutable, found %T", schemaToDelete.Desc)
 			}
 			if err := params.p.dropSchemaImpl(ctx, n.dbDesc, mutDesc); err != nil {
 				return err
 			}
-			schemasIDsToDelete = append(schemasIDsToDelete, schemaToDelete.GetID())
+			schemasIDsToDelete = append(schemasIDsToDelete, schemaToDelete.ID)
 		}
 	}
 
@@ -173,10 +170,19 @@ func (n *dropDatabaseNode) startExec(params runParams) error {
 		return err
 	}
 
-	n.dbDesc.SetDropped()
-	b := p.txn.NewBatch()
-	p.dropNamespaceEntry(ctx, b, n.dbDesc)
+	// Drop all of the collected objects.
+	if err := n.d.dropAllCollectedObjects(ctx, p); err != nil {
+		return err
+	}
 
+	n.dbDesc.AddDrainingName(descpb.NameInfo{
+		ParentID:       keys.RootNamespaceID,
+		ParentSchemaID: keys.RootNamespaceID,
+		Name:           n.dbDesc.Name,
+	})
+	n.dbDesc.State = descpb.DescriptorState_DROP
+
+	b := &kv.Batch{}
 	// Note that a job was already queued above.
 	if err := p.writeDatabaseChangeToBatch(ctx, n.dbDesc, b); err != nil {
 		return err
@@ -186,9 +192,6 @@ func (n *dropDatabaseNode) startExec(params runParams) error {
 	}
 
 	if err := p.removeDbComment(ctx, n.dbDesc.GetID()); err != nil {
-		return err
-	}
-	if err := p.removeDbRoleSettings(ctx, n.dbDesc.GetID()); err != nil {
 		return err
 	}
 
@@ -314,34 +317,6 @@ func (p *planner) removeDbComment(ctx context.Context, dbID descpb.ID) error {
 		"DELETE FROM system.comments WHERE type=$1 AND object_id=$2 AND sub_id=0",
 		keys.DatabaseCommentType,
 		dbID)
-
-	return err
-}
-
-func (p *planner) removeDbRoleSettings(ctx context.Context, dbID descpb.ID) error {
-	// TODO(rafi): Remove this condition in 21.2.
-	if !p.EvalContext().Settings.Version.IsActive(ctx, clusterversion.DatabaseRoleSettings) {
-		return nil
-	}
-	rowsDeleted, err := p.ExtendedEvalContext().ExecCfg.InternalExecutor.ExecEx(
-		ctx,
-		"delete-db-role-settings",
-		p.txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
-		fmt.Sprintf(
-			`DELETE FROM %s WHERE database_id = $1`,
-			sessioninit.DatabaseRoleSettingsTableName,
-		),
-		dbID,
-	)
-	if err != nil {
-		return err
-	}
-	if rowsDeleted > 0 && sessioninit.CacheEnabled.Get(&p.ExecCfg().Settings.SV) {
-		if err := p.bumpDatabaseRoleSettingsTableVersion(ctx); err != nil {
-			return err
-		}
-	}
 
 	return err
 }

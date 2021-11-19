@@ -16,11 +16,10 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/multiregion"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
@@ -36,7 +35,7 @@ import (
 type alterTableSetLocalityNode struct {
 	n         tree.AlterTableLocality
 	tableDesc *tabledesc.Mutable
-	dbDesc    catalog.DatabaseDescriptor
+	dbDesc    *dbdesc.Immutable
 }
 
 // AlterTableLocality transforms a tree.AlterTableLocality into a plan node.
@@ -51,7 +50,7 @@ func (p *planner) AlterTableLocality(
 		return nil, err
 	}
 
-	_, tableDesc, err := p.ResolveMutableTableDescriptorEx(
+	tableDesc, err := p.ResolveMutableTableDescriptorEx(
 		ctx, n.Name, !n.IfExists, tree.ResolveRequireTableDesc,
 	)
 	if err != nil {
@@ -101,8 +100,8 @@ func (n *alterTableSetLocalityNode) alterTableLocalityGlobalToRegionalByTable(
 	params runParams,
 ) error {
 	if !n.tableDesc.IsLocalityGlobal() {
-		f := params.p.EvalContext().FmtCtx(tree.FmtSimple)
-		if err := multiregion.FormatTableLocalityConfig(n.tableDesc.LocalityConfig, f); err != nil {
+		f := tree.NewFmtCtx(tree.FmtSimple)
+		if err := tabledesc.FormatTableLocalityConfig(n.tableDesc.LocalityConfig, f); err != nil {
 			// While we're in an error path and generally it's bad to return a
 			// different error in an error path, we will only get an error here if the
 			// locality is corrupted, in which case, it's probably the right error
@@ -237,6 +236,10 @@ func (n *alterTableSetLocalityNode) alterTableLocalityToRegionalByRow(
 		primaryIndexColIdxStart = int(n.tableDesc.PrimaryIndex.Partitioning.NumImplicitColumns)
 	}
 
+	if n.tableDesc.IsInterleaved() {
+		return interleaveOnRegionalByRowError()
+	}
+
 	for _, idx := range n.tableDesc.AllIndexes() {
 		if idx.IsSharded() {
 			return pgerror.Newf(
@@ -315,7 +318,6 @@ func (n *alterTableSetLocalityNode) alterTableLocalityToRegionalByRow(
 			ColumnDef: regionalByRowDefaultColDef(
 				enumOID,
 				regionalByRowRegionDefaultExpr(enumOID, tree.Name(primaryRegion)),
-				maybeRegionalByRowOnUpdateExpr(params.EvalContext(), enumOID),
 			),
 		}
 		tn, err := params.p.getQualifiedTableName(params.ctx, n.tableDesc)
@@ -333,6 +335,7 @@ func (n *alterTableSetLocalityNode) alterTableLocalityToRegionalByRow(
 			tn,
 			n.tableDesc,
 			defaultColDef,
+			params.SessionData(),
 		); err != nil {
 			return err
 		}
@@ -376,8 +379,8 @@ func (n *alterTableSetLocalityNode) alterTableLocalityToRegionalByRow(
 		newColumnName,
 		newColumnID,
 		newColumnDefaultExpr,
-		n.tableDesc.PrimaryIndex.KeyColumnNames[primaryIndexColIdxStart:],
-		n.tableDesc.PrimaryIndex.KeyColumnDirections[primaryIndexColIdxStart:],
+		n.tableDesc.PrimaryIndex.ColumnNames[primaryIndexColIdxStart:],
+		n.tableDesc.PrimaryIndex.ColumnDirections[primaryIndexColIdxStart:],
 	)
 }
 
@@ -524,8 +527,8 @@ func (n *alterTableSetLocalityNode) startExec(params runParams) error {
 				nil, /* newColumnName */
 				nil, /*	newColumnID */
 				nil, /*	newColumnDefaultExpr */
-				n.tableDesc.PrimaryIndex.KeyColumnNames[explicitColStart:],
-				n.tableDesc.PrimaryIndex.KeyColumnDirections[explicitColStart:],
+				n.tableDesc.PrimaryIndex.ColumnNames[explicitColStart:],
+				n.tableDesc.PrimaryIndex.ColumnDirections[explicitColStart:],
 			)
 		case tree.LocalityLevelRow:
 			if err := n.alterTableLocalityToRegionalByRow(
@@ -542,8 +545,8 @@ func (n *alterTableSetLocalityNode) startExec(params runParams) error {
 				nil, /* newColumnName */
 				nil, /*	newColumnID */
 				nil, /*	newColumnDefaultExpr */
-				n.tableDesc.PrimaryIndex.KeyColumnNames[explicitColStart:],
-				n.tableDesc.PrimaryIndex.KeyColumnDirections[explicitColStart:],
+				n.tableDesc.PrimaryIndex.ColumnNames[explicitColStart:],
+				n.tableDesc.PrimaryIndex.ColumnDirections[explicitColStart:],
 			)
 		default:
 			return errors.AssertionFailedf("unknown table locality: %v", newLocality)
@@ -565,7 +568,7 @@ func (n *alterTableSetLocalityNode) startExec(params runParams) error {
 // writeNewTableLocalityAndZoneConfig writes the table descriptor with the newly
 // updated LocalityConfig and writes a new zone configuration for the table.
 func (n *alterTableSetLocalityNode) writeNewTableLocalityAndZoneConfig(
-	params runParams, dbDesc catalog.DatabaseDescriptor,
+	params runParams, dbDesc *dbdesc.Immutable,
 ) error {
 	// Write out the table descriptor update.
 	if err := params.p.writeSchemaChange(
@@ -577,7 +580,7 @@ func (n *alterTableSetLocalityNode) writeNewTableLocalityAndZoneConfig(
 		return err
 	}
 
-	regionConfig, err := SynthesizeRegionConfig(params.ctx, params.p.txn, dbDesc.GetID(), params.p.Descriptors())
+	regionConfig, err := SynthesizeRegionConfig(params.ctx, params.p.txn, dbDesc.ID, params.p.Descriptors())
 	if err != nil {
 		return err
 	}
@@ -603,8 +606,7 @@ func (p *planner) alterTableDescLocalityToRegionalByTable(
 	ctx context.Context, region tree.Name, tableDesc *tabledesc.Mutable, regionEnumID descpb.ID,
 ) error {
 	if tableDesc.GetMultiRegionEnumDependencyIfExists() {
-		typesDependedOn := []descpb.ID{regionEnumID}
-		if err := p.removeTypeBackReferences(ctx, typesDependedOn, tableDesc.GetID(),
+		if err := p.removeTypeBackReference(ctx, regionEnumID, tableDesc.GetID(),
 			fmt.Sprintf("remove back ref on mr-enum %d for table %d", regionEnumID, tableDesc.GetID()),
 		); err != nil {
 			return err
@@ -627,8 +629,7 @@ func (p *planner) alterTableDescLocalityToGlobal(
 	ctx context.Context, tableDesc *tabledesc.Mutable, regionEnumID descpb.ID,
 ) error {
 	if tableDesc.GetMultiRegionEnumDependencyIfExists() {
-		typesDependedOn := []descpb.ID{regionEnumID}
-		if err := p.removeTypeBackReferences(ctx, typesDependedOn, tableDesc.GetID(),
+		if err := p.removeTypeBackReference(ctx, regionEnumID, tableDesc.GetID(),
 			fmt.Sprintf("remove back ref no mr-enum %d for table %d", regionEnumID, tableDesc.GetID()),
 		); err != nil {
 			return err

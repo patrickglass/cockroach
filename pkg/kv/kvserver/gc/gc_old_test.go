@@ -14,8 +14,8 @@ import (
 	"context"
 	"sort"
 	"testing"
-	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -45,7 +45,7 @@ func runGCOld(
 	now hlc.Timestamp,
 	_ hlc.Timestamp, // exists to make signature match RunGC
 	options RunOptions,
-	gcTTL time.Duration,
+	policy zonepb.GCPolicy,
 	gcer GCer,
 	cleanupIntentsFn CleanupIntentsFunc,
 	cleanupTxnIntentsAsyncFn CleanupTxnIntentsAsyncFunc,
@@ -58,7 +58,7 @@ func runGCOld(
 	intentExp := now.Add(-options.IntentAgeThreshold.Nanoseconds(), 0)
 	txnExp := now.Add(-kvserverbase.TxnCleanupThreshold.Nanoseconds(), 0)
 
-	gc := MakeGarbageCollector(now, gcTTL)
+	gc := MakeGarbageCollector(now, policy)
 
 	if err := gcer.SetGCThreshold(ctx, Threshold{
 		Key: gc.Threshold,
@@ -75,7 +75,7 @@ func runGCOld(
 	var keyBytes int64
 	var valBytes int64
 	info := Info{
-		GCTTL:     gcTTL,
+		Policy:    policy,
 		Now:       now,
 		Threshold: gc.Threshold,
 	}
@@ -245,15 +245,15 @@ func runGCOld(
 // versions and maximum age.
 type GarbageCollector struct {
 	Threshold hlc.Timestamp
-	ttl       time.Duration
+	policy    zonepb.GCPolicy
 }
 
 // MakeGarbageCollector allocates and returns a new GC, with expiration
-// computed based on current time and the gc TTL.
-func MakeGarbageCollector(now hlc.Timestamp, gcTTL time.Duration) GarbageCollector {
+// computed based on current time and policy.TTLSeconds.
+func MakeGarbageCollector(now hlc.Timestamp, policy zonepb.GCPolicy) GarbageCollector {
 	return GarbageCollector{
-		Threshold: CalculateThreshold(now, gcTTL),
-		ttl:       gcTTL,
+		Threshold: CalculateThreshold(now, policy),
+		policy:    policy,
 	}
 }
 
@@ -275,7 +275,7 @@ func MakeGarbageCollector(now hlc.Timestamp, gcTTL time.Duration) GarbageCollect
 // would still allow for the tombstone bugs in #6227, so in the future we will
 // add checks that disallow writes before the last GC expiration time.
 func (gc GarbageCollector) Filter(keys []storage.MVCCKey, values [][]byte) (int, hlc.Timestamp) {
-	if gc.ttl.Seconds() <= 0 {
+	if gc.policy.TTLSeconds <= 0 {
 		return -1, hlc.Timestamp{}
 	}
 	if len(keys) == 0 {
@@ -328,8 +328,8 @@ var (
 // different sorts of MVCC keys.
 func TestGarbageCollectorFilter(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	gcA := MakeGarbageCollector(hlc.Timestamp{WallTime: 0, Logical: 0}, time.Second)
-	gcB := MakeGarbageCollector(hlc.Timestamp{WallTime: 0, Logical: 0}, 2*time.Second)
+	gcA := MakeGarbageCollector(hlc.Timestamp{WallTime: 0, Logical: 0}, zonepb.GCPolicy{TTLSeconds: 1})
+	gcB := MakeGarbageCollector(hlc.Timestamp{WallTime: 0, Logical: 0}, zonepb.GCPolicy{TTLSeconds: 2})
 	n := []byte("data")
 	d := []byte(nil)
 	testData := []struct {
@@ -361,7 +361,7 @@ func TestGarbageCollectorFilter(t *testing.T) {
 	}
 	for i, test := range testData {
 		test.gc.Threshold = test.time
-		test.gc.Threshold.WallTime -= test.gc.ttl.Nanoseconds()
+		test.gc.Threshold.WallTime -= int64(test.gc.policy.TTLSeconds) * 1e9
 		idx, delTS := test.gc.Filter(test.keys, test.values)
 		if idx != test.expIdx {
 			t.Errorf("%d: expected index %d; got %d", i, test.expIdx, idx)

@@ -94,7 +94,10 @@ func ClearTableData(
 ) error {
 	// If DropTime isn't set, assume this drop request is from a version
 	// 1.1 server and invoke legacy code that uses DeleteRange and range GC.
-	if table.GetDropTime() == 0 {
+	// TODO(pbardea): Note that we never set the drop time for interleaved tables,
+	// but this check was added to be more explicit about it. This should get
+	// cleaned up.
+	if table.GetDropTime() == 0 || table.IsInterleaved() {
 		log.Infof(ctx, "clearing data in chunks for table %d", table.GetID())
 		return sql.ClearTableDataInChunks(ctx, db, codec, sv, table, false /* traceKV */)
 	}
@@ -102,12 +105,6 @@ func ClearTableData(
 
 	tableKey := roachpb.RKey(codec.TablePrefix(uint32(table.GetID())))
 	tableSpan := roachpb.RSpan{Key: tableKey, EndKey: tableKey.PrefixEnd()}
-	return clearSpanData(ctx, db, distSender, tableSpan)
-}
-
-func clearSpanData(
-	ctx context.Context, db *kv.DB, distSender *kvcoord.DistSender, span roachpb.RSpan,
-) error {
 
 	// ClearRange requests lays down RocksDB range deletion tombstones that have
 	// serious performance implications (#24029). The logic below attempts to
@@ -133,20 +130,20 @@ func clearSpanData(
 	const waitTime = 500 * time.Millisecond
 
 	var n int
-	lastKey := span.Key
+	lastKey := tableSpan.Key
 	ri := kvcoord.NewRangeIterator(distSender)
 	timer := timeutil.NewTimer()
 	defer timer.Stop()
 
-	for ri.Seek(ctx, span.Key, kvcoord.Ascending); ; ri.Next(ctx) {
+	for ri.Seek(ctx, tableSpan.Key, kvcoord.Ascending); ; ri.Next(ctx) {
 		if !ri.Valid() {
 			return ri.Error()
 		}
 
-		if n++; n >= batchSize || !ri.NeedAnother(span) {
+		if n++; n >= batchSize || !ri.NeedAnother(tableSpan) {
 			endKey := ri.Desc().EndKey
-			if span.EndKey.Less(endKey) {
-				endKey = span.EndKey
+			if tableSpan.EndKey.Less(endKey) {
+				endKey = tableSpan.EndKey
 			}
 			var b kv.Batch
 			b.AddRawRequest(&roachpb.ClearRangeRequest{
@@ -170,7 +167,7 @@ func clearSpanData(
 			}
 		}
 
-		if !ri.NeedAnother(span) {
+		if !ri.NeedAnother(tableSpan) {
 			break
 		}
 	}

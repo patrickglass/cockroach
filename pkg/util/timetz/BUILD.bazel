@@ -22,7 +22,6 @@ go_test(
     deps = [
         "//pkg/util/timeofday",
         "//pkg/util/timeutil",
-        "//pkg/util/timeutil/pgdate",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

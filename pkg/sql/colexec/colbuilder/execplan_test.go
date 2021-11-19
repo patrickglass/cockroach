@@ -17,14 +17,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -85,31 +85,27 @@ func TestNewColOperatorExpectedTypeSchema(t *testing.T) {
 	desc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
 	tr := execinfrapb.TableReaderSpec{
 		Table:         *desc.TableDesc(),
-		Spans:         make([]roachpb.Span, 1),
+		Spans:         make([]execinfrapb.TableReaderSpan, 1),
 		NeededColumns: []uint32{0},
 	}
 	var err error
-	tr.Spans[0].Key, err = randgen.TestingMakePrimaryIndexKey(desc, 0)
+	tr.Spans[0].Span.Key, err = rowenc.TestingMakePrimaryIndexKey(desc, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr.Spans[0].EndKey, err = randgen.TestingMakePrimaryIndexKey(desc, numRows+1)
+	tr.Spans[0].Span.EndKey, err = rowenc.TestingMakePrimaryIndexKey(desc, numRows+1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var monitorRegistry colexecargs.MonitorRegistry
-	defer monitorRegistry.Close(ctx)
 	args := &colexecargs.NewColOperatorArgs{
 		Spec: &execinfrapb.ProcessorSpec{
 			Core:        execinfrapb.ProcessorCoreUnion{TableReader: &tr},
 			ResultTypes: []*types.T{types.Int4},
 		},
 		StreamingMemAccount: &streamingMemAcc,
-		MonitorRegistry:     &monitorRegistry,
 	}
-	r1, err := NewColOperator(ctx, flowCtx, args)
+	r, err := NewColOperator(ctx, flowCtx, args)
 	require.NoError(t, err)
-	defer r1.TestCleanupNoError(t)
 
 	args = &colexecargs.NewColOperatorArgs{
 		Spec: &execinfrapb.ProcessorSpec{
@@ -118,20 +114,24 @@ func TestNewColOperatorExpectedTypeSchema(t *testing.T) {
 			Post:        execinfrapb.PostProcessSpec{RenderExprs: []execinfrapb.Expression{{Expr: "@1 - 1"}}},
 			ResultTypes: []*types.T{types.Int},
 		},
-		Inputs:              []colexecargs.OpWithMetaInfo{{Root: r1.Root}},
+		Inputs:              []colexecop.Operator{r.Op},
 		StreamingMemAccount: &streamingMemAcc,
-		MonitorRegistry:     &monitorRegistry,
 	}
-	r, err := NewColOperator(ctx, flowCtx, args)
+	r, err = NewColOperator(ctx, flowCtx, args)
 	require.NoError(t, err)
-	defer r.TestCleanupNoError(t)
 
-	m := colexec.NewMaterializer(
+	m, err := colexec.NewMaterializer(
 		flowCtx,
 		0, /* processorID */
-		r.OpWithMetaInfo,
+		r.Op,
 		[]*types.T{types.Int},
+		nil, /* output */
+		nil, /* getStats */
+		nil, /* metadataSources */
+		nil, /* toClose */
+		nil, /* cancelFlow */
 	)
+	require.NoError(t, err)
 
 	m.Start(ctx)
 	var rowIdx int

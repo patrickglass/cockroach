@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
@@ -27,8 +26,7 @@ import (
 )
 
 func TestDistinctOnProvided(t *testing.T) {
-	st := cluster.MakeTestingClusterSettings()
-	evalCtx := tree.NewTestingEvalContext(st)
+	evalCtx := tree.NewTestingEvalContext(nil /* st */)
 	var f norm.Factory
 	f.Init(evalCtx, testcat.New())
 	md := f.Metadata()
@@ -107,12 +105,12 @@ func TestDistinctOnProvided(t *testing.T) {
 					FuncDeps:   fd1eq5,
 				},
 				Provided: &physical.Provided{
-					Ordering: props.ParseOrdering(tc.input),
+					Ordering: physical.ParseOrdering(tc.input),
 				},
 			}
 			p := memo.GroupingPrivate{
 				GroupingCols: tc.groupingCols,
-				Ordering:     props.ParseOrderingChoice(tc.internal),
+				Ordering:     physical.ParseOrderingChoice(tc.internal),
 			}
 			var aggs memo.AggregationsExpr
 			tc.outCols.Difference(tc.groupingCols).ForEach(func(col opt.ColumnID) {
@@ -122,7 +120,7 @@ func TestDistinctOnProvided(t *testing.T) {
 				))
 			})
 			distinctOn := f.Memo().MemoizeDistinctOn(input, aggs, &p)
-			req := props.ParseOrderingChoice(tc.required)
+			req := physical.ParseOrderingChoice(tc.required)
 			res := distinctOnBuildProvided(distinctOn, &req).String()
 			if res != tc.expected {
 				t.Errorf("expected '%s', got '%s'", tc.expected, res)

@@ -208,7 +208,7 @@ func (mb *mutationBuilder) buildAntiJoinForDoNothingArbiter(
 		tableOrdinals(mb.tab, columnKinds{
 			includeMutations:       false,
 			includeSystem:          false,
-			includeInverted:        false,
+			includeVirtualInverted: false,
 			includeVirtualComputed: true,
 		}),
 		nil, /* indexFlags */
@@ -294,7 +294,7 @@ func (mb *mutationBuilder) buildLeftJoinForUpsertArbiter(
 		tableOrdinals(mb.tab, columnKinds{
 			includeMutations:       true,
 			includeSystem:          true,
-			includeInverted:        false,
+			includeVirtualInverted: false,
 			includeVirtualComputed: true,
 		}),
 		nil, /* indexFlags */
@@ -446,10 +446,8 @@ func (mb *mutationBuilder) projectPartialArbiterDistinctColumn(
 	}
 	texpr := insertScope.resolveAndRequireType(expr, types.Bool)
 
-	// Use an anonymous name because the column cannot be referenced
-	// in other expressions.
-	colName := scopeColName("").WithMetadataName(fmt.Sprintf("arbiter_%s_distinct", arbiterName))
-	scopeCol := projectionScope.addColumn(colName, texpr)
+	alias := fmt.Sprintf("arbiter_%s_distinct", arbiterName)
+	scopeCol := projectionScope.addColumn(alias, texpr)
 	mb.b.buildScalar(texpr, mb.outScope, projectionScope, scopeCol, nil)
 
 	mb.b.constructProjectForScope(mb.outScope, projectionScope)
@@ -502,7 +500,7 @@ func (h *arbiterPredicateHelper) tableScope() *scope {
 			h.tabMeta, tableOrdinals(h.tabMeta.Table, columnKinds{
 				includeMutations:       false,
 				includeSystem:          false,
-				includeInverted:        false,
+				includeVirtualInverted: false,
 				includeVirtualComputed: true,
 			}),
 			nil, /* indexFlags */
@@ -544,7 +542,7 @@ func (h *arbiterPredicateHelper) partialUniqueConstraintPredicate(
 
 // arbiterFilters returns a scalar expression representing the arbiter
 // predicate. If the arbiter predicate contains non-immutable operators,
-// ok=false is returned.
+// ok=true is returned.
 func (h *arbiterPredicateHelper) arbiterFilters() (_ memo.FiltersExpr, ok bool) {
 	// The filters have been initialized if they are non-nil or
 	// invalidArbiterPredicate has been set to true.

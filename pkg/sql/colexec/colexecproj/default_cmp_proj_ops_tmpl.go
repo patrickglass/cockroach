@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for default_cmp_proj_ops.eg.go. It's
 // formatted in a special way, so it's both valid Go and a valid text/template
@@ -22,12 +20,13 @@
 package colexecproj
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexeccmp"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 )
 
@@ -47,10 +46,13 @@ type defaultCmp_KINDProjOp struct {
 }
 
 var _ colexecop.Operator = &defaultCmp_KINDProjOp{}
-var _ execinfra.Releasable = &defaultCmp_KINDProjOp{}
 
-func (d *defaultCmp_KINDProjOp) Next() coldata.Batch {
-	batch := d.Input.Next()
+func (d *defaultCmp_KINDProjOp) Init() {
+	d.Input.Init()
+}
+
+func (d *defaultCmp_KINDProjOp) Next(ctx context.Context) coldata.Batch {
+	batch := d.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -103,10 +105,6 @@ func (d *defaultCmp_KINDProjOp) Next() coldata.Batch {
 	// the length anyway (this helps maintaining the invariant of flat bytes).
 	batch.SetLength(n)
 	return batch
-}
-
-func (d *defaultCmp_KINDProjOp) Release() {
-	d.toDatumConverter.Release()
 }
 
 // {{end}}

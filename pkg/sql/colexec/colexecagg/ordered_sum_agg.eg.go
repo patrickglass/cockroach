@@ -10,6 +10,7 @@
 package colexecagg
 
 import (
+	"strings"
 	"unsafe"
 
 	"github.com/cockroachdb/apd/v2"
@@ -42,30 +43,18 @@ func newSumOrderedAggAlloc(
 			return &sumInt16OrderedAggAlloc{aggAllocBase: allocBase}, nil
 		case 32:
 			return &sumInt32OrderedAggAlloc{aggAllocBase: allocBase}, nil
-		case -1:
 		default:
 			return &sumInt64OrderedAggAlloc{aggAllocBase: allocBase}, nil
 		}
 	case types.DecimalFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &sumDecimalOrderedAggAlloc{aggAllocBase: allocBase}, nil
-		}
+		return &sumDecimalOrderedAggAlloc{aggAllocBase: allocBase}, nil
 	case types.FloatFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &sumFloat64OrderedAggAlloc{aggAllocBase: allocBase}, nil
-		}
+		return &sumFloat64OrderedAggAlloc{aggAllocBase: allocBase}, nil
 	case types.IntervalFamily:
-		switch t.Width() {
-		case -1:
-		default:
-			return &sumIntervalOrderedAggAlloc{aggAllocBase: allocBase}, nil
-		}
+		return &sumIntervalOrderedAggAlloc{aggAllocBase: allocBase}, nil
+	default:
+		return nil, errors.Errorf("unsupported sum %s agg type %s", strings.ToLower(""), t.Name())
 	}
-	return nil, errors.Errorf("unsupported sum agg type %s", t.Name())
 }
 
 type sumInt16OrderedAgg struct {
@@ -75,10 +64,10 @@ type sumInt16OrderedAgg struct {
 	curAgg apd.Decimal
 	// col points to the output vector we are updating.
 	col []apd.Decimal
-	// numNonNull tracks the number of non-null values we have seen for the group
-	// that is currently being aggregated.
-	numNonNull     uint64
-	overloadHelper execgen.OverloadHelper
+	// foundNonNullForCurrentGroup tracks if we have seen any non-null values
+	// for the group that is currently being aggregated.
+	foundNonNullForCurrentGroup bool
+	overloadHelper              execgen.OverloadHelper
 }
 
 var _ AggregateFunc = &sumInt16OrderedAgg{}
@@ -89,7 +78,7 @@ func (a *sumInt16OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *sumInt16OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	// In order to inline the templated code of overloads, we need to have a
 	// "_overloadHelper" local variable of type "overloadHelper".
@@ -103,17 +92,17 @@ func (a *sumInt16OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -121,7 +110,7 @@ func (a *sumInt16OrderedAgg) Compute(
 							a.curIdx++
 							a.curAgg = zeroDecimalValue
 
-							a.numNonNull = 0
+							a.foundNonNullForCurrentGroup = false
 						}
 						a.isFirstGroup = false
 					}
@@ -141,18 +130,18 @@ func (a *sumInt16OrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -179,12 +168,12 @@ func (a *sumInt16OrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -192,7 +181,7 @@ func (a *sumInt16OrderedAgg) Compute(
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -200,7 +189,7 @@ func (a *sumInt16OrderedAgg) Compute(
 							a.curIdx++
 							a.curAgg = zeroDecimalValue
 
-							a.numNonNull = 0
+							a.foundNonNullForCurrentGroup = false
 						}
 						a.isFirstGroup = false
 					}
@@ -219,7 +208,7 @@ func (a *sumInt16OrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			} else {
@@ -229,7 +218,7 @@ func (a *sumInt16OrderedAgg) Compute(
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -255,7 +244,7 @@ func (a *sumInt16OrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			}
@@ -276,7 +265,7 @@ func (a *sumInt16OrderedAgg) Flush(outputIdx int) {
 	_ = outputIdx
 	outputIdx = a.curIdx
 	a.curIdx++
-	if a.numNonNull == 0 {
+	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
 		a.col[outputIdx] = a.curAgg
@@ -286,7 +275,7 @@ func (a *sumInt16OrderedAgg) Flush(outputIdx int) {
 func (a *sumInt16OrderedAgg) Reset() {
 	a.orderedAggregateFuncBase.Reset()
 	a.curAgg = zeroDecimalValue
-	a.numNonNull = 0
+	a.foundNonNullForCurrentGroup = false
 }
 
 type sumInt16OrderedAggAlloc struct {
@@ -317,10 +306,10 @@ type sumInt32OrderedAgg struct {
 	curAgg apd.Decimal
 	// col points to the output vector we are updating.
 	col []apd.Decimal
-	// numNonNull tracks the number of non-null values we have seen for the group
-	// that is currently being aggregated.
-	numNonNull     uint64
-	overloadHelper execgen.OverloadHelper
+	// foundNonNullForCurrentGroup tracks if we have seen any non-null values
+	// for the group that is currently being aggregated.
+	foundNonNullForCurrentGroup bool
+	overloadHelper              execgen.OverloadHelper
 }
 
 var _ AggregateFunc = &sumInt32OrderedAgg{}
@@ -331,7 +320,7 @@ func (a *sumInt32OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *sumInt32OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	// In order to inline the templated code of overloads, we need to have a
 	// "_overloadHelper" local variable of type "overloadHelper".
@@ -345,17 +334,17 @@ func (a *sumInt32OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -363,7 +352,7 @@ func (a *sumInt32OrderedAgg) Compute(
 							a.curIdx++
 							a.curAgg = zeroDecimalValue
 
-							a.numNonNull = 0
+							a.foundNonNullForCurrentGroup = false
 						}
 						a.isFirstGroup = false
 					}
@@ -383,18 +372,18 @@ func (a *sumInt32OrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -421,12 +410,12 @@ func (a *sumInt32OrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -434,7 +423,7 @@ func (a *sumInt32OrderedAgg) Compute(
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -442,7 +431,7 @@ func (a *sumInt32OrderedAgg) Compute(
 							a.curIdx++
 							a.curAgg = zeroDecimalValue
 
-							a.numNonNull = 0
+							a.foundNonNullForCurrentGroup = false
 						}
 						a.isFirstGroup = false
 					}
@@ -461,7 +450,7 @@ func (a *sumInt32OrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			} else {
@@ -471,7 +460,7 @@ func (a *sumInt32OrderedAgg) Compute(
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -497,7 +486,7 @@ func (a *sumInt32OrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			}
@@ -518,7 +507,7 @@ func (a *sumInt32OrderedAgg) Flush(outputIdx int) {
 	_ = outputIdx
 	outputIdx = a.curIdx
 	a.curIdx++
-	if a.numNonNull == 0 {
+	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
 		a.col[outputIdx] = a.curAgg
@@ -528,7 +517,7 @@ func (a *sumInt32OrderedAgg) Flush(outputIdx int) {
 func (a *sumInt32OrderedAgg) Reset() {
 	a.orderedAggregateFuncBase.Reset()
 	a.curAgg = zeroDecimalValue
-	a.numNonNull = 0
+	a.foundNonNullForCurrentGroup = false
 }
 
 type sumInt32OrderedAggAlloc struct {
@@ -559,10 +548,10 @@ type sumInt64OrderedAgg struct {
 	curAgg apd.Decimal
 	// col points to the output vector we are updating.
 	col []apd.Decimal
-	// numNonNull tracks the number of non-null values we have seen for the group
-	// that is currently being aggregated.
-	numNonNull     uint64
-	overloadHelper execgen.OverloadHelper
+	// foundNonNullForCurrentGroup tracks if we have seen any non-null values
+	// for the group that is currently being aggregated.
+	foundNonNullForCurrentGroup bool
+	overloadHelper              execgen.OverloadHelper
 }
 
 var _ AggregateFunc = &sumInt64OrderedAgg{}
@@ -573,7 +562,7 @@ func (a *sumInt64OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *sumInt64OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	// In order to inline the templated code of overloads, we need to have a
 	// "_overloadHelper" local variable of type "overloadHelper".
@@ -587,17 +576,17 @@ func (a *sumInt64OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -605,7 +594,7 @@ func (a *sumInt64OrderedAgg) Compute(
 							a.curIdx++
 							a.curAgg = zeroDecimalValue
 
-							a.numNonNull = 0
+							a.foundNonNullForCurrentGroup = false
 						}
 						a.isFirstGroup = false
 					}
@@ -625,18 +614,18 @@ func (a *sumInt64OrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -663,12 +652,12 @@ func (a *sumInt64OrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -676,7 +665,7 @@ func (a *sumInt64OrderedAgg) Compute(
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -684,7 +673,7 @@ func (a *sumInt64OrderedAgg) Compute(
 							a.curIdx++
 							a.curAgg = zeroDecimalValue
 
-							a.numNonNull = 0
+							a.foundNonNullForCurrentGroup = false
 						}
 						a.isFirstGroup = false
 					}
@@ -703,7 +692,7 @@ func (a *sumInt64OrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			} else {
@@ -713,7 +702,7 @@ func (a *sumInt64OrderedAgg) Compute(
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -739,7 +728,7 @@ func (a *sumInt64OrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			}
@@ -760,7 +749,7 @@ func (a *sumInt64OrderedAgg) Flush(outputIdx int) {
 	_ = outputIdx
 	outputIdx = a.curIdx
 	a.curIdx++
-	if a.numNonNull == 0 {
+	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
 		a.col[outputIdx] = a.curAgg
@@ -770,7 +759,7 @@ func (a *sumInt64OrderedAgg) Flush(outputIdx int) {
 func (a *sumInt64OrderedAgg) Reset() {
 	a.orderedAggregateFuncBase.Reset()
 	a.curAgg = zeroDecimalValue
-	a.numNonNull = 0
+	a.foundNonNullForCurrentGroup = false
 }
 
 type sumInt64OrderedAggAlloc struct {
@@ -801,9 +790,9 @@ type sumDecimalOrderedAgg struct {
 	curAgg apd.Decimal
 	// col points to the output vector we are updating.
 	col []apd.Decimal
-	// numNonNull tracks the number of non-null values we have seen for the group
-	// that is currently being aggregated.
-	numNonNull uint64
+	// foundNonNullForCurrentGroup tracks if we have seen any non-null values
+	// for the group that is currently being aggregated.
+	foundNonNullForCurrentGroup bool
 }
 
 var _ AggregateFunc = &sumDecimalOrderedAgg{}
@@ -814,7 +803,7 @@ func (a *sumDecimalOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *sumDecimalOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	oldCurAggSize := tree.SizeOfDecimal(&a.curAgg)
 	vec := vecs[inputIdxs[0]]
@@ -825,17 +814,17 @@ func (a *sumDecimalOrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -843,7 +832,7 @@ func (a *sumDecimalOrderedAgg) Compute(
 							a.curIdx++
 							a.curAgg = zeroDecimalValue
 
-							a.numNonNull = 0
+							a.foundNonNullForCurrentGroup = false
 						}
 						a.isFirstGroup = false
 					}
@@ -862,18 +851,18 @@ func (a *sumDecimalOrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -899,12 +888,12 @@ func (a *sumDecimalOrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -912,7 +901,7 @@ func (a *sumDecimalOrderedAgg) Compute(
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -920,7 +909,7 @@ func (a *sumDecimalOrderedAgg) Compute(
 							a.curIdx++
 							a.curAgg = zeroDecimalValue
 
-							a.numNonNull = 0
+							a.foundNonNullForCurrentGroup = false
 						}
 						a.isFirstGroup = false
 					}
@@ -938,7 +927,7 @@ func (a *sumDecimalOrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			} else {
@@ -948,7 +937,7 @@ func (a *sumDecimalOrderedAgg) Compute(
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -973,7 +962,7 @@ func (a *sumDecimalOrderedAgg) Compute(
 							}
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			}
@@ -994,7 +983,7 @@ func (a *sumDecimalOrderedAgg) Flush(outputIdx int) {
 	_ = outputIdx
 	outputIdx = a.curIdx
 	a.curIdx++
-	if a.numNonNull == 0 {
+	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
 		a.col[outputIdx] = a.curAgg
@@ -1004,7 +993,7 @@ func (a *sumDecimalOrderedAgg) Flush(outputIdx int) {
 func (a *sumDecimalOrderedAgg) Reset() {
 	a.orderedAggregateFuncBase.Reset()
 	a.curAgg = zeroDecimalValue
-	a.numNonNull = 0
+	a.foundNonNullForCurrentGroup = false
 }
 
 type sumDecimalOrderedAggAlloc struct {
@@ -1035,9 +1024,9 @@ type sumFloat64OrderedAgg struct {
 	curAgg float64
 	// col points to the output vector we are updating.
 	col []float64
-	// numNonNull tracks the number of non-null values we have seen for the group
-	// that is currently being aggregated.
-	numNonNull uint64
+	// foundNonNullForCurrentGroup tracks if we have seen any non-null values
+	// for the group that is currently being aggregated.
+	foundNonNullForCurrentGroup bool
 }
 
 var _ AggregateFunc = &sumFloat64OrderedAgg{}
@@ -1048,7 +1037,7 @@ func (a *sumFloat64OrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *sumFloat64OrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -1059,17 +1048,17 @@ func (a *sumFloat64OrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -1077,7 +1066,7 @@ func (a *sumFloat64OrderedAgg) Compute(
 							a.curIdx++
 							a.curAgg = zeroFloat64Value
 
-							a.numNonNull = 0
+							a.foundNonNullForCurrentGroup = false
 						}
 						a.isFirstGroup = false
 					}
@@ -1093,18 +1082,18 @@ func (a *sumFloat64OrderedAgg) Compute(
 							a.curAgg = float64(a.curAgg) + float64(v)
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -1127,12 +1116,12 @@ func (a *sumFloat64OrderedAgg) Compute(
 							a.curAgg = float64(a.curAgg) + float64(v)
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -1140,7 +1129,7 @@ func (a *sumFloat64OrderedAgg) Compute(
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -1148,7 +1137,7 @@ func (a *sumFloat64OrderedAgg) Compute(
 							a.curIdx++
 							a.curAgg = zeroFloat64Value
 
-							a.numNonNull = 0
+							a.foundNonNullForCurrentGroup = false
 						}
 						a.isFirstGroup = false
 					}
@@ -1163,7 +1152,7 @@ func (a *sumFloat64OrderedAgg) Compute(
 							a.curAgg = float64(a.curAgg) + float64(v)
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			} else {
@@ -1173,7 +1162,7 @@ func (a *sumFloat64OrderedAgg) Compute(
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -1195,7 +1184,7 @@ func (a *sumFloat64OrderedAgg) Compute(
 							a.curAgg = float64(a.curAgg) + float64(v)
 						}
 
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			}
@@ -1216,7 +1205,7 @@ func (a *sumFloat64OrderedAgg) Flush(outputIdx int) {
 	_ = outputIdx
 	outputIdx = a.curIdx
 	a.curIdx++
-	if a.numNonNull == 0 {
+	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
 		a.col[outputIdx] = a.curAgg
@@ -1226,7 +1215,7 @@ func (a *sumFloat64OrderedAgg) Flush(outputIdx int) {
 func (a *sumFloat64OrderedAgg) Reset() {
 	a.orderedAggregateFuncBase.Reset()
 	a.curAgg = zeroFloat64Value
-	a.numNonNull = 0
+	a.foundNonNullForCurrentGroup = false
 }
 
 type sumFloat64OrderedAggAlloc struct {
@@ -1257,9 +1246,9 @@ type sumIntervalOrderedAgg struct {
 	curAgg duration.Duration
 	// col points to the output vector we are updating.
 	col []duration.Duration
-	// numNonNull tracks the number of non-null values we have seen for the group
-	// that is currently being aggregated.
-	numNonNull uint64
+	// foundNonNullForCurrentGroup tracks if we have seen any non-null values
+	// for the group that is currently being aggregated.
+	foundNonNullForCurrentGroup bool
 }
 
 var _ AggregateFunc = &sumIntervalOrderedAgg{}
@@ -1270,7 +1259,7 @@ func (a *sumIntervalOrderedAgg) SetOutput(vec coldata.Vec) {
 }
 
 func (a *sumIntervalOrderedAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	var oldCurAggSize uintptr
 	vec := vecs[inputIdxs[0]]
@@ -1281,17 +1270,17 @@ func (a *sumIntervalOrderedAgg) Compute(
 		groups := a.groups
 		col := col
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -1299,7 +1288,7 @@ func (a *sumIntervalOrderedAgg) Compute(
 							a.curIdx++
 							a.curAgg = zeroIntervalValue
 
-							a.numNonNull = 0
+							a.foundNonNullForCurrentGroup = false
 						}
 						a.isFirstGroup = false
 					}
@@ -1310,18 +1299,18 @@ func (a *sumIntervalOrderedAgg) Compute(
 						//gcassert:bce
 						v := col.Get(i)
 						a.curAgg = a.curAgg.Add(v)
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 
 					//gcassert:bce
 					if groups[i] {
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -1339,12 +1328,12 @@ func (a *sumIntervalOrderedAgg) Compute(
 						//gcassert:bce
 						v := col.Get(i)
 						a.curAgg = a.curAgg.Add(v)
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			}
 		} else {
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 
@@ -1352,7 +1341,7 @@ func (a *sumIntervalOrderedAgg) Compute(
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -1360,7 +1349,7 @@ func (a *sumIntervalOrderedAgg) Compute(
 							a.curIdx++
 							a.curAgg = zeroIntervalValue
 
-							a.numNonNull = 0
+							a.foundNonNullForCurrentGroup = false
 						}
 						a.isFirstGroup = false
 					}
@@ -1370,7 +1359,7 @@ func (a *sumIntervalOrderedAgg) Compute(
 					if !isNull {
 						v := col.Get(i)
 						a.curAgg = a.curAgg.Add(v)
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			} else {
@@ -1380,7 +1369,7 @@ func (a *sumIntervalOrderedAgg) Compute(
 						if !a.isFirstGroup {
 							// If we encounter a new group, and we haven't found any non-nulls for the
 							// current group, the output for this group should be null.
-							if a.numNonNull == 0 {
+							if !a.foundNonNullForCurrentGroup {
 								a.nulls.SetNull(a.curIdx)
 							} else {
 								a.col[a.curIdx] = a.curAgg
@@ -1397,7 +1386,7 @@ func (a *sumIntervalOrderedAgg) Compute(
 					if !isNull {
 						v := col.Get(i)
 						a.curAgg = a.curAgg.Add(v)
-						a.numNonNull++
+						a.foundNonNullForCurrentGroup = true
 					}
 				}
 			}
@@ -1418,7 +1407,7 @@ func (a *sumIntervalOrderedAgg) Flush(outputIdx int) {
 	_ = outputIdx
 	outputIdx = a.curIdx
 	a.curIdx++
-	if a.numNonNull == 0 {
+	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
 		a.col[outputIdx] = a.curAgg
@@ -1428,7 +1417,7 @@ func (a *sumIntervalOrderedAgg) Flush(outputIdx int) {
 func (a *sumIntervalOrderedAgg) Reset() {
 	a.orderedAggregateFuncBase.Reset()
 	a.curAgg = zeroIntervalValue
-	a.numNonNull = 0
+	a.foundNonNullForCurrentGroup = false
 }
 
 type sumIntervalOrderedAggAlloc struct {

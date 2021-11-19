@@ -22,19 +22,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
-	"github.com/cockroachdb/cockroach/pkg/sql/rowinfra"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
 )
 
-// rowFetcher is an interface used to abstract a row.Fetcher so that a stat
+// rowFetcher is an interface used to abstract a row fetcher so that a stat
 // collector wrapper can be plugged in.
 type rowFetcher interface {
 	StartScan(
-		_ context.Context, _ *kv.Txn, _ roachpb.Spans, batchBytesLimit rowinfra.BytesLimit,
-		rowLimitHint rowinfra.RowLimit, traceKV bool, forceProductionKVBatchSize bool,
+		_ context.Context, _ *kv.Txn, _ roachpb.Spans, limitBatches bool,
+		limitHint int64, traceKV bool, forceProductionKVBatchSize bool,
 	) error
 	StartInconsistentScan(
 		_ context.Context,
@@ -42,14 +41,14 @@ type rowFetcher interface {
 		initialTimestamp hlc.Timestamp,
 		maxTimestampAge time.Duration,
 		spans roachpb.Spans,
-		batchBytesLimit rowinfra.BytesLimit,
-		rowLimitHint rowinfra.RowLimit,
+		limitBatches bool,
+		limitHint int64,
 		traceKV bool,
 		forceProductionKVBatchSize bool,
 	) error
 
 	NextRow(ctx context.Context) (
-		rowenc.EncDatumRow, catalog.TableDescriptor, catalog.Index, error)
+		rowenc.EncDatumRow, catalog.TableDescriptor, *descpb.IndexDescriptor, error)
 
 	// PartialKey is not stat-related but needs to be supported.
 	PartialKey(int) (roachpb.Key, error)
@@ -77,12 +76,13 @@ func initRowFetcher(
 	lockWaitPolicy descpb.ScanLockingWaitPolicy,
 	withSystemColumns bool,
 	virtualColumn catalog.Column,
-) (index catalog.Index, isSecondaryIndex bool, err error) {
+) (index *descpb.IndexDescriptor, isSecondaryIndex bool, err error) {
 	if indexIdx >= len(desc.ActiveIndexes()) {
 		return nil, false, errors.Errorf("invalid indexIdx %d", indexIdx)
 	}
-	index = desc.ActiveIndexes()[indexIdx]
-	isSecondaryIndex = !index.Primary()
+	indexI := desc.ActiveIndexes()[indexIdx]
+	index = indexI.IndexDesc()
+	isSecondaryIndex = !indexI.Primary()
 
 	tableArgs := row.FetcherTableArgs{
 		Desc:             desc,
@@ -99,7 +99,6 @@ func initRowFetcher(
 		reverseScan,
 		lockStrength,
 		lockWaitPolicy,
-		flowCtx.EvalCtx.SessionData().LockTimeout,
 		isCheck,
 		alloc,
 		mon,

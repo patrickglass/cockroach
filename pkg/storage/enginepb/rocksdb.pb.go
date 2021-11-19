@@ -3,17 +3,15 @@
 
 package enginepb
 
-import (
-	encoding_binary "encoding/binary"
-	fmt "fmt"
-	hlc "github.com/cockroachdb/cockroach/pkg/util/hlc"
-	_ "github.com/gogo/protobuf/gogoproto"
-	proto "github.com/gogo/protobuf/proto"
-	github_com_gogo_protobuf_sortkeys "github.com/gogo/protobuf/sortkeys"
-	io "io"
-	math "math"
-	math_bits "math/bits"
-)
+import proto "github.com/gogo/protobuf/proto"
+import fmt "fmt"
+import math "math"
+import hlc "github.com/cockroachdb/cockroach/pkg/util/hlc"
+
+import github_com_gogo_protobuf_sortkeys "github.com/gogo/protobuf/sortkeys"
+import encoding_binary "encoding/binary"
+
+import io "io"
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
@@ -24,7 +22,7 @@ var _ = math.Inf
 // is compatible with the proto package it is being compiled against.
 // A compilation error at this line likely means your copy of the
 // proto package needs to be updated.
-const _ = proto.GoGoProtoPackageIsVersion3 // please upgrade the proto package
+const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
 
 // SSTUserProperties contains the user-added properties of a single sstable.
 type SSTUserProperties struct {
@@ -39,21 +37,21 @@ func (m *SSTUserProperties) Reset()         { *m = SSTUserProperties{} }
 func (m *SSTUserProperties) String() string { return proto.CompactTextString(m) }
 func (*SSTUserProperties) ProtoMessage()    {}
 func (*SSTUserProperties) Descriptor() ([]byte, []int) {
-	return fileDescriptor_820565f89a9868ba, []int{0}
+	return fileDescriptor_rocksdb_d0de3f5554d674cd, []int{0}
 }
 func (m *SSTUserProperties) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *SSTUserProperties) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *SSTUserProperties) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_SSTUserProperties.Merge(m, src)
+func (dst *SSTUserProperties) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_SSTUserProperties.Merge(dst, src)
 }
 func (m *SSTUserProperties) XXX_Size() int {
 	return m.Size()
@@ -75,21 +73,21 @@ func (m *SSTUserPropertiesCollection) Reset()         { *m = SSTUserPropertiesCo
 func (m *SSTUserPropertiesCollection) String() string { return proto.CompactTextString(m) }
 func (*SSTUserPropertiesCollection) ProtoMessage()    {}
 func (*SSTUserPropertiesCollection) Descriptor() ([]byte, []int) {
-	return fileDescriptor_820565f89a9868ba, []int{1}
+	return fileDescriptor_rocksdb_d0de3f5554d674cd, []int{1}
 }
 func (m *SSTUserPropertiesCollection) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *SSTUserPropertiesCollection) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *SSTUserPropertiesCollection) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_SSTUserPropertiesCollection.Merge(m, src)
+func (dst *SSTUserPropertiesCollection) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_SSTUserPropertiesCollection.Merge(dst, src)
 }
 func (m *SSTUserPropertiesCollection) XXX_Size() int {
 	return m.Size()
@@ -116,21 +114,21 @@ func (m *HistogramData) Reset()         { *m = HistogramData{} }
 func (m *HistogramData) String() string { return proto.CompactTextString(m) }
 func (*HistogramData) ProtoMessage()    {}
 func (*HistogramData) Descriptor() ([]byte, []int) {
-	return fileDescriptor_820565f89a9868ba, []int{2}
+	return fileDescriptor_rocksdb_d0de3f5554d674cd, []int{2}
 }
 func (m *HistogramData) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *HistogramData) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *HistogramData) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_HistogramData.Merge(m, src)
+func (dst *HistogramData) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_HistogramData.Merge(dst, src)
 }
 func (m *HistogramData) XXX_Size() int {
 	return m.Size()
@@ -152,21 +150,21 @@ func (m *TickersAndHistograms) Reset()         { *m = TickersAndHistograms{} }
 func (m *TickersAndHistograms) String() string { return proto.CompactTextString(m) }
 func (*TickersAndHistograms) ProtoMessage()    {}
 func (*TickersAndHistograms) Descriptor() ([]byte, []int) {
-	return fileDescriptor_820565f89a9868ba, []int{3}
+	return fileDescriptor_rocksdb_d0de3f5554d674cd, []int{3}
 }
 func (m *TickersAndHistograms) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
 func (m *TickersAndHistograms) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
-	n, err := m.MarshalToSizedBuffer(b)
+	n, err := m.MarshalTo(b)
 	if err != nil {
 		return nil, err
 	}
 	return b[:n], nil
 }
-func (m *TickersAndHistograms) XXX_Merge(src proto.Message) {
-	xxx_messageInfo_TickersAndHistograms.Merge(m, src)
+func (dst *TickersAndHistograms) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_TickersAndHistograms.Merge(dst, src)
 }
 func (m *TickersAndHistograms) XXX_Size() int {
 	return m.Size()
@@ -185,48 +183,10 @@ func init() {
 	proto.RegisterMapType((map[string]HistogramData)(nil), "cockroach.storage.enginepb.TickersAndHistograms.HistogramsEntry")
 	proto.RegisterMapType((map[string]uint64)(nil), "cockroach.storage.enginepb.TickersAndHistograms.TickersEntry")
 }
-
-func init() { proto.RegisterFile("storage/enginepb/rocksdb.proto", fileDescriptor_820565f89a9868ba) }
-
-var fileDescriptor_820565f89a9868ba = []byte{
-	// 495 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x94, 0x53, 0x41, 0x6b, 0x13, 0x41,
-	0x14, 0xde, 0x49, 0xb6, 0xa9, 0x9d, 0x28, 0xea, 0x92, 0xc3, 0xb2, 0xe2, 0x18, 0x72, 0x8a, 0x82,
-	0xbb, 0x12, 0x0d, 0x98, 0x82, 0xa8, 0xd5, 0x82, 0x17, 0x41, 0xa6, 0x11, 0xc1, 0x8b, 0x4c, 0xa6,
-	0xe3, 0xee, 0x90, 0xdd, 0x99, 0x65, 0x66, 0x22, 0xa9, 0xbf, 0x42, 0xf0, 0x4f, 0xe5, 0xd8, 0x63,
-	0x4f, 0xa2, 0xc9, 0xef, 0x10, 0x64, 0x66, 0xb3, 0x6d, 0xb4, 0xb5, 0xe8, 0xed, 0x7b, 0x1f, 0xef,
-	0xfb, 0xde, 0x7b, 0xdf, 0xee, 0x40, 0xa4, 0x8d, 0x54, 0x24, 0x65, 0x09, 0x13, 0x29, 0x17, 0xac,
-	0x9c, 0x24, 0x4a, 0xd2, 0xa9, 0x3e, 0x9c, 0xc4, 0xa5, 0x92, 0x46, 0x06, 0x11, 0x95, 0x74, 0xaa,
-	0x24, 0xa1, 0x59, 0xbc, 0xee, 0x8c, 0xeb, 0xce, 0x28, 0x9c, 0x19, 0x9e, 0x27, 0x59, 0x4e, 0x13,
-	0xc3, 0x0b, 0xa6, 0x0d, 0x29, 0xca, 0x4a, 0x15, 0x75, 0x52, 0x99, 0x4a, 0x07, 0x13, 0x8b, 0x2a,
-	0xb6, 0xf7, 0x15, 0xc0, 0x9b, 0x07, 0x07, 0xe3, 0xb7, 0x9a, 0xa9, 0x37, 0x4a, 0x96, 0x4c, 0x19,
-	0xce, 0x74, 0x10, 0x40, 0xbf, 0x24, 0x26, 0x0b, 0x41, 0x17, 0xf4, 0x77, 0xb0, 0xc3, 0xc1, 0x23,
-	0xd8, 0x32, 0xfa, 0x43, 0xc1, 0x45, 0xd8, 0xe8, 0x82, 0x7e, 0x7b, 0x70, 0x3b, 0x3e, 0x5b, 0xc3,
-	0x0e, 0x8d, 0xb3, 0x9c, 0xc6, 0xe3, 0x7a, 0x28, 0xde, 0x32, 0xfa, 0x35, 0x17, 0xb5, 0x8a, 0xcc,
-	0xc3, 0xe6, 0xbf, 0xaa, 0xc8, 0xbc, 0xf7, 0x19, 0xde, 0x3a, 0xb7, 0xd4, 0x0b, 0x99, 0xe7, 0x8c,
-	0x1a, 0x2e, 0x45, 0xb0, 0x0f, 0x9b, 0x5a, 0x9b, 0x10, 0x74, 0x9b, 0xfd, 0xf6, 0xe0, 0x7e, 0xfc,
-	0xf7, 0x38, 0xe2, 0x73, 0x2e, 0x7b, 0xfe, 0xe2, 0xdb, 0x1d, 0x0f, 0x5b, 0x7d, 0xd0, 0x81, 0x5b,
-	0x4c, 0x29, 0xa9, 0xdc, 0x41, 0x3b, 0xb8, 0x2a, 0x6c, 0x22, 0xd7, 0x5e, 0x71, 0x6d, 0x64, 0xaa,
-	0x48, 0xf1, 0x92, 0x18, 0x62, 0xd3, 0x28, 0x18, 0x11, 0x2e, 0x0d, 0x80, 0x1d, 0x0e, 0x6e, 0xc0,
-	0x66, 0x39, 0x7c, 0xe0, 0x94, 0x00, 0x5b, 0xe8, 0x98, 0xd1, 0xd0, 0x9d, 0x69, 0x99, 0xd1, 0xb0,
-	0x62, 0x46, 0xa1, 0x5f, 0x33, 0x23, 0xcb, 0xd8, 0x28, 0xb6, 0x2a, 0xa6, 0x20, 0x73, 0xbb, 0x03,
-	0x95, 0x33, 0x61, 0xc2, 0x56, 0x17, 0xf4, 0x7d, 0x5c, 0x15, 0xb6, 0x4f, 0xcf, 0x8a, 0x70, 0xdb,
-	0x71, 0x16, 0xf6, 0x7e, 0x36, 0x60, 0x67, 0xcc, 0xe9, 0x94, 0x29, 0xfd, 0x5c, 0x1c, 0x9e, 0xee,
-	0xa7, 0x83, 0x77, 0x70, 0xdb, 0x54, 0xfc, 0x3a, 0x8f, 0x27, 0x97, 0xe5, 0x71, 0x91, 0x45, 0x4d,
-	0xee, 0x0b, 0xa3, 0x8e, 0x70, 0xed, 0x16, 0x7c, 0x84, 0x30, 0x3b, 0xed, 0x09, 0x1b, 0xce, 0xfb,
-	0xd9, 0x7f, 0x7b, 0x9f, 0x41, 0x67, 0xbf, 0x8e, 0x7f, 0xc3, 0x39, 0xda, 0x85, 0x57, 0x37, 0x17,
-	0xb0, 0xb7, 0x4f, 0xd9, 0xd1, 0xfa, 0xd7, 0xb3, 0xd0, 0x66, 0xf4, 0x89, 0xe4, 0x33, 0xe6, 0xd2,
-	0xf6, 0x71, 0x55, 0xec, 0x36, 0x1e, 0x83, 0x28, 0x83, 0xd7, 0xff, 0x18, 0x70, 0x81, 0xfc, 0xe9,
-	0xa6, 0xbc, 0x3d, 0xb8, 0x7b, 0xd9, 0x0d, 0xbf, 0x7d, 0xf8, 0x8d, 0x49, 0x7b, 0xf7, 0x16, 0x3f,
-	0x90, 0xb7, 0x58, 0x22, 0x70, 0xbc, 0x44, 0xe0, 0x64, 0x89, 0xc0, 0xf7, 0x25, 0x02, 0x5f, 0x56,
-	0xc8, 0x3b, 0x5e, 0x21, 0xef, 0x64, 0x85, 0xbc, 0xf7, 0x57, 0x6a, 0x93, 0x49, 0xcb, 0x3d, 0xad,
-	0x87, 0xbf, 0x02, 0x00, 0x00, 0xff, 0xff, 0x76, 0x8e, 0x19, 0xa2, 0xc8, 0x03, 0x00, 0x00,
-}
-
 func (m *SSTUserProperties) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -234,53 +194,43 @@ func (m *SSTUserProperties) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *SSTUserProperties) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *SSTUserProperties) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	if m.TsMax != nil {
-		{
-			size, err := m.TsMax.MarshalToSizedBuffer(dAtA[:i])
-			if err != nil {
-				return 0, err
-			}
-			i -= size
-			i = encodeVarintRocksdb(dAtA, i, uint64(size))
-		}
-		i--
-		dAtA[i] = 0x1a
+	if len(m.Path) > 0 {
+		dAtA[i] = 0xa
+		i++
+		i = encodeVarintRocksdb(dAtA, i, uint64(len(m.Path)))
+		i += copy(dAtA[i:], m.Path)
 	}
 	if m.TsMin != nil {
-		{
-			size, err := m.TsMin.MarshalToSizedBuffer(dAtA[:i])
-			if err != nil {
-				return 0, err
-			}
-			i -= size
-			i = encodeVarintRocksdb(dAtA, i, uint64(size))
-		}
-		i--
 		dAtA[i] = 0x12
+		i++
+		i = encodeVarintRocksdb(dAtA, i, uint64(m.TsMin.Size()))
+		n1, err := m.TsMin.MarshalTo(dAtA[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n1
 	}
-	if len(m.Path) > 0 {
-		i -= len(m.Path)
-		copy(dAtA[i:], m.Path)
-		i = encodeVarintRocksdb(dAtA, i, uint64(len(m.Path)))
-		i--
-		dAtA[i] = 0xa
+	if m.TsMax != nil {
+		dAtA[i] = 0x1a
+		i++
+		i = encodeVarintRocksdb(dAtA, i, uint64(m.TsMax.Size()))
+		n2, err := m.TsMax.MarshalTo(dAtA[i:])
+		if err != nil {
+			return 0, err
+		}
+		i += n2
 	}
-	return len(dAtA) - i, nil
+	return i, nil
 }
 
 func (m *SSTUserPropertiesCollection) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -288,43 +238,35 @@ func (m *SSTUserPropertiesCollection) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *SSTUserPropertiesCollection) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *SSTUserPropertiesCollection) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	if len(m.Error) > 0 {
-		i -= len(m.Error)
-		copy(dAtA[i:], m.Error)
-		i = encodeVarintRocksdb(dAtA, i, uint64(len(m.Error)))
-		i--
-		dAtA[i] = 0x12
-	}
 	if len(m.Sst) > 0 {
-		for iNdEx := len(m.Sst) - 1; iNdEx >= 0; iNdEx-- {
-			{
-				size, err := m.Sst[iNdEx].MarshalToSizedBuffer(dAtA[:i])
-				if err != nil {
-					return 0, err
-				}
-				i -= size
-				i = encodeVarintRocksdb(dAtA, i, uint64(size))
-			}
-			i--
+		for _, msg := range m.Sst {
 			dAtA[i] = 0xa
+			i++
+			i = encodeVarintRocksdb(dAtA, i, uint64(msg.Size()))
+			n, err := msg.MarshalTo(dAtA[i:])
+			if err != nil {
+				return 0, err
+			}
+			i += n
 		}
 	}
-	return len(dAtA) - i, nil
+	if len(m.Error) > 0 {
+		dAtA[i] = 0x12
+		i++
+		i = encodeVarintRocksdb(dAtA, i, uint64(len(m.Error)))
+		i += copy(dAtA[i:], m.Error)
+	}
+	return i, nil
 }
 
 func (m *HistogramData) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -332,62 +274,57 @@ func (m *HistogramData) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *HistogramData) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *HistogramData) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	if m.Sum != 0 {
-		i = encodeVarintRocksdb(dAtA, i, uint64(m.Sum))
-		i--
-		dAtA[i] = 0x38
-	}
-	if m.Count != 0 {
-		i = encodeVarintRocksdb(dAtA, i, uint64(m.Count))
-		i--
-		dAtA[i] = 0x30
-	}
-	if m.Max != 0 {
-		i -= 8
-		encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.Max))))
-		i--
-		dAtA[i] = 0x29
-	}
-	if m.P99 != 0 {
-		i -= 8
-		encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P99))))
-		i--
-		dAtA[i] = 0x21
-	}
-	if m.P95 != 0 {
-		i -= 8
-		encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P95))))
-		i--
-		dAtA[i] = 0x19
+	if m.Mean != 0 {
+		dAtA[i] = 0x9
+		i++
+		encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.Mean))))
+		i += 8
 	}
 	if m.P50 != 0 {
-		i -= 8
-		encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P50))))
-		i--
 		dAtA[i] = 0x11
+		i++
+		encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P50))))
+		i += 8
 	}
-	if m.Mean != 0 {
-		i -= 8
-		encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.Mean))))
-		i--
-		dAtA[i] = 0x9
+	if m.P95 != 0 {
+		dAtA[i] = 0x19
+		i++
+		encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P95))))
+		i += 8
 	}
-	return len(dAtA) - i, nil
+	if m.P99 != 0 {
+		dAtA[i] = 0x21
+		i++
+		encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.P99))))
+		i += 8
+	}
+	if m.Max != 0 {
+		dAtA[i] = 0x29
+		i++
+		encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.Max))))
+		i += 8
+	}
+	if m.Count != 0 {
+		dAtA[i] = 0x30
+		i++
+		i = encodeVarintRocksdb(dAtA, i, uint64(m.Count))
+	}
+	if m.Sum != 0 {
+		dAtA[i] = 0x38
+		i++
+		i = encodeVarintRocksdb(dAtA, i, uint64(m.Sum))
+	}
+	return i, nil
 }
 
 func (m *TickersAndHistograms) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	n, err := m.MarshalTo(dAtA)
 	if err != nil {
 		return nil, err
 	}
@@ -395,79 +332,73 @@ func (m *TickersAndHistograms) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *TickersAndHistograms) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-func (m *TickersAndHistograms) MarshalToSizedBuffer(dAtA []byte) (int, error) {
-	i := len(dAtA)
+	var i int
 	_ = i
 	var l int
 	_ = l
-	if len(m.Histograms) > 0 {
-		keysForHistograms := make([]string, 0, len(m.Histograms))
-		for k := range m.Histograms {
-			keysForHistograms = append(keysForHistograms, string(k))
-		}
-		github_com_gogo_protobuf_sortkeys.Strings(keysForHistograms)
-		for iNdEx := len(keysForHistograms) - 1; iNdEx >= 0; iNdEx-- {
-			v := m.Histograms[string(keysForHistograms[iNdEx])]
-			baseI := i
-			{
-				size, err := (&v).MarshalToSizedBuffer(dAtA[:i])
-				if err != nil {
-					return 0, err
-				}
-				i -= size
-				i = encodeVarintRocksdb(dAtA, i, uint64(size))
-			}
-			i--
-			dAtA[i] = 0x12
-			i -= len(keysForHistograms[iNdEx])
-			copy(dAtA[i:], keysForHistograms[iNdEx])
-			i = encodeVarintRocksdb(dAtA, i, uint64(len(keysForHistograms[iNdEx])))
-			i--
-			dAtA[i] = 0xa
-			i = encodeVarintRocksdb(dAtA, i, uint64(baseI-i))
-			i--
-			dAtA[i] = 0x12
-		}
-	}
 	if len(m.Tickers) > 0 {
 		keysForTickers := make([]string, 0, len(m.Tickers))
 		for k := range m.Tickers {
 			keysForTickers = append(keysForTickers, string(k))
 		}
 		github_com_gogo_protobuf_sortkeys.Strings(keysForTickers)
-		for iNdEx := len(keysForTickers) - 1; iNdEx >= 0; iNdEx-- {
-			v := m.Tickers[string(keysForTickers[iNdEx])]
-			baseI := i
-			i = encodeVarintRocksdb(dAtA, i, uint64(v))
-			i--
+		for _, k := range keysForTickers {
+			dAtA[i] = 0xa
+			i++
+			v := m.Tickers[string(k)]
+			mapSize := 1 + len(k) + sovRocksdb(uint64(len(k))) + 1 + sovRocksdb(uint64(v))
+			i = encodeVarintRocksdb(dAtA, i, uint64(mapSize))
+			dAtA[i] = 0xa
+			i++
+			i = encodeVarintRocksdb(dAtA, i, uint64(len(k)))
+			i += copy(dAtA[i:], k)
 			dAtA[i] = 0x10
-			i -= len(keysForTickers[iNdEx])
-			copy(dAtA[i:], keysForTickers[iNdEx])
-			i = encodeVarintRocksdb(dAtA, i, uint64(len(keysForTickers[iNdEx])))
-			i--
-			dAtA[i] = 0xa
-			i = encodeVarintRocksdb(dAtA, i, uint64(baseI-i))
-			i--
-			dAtA[i] = 0xa
+			i++
+			i = encodeVarintRocksdb(dAtA, i, uint64(v))
 		}
 	}
-	return len(dAtA) - i, nil
+	if len(m.Histograms) > 0 {
+		keysForHistograms := make([]string, 0, len(m.Histograms))
+		for k := range m.Histograms {
+			keysForHistograms = append(keysForHistograms, string(k))
+		}
+		github_com_gogo_protobuf_sortkeys.Strings(keysForHistograms)
+		for _, k := range keysForHistograms {
+			dAtA[i] = 0x12
+			i++
+			v := m.Histograms[string(k)]
+			msgSize := 0
+			if (&v) != nil {
+				msgSize = (&v).Size()
+				msgSize += 1 + sovRocksdb(uint64(msgSize))
+			}
+			mapSize := 1 + len(k) + sovRocksdb(uint64(len(k))) + msgSize
+			i = encodeVarintRocksdb(dAtA, i, uint64(mapSize))
+			dAtA[i] = 0xa
+			i++
+			i = encodeVarintRocksdb(dAtA, i, uint64(len(k)))
+			i += copy(dAtA[i:], k)
+			dAtA[i] = 0x12
+			i++
+			i = encodeVarintRocksdb(dAtA, i, uint64((&v).Size()))
+			n3, err := (&v).MarshalTo(dAtA[i:])
+			if err != nil {
+				return 0, err
+			}
+			i += n3
+		}
+	}
+	return i, nil
 }
 
 func encodeVarintRocksdb(dAtA []byte, offset int, v uint64) int {
-	offset -= sovRocksdb(v)
-	base := offset
 	for v >= 1<<7 {
 		dAtA[offset] = uint8(v&0x7f | 0x80)
 		v >>= 7
 		offset++
 	}
 	dAtA[offset] = uint8(v)
-	return base
+	return offset + 1
 }
 func (m *SSTUserProperties) Size() (n int) {
 	if m == nil {
@@ -566,7 +497,14 @@ func (m *TickersAndHistograms) Size() (n int) {
 }
 
 func sovRocksdb(x uint64) (n int) {
-	return (math_bits.Len64(x|1) + 6) / 7
+	for {
+		n++
+		x >>= 7
+		if x == 0 {
+			break
+		}
+	}
+	return n
 }
 func sozRocksdb(x uint64) (n int) {
 	return sovRocksdb(uint64((x << 1) ^ uint64((int64(x) >> 63))))
@@ -586,7 +524,7 @@ func (m *SSTUserProperties) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -614,7 +552,7 @@ func (m *SSTUserProperties) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				stringLen |= uint64(b&0x7F) << shift
+				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -624,9 +562,6 @@ func (m *SSTUserProperties) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthRocksdb
 			}
 			postIndex := iNdEx + intStringLen
-			if postIndex < 0 {
-				return ErrInvalidLengthRocksdb
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -646,7 +581,7 @@ func (m *SSTUserProperties) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -655,9 +590,6 @@ func (m *SSTUserProperties) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthRocksdb
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthRocksdb
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -682,7 +614,7 @@ func (m *SSTUserProperties) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -691,9 +623,6 @@ func (m *SSTUserProperties) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthRocksdb
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthRocksdb
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -740,7 +669,7 @@ func (m *SSTUserPropertiesCollection) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -768,7 +697,7 @@ func (m *SSTUserPropertiesCollection) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -777,9 +706,6 @@ func (m *SSTUserPropertiesCollection) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthRocksdb
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthRocksdb
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -802,7 +728,7 @@ func (m *SSTUserPropertiesCollection) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				stringLen |= uint64(b&0x7F) << shift
+				stringLen |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -812,9 +738,6 @@ func (m *SSTUserPropertiesCollection) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthRocksdb
 			}
 			postIndex := iNdEx + intStringLen
-			if postIndex < 0 {
-				return ErrInvalidLengthRocksdb
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -856,7 +779,7 @@ func (m *HistogramData) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -939,7 +862,7 @@ func (m *HistogramData) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Count |= uint64(b&0x7F) << shift
+				m.Count |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -958,7 +881,7 @@ func (m *HistogramData) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Sum |= uint64(b&0x7F) << shift
+				m.Sum |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -999,7 +922,7 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= uint64(b&0x7F) << shift
+			wire |= (uint64(b) & 0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -1027,7 +950,7 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1036,9 +959,6 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthRocksdb
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthRocksdb
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1059,7 +979,7 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 					}
 					b := dAtA[iNdEx]
 					iNdEx++
-					wire |= uint64(b&0x7F) << shift
+					wire |= (uint64(b) & 0x7F) << shift
 					if b < 0x80 {
 						break
 					}
@@ -1076,7 +996,7 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 						}
 						b := dAtA[iNdEx]
 						iNdEx++
-						stringLenmapkey |= uint64(b&0x7F) << shift
+						stringLenmapkey |= (uint64(b) & 0x7F) << shift
 						if b < 0x80 {
 							break
 						}
@@ -1086,9 +1006,6 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 						return ErrInvalidLengthRocksdb
 					}
 					postStringIndexmapkey := iNdEx + intStringLenmapkey
-					if postStringIndexmapkey < 0 {
-						return ErrInvalidLengthRocksdb
-					}
 					if postStringIndexmapkey > l {
 						return io.ErrUnexpectedEOF
 					}
@@ -1104,7 +1021,7 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 						}
 						b := dAtA[iNdEx]
 						iNdEx++
-						mapvalue |= uint64(b&0x7F) << shift
+						mapvalue |= (uint64(b) & 0x7F) << shift
 						if b < 0x80 {
 							break
 						}
@@ -1140,7 +1057,7 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= int(b&0x7F) << shift
+				msglen |= (int(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1149,9 +1066,6 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthRocksdb
 			}
 			postIndex := iNdEx + msglen
-			if postIndex < 0 {
-				return ErrInvalidLengthRocksdb
-			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -1172,7 +1086,7 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 					}
 					b := dAtA[iNdEx]
 					iNdEx++
-					wire |= uint64(b&0x7F) << shift
+					wire |= (uint64(b) & 0x7F) << shift
 					if b < 0x80 {
 						break
 					}
@@ -1189,7 +1103,7 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 						}
 						b := dAtA[iNdEx]
 						iNdEx++
-						stringLenmapkey |= uint64(b&0x7F) << shift
+						stringLenmapkey |= (uint64(b) & 0x7F) << shift
 						if b < 0x80 {
 							break
 						}
@@ -1199,9 +1113,6 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 						return ErrInvalidLengthRocksdb
 					}
 					postStringIndexmapkey := iNdEx + intStringLenmapkey
-					if postStringIndexmapkey < 0 {
-						return ErrInvalidLengthRocksdb
-					}
 					if postStringIndexmapkey > l {
 						return io.ErrUnexpectedEOF
 					}
@@ -1218,7 +1129,7 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 						}
 						b := dAtA[iNdEx]
 						iNdEx++
-						mapmsglen |= int(b&0x7F) << shift
+						mapmsglen |= (int(b) & 0x7F) << shift
 						if b < 0x80 {
 							break
 						}
@@ -1227,7 +1138,7 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 						return ErrInvalidLengthRocksdb
 					}
 					postmsgIndex := iNdEx + mapmsglen
-					if postmsgIndex < 0 {
+					if mapmsglen < 0 {
 						return ErrInvalidLengthRocksdb
 					}
 					if postmsgIndex > l {
@@ -1279,7 +1190,6 @@ func (m *TickersAndHistograms) Unmarshal(dAtA []byte) error {
 func skipRocksdb(dAtA []byte) (n int, err error) {
 	l := len(dAtA)
 	iNdEx := 0
-	depth := 0
 	for iNdEx < l {
 		var wire uint64
 		for shift := uint(0); ; shift += 7 {
@@ -1311,8 +1221,10 @@ func skipRocksdb(dAtA []byte) (n int, err error) {
 					break
 				}
 			}
+			return iNdEx, nil
 		case 1:
 			iNdEx += 8
+			return iNdEx, nil
 		case 2:
 			var length int
 			for shift := uint(0); ; shift += 7 {
@@ -1329,34 +1241,92 @@ func skipRocksdb(dAtA []byte) (n int, err error) {
 					break
 				}
 			}
+			iNdEx += length
 			if length < 0 {
 				return 0, ErrInvalidLengthRocksdb
 			}
-			iNdEx += length
+			return iNdEx, nil
 		case 3:
-			depth++
-		case 4:
-			if depth == 0 {
-				return 0, ErrUnexpectedEndOfGroupRocksdb
+			for {
+				var innerWire uint64
+				var start int = iNdEx
+				for shift := uint(0); ; shift += 7 {
+					if shift >= 64 {
+						return 0, ErrIntOverflowRocksdb
+					}
+					if iNdEx >= l {
+						return 0, io.ErrUnexpectedEOF
+					}
+					b := dAtA[iNdEx]
+					iNdEx++
+					innerWire |= (uint64(b) & 0x7F) << shift
+					if b < 0x80 {
+						break
+					}
+				}
+				innerWireType := int(innerWire & 0x7)
+				if innerWireType == 4 {
+					break
+				}
+				next, err := skipRocksdb(dAtA[start:])
+				if err != nil {
+					return 0, err
+				}
+				iNdEx = start + next
 			}
-			depth--
+			return iNdEx, nil
+		case 4:
+			return iNdEx, nil
 		case 5:
 			iNdEx += 4
+			return iNdEx, nil
 		default:
 			return 0, fmt.Errorf("proto: illegal wireType %d", wireType)
 		}
-		if iNdEx < 0 {
-			return 0, ErrInvalidLengthRocksdb
-		}
-		if depth == 0 {
-			return iNdEx, nil
-		}
 	}
-	return 0, io.ErrUnexpectedEOF
+	panic("unreachable")
 }
 
 var (
-	ErrInvalidLengthRocksdb        = fmt.Errorf("proto: negative length found during unmarshaling")
-	ErrIntOverflowRocksdb          = fmt.Errorf("proto: integer overflow")
-	ErrUnexpectedEndOfGroupRocksdb = fmt.Errorf("proto: unexpected end of group")
+	ErrInvalidLengthRocksdb = fmt.Errorf("proto: negative length found during unmarshaling")
+	ErrIntOverflowRocksdb   = fmt.Errorf("proto: integer overflow")
 )
+
+func init() {
+	proto.RegisterFile("storage/enginepb/rocksdb.proto", fileDescriptor_rocksdb_d0de3f5554d674cd)
+}
+
+var fileDescriptor_rocksdb_d0de3f5554d674cd = []byte{
+	// 495 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x94, 0x53, 0x41, 0x6b, 0x13, 0x41,
+	0x14, 0xde, 0x49, 0xb6, 0xa9, 0x9d, 0x28, 0xea, 0x92, 0xc3, 0xb2, 0xe2, 0x18, 0x72, 0x8a, 0x82,
+	0xbb, 0x12, 0x0d, 0x98, 0x82, 0xa8, 0xd5, 0x82, 0x17, 0x41, 0xa6, 0x11, 0xc1, 0x8b, 0x4c, 0xa6,
+	0xe3, 0xee, 0x90, 0xdd, 0x99, 0x65, 0x66, 0x22, 0xa9, 0xbf, 0x42, 0xf0, 0x4f, 0xe5, 0xd8, 0x63,
+	0x4f, 0xa2, 0xc9, 0xef, 0x10, 0x64, 0x66, 0xb3, 0x6d, 0xb4, 0xb5, 0xe8, 0xed, 0x7b, 0x1f, 0xef,
+	0xfb, 0xde, 0x7b, 0xdf, 0xee, 0x40, 0xa4, 0x8d, 0x54, 0x24, 0x65, 0x09, 0x13, 0x29, 0x17, 0xac,
+	0x9c, 0x24, 0x4a, 0xd2, 0xa9, 0x3e, 0x9c, 0xc4, 0xa5, 0x92, 0x46, 0x06, 0x11, 0x95, 0x74, 0xaa,
+	0x24, 0xa1, 0x59, 0xbc, 0xee, 0x8c, 0xeb, 0xce, 0x28, 0x9c, 0x19, 0x9e, 0x27, 0x59, 0x4e, 0x13,
+	0xc3, 0x0b, 0xa6, 0x0d, 0x29, 0xca, 0x4a, 0x15, 0x75, 0x52, 0x99, 0x4a, 0x07, 0x13, 0x8b, 0x2a,
+	0xb6, 0xf7, 0x15, 0xc0, 0x9b, 0x07, 0x07, 0xe3, 0xb7, 0x9a, 0xa9, 0x37, 0x4a, 0x96, 0x4c, 0x19,
+	0xce, 0x74, 0x10, 0x40, 0xbf, 0x24, 0x26, 0x0b, 0x41, 0x17, 0xf4, 0x77, 0xb0, 0xc3, 0xc1, 0x23,
+	0xd8, 0x32, 0xfa, 0x43, 0xc1, 0x45, 0xd8, 0xe8, 0x82, 0x7e, 0x7b, 0x70, 0x3b, 0x3e, 0x5b, 0xc3,
+	0x0e, 0x8d, 0xb3, 0x9c, 0xc6, 0xe3, 0x7a, 0x28, 0xde, 0x32, 0xfa, 0x35, 0x17, 0xb5, 0x8a, 0xcc,
+	0xc3, 0xe6, 0xbf, 0xaa, 0xc8, 0xbc, 0xf7, 0x19, 0xde, 0x3a, 0xb7, 0xd4, 0x0b, 0x99, 0xe7, 0x8c,
+	0x1a, 0x2e, 0x45, 0xb0, 0x0f, 0x9b, 0x5a, 0x9b, 0x10, 0x74, 0x9b, 0xfd, 0xf6, 0xe0, 0x7e, 0xfc,
+	0xf7, 0x38, 0xe2, 0x73, 0x2e, 0x7b, 0xfe, 0xe2, 0xdb, 0x1d, 0x0f, 0x5b, 0x7d, 0xd0, 0x81, 0x5b,
+	0x4c, 0x29, 0xa9, 0xdc, 0x41, 0x3b, 0xb8, 0x2a, 0x6c, 0x22, 0xd7, 0x5e, 0x71, 0x6d, 0x64, 0xaa,
+	0x48, 0xf1, 0x92, 0x18, 0x62, 0xd3, 0x28, 0x18, 0x11, 0x2e, 0x0d, 0x80, 0x1d, 0x0e, 0x6e, 0xc0,
+	0x66, 0x39, 0x7c, 0xe0, 0x94, 0x00, 0x5b, 0xe8, 0x98, 0xd1, 0xd0, 0x9d, 0x69, 0x99, 0xd1, 0xb0,
+	0x62, 0x46, 0xa1, 0x5f, 0x33, 0x23, 0xcb, 0xd8, 0x28, 0xb6, 0x2a, 0xa6, 0x20, 0x73, 0xbb, 0x03,
+	0x95, 0x33, 0x61, 0xc2, 0x56, 0x17, 0xf4, 0x7d, 0x5c, 0x15, 0xb6, 0x4f, 0xcf, 0x8a, 0x70, 0xdb,
+	0x71, 0x16, 0xf6, 0x7e, 0x36, 0x60, 0x67, 0xcc, 0xe9, 0x94, 0x29, 0xfd, 0x5c, 0x1c, 0x9e, 0xee,
+	0xa7, 0x83, 0x77, 0x70, 0xdb, 0x54, 0xfc, 0x3a, 0x8f, 0x27, 0x97, 0xe5, 0x71, 0x91, 0x45, 0x4d,
+	0xee, 0x0b, 0xa3, 0x8e, 0x70, 0xed, 0x16, 0x7c, 0x84, 0x30, 0x3b, 0xed, 0x09, 0x1b, 0xce, 0xfb,
+	0xd9, 0x7f, 0x7b, 0x9f, 0x41, 0x67, 0xbf, 0x8e, 0x7f, 0xc3, 0x39, 0xda, 0x85, 0x57, 0x37, 0x17,
+	0xb0, 0xb7, 0x4f, 0xd9, 0xd1, 0xfa, 0xd7, 0xb3, 0xd0, 0x66, 0xf4, 0x89, 0xe4, 0x33, 0xe6, 0xd2,
+	0xf6, 0x71, 0x55, 0xec, 0x36, 0x1e, 0x83, 0x28, 0x83, 0xd7, 0xff, 0x18, 0x70, 0x81, 0xfc, 0xe9,
+	0xa6, 0xbc, 0x3d, 0xb8, 0x7b, 0xd9, 0x0d, 0xbf, 0x7d, 0xf8, 0x8d, 0x49, 0x7b, 0xf7, 0x16, 0x3f,
+	0x90, 0xb7, 0x58, 0x22, 0x70, 0xbc, 0x44, 0xe0, 0x64, 0x89, 0xc0, 0xf7, 0x25, 0x02, 0x5f, 0x56,
+	0xc8, 0x3b, 0x5e, 0x21, 0xef, 0x64, 0x85, 0xbc, 0xf7, 0x57, 0x6a, 0x93, 0x49, 0xcb, 0x3d, 0xad,
+	0x87, 0xbf, 0x02, 0x00, 0x00, 0xff, 0xff, 0x76, 0x8e, 0x19, 0xa2, 0xc8, 0x03, 0x00, 0x00,
+}

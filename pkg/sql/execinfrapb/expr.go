@@ -13,6 +13,7 @@ package execinfrapb
 import (
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/transform"
@@ -48,8 +49,6 @@ func (*ivarBinder) VisitPost(expr tree.Expr) tree.Expr { return expr }
 
 // processExpression parses the string expression inside an Expression,
 // and associates ordinal references (@1, @2, etc) with the given helper.
-//
-// evalCtx will not be mutated.
 func processExpression(
 	exprSpec Expression,
 	evalCtx *tree.EvalContext,
@@ -61,7 +60,7 @@ func processExpression(
 	}
 	expr, err := parser.ParseExprWithInt(
 		exprSpec.Expr,
-		parser.NakedIntTypeFromDefaultIntSize(evalCtx.SessionData().DefaultIntSize),
+		parser.NakedIntTypeFromDefaultIntSize(evalCtx.SessionData.DefaultIntSize),
 	)
 	if err != nil {
 		return nil, err
@@ -145,8 +144,6 @@ func (eh *ExprHelper) IndexedVarNodeFormatter(idx int) tree.NodeFormatter {
 
 // DeserializeExpr deserializes expr, binds the indexed variables to the
 // provided IndexedVarHelper, and evaluates any constants in the expression.
-//
-// evalCtx will not be mutated.
 func DeserializeExpr(
 	expr string, semaCtx *tree.SemaContext, evalCtx *tree.EvalContext, vars *tree.IndexedVarHelper,
 ) (tree.TypedExpr, error) {
@@ -159,7 +156,7 @@ func DeserializeExpr(
 		return deserializedExpr, err
 	}
 	var t transform.ExprTransformContext
-	if t.AggregateInExpr(deserializedExpr, evalCtx.SessionData().SearchPath) {
+	if t.AggregateInExpr(deserializedExpr, evalCtx.SessionData.SearchPath) {
 		return nil, errors.Errorf("expression '%s' has aggregate", deserializedExpr)
 	}
 	return deserializedExpr, nil
@@ -192,23 +189,9 @@ func (eh *ExprHelper) Init(
 func (eh *ExprHelper) EvalFilter(row rowenc.EncDatumRow) (bool, error) {
 	eh.Row = row
 	eh.evalCtx.PushIVarContainer(eh)
-	pass, err := RunFilter(eh.Expr, eh.evalCtx)
+	pass, err := schemaexpr.RunFilter(eh.Expr, eh.evalCtx)
 	eh.evalCtx.PopIVarContainer()
 	return pass, err
-}
-
-// RunFilter runs a filter expression and returns whether the filter passes.
-func RunFilter(filter tree.TypedExpr, evalCtx *tree.EvalContext) (bool, error) {
-	if filter == nil {
-		return true, nil
-	}
-
-	d, err := filter.Eval(evalCtx)
-	if err != nil {
-		return false, err
-	}
-
-	return d == tree.DBoolTrue, nil
 }
 
 // Eval - given a row - evaluates the wrapped expression and returns the

@@ -12,27 +12,19 @@ package tabledesc_test
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
-	"sync"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/geo/geoindex"
-	"github.com/cockroachdb/cockroach/pkg/jobs"
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -241,17 +233,22 @@ func TestIndexInterface(t *testing.T) {
 
 	// Check index methods on features not tested here.
 	for _, idx := range indexes {
+		require.False(t, idx.IsInterleaved(),
+			errMsgFmt, "IsInterleaved", idx.GetName())
 		require.False(t, idx.IsDisabled(),
 			errMsgFmt, "IsDisabled", idx.GetName())
 		require.False(t, idx.IsCreatedExplicitly(),
 			errMsgFmt, "IsCreatedExplicitly", idx.GetName())
-		if idx.Primary() {
-			require.Equal(t, descpb.IndexDescriptorVersion(0x4), idx.GetVersion(),
-				errMsgFmt, "GetVersion", idx.GetName())
-		} else {
-			require.Equal(t, descpb.IndexDescriptorVersion(0x3), idx.GetVersion(),
-				errMsgFmt, "GetVersion", idx.GetName())
-		}
+		require.Equal(t, descpb.IndexDescriptorVersion(0x3), idx.GetVersion(),
+			errMsgFmt, "GetVersion", idx.GetName())
+		require.Equal(t, descpb.PartitioningDescriptor{}, idx.GetPartitioning(),
+			errMsgFmt, "GetPartitioning", idx.GetName())
+		require.Equal(t, []string(nil), idx.PartitionNames(),
+			errMsgFmt, "PartitionNames", idx.GetName())
+		require.Equal(t, 0, idx.NumInterleaveAncestors(),
+			errMsgFmt, "NumInterleaveAncestors", idx.GetName())
+		require.Equal(t, 0, idx.NumInterleavedBy(),
+			errMsgFmt, "NumInterleavedBy", idx.GetName())
 		require.False(t, idx.HasOldStoredColumns(),
 			errMsgFmt, "HasOldStoredColumns", idx.GetName())
 		require.Equalf(t, 0, idx.NumCompositeColumns(),
@@ -279,23 +276,20 @@ func TestIndexInterface(t *testing.T) {
 			errMsgFmt, "GetShardColumnName", idx.GetName())
 		require.Equal(t, idx == s4, !(&descpb.ShardedDescriptor{}).Equal(idx.GetSharded()),
 			errMsgFmt, "GetSharded", idx.GetName())
-		require.Equalf(t, idx != s3, idx.NumSecondaryStoredColumns() == 0,
-			errMsgFmt, "NumSecondaryStoredColumns", idx.GetName())
+		require.Equalf(t, idx != s3, idx.NumStoredColumns() == 0,
+			errMsgFmt, "NumStoredColumns", idx.GetName())
 	}
 
 	// Check index columns.
 	for i, idx := range indexes {
 		expectedColNames := indexColumns[i]
-		actualColNames := make([]string, idx.NumKeyColumns())
-		colIDs := idx.CollectKeyColumnIDs()
-		colIDs.UnionWith(idx.CollectSecondaryStoredColumnIDs())
-		colIDs.UnionWith(idx.CollectKeySuffixColumnIDs())
+		actualColNames := make([]string, idx.NumColumns())
 		for j := range actualColNames {
-			actualColNames[j] = idx.GetKeyColumnName(j)
-			require.Equalf(t, idx == s1, idx.GetKeyColumnDirection(j) == descpb.IndexDescriptor_DESC,
+			actualColNames[j] = idx.GetColumnName(j)
+			require.Equalf(t, idx == s1, idx.GetColumnDirection(j) == descpb.IndexDescriptor_DESC,
 				"mismatched column directions for index '%s'", idx.GetName())
-			require.True(t, colIDs.Contains(idx.GetKeyColumnID(j)),
-				"column ID resolution failure for column '%s' in index '%s'", idx.GetKeyColumnName(j), idx.GetName())
+			require.True(t, idx.ContainsColumnID(idx.GetColumnID(j)),
+				"column ID resolution failure for column '%s' in index '%s'", idx.GetColumnName(j), idx.GetName())
 		}
 		require.Equalf(t, expectedColNames, actualColNames,
 			"mismatched columns for index '%s'", idx.GetName())
@@ -305,11 +299,11 @@ func TestIndexInterface(t *testing.T) {
 	for i, idx := range indexes {
 		expectedExtraColIDs := make([]descpb.ColumnID, len(extraColumnsAsPkColOrdinals[i]))
 		for j, pkColOrdinal := range extraColumnsAsPkColOrdinals[i] {
-			expectedExtraColIDs[j] = pk.GetKeyColumnID(pkColOrdinal)
+			expectedExtraColIDs[j] = pk.GetColumnID(pkColOrdinal)
 		}
-		actualExtraColIDs := make([]descpb.ColumnID, idx.NumKeySuffixColumns())
+		actualExtraColIDs := make([]descpb.ColumnID, idx.NumExtraColumns())
 		for j := range actualExtraColIDs {
-			actualExtraColIDs[j] = idx.GetKeySuffixColumnID(j)
+			actualExtraColIDs[j] = idx.GetExtraColumnID(j)
 		}
 		require.Equalf(t, expectedExtraColIDs, actualExtraColIDs,
 			"mismatched extra columns for index '%s'", idx.GetName())
@@ -317,10 +311,10 @@ func TestIndexInterface(t *testing.T) {
 
 	// Check particular index column features.
 	require.Equal(t, "c6", s2.InvertedColumnName())
-	require.Equal(t, s2.GetKeyColumnID(0), s2.InvertedColumnID())
+	require.Equal(t, s2.GetColumnID(0), s2.InvertedColumnID())
 	require.Equal(t, "c7", s6.InvertedColumnName())
-	require.Equal(t, s6.GetKeyColumnID(0), s6.InvertedColumnID())
-	require.Equal(t, 2, s3.NumSecondaryStoredColumns())
+	require.Equal(t, s6.GetColumnID(0), s6.InvertedColumnID())
+	require.Equal(t, 2, s3.NumStoredColumns())
 	require.Equal(t, "c5", s3.GetStoredColumnName(0))
 	require.Equal(t, "c6", s3.GetStoredColumnName(1))
 }
@@ -350,12 +344,12 @@ func TestIndexStrictColumnIDs(t *testing.T) {
 	// index while still passing validation.
 	mut := catalogkv.TestingGetMutableExistingTableDescriptor(db, keys.SystemSQLCodec, "d", "t")
 	idx := &mut.Indexes[0]
-	id := idx.KeyColumnIDs[0]
-	name := idx.KeyColumnNames[0]
-	idx.Version = descpb.SecondaryIndexFamilyFormatVersion
+	id := idx.ColumnIDs[0]
+	name := idx.ColumnNames[0]
+	idx.Version = descpb.EmptyArraysInInvertedIndexesVersion
 	idx.StoreColumnIDs = append([]descpb.ColumnID{}, id, id, id, id)
 	idx.StoreColumnNames = append([]string{}, name, name, name, name)
-	idx.KeySuffixColumnIDs = append([]descpb.ColumnID{}, id, id, id, id)
+	idx.ExtraColumnIDs = append([]descpb.ColumnID{}, id, id, id, id)
 	mut.Version++
 	require.NoError(t, catalog.ValidateSelf(mut))
 
@@ -383,155 +377,15 @@ func TestIndexStrictColumnIDs(t *testing.T) {
 	var msg string
 	err = rows.Scan(&msg)
 	require.NoError(t, err)
-	expected := fmt.Sprintf(`InitPut /Table/%d/2/0/0/0/0/0/0 -> /BYTES/0x2300030003000300`, mut.GetID())
-	require.Equal(t, expected, msg)
+	require.Equal(t, `InitPut /Table/53/2/0/0/0/0/0/0 -> /BYTES/0x2300030003000300`, msg)
 
 	// Test that with the strict guarantees, this table descriptor would have been
 	// considered invalid.
 	idx.Version = descpb.StrictIndexColumnIDGuaranteesVersion
-	expected = fmt.Sprintf(`relation "t" (%d): index "sec" has duplicates in KeySuffixColumnIDs: [2 2 2 2]`, mut.GetID())
-	require.EqualError(t, catalog.ValidateSelf(mut), expected)
+	require.EqualError(t, catalog.ValidateSelf(mut),
+		`relation "t" (53): index "sec" has duplicates in ExtraColumnIDs: [2 2 2 2]`)
 
 	_, err = conn.Exec(`ALTER TABLE d.t DROP COLUMN c2`)
 	require.NoError(t, err)
-}
 
-// TestLatestIndexDescriptorVersionValues tests the correct behavior of the
-// LatestIndexDescVersion version. The values it returns should reflect those
-// used when creating indexes.
-func TestLatestIndexDescriptorVersionValues(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	ctx := context.Background()
-
-	const vp = tabledesc.LatestPrimaryIndexDescriptorVersion
-	const vnp = tabledesc.LatestNonPrimaryIndexDescriptorVersion
-
-	// Create a test cluster that will be used to create all kinds of indexes.
-	// We make it hang while finalizing an ALTER PRIMARY KEY to cover the edge
-	// case of primary-index-encoded indexes in mutations.
-	swapNotification := make(chan struct{})
-	waitBeforeContinuing := make(chan struct{})
-	args := base.TestServerArgs{
-		Knobs: base.TestingKnobs{
-			JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
-			SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
-				RunBeforePrimaryKeySwap: func() {
-					swapNotification <- struct{}{}
-					<-waitBeforeContinuing
-				},
-			},
-		},
-	}
-	s, sqlDB, kvDB := serverutils.StartServer(t, args)
-	defer s.Stopper().Stop(ctx)
-	tdb := sqlutils.MakeSQLRunner(sqlDB)
-
-	// Populate the test cluster with all manner of indexes and index mutations.
-	tdb.Exec(t, "CREATE SEQUENCE s")
-	tdb.Exec(t, "CREATE MATERIALIZED VIEW v AS SELECT 1 AS e, 2 AS f")
-	tdb.Exec(t, "CREATE INDEX vsec ON v (f)")
-	tdb.Exec(t, "CREATE TABLE t (a INT NOT NULL PRIMARY KEY, b INT, c INT, d INT NOT NULL, INDEX tsec (b), UNIQUE (c))")
-	// Wait for schema changes to complete.
-	q := fmt.Sprintf(
-		`SELECT count(*) FROM [SHOW JOBS] WHERE job_type IN ('%s', '%s') AND status <> 'succeeded'`,
-		jobspb.TypeSchemaChange,
-		jobspb.TypeNewSchemaChange,
-	)
-	tdb.CheckQueryResultsRetry(t, q, [][]string{{"0"}})
-	// Hang on ALTER PRIMARY KEY finalization.
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		tdb.Exec(t, "ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (d)")
-		wg.Done()
-	}()
-	<-swapNotification
-
-	test := func(desc catalog.TableDescriptor) {
-		require.Equal(t, descpb.PrimaryIndexEncoding, desc.GetPrimaryIndex().GetEncodingType())
-		require.Equal(t, vp, desc.GetPrimaryIndex().GetVersion())
-		for _, index := range desc.PublicNonPrimaryIndexes() {
-			require.Equal(t, descpb.SecondaryIndexEncoding, index.GetEncodingType())
-		}
-		nonPrimaries := desc.DeletableNonPrimaryIndexes()
-
-		switch desc.GetName() {
-		case "t":
-			require.Equal(t, 6, len(nonPrimaries))
-			for _, np := range nonPrimaries {
-				switch np.GetName() {
-				case "tsec":
-					require.True(t, np.Public())
-					require.Equal(t, vnp, np.GetVersion())
-
-				case "t_c_key":
-					require.True(t, np.Public())
-					require.True(t, np.IsUnique())
-					require.Equal(t, vnp, np.GetVersion())
-
-				case "t_a_key":
-					require.True(t, np.IsMutation())
-					require.Equal(t, descpb.SecondaryIndexEncoding, np.GetEncodingType())
-					require.Equal(t, vnp, np.GetVersion())
-
-				case "new_primary_key":
-					require.True(t, np.IsMutation())
-					require.Equal(t, descpb.PrimaryIndexEncoding, np.GetEncodingType())
-					require.Equal(t, vnp, np.GetVersion())
-
-				case "tsec_rewrite_for_primary_key_change":
-					require.True(t, np.IsMutation())
-					require.Equal(t, descpb.SecondaryIndexEncoding, np.GetEncodingType())
-					require.Equal(t, vnp, np.GetVersion())
-
-				case "t_c_key_rewrite_for_primary_key_change":
-					require.True(t, np.IsMutation())
-					require.True(t, np.IsUnique())
-					require.Equal(t, descpb.SecondaryIndexEncoding, np.GetEncodingType())
-					require.Equal(t, vnp, np.GetVersion())
-
-				default:
-					t.Fatalf("unexpected index or index mutation %q", np.GetName())
-				}
-			}
-		case "s":
-			require.Empty(t, nonPrimaries)
-
-		case "v":
-			require.Equal(t, 1, len(nonPrimaries))
-			np := nonPrimaries[0]
-			require.False(t, np.IsMutation())
-			require.Equal(t, "vsec", np.GetName())
-			require.Equal(t, vnp, np.GetVersion())
-		}
-	}
-
-	// We bypass the usual descriptor retrieval mechanisms because we don't want
-	// RunPostDeserializationChanges to run and potentially overwrite index
-	// descriptor versions.
-	rows := tdb.QueryStr(t, `
-		SELECT encode(descriptor, 'hex')
-		FROM system.descriptor
-		WHERE id IN ('t'::REGCLASS::INT, 's'::REGCLASS::INT, 'v'::REGCLASS::INT)`)
-	require.NotEmpty(t, rows)
-	for _, row := range rows {
-		require.NotEmpty(t, row)
-		bytes, err := hex.DecodeString(row[0])
-		require.NoError(t, err)
-		var descProto descpb.Descriptor
-		require.NoError(t, protoutil.Unmarshal(bytes, &descProto))
-		b := catalogkv.NewBuilderWithMVCCTimestamp(&descProto, hlc.Timestamp{WallTime: 1})
-		desc := b.BuildImmutable().(catalog.TableDescriptor)
-		test(desc)
-	}
-
-	// Test again but with RunPostDeserializationChanges.
-	for _, name := range []string{`t`, `s`, `v`} {
-		desc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "defaultdb", name)
-		test(desc)
-	}
-
-	// Resume pending statement execution.
-	waitBeforeContinuing <- struct{}{}
-	wg.Wait()
 }

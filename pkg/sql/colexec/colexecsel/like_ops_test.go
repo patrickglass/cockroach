@@ -103,7 +103,7 @@ func TestLikeOperators(t *testing.T) {
 
 func BenchmarkLikeOps(b *testing.B) {
 	defer log.Scope(b).Close(b)
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	ctx := context.Background()
 
 	typs := []*types.T{types.Bytes}
@@ -127,11 +127,11 @@ func BenchmarkLikeOps(b *testing.B) {
 
 	batch.SetLength(coldata.BatchSize())
 	source := colexecop.NewRepeatableBatchSource(testAllocator, batch, typs)
-	source.Init(ctx)
+	source.Init()
 
 	base := selConstOpBase{
-		OneInputHelper: colexecop.MakeOneInputHelper(source),
-		colIdx:         0,
+		OneInputNode: colexecop.NewOneInputNode(source),
+		colIdx:       0,
 	}
 	prefixOp := &selPrefixBytesBytesConstOp{
 		selConstOpBase: base,
@@ -162,10 +162,10 @@ func BenchmarkLikeOps(b *testing.B) {
 	}
 	for _, tc := range testCases {
 		b.Run(tc.name, func(b *testing.B) {
-			tc.op.Init(ctx)
+			tc.op.Init()
 			b.SetBytes(int64(width * coldata.BatchSize()))
 			for i := 0; i < b.N; i++ {
-				tc.op.Next()
+				tc.op.Next(ctx)
 			}
 		})
 	}

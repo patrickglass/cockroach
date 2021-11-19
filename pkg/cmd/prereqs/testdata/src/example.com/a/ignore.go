@@ -10,5 +10,4 @@
 
 package a
 
-//go:build notme
 // +build notme

@@ -35,6 +35,11 @@ import (
 // ambiguous results). Non-transactional read/write operations are treated as
 // though they had been wrapped in a transaction and are verified accordingly.
 //
+// TODO(dan): Verify that the results of reads match the data visible at the
+// commit timestamp. We should be able to construct a validity timespan for each
+// read in the transaction and fail if there isn't some timestamp that overlaps
+// all of them.
+//
 // TODO(dan): Verify that there is no causality inversion between steps. That
 // is, if transactions corresponding to two steps are sequential (i.e.
 // txn1CommitStep.After < txn2BeginStep.Before) then the commit timestamps need
@@ -78,18 +83,6 @@ func Validate(steps []Step, kvs *Engine) []error {
 			Materialized: true,
 		}
 		extraKVs = append(extraKVs, kv)
-	}
-	for key, tombstones := range v.tombstonesForKey {
-		numExtraWrites := len(tombstones) - v.committedDeletesForKey[key]
-		for i := 0; i < numExtraWrites; i++ {
-			kv := &observedWrite{
-				Key:   []byte(key),
-				Value: roachpb.Value{},
-				// NB: As it's unclear which are "extra", timestamp is left missing.
-				Materialized: true,
-			}
-			extraKVs = append(extraKVs, kv)
-		}
 	}
 	if len(extraKVs) > 0 {
 		err := errors.Errorf(`extra writes: %s`, printObserved(extraKVs...))
@@ -136,63 +129,29 @@ func (ts timeSpan) String() string {
 	return fmt.Sprintf(`[%s, %s)`, start, end)
 }
 
-// disjointTimeSpans represents a collection of timeSpan objects for when
-// operations are valid. It exists as a convenience to be able to generate
-// intersections when there are overlaps with other timeSpan collections.
-type disjointTimeSpans []timeSpan
-
-func (ts disjointTimeSpans) validIntersections(
-	keyOpValidTimeSpans disjointTimeSpans,
-) disjointTimeSpans {
-	var newValidSpans disjointTimeSpans
-	for _, existingValidSpan := range ts {
-		for _, opValidSpan := range keyOpValidTimeSpans {
-			intersection := existingValidSpan.Intersect(opValidSpan)
-			if !intersection.IsEmpty() {
-				newValidSpans = append(newValidSpans, intersection)
-			}
-		}
-	}
-	return newValidSpans
-}
-
 // multiKeyTimeSpan represents a collection of timeSpans: one for each key
 // accessed by a ranged operation and one for the keys missed by the ranged
 // operation.
 type multiKeyTimeSpan struct {
-	Keys []disjointTimeSpans
-	Gaps disjointTimeSpans
+	Keys []timeSpan
+	Gap  timeSpan
 }
 
-func (mts multiKeyTimeSpan) Combined() disjointTimeSpans {
-	validPossibilities := mts.Gaps
+func (mts multiKeyTimeSpan) Combined() timeSpan {
+	valid := mts.Gap
 	for _, validKey := range mts.Keys {
-		validPossibilities = validPossibilities.validIntersections(validKey)
+		valid = valid.Intersect(validKey)
 	}
-	return validPossibilities
+	return valid
 }
 
 func (mts multiKeyTimeSpan) String() string {
 	var buf strings.Builder
 	buf.WriteByte('{')
-	for i, timeSpans := range mts.Keys {
-		fmt.Fprintf(&buf, "%d:", i)
-		for tsIdx, ts := range timeSpans {
-			if tsIdx != 0 {
-				fmt.Fprintf(&buf, ",")
-			}
-			fmt.Fprintf(&buf, "%s", ts)
-		}
-		fmt.Fprintf(&buf, ", ")
+	for i, ts := range mts.Keys {
+		fmt.Fprintf(&buf, "%d:%s, ", i, ts)
 	}
-	fmt.Fprintf(&buf, "gap:")
-	for idx, gapSpan := range mts.Gaps {
-		if idx != 0 {
-			fmt.Fprintf(&buf, ",")
-		}
-		fmt.Fprintf(&buf, "%s", gapSpan)
-	}
-	fmt.Fprintf(&buf, "}")
+	fmt.Fprintf(&buf, "gap:%s}", mts.Gap)
 	return buf.String()
 }
 
@@ -210,31 +169,24 @@ type observedWrite struct {
 	Key   roachpb.Key
 	Value roachpb.Value
 	// Timestamp will only be filled if Materialized is true.
-	Timestamp     hlc.Timestamp
-	Materialized  bool
-	IsDeleteRange bool
+	Timestamp    hlc.Timestamp
+	Materialized bool
 }
 
 func (*observedWrite) observedMarker() {}
 
-func (o *observedWrite) isDelete() bool {
-	return !o.Value.IsPresent()
-}
-
 type observedRead struct {
-	Key        roachpb.Key
-	Value      roachpb.Value
-	ValidTimes disjointTimeSpans
+	Key   roachpb.Key
+	Value roachpb.Value
+	Valid timeSpan
 }
 
 func (*observedRead) observedMarker() {}
 
 type observedScan struct {
-	Span          roachpb.Span
-	IsDeleteRange bool
-	Reverse       bool
-	KVs           []roachpb.KeyValue
-	Valid         multiKeyTimeSpan
+	Span  roachpb.Span
+	KVs   []roachpb.KeyValue
+	Valid multiKeyTimeSpan
 }
 
 func (*observedScan) observedMarker() {}
@@ -248,25 +200,11 @@ type validator struct {
 	// written and the operation that wrote it.
 	kvByValue map[string]storage.MVCCKeyValue
 
-	// Unfortunately, with tombstones there is no 1:1 relationship between the nil
-	// value and the delete operation that wrote it, so we must store all tombstones
-	// for a given key. When validating committed delete operations, we validate
-	// that there is a tombstone with a timestamp that would be valid, similar
-	// to how reads are evaluated.  At the end of validation, we also validate
-	// that we have seen a correct number of materialized delete operations
-	// given the number of tombstones for each key; thus, we can see if we have
-	// any "missing" or "extra" writes at the end.
-	// Each key has a map of all the tombstone timestamps, stored with a boolean
-	// flag indicating if it has been matched to a transactional delete or not.
-	tombstonesForKey       map[string]map[hlc.Timestamp]bool
-	committedDeletesForKey map[string]int
-
 	failures []error
 }
 
 func makeValidator(kvs *Engine) (*validator, error) {
 	kvByValue := make(map[string]storage.MVCCKeyValue)
-	tombstonesForKey := make(map[string]map[hlc.Timestamp]bool)
 	var err error
 	kvs.Iterate(func(key storage.MVCCKey, value []byte, iterErr error) {
 		if iterErr != nil {
@@ -287,12 +225,6 @@ func makeValidator(kvs *Engine) (*validator, error) {
 			// globally over a run, so there's a 1:1 relationship between a value that
 			// was written and the operation that wrote it.
 			kvByValue[valueStr] = storage.MVCCKeyValue{Key: key, Value: value}
-		} else if len(value) == 0 {
-			rawKey := string(key.Key)
-			if _, ok := tombstonesForKey[rawKey]; !ok {
-				tombstonesForKey[rawKey] = make(map[hlc.Timestamp]bool)
-			}
-			tombstonesForKey[rawKey][key.Timestamp] = false
 		}
 	})
 	if err != nil {
@@ -300,28 +232,10 @@ func makeValidator(kvs *Engine) (*validator, error) {
 	}
 
 	return &validator{
-		kvs:                    kvs,
-		kvByValue:              kvByValue,
-		tombstonesForKey:       tombstonesForKey,
-		committedDeletesForKey: make(map[string]int),
-		observedOpsByTxn:       make(map[string][]observedOp),
+		kvs:              kvs,
+		kvByValue:        kvByValue,
+		observedOpsByTxn: make(map[string][]observedOp),
 	}, nil
-}
-
-// getDeleteForKey looks up a stored tombstone for a given key (if it
-// exists) from tombstonesForKey, returning the tombstone (i.e. MVCCKey) along
-// with a `true` boolean value if found, or the empty key and `false` if not.
-func (v *validator) getDeleteForKey(key string, txn *roachpb.Transaction) (storage.MVCCKey, bool) {
-	if txn == nil {
-		panic(errors.AssertionFailedf(`transaction required to look up delete for key: %v`, key))
-	}
-
-	if used, ok := v.tombstonesForKey[key][txn.TxnMeta.WriteTimestamp]; !used && ok {
-		v.tombstonesForKey[key][txn.TxnMeta.WriteTimestamp] = true
-		return storage.MVCCKey{Key: []byte(key), Timestamp: txn.TxnMeta.WriteTimestamp}, true
-	}
-
-	return storage.MVCCKey{}, false
 }
 
 func (v *validator) processOp(txnID *string, op Operation) {
@@ -329,7 +243,7 @@ func (v *validator) processOp(txnID *string, op Operation) {
 	case *GetOperation:
 		v.failIfError(op, t.Result)
 		if txnID == nil {
-			v.checkAtomic(`get`, t.Result, nil, op)
+			v.checkAtomic(`get`, t.Result, op)
 		} else {
 			read := &observedRead{
 				Key:   t.Key,
@@ -339,7 +253,7 @@ func (v *validator) processOp(txnID *string, op Operation) {
 		}
 	case *PutOperation:
 		if txnID == nil {
-			v.checkAtomic(`put`, t.Result, nil, op)
+			v.checkAtomic(`put`, t.Result, op)
 		} else {
 			// Accumulate all the writes for this transaction.
 			kv, ok := v.kvByValue[string(t.Value)]
@@ -354,77 +268,17 @@ func (v *validator) processOp(txnID *string, op Operation) {
 			}
 			v.observedOpsByTxn[*txnID] = append(v.observedOpsByTxn[*txnID], write)
 		}
-	case *DeleteOperation:
-		if txnID == nil {
-			v.checkAtomic(`delete`, t.Result, nil, op)
-		} else {
-			// NB: While Put operations can be identified as having materialized
-			// (or not) in the storage engine because the Generator guarantees each
-			// value to be unique (and thus, if a MVCC key/value pair exists in the
-			// storage engine with a value matching that of a write operation, it
-			// materialized), the same cannot be done for Delete operations, which
-			// all write the same tombstone value. Thus, Delete operations can only
-			// be identified as materialized by determining if the final write
-			// operation for a key in a given transaction was a Delete, and
-			// validating that a potential tombstone for that key was stored.
-			// This validation must be done at the end of the transaction;
-			// specifically, in the function `checkCommittedTxn(..)` where it looks
-			// up a corresponding tombstone with `getDeleteForKey(..)`.
-			write := &observedWrite{
-				Key:   t.Key,
-				Value: roachpb.Value{},
-			}
-			v.observedOpsByTxn[*txnID] = append(v.observedOpsByTxn[*txnID], write)
-		}
-	case *DeleteRangeOperation:
-		if txnID == nil {
-			v.checkAtomic(`deleteRange`, t.Result, nil, op)
-		} else {
-			// For the purposes of validation, DelRange operations decompose into
-			// a specialized scan for keys with non-nil values, followed by
-			// writes for each key, with a span to validate that the keys we are
-			// deleting are within the proper bounds.  See above comment for how
-			// the individual deletion tombstones for each key are validated.
-			scan := &observedScan{
-				Span: roachpb.Span{
-					Key:    t.Key,
-					EndKey: t.EndKey,
-				},
-				IsDeleteRange: true,
-				KVs:           make([]roachpb.KeyValue, len(t.Result.Keys)),
-			}
-			deleteOps := make([]observedOp, len(t.Result.Keys))
-			for i, key := range t.Result.Keys {
-				scan.KVs[i] = roachpb.KeyValue{
-					Key:   key,
-					Value: roachpb.Value{},
-				}
-				write := &observedWrite{
-					Key:           key,
-					Value:         roachpb.Value{},
-					IsDeleteRange: true,
-				}
-				deleteOps[i] = write
-			}
-			v.observedOpsByTxn[*txnID] = append(v.observedOpsByTxn[*txnID], scan)
-			v.observedOpsByTxn[*txnID] = append(v.observedOpsByTxn[*txnID], deleteOps...)
-		}
 	case *ScanOperation:
 		v.failIfError(op, t.Result)
 		if txnID == nil {
-			atomicScanType := `scan`
-			if t.Reverse {
-				atomicScanType = `reverse scan`
-			}
-			v.checkAtomic(atomicScanType, t.Result, nil, op)
+			v.checkAtomic(`scan`, t.Result, op)
 		} else {
 			scan := &observedScan{
 				Span: roachpb.Span{
 					Key:    t.Key,
 					EndKey: t.EndKey,
 				},
-				KVs:     make([]roachpb.KeyValue, len(t.Result.Values)),
-				Reverse: t.Reverse,
+				KVs: make([]roachpb.KeyValue, len(t.Result.Values)),
 			}
 			for i, kv := range t.Result.Values {
 				scan.KVs[i] = roachpb.KeyValue{
@@ -511,13 +365,11 @@ func (v *validator) processOp(txnID *string, op Operation) {
 		} else {
 			v.failIfError(op, t.Result)
 		}
-	case *ChangeZoneOperation:
-		v.failIfError(op, t.Result)
 	case *BatchOperation:
 		if !resultIsRetryable(t.Result) {
 			v.failIfError(op, t.Result)
 			if txnID == nil {
-				v.checkAtomic(`batch`, t.Result, nil, t.Ops...)
+				v.checkAtomic(`batch`, t.Result, t.Ops...)
 			} else {
 				for _, op := range t.Ops {
 					v.processOp(txnID, op)
@@ -529,24 +381,21 @@ func (v *validator) processOp(txnID *string, op Operation) {
 		if t.CommitInBatch != nil {
 			ops = append(ops, t.CommitInBatch.Ops...)
 		}
-		v.checkAtomic(`txn`, t.Result, t.Txn, ops...)
+		v.checkAtomic(`txn`, t.Result, ops...)
 	default:
 		panic(errors.AssertionFailedf(`unknown operation type: %T %v`, t, t))
 	}
 }
 
-func (v *validator) checkAtomic(
-	atomicType string, result Result, optTxn *roachpb.Transaction, ops ...Operation,
-) {
+func (v *validator) checkAtomic(atomicType string, result Result, ops ...Operation) {
 	fakeTxnID := uuid.MakeV4().String()
 	for _, op := range ops {
 		v.processOp(&fakeTxnID, op)
 	}
 	txnObservations := v.observedOpsByTxn[fakeTxnID]
 	delete(v.observedOpsByTxn, fakeTxnID)
-
 	if result.Type != ResultType_Error {
-		v.checkCommittedTxn(`committed `+atomicType, txnObservations, optTxn)
+		v.checkCommittedTxn(`committed `+atomicType, txnObservations)
 	} else if resultIsAmbiguous(result) {
 		v.checkAmbiguousTxn(`ambiguous `+atomicType, txnObservations)
 	} else {
@@ -554,9 +403,7 @@ func (v *validator) checkAtomic(
 	}
 }
 
-func (v *validator) checkCommittedTxn(
-	atomicType string, txnObservations []observedOp, optTxn *roachpb.Transaction,
-) {
+func (v *validator) checkCommittedTxn(atomicType string, txnObservations []observedOp) {
 	// The following works by verifying that there is at least one time at which
 	// it was valid to see all the reads and writes that we saw in this
 	// transaction.
@@ -565,8 +412,6 @@ func (v *validator) checkCommittedTxn(
 	// - Write k1@t2 -> v1
 	// - Read k2 -> v2
 	// - Scan [k3,k5) -> [v3,v4]
-	// - Delete k5@t2 -> <nil> (MVCC delete writes tombstone value)
-	// - Read k5 -> <nil>
 	//
 	// And what was present in KV after this and some other transactions:
 	// - k1@t2, v1
@@ -575,8 +420,6 @@ func (v *validator) checkCommittedTxn(
 	// - k2@t3, v6
 	// - k3@t0, v3
 	// - k4@t2, v4
-	// - k5@t1, v7
-	// - k5@t2, <nil>
 	//
 	// Each of the operations in the transaction, if taken individually, has some
 	// window at which it was valid. The Write was only valid for a commit exactly
@@ -584,20 +427,12 @@ func (v *validator) checkCommittedTxn(
 	// of the txn commit. The Read would have been valid for [t1,t3) because v2 was
 	// written at t1 and overwritten at t3. The scan would have been valid for
 	// [t2,∞) because v3 was written at t0 and v4 was written at t2 and neither were
-	// overwritten.  The Delete, same as the Write, is valid at the timestamp of
-	// the txn commit, as it is simply a Write with an empty (nil) value.  The
-	// final Read, it is worth noting, could be valid at two disjoint timespans
-	// that must be considered: [-∞, t1), and [t2,∞).
+	// overwritten.
 	//
-	//
-	// As long as there is at least one time span in which all operations
-	// overlap validly, we're good. However, if another write had a timestamp of
-	// t3, then there is no timestamp at which the transaction could have
-	// committed, which is a violation of our consistency guarantees.
+	// As long as these time spans overlap, we're good. However, if another write
+	// had a timestamp of t3, then there is no timestamp at which the transaction
+	// could have committed, which is a violation of our consistency guarantees.
 	// Similarly if there was some read that was only valid from [t1,t2).
-	// While Reads of concrete values only ever have one valid timespan, with
-	// the introduction of Deletes, a Read that returns <nil> may have multiple
-	// valid timespans (i.e. before the key existed, after it was deleted).
 	//
 	// Listen up, this is where it gets tricky. Within a transaction, if the same
 	// key is written more than once, only the last one will ever be materialized
@@ -636,31 +471,10 @@ func (v *validator) checkCommittedTxn(
 		case *observedWrite:
 			if _, ok := lastWriteIdxByKey[string(o.Key)]; !ok {
 				lastWriteIdxByKey[string(o.Key)] = idx
-
-				// Mark which deletes are materialized and match them with a stored
-				// tombstone, since this cannot be done before the end of the txn.
-				// This is because materialized deletes do not write unique values,
-				// but must be the final write in a txn for that key.
-				if o.isDelete() {
-					key := string(o.Key)
-					v.committedDeletesForKey[key]++
-					if optTxn == nil {
-						// In the case that the delete is not in a transaction (or in an
-						// ambiguous transaction), we do not match it to a specific
-						// tombstone as we cannot be certain which tombstone resulted from
-						// this operation; hence, we leave the timestamp empty.
-						o.Materialized = v.committedDeletesForKey[key] <= len(v.tombstonesForKey[key])
-					} else if storedDelete, ok := v.getDeleteForKey(key, optTxn); ok {
-						o.Materialized = true
-						o.Timestamp = storedDelete.Timestamp
-					}
-				}
 			}
-			if !o.Timestamp.IsEmpty() {
-				mvccKey := storage.MVCCKey{Key: o.Key, Timestamp: o.Timestamp}
-				if err := batch.Delete(storage.EncodeKey(mvccKey), nil); err != nil {
-					panic(err)
-				}
+			mvccKey := storage.MVCCKey{Key: o.Key, Timestamp: o.Timestamp}
+			if err := batch.Delete(storage.EncodeKey(mvccKey), nil); err != nil {
+				panic(err)
 			}
 		}
 	}
@@ -686,7 +500,7 @@ func (v *validator) checkCommittedTxn(
 				}
 				// This write was never materialized in KV because the key got
 				// overwritten later in the txn. But reads in the txn could have seen
-				// it, so we put in the batch being maintained for validReadTimes using
+				// it, so we put in the batch being maintained for validReadTime using
 				// the timestamp of the write for this key that eventually "won".
 				mvccKey = storage.MVCCKey{
 					Key:       o.Key,
@@ -697,39 +511,31 @@ func (v *validator) checkCommittedTxn(
 				panic(err)
 			}
 		case *observedRead:
-			o.ValidTimes = validReadTimes(batch, o.Key, o.Value.RawBytes, false)
+			o.Valid = validReadTime(batch, o.Key, o.Value.RawBytes)
 		case *observedScan:
 			// All kvs should be within scan boundary.
 			for _, kv := range o.KVs {
 				if !o.Span.ContainsKey(kv.Key) {
-					opCode := "scan"
-					if o.IsDeleteRange {
-						opCode = "delete range"
-					}
-					failure = fmt.Sprintf(`key %s outside %s bounds`, kv.Key, opCode)
+					failure = fmt.Sprintf(`key %s outside scan bounds`, kv.Key)
 					break
 				}
 			}
 			// All kvs should be in order.
-			orderedKVs := sort.Interface(roachpb.KeyValueByKey(o.KVs))
-			if o.Reverse {
-				orderedKVs = sort.Reverse(orderedKVs)
-			}
-			if !sort.IsSorted(orderedKVs) {
+			if !sort.IsSorted(roachpb.KeyValueByKey(o.KVs)) {
 				failure = `scan result not ordered correctly`
 			}
-			o.Valid = validScanTime(batch, o.Span, o.KVs, o.IsDeleteRange)
+			o.Valid = validScanTime(batch, o.Span, o.KVs)
 		default:
 			panic(errors.AssertionFailedf(`unknown observedOp: %T %s`, observation, observation))
 		}
 	}
 
-	validPossibilities := disjointTimeSpans{{Start: hlc.MinTimestamp, End: hlc.MaxTimestamp}}
+	valid := timeSpan{Start: hlc.MinTimestamp, End: hlc.MaxTimestamp}
 	for idx, observation := range txnObservations {
 		if failure != `` {
 			break
 		}
-		var opValid disjointTimeSpans
+		var opValid timeSpan
 		switch o := observation.(type) {
 		case *observedWrite:
 			isLastWriteForKey := idx == lastWriteIdxByKey[string(o.Key)]
@@ -740,40 +546,19 @@ func (v *validator) checkCommittedTxn(
 				failure = atomicType + ` missing write`
 				continue
 			}
-
-			if o.isDelete() && len(txnObservations) == 1 {
-				// For delete operations outside of transactions, it is not possible to
-				// identify the precise tombstone, so we skip timestamp validation.
-				continue
-			}
-
-			opValid = disjointTimeSpans{{Start: o.Timestamp, End: o.Timestamp.Next()}}
+			opValid = timeSpan{Start: o.Timestamp, End: o.Timestamp.Next()}
 		case *observedRead:
-			opValid = o.ValidTimes
+			opValid = o.Valid
 		case *observedScan:
 			opValid = o.Valid.Combined()
 		default:
 			panic(errors.AssertionFailedf(`unknown observedOp: %T %s`, observation, observation))
 		}
-		newValidSpans := validPossibilities.validIntersections(opValid)
-		if len(newValidSpans) == 0 {
+		intersection := valid.Intersect(opValid)
+		if intersection.IsEmpty() {
 			failure = atomicType + ` non-atomic timestamps`
 		}
-		validPossibilities = newValidSpans
-	}
-
-	// Finally, validate that the write timestamp of the transaction matches the
-	// write timestamp of each write within that transaction.
-	for _, observation := range txnObservations {
-		if failure != `` {
-			break
-		}
-		switch o := observation.(type) {
-		case *observedWrite:
-			if optTxn != nil && o.Materialized && optTxn.TxnMeta.WriteTimestamp != o.Timestamp {
-				failure = fmt.Sprintf(`committed txn mismatched write timestamp %s`, optTxn.TxnMeta.WriteTimestamp)
-			}
-		}
+		valid = intersection
 	}
 
 	if failure != `` {
@@ -784,7 +569,6 @@ func (v *validator) checkCommittedTxn(
 
 func (v *validator) checkAmbiguousTxn(atomicType string, txnObservations []observedOp) {
 	var somethingCommitted bool
-	deletedKeysInTxn := make(map[string]int)
 	var hadWrite bool
 	for _, observation := range txnObservations {
 		switch o := observation.(type) {
@@ -794,40 +578,15 @@ func (v *validator) checkAmbiguousTxn(atomicType string, txnObservations []obser
 				somethingCommitted = true
 				break
 			}
-			if o.isDelete() && len(v.tombstonesForKey[string(o.Key)]) > v.committedDeletesForKey[string(o.Key)] {
-				deletedKeysInTxn[string(o.Key)]++
-				break
-			}
 		}
 	}
-
-	if len(deletedKeysInTxn) > 0 {
-		// TODO(sarkesian): Since we can't rely on the transaction write timestamp
-		// in an ambiguous transaction, and therefore cannot identify the tombstone
-		// resulting from a delete operation, it is impossible to validate if the
-		// transaction was actually atomic. For now, we have chosen to fail loudly,
-		// though if we are able to validate properly, this should be removed.
-		err := errors.Errorf(
-			`unable to validate delete operations in ambiguous transactions: %s`,
-			printObserved(txnObservations...),
-		)
-		v.failures = append(v.failures, err)
-
-		for key := range deletedKeysInTxn {
-			// NB: We don't know for sure if these delete committed, but we know we
-			// still have tombstones for the keys. If we are incorrect in assuming it
-			// committed, it will affect delete counting in subsequent transactions;
-			// note that when dealing with ambiguous deletes that fail to commit,
-			// later deletes may show "committed delete missing write" errors.
-			v.committedDeletesForKey[key]++
-		}
-	} else if !hadWrite {
+	if !hadWrite {
 		// TODO(dan): Is it possible to receive an ambiguous read-only txn? Assume
 		// committed for now because the committed case has assertions about reads
 		// but the uncommitted case doesn't and this seems to work.
-		v.checkCommittedTxn(atomicType, txnObservations, nil)
+		v.checkCommittedTxn(atomicType, txnObservations)
 	} else if somethingCommitted {
-		v.checkCommittedTxn(atomicType, txnObservations, nil)
+		v.checkCommittedTxn(atomicType, txnObservations)
 	} else {
 		v.checkUncommittedTxn(atomicType, txnObservations)
 	}
@@ -844,11 +603,6 @@ func (v *validator) checkUncommittedTxn(atomicType string, txnObservations []obs
 			if o.Materialized {
 				failure = atomicType + ` had writes`
 			}
-			// NB: While we don't check deletes here, as we cannot uniquely identify
-			// the particular delete operation that is responsible for a stored
-			// tombstone value for a key, if an uncommitted delete actually
-			// materialized in the storage engine, we will see an "extra write" error
-			// upon final validation.
 		case *observedRead:
 			// TODO(dan): Figure out what we can assert about reads in an uncommitted
 			// transaction.
@@ -923,10 +677,8 @@ func mustGetStringValue(value []byte) string {
 	return string(v)
 }
 
-func validReadTimes(
-	b *pebble.Batch, key roachpb.Key, value []byte, anyValueAccepted bool,
-) disjointTimeSpans {
-	var validTimes disjointTimeSpans
+func validReadTime(b *pebble.Batch, key roachpb.Key, value []byte) timeSpan {
+	var validTime []timeSpan
 	end := hlc.MaxTimestamp
 
 	iter := b.NewIter(nil)
@@ -940,60 +692,48 @@ func validReadTimes(
 		if !mvccKey.Key.Equal(key) {
 			break
 		}
-		if (anyValueAccepted && len(iter.Value()) > 0) ||
-			(!anyValueAccepted && mustGetStringValue(iter.Value()) == mustGetStringValue(value)) {
-			validTimes = append(validTimes, timeSpan{Start: mvccKey.Timestamp, End: end})
+		if mustGetStringValue(iter.Value()) == mustGetStringValue(value) {
+			validTime = append(validTime, timeSpan{Start: mvccKey.Timestamp, End: end})
 		}
 		end = mvccKey.Timestamp
 	}
-	if !anyValueAccepted && len(value) == 0 {
-		validTimes = append(disjointTimeSpans{{Start: hlc.MinTimestamp, End: end}}, validTimes...)
+	if len(value) == 0 {
+		validTime = append(validTime, timeSpan{Start: hlc.MinTimestamp, End: end})
 	}
 
-	// NB: With the exception of deletes, the "only write each value once"
-	// property of the generator means that we have a 1:1 mapping between some
-	// `(key, non-nil-value)` observation and a time span in which it was valid.
-	// With deletes, there multiple disjoint spans for a `(key, nil-value)`
-	// observation (i.e. before the key existed, after it was deleted).
-	// This means that for each read, we must consider all possibly valid times.
-	return validTimes
+	if len(validTime) == 0 {
+		return timeSpan{}
+	} else if len(validTime) == 1 {
+		return validTime[0]
+	} else {
+		// TODO(aayush): Until we add deletes, the "only write each value once"
+		// property of the generator means that we have a 1:1 mapping between some
+		// `(key, possibly-nil-value)` observation and a time span in which it was
+		// valid. Once we add deletes, there will be multiple disjoint spans for the
+		// `(key, nil)` case.
+		panic(`unreachable`)
+	}
 }
 
-func validScanTime(
-	b *pebble.Batch, span roachpb.Span, kvs []roachpb.KeyValue, isDeleteRange bool,
-) multiKeyTimeSpan {
+func validScanTime(b *pebble.Batch, span roachpb.Span, kvs []roachpb.KeyValue) multiKeyTimeSpan {
 	valid := multiKeyTimeSpan{
-		Gaps: disjointTimeSpans{{Start: hlc.MinTimestamp, End: hlc.MaxTimestamp}},
+		Gap: timeSpan{Start: hlc.MinTimestamp, End: hlc.MaxTimestamp},
 	}
 
-	// Find the valid time span for each kv returned.
+	// Find the valid time spans for each kv returned.
 	for _, kv := range kvs {
-		// Since scan results don't include deleted keys, there should only ever
-		// be 0 or 1 valid read time span for each `(key, specific-non-nil-value)`
-		// returned, given that the values are guaranteed to be unique by the
-		// Generator. However, in the DeleteRange case where we are looking for
-		// `(key, any-non-nil-value)`, it is of course valid for there to be
-		// multiple disjoint time spans.
-		validTimes := validReadTimes(b, kv.Key, kv.Value.RawBytes, isDeleteRange)
-		if !isDeleteRange && len(validTimes) > 1 {
-			panic(errors.AssertionFailedf(
-				`invalid number of read time spans for a (key,non-nil-value) pair in scan results: %s->%s`,
-				kv.Key, mustGetStringValue(kv.Value.RawBytes)))
-		}
-		if len(validTimes) == 0 {
-			validTimes = append(validTimes, timeSpan{})
-		}
-		valid.Keys = append(valid.Keys, validTimes)
+		validTime := validReadTime(b, kv.Key, kv.Value.RawBytes)
+		valid.Keys = append(valid.Keys, validTime)
 	}
 
 	// Augment with the valid time span for any kv not observed but that
 	// overlaps the scan span.
+	// TODO(aayush): this will get more complex once we add deletes.
 	keys := make(map[string]struct{}, len(kvs))
 	for _, kv := range kvs {
 		keys[string(kv.Key)] = struct{}{}
 	}
 
-	missingKeys := make(map[string]disjointTimeSpans)
 	iter := b.NewIter(nil)
 	defer func() { _ = iter.Close() }()
 	iter.SeekGE(storage.EncodeKey(storage.MVCCKey{Key: span.Key}))
@@ -1010,17 +750,10 @@ func validScanTime(
 			// Key in scan response.
 			continue
 		}
-		if _, ok := missingKeys[string(mvccKey.Key)]; !ok {
-			// Key not in scan response. Only valid if scan was before key's time, or
-			// at a time when the key was deleted.
-			missingKeys[string(mvccKey.Key)] = validReadTimes(b, mvccKey.Key, nil, false)
-		}
+		// Key not in scan response. Only valid if scan was before key's time.
+		validTime := timeSpan{Start: hlc.MinTimestamp, End: mvccKey.Timestamp}
+		valid.Gap = valid.Gap.Intersect(validTime)
 	}
-
-	for _, nilValueReadTimes := range missingKeys {
-		valid.Gaps = valid.Gaps.validIntersections(nilValueReadTimes)
-	}
-
 	return valid
 }
 
@@ -1032,58 +765,27 @@ func printObserved(observedOps ...observedOp) string {
 		}
 		switch o := observed.(type) {
 		case *observedWrite:
-			opCode := "w"
-			if o.isDelete() {
-				if o.IsDeleteRange {
-					opCode = "dr.d"
-				} else {
-					opCode = "d"
-				}
-			}
 			ts := `missing`
 			if o.Materialized {
-				if o.isDelete() && o.Timestamp.IsEmpty() {
-					ts = `uncertain`
-				} else {
-					ts = o.Timestamp.String()
-				}
+				ts = o.Timestamp.String()
 			}
-			fmt.Fprintf(&buf, "[%s]%s:%s->%s",
-				opCode, o.Key, ts, mustGetStringValue(o.Value.RawBytes))
+			fmt.Fprintf(&buf, "[w]%s:%s->%s",
+				o.Key, ts, mustGetStringValue(o.Value.RawBytes))
 		case *observedRead:
-			fmt.Fprintf(&buf, "[r]%s:", o.Key)
-			validTimes := o.ValidTimes
-			if len(validTimes) == 0 {
-				validTimes = append(validTimes, timeSpan{})
-			}
-			for idx, validTime := range validTimes {
-				if idx != 0 {
-					fmt.Fprintf(&buf, ",")
-				}
-				fmt.Fprintf(&buf, "%s", validTime)
-			}
-			fmt.Fprintf(&buf, "->%s", mustGetStringValue(o.Value.RawBytes))
+			fmt.Fprintf(&buf, "[r]%s:%s->%s",
+				o.Key, o.Valid, mustGetStringValue(o.Value.RawBytes))
 		case *observedScan:
-			opCode := "s"
-			if o.IsDeleteRange {
-				opCode = "dr.s"
-			}
-			if o.Reverse {
-				opCode = "rs"
-			}
 			var kvs strings.Builder
 			for i, kv := range o.KVs {
 				if i > 0 {
 					kvs.WriteString(`, `)
 				}
 				kvs.WriteString(kv.Key.String())
-				if !o.IsDeleteRange {
-					kvs.WriteByte(':')
-					kvs.WriteString(mustGetStringValue(kv.Value.RawBytes))
-				}
+				kvs.WriteByte(':')
+				kvs.WriteString(mustGetStringValue(kv.Value.RawBytes))
 			}
-			fmt.Fprintf(&buf, "[%s]%s:%s->[%s]",
-				opCode, o.Span, o.Valid, kvs.String())
+			fmt.Fprintf(&buf, "[s]%s:%s->[%s]",
+				o.Span, o.Valid, kvs.String())
 		default:
 			panic(errors.AssertionFailedf(`unknown observedOp: %T %s`, observed, observed))
 		}

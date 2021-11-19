@@ -1,2 +1,0 @@
-show_full_scans_stmt ::=
-	'SHOW' 'FULL' 'TABLE' 'SCANS'

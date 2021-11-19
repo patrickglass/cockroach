@@ -19,13 +19,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/multiregion"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
-	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -47,9 +45,8 @@ type comment struct {
 func selectComment(ctx context.Context, p PlanHookState, tableID descpb.ID) (tc *tableComments) {
 	query := fmt.Sprintf("SELECT type, object_id, sub_id, comment FROM system.comments WHERE object_id = %d", tableID)
 
-	txn := p.ExtendedEvalContext().Txn
 	it, err := p.ExtendedEvalContext().ExecCfg.InternalExecutor.QueryIterator(
-		ctx, "show-tables-with-comment", txn, query)
+		ctx, "show-tables-with-comment", p.Txn(), query)
 	if err != nil {
 		log.VEventf(ctx, 1, "%q", err)
 	} else {
@@ -89,11 +86,7 @@ func selectComment(ctx context.Context, p PlanHookState, tableID descpb.ID) (tc 
 // statement used to create the given view. It is used in the implementation of
 // the crdb_internal.create_statements virtual table.
 func ShowCreateView(
-	ctx context.Context,
-	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
-	tn *tree.TableName,
-	desc catalog.TableDescriptor,
+	ctx context.Context, tn *tree.TableName, desc catalog.TableDescriptor,
 ) (string, error) {
 	f := tree.NewFmtCtx(tree.FmtSimple)
 	f.WriteString("CREATE ")
@@ -111,104 +104,8 @@ func ShowCreateView(
 		f.FormatNameP(&name)
 	}
 	f.WriteString(") AS ")
-
-	// Deserialize user-defined types in the view query.
-	typeReplacedViewQuery, err := formatViewQueryTypesForDisplay(ctx, semaCtx, sessionData, desc)
-	if err != nil {
-		log.Warningf(ctx,
-			"error deserializing user defined types for view %s (%v): %+v",
-			desc.GetName(), desc.GetID(), err)
-		f.WriteString(desc.GetViewQuery())
-	} else {
-		// Convert sequences referenced by ID in the view back to their names.
-		sequenceReplacedViewQuery, err := formatViewQuerySequencesForDisplay(
-			ctx, semaCtx, typeReplacedViewQuery)
-		if err != nil {
-			log.Warningf(ctx,
-				"error converting sequence IDs to names for view %s (%v): %+v",
-				desc.GetName(), desc.GetID(), err)
-			f.WriteString(typeReplacedViewQuery)
-		} else {
-			f.WriteString(sequenceReplacedViewQuery)
-		}
-	}
-
+	f.WriteString(desc.GetViewQuery())
 	return f.CloseAndGetString(), nil
-}
-
-// formatViewQuerySequencesForDisplay walks the view query and
-// looks for sequence IDs in the statement. If it finds any,
-// it will replace the IDs with the descriptor's fully qualified name.
-func formatViewQuerySequencesForDisplay(
-	ctx context.Context, semaCtx *tree.SemaContext, viewQuery string,
-) (string, error) {
-	replaceFunc := func(expr tree.Expr) (recurse bool, newExpr tree.Expr, err error) {
-		newExpr, err = schemaexpr.ReplaceIDsWithFQNames(ctx, expr, semaCtx)
-		if err != nil {
-			return false, expr, err
-		}
-		return false, newExpr, nil
-	}
-
-	stmt, err := parser.ParseOne(viewQuery)
-	if err != nil {
-		return "", err
-	}
-
-	newStmt, err := tree.SimpleStmtVisit(stmt.AST, replaceFunc)
-	if err != nil {
-		return "", err
-	}
-	return newStmt.String(), nil
-}
-
-// formatViewQueryTypesForDisplay walks the view query and
-// look for serialized user-defined types. If it finds any,
-// it will deserialize it to display its name.
-func formatViewQueryTypesForDisplay(
-	ctx context.Context,
-	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
-	desc catalog.TableDescriptor,
-) (string, error) {
-	replaceFunc := func(expr tree.Expr) (recurse bool, newExpr tree.Expr, err error) {
-		switch n := expr.(type) {
-		case *tree.AnnotateTypeExpr, *tree.CastExpr:
-			texpr, err := tree.TypeCheck(ctx, n, semaCtx, types.Any)
-			if err != nil {
-				return false, expr, err
-			}
-			if !texpr.ResolvedType().UserDefined() {
-				return true, expr, nil
-			}
-
-			formattedExpr, err := schemaexpr.FormatExprForDisplay(
-				ctx, desc, expr.String(), semaCtx, sessionData, tree.FmtParsable,
-			)
-			if err != nil {
-				return false, expr, err
-			}
-			newExpr, err = parser.ParseExpr(formattedExpr)
-			if err != nil {
-				return false, expr, err
-			}
-			return false, newExpr, nil
-		default:
-			return true, expr, nil
-		}
-	}
-
-	viewQuery := desc.GetViewQuery()
-	stmt, err := parser.ParseOne(viewQuery)
-	if err != nil {
-		return "", err
-	}
-
-	newStmt, err := tree.SimpleStmtVisit(stmt.AST, replaceFunc)
-	if err != nil {
-		return "", err
-	}
-	return newStmt.String(), nil
 }
 
 // showComments prints out the COMMENT statements sufficient to populate a
@@ -300,7 +197,7 @@ func showForeignKeyConstraint(
 	} else {
 		refNames = []string{"???"}
 		originNames = []string{"???"}
-		fkTableName = tree.MakeTableNameWithSchema(tree.Name(""), tree.PublicSchemaName, tree.Name(fmt.Sprintf("[%d as ref]", fk.ReferencedTableID)))
+		fkTableName = tree.MakeTableName(tree.Name(""), tree.Name(fmt.Sprintf("[%d as ref]", fk.ReferencedTableID)))
 		fkTableName.ExplicitSchema = false
 	}
 	buf.WriteString("FOREIGN KEY (")
@@ -344,9 +241,6 @@ func ShowCreateSequence(
 	f.WriteString("SEQUENCE ")
 	f.FormatNode(tn)
 	opts := desc.GetSequenceOpts()
-	if opts.AsIntegerType != "" {
-		f.Printf(" AS %s", opts.AsIntegerType)
-	}
 	f.Printf(" MINVALUE %d", opts.MinValue)
 	f.Printf(" MAXVALUE %d", opts.MaxValue)
 	f.Printf(" INCREMENT %d", opts.Increment)
@@ -387,8 +281,48 @@ func showFamilyClause(desc catalog.TableDescriptor, f *tree.FmtCtx) {
 func showCreateLocality(desc catalog.TableDescriptor, f *tree.FmtCtx) error {
 	if c := desc.GetLocalityConfig(); c != nil {
 		f.WriteString(" LOCALITY ")
-		return multiregion.FormatTableLocalityConfig(c, f)
+		return tabledesc.FormatTableLocalityConfig(c, f)
 	}
+	return nil
+}
+
+// showCreateInterleave returns an INTERLEAVE IN PARENT clause for the specified
+// index, if applicable.
+//
+// The name of the parent table is prefixed by its database name unless
+// it is equal to the given dbPrefix. This allows us to elide the prefix
+// when the given index is interleaved in a table of the current database.
+func showCreateInterleave(
+	idx *descpb.IndexDescriptor, buf *bytes.Buffer, dbPrefix string, lCtx simpleSchemaResolver,
+) error {
+	if len(idx.Interleave.Ancestors) == 0 {
+		return nil
+	}
+	intl := idx.Interleave
+	parentTableID := intl.Ancestors[len(intl.Ancestors)-1].TableID
+	var err error
+	var parentName tree.TableName
+	if lCtx != nil {
+		parentName, err = getParentAsTableName(lCtx, parentTableID, dbPrefix)
+		if err != nil {
+			return err
+		}
+	} else {
+		parentName = tree.MakeTableName(tree.Name(""), tree.Name(fmt.Sprintf("[%d as parent]", parentTableID)))
+		parentName.ExplicitCatalog = false
+		parentName.ExplicitSchema = false
+	}
+	var sharedPrefixLen int
+	for _, ancestor := range intl.Ancestors {
+		sharedPrefixLen += int(ancestor.SharedPrefixLen)
+	}
+	buf.WriteString(" INTERLEAVE IN PARENT ")
+	fmtCtx := tree.NewFmtCtx(tree.FmtSimple)
+	fmtCtx.FormatNode(&parentName)
+	buf.WriteString(fmtCtx.CloseAndGetString())
+	buf.WriteString(" (")
+	formatQuoteNames(buf, idx.ColumnNames[:sharedPrefixLen]...)
+	buf.WriteString(")")
 	return nil
 }
 
@@ -398,21 +332,21 @@ func ShowCreatePartitioning(
 	a *rowenc.DatumAlloc,
 	codec keys.SQLCodec,
 	tableDesc catalog.TableDescriptor,
-	idx catalog.Index,
-	part catalog.Partitioning,
+	idxDesc *descpb.IndexDescriptor,
+	partDesc *descpb.PartitioningDescriptor,
 	buf *bytes.Buffer,
 	indent int,
 	colOffset int,
 ) error {
 	isPrimaryKeyOfPartitionAllByTable :=
-		tableDesc.IsPartitionAllBy() && tableDesc.GetPrimaryIndexID() == idx.GetID() && colOffset == 0
+		tableDesc.IsPartitionAllBy() && tableDesc.GetPrimaryIndexID() == idxDesc.ID && colOffset == 0
 
-	if part.NumColumns() == 0 && !isPrimaryKeyOfPartitionAllByTable {
+	if partDesc.NumColumns == 0 && !isPrimaryKeyOfPartitionAllByTable {
 		return nil
 	}
 	// Do not print PARTITION BY clauses of non-primary indexes belonging to a table
 	// that is PARTITION BY ALL. The ALL will be printed for the PRIMARY INDEX clause.
-	if tableDesc.IsPartitionAllBy() && tableDesc.GetPrimaryIndexID() != idx.GetID() {
+	if tableDesc.IsPartitionAllBy() && tableDesc.GetPrimaryIndexID() != idxDesc.ID {
 		return nil
 	}
 	// Do not print PARTITION ALL BY if we are a REGIONAL BY ROW table.
@@ -436,84 +370,77 @@ func ShowCreatePartitioning(
 		buf.WriteString(`ALL `)
 	}
 	buf.WriteString(`BY `)
-	if part.NumLists() > 0 {
+	if len(partDesc.List) > 0 {
 		buf.WriteString(`LIST`)
-	} else if part.NumRanges() > 0 {
+	} else if len(partDesc.Range) > 0 {
 		buf.WriteString(`RANGE`)
 	} else if isPrimaryKeyOfPartitionAllByTable {
 		buf.WriteString(`NOTHING`)
 		return nil
 	} else {
-		return errors.Errorf(`invalid partition descriptor: %v`, part.PartitioningDesc())
+		return errors.Errorf(`invalid partition descriptor: %v`, partDesc)
 	}
 	buf.WriteString(` (`)
-	for i := 0; i < part.NumColumns(); i++ {
+	for i := 0; i < int(partDesc.NumColumns); i++ {
 		if i != 0 {
 			buf.WriteString(", ")
 		}
-		buf.WriteString(idx.GetKeyColumnName(colOffset + i))
+		buf.WriteString(idxDesc.ColumnNames[colOffset+i])
 	}
 	buf.WriteString(`) (`)
 	fmtCtx := tree.NewFmtCtx(tree.FmtSimple)
-	isFirst := true
-	err := part.ForEachList(func(name string, values [][]byte, subPartitioning catalog.Partitioning) error {
-		if !isFirst {
+	for i := range partDesc.List {
+		part := &partDesc.List[i]
+		if i != 0 {
 			buf.WriteString(`, `)
 		}
-		isFirst = false
 		buf.WriteString("\n")
 		buf.WriteString(indentStr)
 		buf.WriteString("\tPARTITION ")
-		fmtCtx.FormatNameP(&name)
+		fmtCtx.FormatNameP(&part.Name)
 		_, _ = fmtCtx.Buffer.WriteTo(buf)
 		buf.WriteString(` VALUES IN (`)
-		for j, values := range values {
+		for j, values := range part.Values {
 			if j != 0 {
 				buf.WriteString(`, `)
 			}
 			tuple, _, err := rowenc.DecodePartitionTuple(
-				a, codec, tableDesc, idx, part, values, fakePrefixDatums)
+				a, codec, tableDesc, idxDesc, partDesc, values, fakePrefixDatums)
 			if err != nil {
 				return err
 			}
 			buf.WriteString(tuple.String())
 		}
 		buf.WriteString(`)`)
-		return ShowCreatePartitioning(
-			a, codec, tableDesc, idx, subPartitioning, buf, indent+1, colOffset+part.NumColumns(),
-		)
-	})
-	if err != nil {
-		return err
+		if err := ShowCreatePartitioning(
+			a, codec, tableDesc, idxDesc, &part.Subpartitioning, buf, indent+1,
+			colOffset+int(partDesc.NumColumns),
+		); err != nil {
+			return err
+		}
 	}
-	isFirst = true
-	err = part.ForEachRange(func(name string, from, to []byte) error {
-		if !isFirst {
+	for i, part := range partDesc.Range {
+		if i != 0 {
 			buf.WriteString(`, `)
 		}
-		isFirst = false
 		buf.WriteString("\n")
 		buf.WriteString(indentStr)
 		buf.WriteString("\tPARTITION ")
-		buf.WriteString(name)
+		buf.WriteString(part.Name)
 		buf.WriteString(" VALUES FROM ")
 		fromTuple, _, err := rowenc.DecodePartitionTuple(
-			a, codec, tableDesc, idx, part, from, fakePrefixDatums)
+			a, codec, tableDesc, idxDesc, partDesc, part.FromInclusive, fakePrefixDatums)
 		if err != nil {
 			return err
 		}
 		buf.WriteString(fromTuple.String())
 		buf.WriteString(" TO ")
 		toTuple, _, err := rowenc.DecodePartitionTuple(
-			a, codec, tableDesc, idx, part, to, fakePrefixDatums)
+			a, codec, tableDesc, idxDesc, partDesc, part.ToExclusive, fakePrefixDatums)
 		if err != nil {
 			return err
 		}
 		buf.WriteString(toTuple.String())
-		return nil
-	})
-	if err != nil {
-		return err
 	}
 	buf.WriteString("\n")
 	buf.WriteString(indentStr)
@@ -524,11 +451,7 @@ func ShowCreatePartitioning(
 // showConstraintClause creates the CONSTRAINT clauses for a CREATE statement,
 // writing them to tree.FmtCtx f
 func showConstraintClause(
-	ctx context.Context,
-	desc catalog.TableDescriptor,
-	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
-	f *tree.FmtCtx,
+	ctx context.Context, desc catalog.TableDescriptor, semaCtx *tree.SemaContext, f *tree.FmtCtx,
 ) error {
 	for _, e := range desc.AllActiveAndInactiveChecks() {
 		f.WriteString(",\n\t")
@@ -538,7 +461,7 @@ func showConstraintClause(
 			f.WriteString(" ")
 		}
 		f.WriteString("CHECK (")
-		expr, err := schemaexpr.FormatExprForDisplay(ctx, desc, e.Expr, semaCtx, sessionData, tree.FmtParsable)
+		expr, err := schemaexpr.FormatExprForDisplay(ctx, desc, e.Expr, semaCtx, tree.FmtParsable)
 		if err != nil {
 			return err
 		}
@@ -564,7 +487,7 @@ func showConstraintClause(
 		f.WriteString(")")
 		if c.IsPartial() {
 			f.WriteString(" WHERE ")
-			pred, err := schemaexpr.FormatExprForDisplay(ctx, desc, c.Predicate, semaCtx, sessionData, tree.FmtParsable)
+			pred, err := schemaexpr.FormatExprForDisplay(ctx, desc, c.Predicate, semaCtx, tree.FmtParsable)
 			if err != nil {
 				return err
 			}

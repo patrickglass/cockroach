@@ -13,20 +13,20 @@ package ordering
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 )
 
 func scalarGroupByBuildChildReqOrdering(
-	parent memo.RelExpr, required *props.OrderingChoice, childIdx int,
-) props.OrderingChoice {
+	parent memo.RelExpr, required *physical.OrderingChoice, childIdx int,
+) physical.OrderingChoice {
 	if childIdx != 0 {
-		return props.OrderingChoice{}
+		return physical.OrderingChoice{}
 	}
 	// Scalar group by requires the ordering in its private.
 	return parent.(*memo.ScalarGroupByExpr).Ordering
 }
 
-func groupByCanProvideOrdering(expr memo.RelExpr, required *props.OrderingChoice) bool {
+func groupByCanProvideOrdering(expr memo.RelExpr, required *physical.OrderingChoice) bool {
 	// GroupBy may require a certain ordering of its input, but can also pass
 	// through a stronger ordering on the grouping columns.
 	groupBy := expr.(*memo.GroupByExpr)
@@ -34,10 +34,10 @@ func groupByCanProvideOrdering(expr memo.RelExpr, required *props.OrderingChoice
 }
 
 func groupByBuildChildReqOrdering(
-	parent memo.RelExpr, required *props.OrderingChoice, childIdx int,
-) props.OrderingChoice {
+	parent memo.RelExpr, required *physical.OrderingChoice, childIdx int,
+) physical.OrderingChoice {
 	if childIdx != 0 {
-		return props.OrderingChoice{}
+		return physical.OrderingChoice{}
 	}
 	groupBy := parent.(*memo.GroupByExpr)
 	result := *required
@@ -56,7 +56,7 @@ func groupByBuildChildReqOrdering(
 	return result
 }
 
-func groupByBuildProvided(expr memo.RelExpr, required *props.OrderingChoice) opt.Ordering {
+func groupByBuildProvided(expr memo.RelExpr, required *physical.OrderingChoice) opt.Ordering {
 	groupBy := expr.(*memo.GroupByExpr)
 	provided := groupBy.Input.ProvidedPhysical().Ordering
 	inputFDs := &groupBy.Input.Relational().FuncDeps
@@ -67,17 +67,17 @@ func groupByBuildProvided(expr memo.RelExpr, required *props.OrderingChoice) opt
 	return remapProvided(provided, inputFDs, groupBy.GroupingCols)
 }
 
-func distinctOnCanProvideOrdering(expr memo.RelExpr, required *props.OrderingChoice) bool {
+func distinctOnCanProvideOrdering(expr memo.RelExpr, required *physical.OrderingChoice) bool {
 	// DistinctOn may require a certain ordering of its input, but can also pass
 	// through a stronger ordering on the grouping columns.
 	return required.Intersects(&expr.Private().(*memo.GroupingPrivate).Ordering)
 }
 
 func distinctOnBuildChildReqOrdering(
-	parent memo.RelExpr, required *props.OrderingChoice, childIdx int,
-) props.OrderingChoice {
+	parent memo.RelExpr, required *physical.OrderingChoice, childIdx int,
+) physical.OrderingChoice {
 	if childIdx != 0 {
-		return props.OrderingChoice{}
+		return physical.OrderingChoice{}
 	}
 	// The FD set of the input doesn't "pass through" to the DistinctOn FD set;
 	// check the ordering to see if it can be simplified with respect to the input
@@ -87,7 +87,7 @@ func distinctOnBuildChildReqOrdering(
 	return result
 }
 
-func distinctOnBuildProvided(expr memo.RelExpr, required *props.OrderingChoice) opt.Ordering {
+func distinctOnBuildProvided(expr memo.RelExpr, required *physical.OrderingChoice) opt.Ordering {
 	input := expr.Child(0).(memo.RelExpr)
 	provided := input.ProvidedPhysical().Ordering
 	inputFDs := &input.Relational().FuncDeps
@@ -99,16 +99,16 @@ func distinctOnBuildProvided(expr memo.RelExpr, required *props.OrderingChoice) 
 
 // StreamingGroupingColOrdering returns an ordering on grouping columns that is
 // guaranteed on the input of an aggregation operator. This ordering can be used
-// to perform a streaming aggregation.
+// perform a streaming aggregation.
 func StreamingGroupingColOrdering(
-	g *memo.GroupingPrivate, required *props.OrderingChoice,
+	g *memo.GroupingPrivate, required *physical.OrderingChoice,
 ) opt.Ordering {
 	inputOrdering := required.Intersection(&g.Ordering)
 	ordering := make(opt.Ordering, len(inputOrdering.Columns))
 	for i := range inputOrdering.Columns {
 		// Get any grouping column from the set. Normally there would be at most one
 		// because we have rules that remove redundant grouping columns.
-		cols := inputOrdering.Group(i).Intersection(g.GroupingCols)
+		cols := inputOrdering.Columns[i].Group.Intersection(g.GroupingCols)
 		colID, ok := cols.Next(0)
 		if !ok {
 			// This group refers to a column that is not a grouping column.

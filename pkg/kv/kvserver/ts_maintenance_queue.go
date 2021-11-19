@@ -14,9 +14,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/config"
+	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -87,7 +88,7 @@ type timeSeriesMaintenanceQueue struct {
 // newTimeSeriesMaintenanceQueue returns a new instance of
 // timeSeriesMaintenanceQueue.
 func newTimeSeriesMaintenanceQueue(
-	store *Store, db *kv.DB, tsData TimeSeriesDataStore,
+	store *Store, db *kv.DB, g *gossip.Gossip, tsData TimeSeriesDataStore,
 ) *timeSeriesMaintenanceQueue {
 	q := &timeSeriesMaintenanceQueue{
 		tsData:         tsData,
@@ -106,7 +107,7 @@ func newTimeSeriesMaintenanceQueue(
 		),
 	}
 	q.baseQueue = newBaseQueue(
-		"timeSeriesMaintenance", q, store,
+		"timeSeriesMaintenance", q, store, g,
 		queueConfig{
 			maxSize:              defaultQueueMaxSize,
 			needsLease:           true,
@@ -123,7 +124,7 @@ func newTimeSeriesMaintenanceQueue(
 }
 
 func (q *timeSeriesMaintenanceQueue) shouldQueue(
-	ctx context.Context, now hlc.ClockTimestamp, repl *Replica, _ spanconfig.StoreReader,
+	ctx context.Context, now hlc.ClockTimestamp, repl *Replica, _ *config.SystemConfig,
 ) (shouldQ bool, priority float64) {
 	if !repl.store.cfg.TestingKnobs.DisableLastProcessedCheck {
 		lpTS, err := repl.getQueueLastProcessed(ctx, q.name)
@@ -143,7 +144,7 @@ func (q *timeSeriesMaintenanceQueue) shouldQueue(
 }
 
 func (q *timeSeriesMaintenanceQueue) process(
-	ctx context.Context, repl *Replica, _ spanconfig.StoreReader,
+	ctx context.Context, repl *Replica, _ *config.SystemConfig,
 ) (processed bool, err error) {
 	desc := repl.Desc()
 	snap := repl.store.Engine().NewSnapshot()

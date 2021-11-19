@@ -40,10 +40,6 @@ var (
 	RegProcedure = &T{InternalType: InternalType{
 		Family: OidFamily, Oid: oid.T_regprocedure, Locale: &emptyLocale}}
 
-	// RegRole is the type of a Postgres regrole OID variant (T_regrole).
-	RegRole = &T{InternalType: InternalType{
-		Family: OidFamily, Oid: oid.T_regrole, Locale: &emptyLocale}}
-
 	// RegType is the type of of a Postgres regtype OID variant (T_regtype).
 	RegType = &T{InternalType: InternalType{
 		Family: OidFamily, Oid: oid.T_regtype, Locale: &emptyLocale}}
@@ -64,7 +60,7 @@ var OidToType = map[oid.Oid]*T{
 	oid.T_bool:         Bool,
 	oid.T_bpchar:       typeBpChar,
 	oid.T_bytea:        Bytes,
-	oid.T_char:         QChar,
+	oid.T_char:         typeQChar,
 	oid.T_date:         Date,
 	oid.T_float4:       Float4,
 	oid.T_float8:       Float,
@@ -84,7 +80,6 @@ var OidToType = map[oid.Oid]*T{
 	oid.T_regnamespace: RegNamespace,
 	oid.T_regproc:      RegProc,
 	oid.T_regprocedure: RegProcedure,
-	oid.T_regrole:      RegRole,
 	oid.T_regtype:      RegType,
 	oid.T_text:         String,
 	oid.T_time:         Time,
@@ -128,7 +123,6 @@ var oidToArrayOid = map[oid.Oid]oid.Oid{
 	oid.T_regnamespace: oid.T__regnamespace,
 	oid.T_regproc:      oid.T__regproc,
 	oid.T_regprocedure: oid.T__regprocedure,
-	oid.T_regrole:      oid.T__regrole,
 	oid.T_regtype:      oid.T__regtype,
 	oid.T_text:         oid.T__text,
 	oid.T_time:         oid.T__time,
@@ -211,14 +205,6 @@ func CalcArrayOid(elemTyp *T) oid.Oid {
 
 	case EnumFamily:
 		return elemTyp.UserDefinedArrayOID()
-
-	case TupleFamily:
-		if elemTyp.UserDefined() {
-			// We're currently not creating array types for implicitly-defined
-			// per-table record types. So, we cheat a little, and return, as the OID
-			// for an array of these things, the OID for a generic array of records.
-			return oid.T__record
-		}
 	}
 
 	// Map the OID of the array element type to the corresponding array OID.

@@ -49,6 +49,7 @@ import (
 func TestSchemaChangeGCJob(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	skip.WithIssue(t, 60664, "flaky test")
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	type DropItem int
 	const (
@@ -66,9 +67,8 @@ func TestSchemaChangeGCJob(t *testing.T) {
 
 	for _, dropItem := range []DropItem{INDEX, TABLE, DATABASE} {
 		for _, ttlTime := range []TTLTime{PAST, SOON, FUTURE} {
-			blockGC := make(chan struct{}, 1)
 			params := base.TestServerArgs{}
-			params.Knobs.JobsTestingKnobs = jobs.NewTestingKnobsWithShortIntervals()
+			blockGC := make(chan struct{}, 1)
 			params.Knobs.GCJob = &sql.GCJobTestingKnobs{
 				RunBeforePerformGC: func(_ jobspb.JobID) error {
 					<-blockGC
@@ -265,11 +265,11 @@ func TestSchemaChangeGCJob(t *testing.T) {
 func TestSchemaChangeGCJobTableGCdWhileWaitingForExpiration(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	args := base.TestServerArgs{Knobs: base.TestingKnobs{JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals()}}
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	// We're going to drop a table then manually delete it, then update the
 	// database zone config and ensure the job finishes successfully.
-	s, db, kvDB := serverutils.StartServer(t, args)
+	s, db, kvDB := serverutils.StartServer(t, base.TestServerArgs{})
 	ctx := context.Background()
 	defer s.Stopper().Stop(ctx)
 	sqlDB := sqlutils.MakeSQLRunner(db)
@@ -303,7 +303,7 @@ SELECT job_id, status, running_status
 
 	// Manually delete the table.
 	require.NoError(t, kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		nameKey := catalogkeys.MakePublicObjectNameKey(keys.SystemSQLCodec, dbID, "foo")
+		nameKey := catalogkeys.MakeNameMetadataKey(keys.SystemSQLCodec, dbID, keys.PublicSchemaID, "foo")
 		if err := txn.Del(ctx, nameKey); err != nil {
 			return err
 		}
@@ -331,13 +331,13 @@ SELECT job_id, status, running_status
 // logic for GC-ing tenant.
 func TestGCResumer(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 	defer log.Scope(t).Close(t)
 	defer jobs.ResetConstructors()()
 	gcjob.SetSmallMaxGCIntervalForTest()
 
 	ctx := context.Background()
-	args := base.TestServerArgs{Knobs: base.TestingKnobs{JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals()}}
-	srv, sqlDB, kvDB := serverutils.StartServer(t, args)
+	srv, sqlDB, kvDB := serverutils.StartServer(t, base.TestServerArgs{})
 	execCfg := srv.ExecutorConfig().(sql.ExecutorConfig)
 	jobRegistry := execCfg.JobRegistry
 	defer srv.Stopper().Stop(ctx)
@@ -427,7 +427,6 @@ func TestGCJobRetry(t *testing.T) {
 	var failed atomic.Value
 	failed.Store(false)
 	params := base.TestServerArgs{}
-	params.Knobs.JobsTestingKnobs = jobs.NewTestingKnobsWithShortIntervals()
 	params.Knobs.Store = &kvserver.StoreTestingKnobs{
 		TestingRequestFilter: func(ctx context.Context, request roachpb.BatchRequest) *roachpb.Error {
 			_, ok := request.GetArg(roachpb.ClearRange)

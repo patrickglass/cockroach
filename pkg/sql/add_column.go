@@ -18,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
@@ -30,6 +31,7 @@ func (p *planner) addColumnImpl(
 	tn *tree.TableName,
 	desc *tabledesc.Mutable,
 	t *tree.AlterTableAddColumn,
+	sessionData *sessiondata.SessionData,
 ) error {
 	d := t.ColumnDef
 
@@ -37,6 +39,7 @@ func (p *planner) addColumnImpl(
 		d.Computed.Expr = schemaexpr.MaybeRewriteComputedColumn(d.Computed.Expr, params.SessionData())
 	}
 
+	version := params.ExecCfg().Settings.Version.ActiveVersionOrEmpty(params.ctx)
 	toType, err := tree.ResolveType(params.ctx, d.Type, params.p.semaCtx.GetTypeResolver())
 	if err != nil {
 		return err
@@ -48,20 +51,25 @@ func (p *planner) addColumnImpl(
 			"VECTOR column types are unsupported",
 		)
 	}
-
-	if err := checkTypeIsSupported(params.ctx, params.ExecCfg().Settings, toType); err != nil {
+	if supported, err := isTypeSupportedInVersion(version, toType); err != nil {
 		return err
+	} else if !supported {
+		return pgerror.Newf(
+			pgcode.FeatureNotSupported,
+			"type %s is not supported until version upgrade is finalized",
+			toType.SQLString(),
+		)
 	}
 
-	newDef, seqPrefix, seqName, seqOpts, err := params.p.processSerialLikeInColumnDef(params.ctx, d, tn)
+	newDef, seqDbDesc, seqName, seqOpts, err := params.p.processSerialInColumnDef(params.ctx, d, tn)
 	if err != nil {
 		return err
 	}
 	if seqName != nil {
 		if err := doCreateSequence(
 			params,
-			seqPrefix.Database,
-			seqPrefix.Schema,
+			seqDbDesc,
+			n.tableDesc.GetParentSchemaID(),
 			seqName,
 			n.tableDesc.Persistence(),
 			seqOpts,
@@ -72,12 +80,10 @@ func (p *planner) addColumnImpl(
 	}
 	d = newDef
 
-	cdd, err := tabledesc.MakeColumnDefDescs(params.ctx, d, &params.p.semaCtx, params.EvalContext())
+	col, idx, expr, err := tabledesc.MakeColumnDefDescs(params.ctx, d, &params.p.semaCtx, params.EvalContext())
 	if err != nil {
 		return err
 	}
-	col := cdd.ColumnDescriptor
-	idx := cdd.PrimaryKeyOrUniqueIndexDescriptor
 	incTelemetryForNewColumn(d, col)
 
 	// Ensure all new indexes are partitioned appropriately.
@@ -103,9 +109,9 @@ func (p *planner) addColumnImpl(
 		}
 	}
 
-	// If the new column has a DEFAULT or an ON UPDATE expression that uses a
-	// sequence, add references between its descriptor and this column descriptor.
-	if err := cdd.ForEachTypedExpr(func(expr tree.TypedExpr) error {
+	// If the new column has a DEFAULT expression that uses a sequence, add references between
+	// its descriptor and this column descriptor.
+	if d.HasDefaultExpr() {
 		changedSeqDescs, err := maybeAddSequenceDependencies(
 			params.ctx, params.ExecCfg().Settings, params.p, n.tableDesc, col, expr, nil,
 		)
@@ -119,9 +125,6 @@ func (p *planner) addColumnImpl(
 				return err
 			}
 		}
-		return nil
-	}); err != nil {
-		return err
 	}
 
 	// We're checking to see if a user is trying add a non-nullable column without a default to a
@@ -159,21 +162,17 @@ func (p *planner) addColumnImpl(
 	}
 
 	if d.IsComputed() {
-		serializedExpr, _, err := schemaexpr.ValidateComputedColumnExpression(
-			params.ctx, n.tableDesc, d, tn, "computed column", params.p.SemaCtx(),
+		computedColValidator := schemaexpr.MakeComputedColumnValidator(
+			params.ctx,
+			n.tableDesc,
+			&params.p.semaCtx,
+			tn,
 		)
+		serializedExpr, err := computedColValidator.Validate(d)
 		if err != nil {
 			return err
 		}
 		col.ComputeExpr = &serializedExpr
-	}
-
-	if !col.Virtual {
-		// Add non-virtual column name and ID to primary index.
-		primaryIndex := n.tableDesc.GetPrimaryIndex().IndexDescDeepCopy()
-		primaryIndex.StoreColumnNames = append(primaryIndex.StoreColumnNames, col.Name)
-		primaryIndex.StoreColumnIDs = append(primaryIndex.StoreColumnIDs, col.ID)
-		n.tableDesc.SetPrimaryIndex(primaryIndex)
 	}
 
 	// Zone configuration logic is only required for REGIONAL BY ROW tables

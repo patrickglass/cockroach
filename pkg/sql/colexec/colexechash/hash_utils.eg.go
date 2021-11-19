@@ -10,6 +10,7 @@
 package colexechash
 
 import (
+	"context"
 	"math"
 	"reflect"
 	"unsafe"
@@ -21,9 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/errors"
 )
 
@@ -31,21 +30,20 @@ import (
 // pick up the right packages when run within the bazel sandbox.
 var (
 	_ = typeconv.DatumVecCanonicalTypeFamily
-	_ = coldataext.Hash
-	_ json.JSON
-	_ tree.Datum
+	_ coldataext.Datum
 )
 
 // rehash takes an element of a key (tuple representing a row of equality
 // column values) at a given column and computes a new hash by applying a
 // transformation to the existing hash.
 func rehash(
+	ctx context.Context,
 	buckets []uint64,
 	col coldata.Vec,
 	nKeys int,
 	sel []int,
 	cancelChecker colexecutils.CancelChecker,
-	overloadHelper *execgen.OverloadHelper,
+	overloadHelper execgen.OverloadHelper,
 	datumAlloc *rowenc.DatumAlloc,
 ) {
 	// In order to inline the templated code of overloads, we need to have a
@@ -82,7 +80,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -105,7 +103,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -129,7 +127,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -149,7 +147,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			}
 		}
@@ -180,7 +178,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -200,7 +198,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -221,7 +219,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -238,7 +236,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			}
 		}
@@ -274,7 +272,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -299,7 +297,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -325,7 +323,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -347,7 +345,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			}
 		}
@@ -378,7 +376,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -399,7 +397,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -421,7 +419,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -439,7 +437,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			}
 		case 32:
@@ -467,7 +465,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -488,7 +486,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -510,7 +508,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -528,7 +526,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			}
 		case -1:
@@ -557,7 +555,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -578,7 +576,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -600,7 +598,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -618,7 +616,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			}
 		}
@@ -652,7 +650,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -675,7 +673,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -699,7 +697,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -719,7 +717,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			}
 		}
@@ -750,7 +748,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -770,7 +768,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -791,7 +789,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -808,7 +806,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			}
 		}
@@ -841,7 +839,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -863,7 +861,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -886,7 +884,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -905,124 +903,7 @@ func rehash(
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
-				}
-			}
-		}
-	case types.JsonFamily:
-		switch col.Type().Width() {
-		case -1:
-		default:
-			keys, nulls := col.JSON(), col.Nulls()
-			if col.MaybeHasNulls() {
-				if sel != nil {
-					// Early bounds checks.
-					_ = buckets[nKeys-1]
-					_ = sel[nKeys-1]
-					var selIdx int
-					for i := 0; i < nKeys; i++ {
-						//gcassert:bce
-						selIdx = sel[i]
-						if nulls.NullAt(selIdx) {
-							continue
-						}
-						v := keys.Get(selIdx)
-						//gcassert:bce
-						p := uintptr(buckets[i])
-
-						scratch := _overloadHelper.ByteScratch[:0]
-						_b, _err := json.EncodeJSON(scratch, v)
-						if _err != nil {
-							colexecerror.ExpectedError(_err)
-						}
-						_overloadHelper.ByteScratch = _b
-
-						sh := (*reflect.SliceHeader)(unsafe.Pointer(&_b))
-						p = memhash(unsafe.Pointer(sh.Data), p, uintptr(len(_b)))
-
-						//gcassert:bce
-						buckets[i] = uint64(p)
-					}
-					cancelChecker.CheckEveryCall()
-				} else {
-					// Early bounds checks.
-					_ = buckets[nKeys-1]
-					var selIdx int
-					for i := 0; i < nKeys; i++ {
-						selIdx = i
-						if nulls.NullAt(selIdx) {
-							continue
-						}
-						v := keys.Get(selIdx)
-						//gcassert:bce
-						p := uintptr(buckets[i])
-
-						scratch := _overloadHelper.ByteScratch[:0]
-						_b, _err := json.EncodeJSON(scratch, v)
-						if _err != nil {
-							colexecerror.ExpectedError(_err)
-						}
-						_overloadHelper.ByteScratch = _b
-
-						sh := (*reflect.SliceHeader)(unsafe.Pointer(&_b))
-						p = memhash(unsafe.Pointer(sh.Data), p, uintptr(len(_b)))
-
-						//gcassert:bce
-						buckets[i] = uint64(p)
-					}
-					cancelChecker.CheckEveryCall()
-				}
-			} else {
-				if sel != nil {
-					// Early bounds checks.
-					_ = buckets[nKeys-1]
-					_ = sel[nKeys-1]
-					var selIdx int
-					for i := 0; i < nKeys; i++ {
-						//gcassert:bce
-						selIdx = sel[i]
-						v := keys.Get(selIdx)
-						//gcassert:bce
-						p := uintptr(buckets[i])
-
-						scratch := _overloadHelper.ByteScratch[:0]
-						_b, _err := json.EncodeJSON(scratch, v)
-						if _err != nil {
-							colexecerror.ExpectedError(_err)
-						}
-						_overloadHelper.ByteScratch = _b
-
-						sh := (*reflect.SliceHeader)(unsafe.Pointer(&_b))
-						p = memhash(unsafe.Pointer(sh.Data), p, uintptr(len(_b)))
-
-						//gcassert:bce
-						buckets[i] = uint64(p)
-					}
-					cancelChecker.CheckEveryCall()
-				} else {
-					// Early bounds checks.
-					_ = buckets[nKeys-1]
-					var selIdx int
-					for i := 0; i < nKeys; i++ {
-						selIdx = i
-						v := keys.Get(selIdx)
-						//gcassert:bce
-						p := uintptr(buckets[i])
-
-						scratch := _overloadHelper.ByteScratch[:0]
-						_b, _err := json.EncodeJSON(scratch, v)
-						if _err != nil {
-							colexecerror.ExpectedError(_err)
-						}
-						_overloadHelper.ByteScratch = _b
-
-						sh := (*reflect.SliceHeader)(unsafe.Pointer(&_b))
-						p = memhash(unsafe.Pointer(sh.Data), p, uintptr(len(_b)))
-
-						//gcassert:bce
-						buckets[i] = uint64(p)
-					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			}
 		}
@@ -1046,14 +927,14 @@ func rehash(
 						v := keys.Get(selIdx)
 						//gcassert:bce
 						p := uintptr(buckets[i])
-						b := coldataext.Hash(v.(tree.Datum), datumAlloc)
+						b := v.(*coldataext.Datum).Hash(datumAlloc)
 						sh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
 						p = memhash(unsafe.Pointer(sh.Data), p, uintptr(len(b)))
 
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -1066,14 +947,14 @@ func rehash(
 						v := keys.Get(selIdx)
 						//gcassert:bce
 						p := uintptr(buckets[i])
-						b := coldataext.Hash(v.(tree.Datum), datumAlloc)
+						b := v.(*coldataext.Datum).Hash(datumAlloc)
 						sh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
 						p = memhash(unsafe.Pointer(sh.Data), p, uintptr(len(b)))
 
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -1087,14 +968,14 @@ func rehash(
 						v := keys.Get(selIdx)
 						//gcassert:bce
 						p := uintptr(buckets[i])
-						b := coldataext.Hash(v.(tree.Datum), datumAlloc)
+						b := v.(*coldataext.Datum).Hash(datumAlloc)
 						sh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
 						p = memhash(unsafe.Pointer(sh.Data), p, uintptr(len(b)))
 
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
@@ -1104,14 +985,14 @@ func rehash(
 						v := keys.Get(selIdx)
 						//gcassert:bce
 						p := uintptr(buckets[i])
-						b := coldataext.Hash(v.(tree.Datum), datumAlloc)
+						b := v.(*coldataext.Datum).Hash(datumAlloc)
 						sh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
 						p = memhash(unsafe.Pointer(sh.Data), p, uintptr(len(b)))
 
 						//gcassert:bce
 						buckets[i] = uint64(p)
 					}
-					cancelChecker.CheckEveryCall()
+					cancelChecker.CheckEveryCall(ctx)
 				}
 			}
 		}

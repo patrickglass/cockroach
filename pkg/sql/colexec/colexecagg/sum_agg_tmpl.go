@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for sum_agg.eg.go. It's formatted in a
 // special way, so it's both valid Go and a valid text/template input. This
@@ -22,6 +20,7 @@
 package colexecagg
 
 import (
+	"strings"
 	"unsafe"
 
 	"github.com/cockroachdb/apd/v2"
@@ -52,12 +51,6 @@ func _ASSIGN_ADD(_, _, _, _, _, _ string) {
 	colexecerror.InternalError(errors.AssertionFailedf(""))
 }
 
-// _ASSIGN_SUBTRACT is the template subtraction function for assigning the first
-// input to the result of the second input - the third input.
-func _ASSIGN_SUBTRACT(_, _, _, _, _, _ string) {
-	colexecerror.InternalError(errors.AssertionFailedf(""))
-}
-
 // */}}
 
 func newSum_SUMKIND_AGGKINDAggAlloc(
@@ -65,39 +58,44 @@ func newSum_SUMKIND_AGGKINDAggAlloc(
 ) (aggregateFuncAlloc, error) {
 	allocBase := aggAllocBase{allocator: allocator, allocSize: allocSize}
 	switch t.Family() {
-	// {{range .Infos}}
-	case _TYPE_FAMILY:
+	case types.IntFamily:
 		switch t.Width() {
-		// {{range .WidthOverloads}}
-		case _TYPE_WIDTH:
-			// {{with .Overload}}
-			return &sum_SUMKIND_TYPE_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
-			// {{end}}
-			// {{end}}
+		case 16:
+			return &sum_SUMKINDInt16_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+		case 32:
+			return &sum_SUMKINDInt32_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+		default:
+			return &sum_SUMKINDInt64_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
 		}
-		// {{end}}
+	// {{if eq .SumKind ""}}
+	case types.DecimalFamily:
+		return &sumDecimal_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+	case types.FloatFamily:
+		return &sumFloat64_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+	case types.IntervalFamily:
+		return &sumInterval_AGGKINDAggAlloc{aggAllocBase: allocBase}, nil
+	// {{end}}
+	default:
+		return nil, errors.Errorf("unsupported sum %s agg type %s", strings.ToLower("_SUMKIND"), t.Name())
 	}
-	return nil, errors.Errorf("unsupported sum agg type %s", t.Name())
 }
 
 // {{range .Infos}}
-// {{range .WidthOverloads}}
-// {{with .Overload}}
 
 type sum_SUMKIND_TYPE_AGGKINDAgg struct {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	orderedAggregateFuncBase
 	// {{else}}
-	unorderedAggregateFuncBase
+	hashAggregateFuncBase
 	// {{end}}
 	// curAgg holds the running total, so we can index into the slice once per
 	// group, instead of on each iteration.
 	curAgg _RET_GOTYPE
 	// col points to the output vector we are updating.
 	col []_RET_GOTYPE
-	// numNonNull tracks the number of non-null values we have seen for the group
-	// that is currently being aggregated.
-	numNonNull uint64
+	// foundNonNullForCurrentGroup tracks if we have seen any non-null values
+	// for the group that is currently being aggregated.
+	foundNonNullForCurrentGroup bool
 	// {{if .NeedsHelper}}
 	// {{/*
 	// overloadHelper is used only when we perform the summation of integers
@@ -115,13 +113,13 @@ func (a *sum_SUMKIND_TYPE_AGGKINDAgg) SetOutput(vec coldata.Vec) {
 	// {{if eq "_AGGKIND" "Ordered"}}
 	a.orderedAggregateFuncBase.SetOutput(vec)
 	// {{else}}
-	a.unorderedAggregateFuncBase.SetOutput(vec)
+	a.hashAggregateFuncBase.SetOutput(vec)
 	// {{end}}
 	a.col = vec._RET_TYPE()
 }
 
 func (a *sum_SUMKIND_TYPE_AGGKINDAgg) Compute(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int, sel []int,
+	vecs []coldata.Vec, inputIdxs []uint32, inputLen int, sel []int,
 ) {
 	// {{if .NeedsHelper}}
 	// {{/*
@@ -137,7 +135,6 @@ func (a *sum_SUMKIND_TYPE_AGGKINDAgg) Compute(
 	execgen.SETVARIABLESIZE(oldCurAggSize, a.curAgg)
 	vec := vecs[inputIdxs[0]]
 	col, nulls := vec.TemplateType(), vec.Nulls()
-	// {{if not (eq "_AGGKIND" "Window")}}
 	a.allocator.PerformOperation([]coldata.Vec{a.vec}, func() {
 		// {{if eq "_AGGKIND" "Ordered"}}
 		// Capture groups and col to force bounds check to work. See
@@ -150,21 +147,21 @@ func (a *sum_SUMKIND_TYPE_AGGKINDAgg) Compute(
 		// sel to specify the tuples to be aggregated.
 		// */}}
 		if sel == nil {
-			_, _ = groups[endIdx-1], groups[startIdx]
-			_, _ = col.Get(endIdx-1), col.Get(startIdx)
+			_ = groups[inputLen-1]
+			_ = col.Get(inputLen - 1)
 			if nulls.MaybeHasNulls() {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 					_ACCUMULATE_SUM(a, nulls, i, true, false)
 				}
 			} else {
-				for i := startIdx; i < endIdx; i++ {
+				for i := 0; i < inputLen; i++ {
 					_ACCUMULATE_SUM(a, nulls, i, false, false)
 				}
 			}
 		} else
 		// {{end}}
 		{
-			sel = sel[startIdx:endIdx]
+			sel = sel[:inputLen]
 			if nulls.MaybeHasNulls() {
 				for _, i := range sel {
 					_ACCUMULATE_SUM(a, nulls, i, true, true)
@@ -177,21 +174,6 @@ func (a *sum_SUMKIND_TYPE_AGGKINDAgg) Compute(
 		}
 	},
 	)
-	// {{else}}
-	// Unnecessary memory accounting can have significant overhead for window
-	// aggregate functions because Compute is called at least once for every row.
-	// For this reason, we do not use PerformOperation here.
-	_, _ = col.Get(endIdx-1), col.Get(startIdx)
-	if nulls.MaybeHasNulls() {
-		for i := startIdx; i < endIdx; i++ {
-			_ACCUMULATE_SUM(a, nulls, i, true, false)
-		}
-	} else {
-		for i := startIdx; i < endIdx; i++ {
-			_ACCUMULATE_SUM(a, nulls, i, false, false)
-		}
-	}
-	// {{end}}
 	execgen.SETVARIABLESIZE(newCurAggSize, a.curAgg)
 	if newCurAggSize != oldCurAggSize {
 		a.allocator.AdjustMemoryUsage(int64(newCurAggSize - oldCurAggSize))
@@ -208,16 +190,10 @@ func (a *sum_SUMKIND_TYPE_AGGKINDAgg) Flush(outputIdx int) {
 	outputIdx = a.curIdx
 	a.curIdx++
 	// {{end}}
-	if a.numNonNull == 0 {
+	if !a.foundNonNullForCurrentGroup {
 		a.nulls.SetNull(outputIdx)
 	} else {
-		// {{if eq "_AGGKIND" "Window"}}
-		// We need to copy the value because window functions reuse the aggregation
-		// between rows.
-		execgen.COPYVAL(a.col[outputIdx], a.curAgg)
-		// {{else}}
 		a.col[outputIdx] = a.curAgg
-		// {{end}}
 	}
 }
 
@@ -226,7 +202,7 @@ func (a *sum_SUMKIND_TYPE_AGGKINDAgg) Reset() {
 	a.orderedAggregateFuncBase.Reset()
 	// {{end}}
 	a.curAgg = zero_RET_TYPEValue
-	a.numNonNull = 0
+	a.foundNonNullForCurrentGroup = false
 }
 
 type sum_SUMKIND_TYPE_AGGKINDAggAlloc struct {
@@ -250,40 +226,6 @@ func (a *sum_SUMKIND_TYPE_AGGKINDAggAlloc) newAggFunc() AggregateFunc {
 	return f
 }
 
-// {{if eq "_AGGKIND" "Window"}}
-
-// Remove implements the slidingWindowAggregateFunc interface (see
-// window_aggregator_tmpl.go).
-func (a *sum_SUMKIND_TYPE_AGGKINDAgg) Remove(
-	vecs []coldata.Vec, inputIdxs []uint32, startIdx, endIdx int,
-) {
-	// {{if .NeedsHelper}}
-	// In order to inline the templated code of overloads, we need to have a
-	// "_overloadHelper" local variable of type "overloadHelper".
-	_overloadHelper := a.overloadHelper
-	// {{end}}
-	execgen.SETVARIABLESIZE(oldCurAggSize, a.curAgg)
-	vec := vecs[inputIdxs[0]]
-	col, nulls := vec.TemplateType(), vec.Nulls()
-	_, _ = col.Get(endIdx-1), col.Get(startIdx)
-	if nulls.MaybeHasNulls() {
-		for i := startIdx; i < endIdx; i++ {
-			_REMOVE_ROW(a, nulls, i, true)
-		}
-	} else {
-		for i := startIdx; i < endIdx; i++ {
-			_REMOVE_ROW(a, nulls, i, false)
-		}
-	}
-	execgen.SETVARIABLESIZE(newCurAggSize, a.curAgg)
-	if newCurAggSize != oldCurAggSize {
-		a.allocator.AdjustMemoryUsage(int64(newCurAggSize - oldCurAggSize))
-	}
-}
-
-// {{end}}
-// {{end}}
-// {{end}}
 // {{end}}
 
 // {{/*
@@ -304,7 +246,7 @@ func _ACCUMULATE_SUM(
 		if !a.isFirstGroup {
 			// If we encounter a new group, and we haven't found any non-nulls for the
 			// current group, the output for this group should be null.
-			if a.numNonNull == 0 {
+			if !a.foundNonNullForCurrentGroup {
 				a.nulls.SetNull(a.curIdx)
 			} else {
 				a.col[a.curIdx] = a.curAgg
@@ -319,7 +261,7 @@ func _ACCUMULATE_SUM(
 			// nulls, this will be updated unconditionally below.
 			// */}}
 			// {{if .HasNulls}}
-			a.numNonNull = 0
+			a.foundNonNullForCurrentGroup = false
 			// {{end}}
 		}
 		a.isFirstGroup = false
@@ -338,30 +280,9 @@ func _ACCUMULATE_SUM(
 		// {{end}}
 		v := col.Get(i)
 		_ASSIGN_ADD(a.curAgg, a.curAgg, v, _, _, col)
-		a.numNonNull++
+		a.foundNonNullForCurrentGroup = true
 	}
 	// {{end}}
 
-	// {{/*
-} // */}}
-
-// {{/*
-// _REMOVE_ROW removes the value of the ith row from the output for the
-// current aggregation.
-func _REMOVE_ROW(a *sum_SUMKIND_TYPE_AGGKINDAgg, nulls *coldata.Nulls, i int, _HAS_NULLS bool) { // */}}
-	// {{define "removeRow"}}
-	var isNull bool
-	// {{if .HasNulls}}
-	isNull = nulls.NullAt(i)
-	// {{else}}
-	isNull = false
-	// {{end}}
-	if !isNull {
-		//gcassert:bce
-		v := col.Get(i)
-		_ASSIGN_SUBTRACT(a.curAgg, a.curAgg, v, _, _, col)
-		a.numNonNull--
-	}
-	// {{end}}
 	// {{/*
 } // */}}

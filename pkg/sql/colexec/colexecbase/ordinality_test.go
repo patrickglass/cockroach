@@ -95,11 +95,11 @@ func BenchmarkOrdinality(b *testing.B) {
 	source := colexecop.NewRepeatableBatchSource(testAllocator, batch, typs)
 	ordinality, err := createTestOrdinalityOperator(ctx, flowCtx, source, []*types.T{types.Int, types.Int, types.Int})
 	require.NoError(b, err)
-	ordinality.Init(ctx)
+	ordinality.Init()
 
 	b.SetBytes(int64(8 * coldata.BatchSize()))
 	for i := 0; i < b.N; i++ {
-		ordinality.Next()
+		ordinality.Next(ctx)
 	}
 }
 
@@ -115,12 +115,12 @@ func createTestOrdinalityOperator(
 	}
 	args := &colexecargs.NewColOperatorArgs{
 		Spec:                spec,
-		Inputs:              []colexecargs.OpWithMetaInfo{{Root: input}},
+		Inputs:              []colexecop.Operator{input},
 		StreamingMemAccount: testMemAcc,
 	}
 	result, err := colexecargs.TestNewColOperator(ctx, flowCtx, args)
 	if err != nil {
 		return nil, err
 	}
-	return result.Root, nil
+	return result.Op, nil
 }

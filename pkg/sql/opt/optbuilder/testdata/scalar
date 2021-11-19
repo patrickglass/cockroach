@@ -310,9 +310,9 @@ contains [type=bool]
 build-scalar vars=(a jsonb)
 '{"a":1}' <@ a
 ----
-contained-by [type=bool]
- ├── const: '{"a": 1}' [type=jsonb]
- └── variable: a:1 [type=jsonb]
+contains [type=bool]
+ ├── variable: a:1 [type=jsonb]
+ └── const: '{"a": 1}' [type=jsonb]
 
 build-scalar vars=(a jsonb)
 a ? 'a'
@@ -896,14 +896,12 @@ concat [type=int[]]
 build-scalar
 ARRAY['"foo"'::jsonb]
 ----
-array: [type=jsonb[]]
- └── const: '"foo"' [type=jsonb]
+error: unimplemented: arrays of jsonb not allowed
 
 build-scalar
 ARRAY['"foo"'::json]
 ----
-array: [type=jsonb[]]
- └── const: '"foo"' [type=jsonb]
+error: unimplemented: arrays of jsonb not allowed
 
 opt
 SELECT -((-9223372036854775808):::int)
@@ -942,35 +940,35 @@ build
 SELECT b, ARRAY(SELECT a FROM x WHERE x.a = y.b) FROM y
 ----
 project
- ├── columns: b:1!null array:7
+ ├── columns: b:1!null array:5
  ├── scan y
- │    └── columns: b:1!null y.crdb_internal_mvcc_timestamp:2 y.tableoid:3
+ │    └── columns: b:1!null y.crdb_internal_mvcc_timestamp:2
  └── projections
-      └── array-flatten [as=array:7]
+      └── array-flatten [as=array:5]
            └── project
-                ├── columns: a:4!null
+                ├── columns: a:3!null
                 └── select
-                     ├── columns: a:4!null x.crdb_internal_mvcc_timestamp:5 x.tableoid:6
+                     ├── columns: a:3!null x.crdb_internal_mvcc_timestamp:4
                      ├── scan x
-                     │    └── columns: a:4!null x.crdb_internal_mvcc_timestamp:5 x.tableoid:6
+                     │    └── columns: a:3!null x.crdb_internal_mvcc_timestamp:4
                      └── filters
-                          └── a:4 = b:1
+                          └── a:3 = b:1
 
 build
 SELECT b, ARRAY(SELECT a FROM x ORDER BY a) FROM y
 ----
 project
- ├── columns: b:1!null array:7
+ ├── columns: b:1!null array:5
  ├── scan y
- │    └── columns: b:1!null y.crdb_internal_mvcc_timestamp:2 y.tableoid:3
+ │    └── columns: b:1!null y.crdb_internal_mvcc_timestamp:2
  └── projections
-      └── array-flatten [as=array:7]
+      └── array-flatten [as=array:5]
            └── project
-                ├── columns: a:4!null
-                ├── ordering: +4
+                ├── columns: a:3!null
+                ├── ordering: +3
                 └── scan x
-                     ├── columns: a:4!null x.crdb_internal_mvcc_timestamp:5 x.tableoid:6
-                     └── ordering: +4
+                     ├── columns: a:3!null x.crdb_internal_mvcc_timestamp:4
+                     └── ordering: +3
 
 build
 SELECT ARRAY(VALUES ('foo'), ('bar'), ('baz'))
@@ -1032,15 +1030,7 @@ project
 build
 SELECT ARRAY(VALUES ('{}'::JSONB))
 ----
-project
- ├── columns: array:2
- ├── values
- │    └── ()
- └── projections
-      └── array-flatten [as=array:2]
-           └── values
-                ├── columns: column1:1!null
-                └── ('{}',)
+error (0A000): unimplemented: arrays of jsonb not allowed
 
 build
 SELECT ARRAY(SELECT 1, 2)
@@ -1224,18 +1214,18 @@ build
 SELECT ARRAY(SELECT x FROM u ORDER BY x)
 ----
 project
- ├── columns: array:5
+ ├── columns: array:4
  ├── values
  │    └── ()
  └── projections
-      └── array-flatten [as=array:5]
+      └── array-flatten [as=array:4]
            └── sort
                 ├── columns: x:1
                 ├── ordering: +1
                 └── project
                      ├── columns: x:1
                      └── scan u
-                          └── columns: x:1 rowid:2!null crdb_internal_mvcc_timestamp:3 tableoid:4
+                          └── columns: x:1 rowid:2!null crdb_internal_mvcc_timestamp:3
 
 build
 SELECT * FROM v WHERE y = ARRAY(SELECT x FROM u ORDER BY x)
@@ -1243,39 +1233,25 @@ SELECT * FROM v WHERE y = ARRAY(SELECT x FROM u ORDER BY x)
 project
  ├── columns: y:1!null
  └── select
-      ├── columns: y:1!null v.rowid:2!null v.crdb_internal_mvcc_timestamp:3 v.tableoid:4
+      ├── columns: y:1!null v.rowid:2!null v.crdb_internal_mvcc_timestamp:3
       ├── scan v
-      │    └── columns: y:1 v.rowid:2!null v.crdb_internal_mvcc_timestamp:3 v.tableoid:4
+      │    └── columns: y:1 v.rowid:2!null v.crdb_internal_mvcc_timestamp:3
       └── filters
            └── eq
                 ├── y:1
                 └── array-flatten
                      └── sort
-                          ├── columns: x:5
-                          ├── ordering: +5
+                          ├── columns: x:4
+                          ├── ordering: +4
                           └── project
-                               ├── columns: x:5
+                               ├── columns: x:4
                                └── scan u
-                                    └── columns: x:5 u.rowid:6!null u.crdb_internal_mvcc_timestamp:7 u.tableoid:8
+                                    └── columns: x:4 u.rowid:5!null u.crdb_internal_mvcc_timestamp:6
 
 build
 SELECT ARRAY(SELECT (y, 2) FROM u ORDER BY x) FROM v
 ----
-project
- ├── columns: array:10
- ├── scan v
- │    └── columns: y:1 v.rowid:2!null v.crdb_internal_mvcc_timestamp:3 v.tableoid:4
- └── projections
-      └── array-flatten col=9 [as=array:10]
-           └── sort
-                ├── columns: "?column?":9  [hidden: x:5]
-                ├── ordering: +5
-                └── project
-                     ├── columns: "?column?":9 x:5
-                     ├── scan u
-                     │    └── columns: x:5 u.rowid:6!null u.crdb_internal_mvcc_timestamp:7 u.tableoid:8
-                     └── projections
-                          └── (y:1, 2) [as="?column?":9]
+error (0A000): unimplemented: can't execute a correlated ARRAY(...) over tuple{int[], int}
 
 build
 SELECT ARRAY(SELECT y FROM u ORDER BY x) FROM v

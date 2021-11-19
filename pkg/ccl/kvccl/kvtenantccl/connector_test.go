@@ -77,27 +77,9 @@ func (*mockServer) RangeFeed(*roachpb.RangeFeedRequest, roachpb.Internal_RangeFe
 	panic("unimplemented")
 }
 
-func (*mockServer) Join(
+func (m *mockServer) Join(
 	context.Context, *roachpb.JoinNodeRequest,
 ) (*roachpb.JoinNodeResponse, error) {
-	panic("unimplemented")
-}
-
-func (*mockServer) TokenBucket(
-	ctx context.Context, in *roachpb.TokenBucketRequest,
-) (*roachpb.TokenBucketResponse, error) {
-	panic("unimplemented")
-}
-
-func (m *mockServer) GetSpanConfigs(
-	context.Context, *roachpb.GetSpanConfigsRequest,
-) (*roachpb.GetSpanConfigsResponse, error) {
-	panic("unimplemented")
-}
-
-func (m *mockServer) UpdateSpanConfigs(
-	context.Context, *roachpb.UpdateSpanConfigsRequest,
-) (*roachpb.UpdateSpanConfigsResponse, error) {
 	panic("unimplemented")
 }
 

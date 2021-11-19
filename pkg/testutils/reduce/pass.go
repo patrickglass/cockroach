@@ -39,20 +39,20 @@ func (p intPass) Name() string {
 	return p.name
 }
 
-func (p intPass) New(string) State {
+func (p intPass) New(File) State {
 	return 0
 }
 
-func (p intPass) Transform(f string, s State) (string, Result, error) {
+func (p intPass) Transform(f File, s State) (File, Result, error) {
 	i := s.(int)
-	data, ok, err := p.fn(f, i)
+	data, ok, err := p.fn(string(f), i)
 	res := OK
 	if !ok {
 		res = STOP
 	}
-	return data, res, err
+	return File(data), res, err
 }
 
-func (p intPass) Advance(f string, s State) State {
+func (p intPass) Advance(f File, s State) State {
 	return s.(int) + 1
 }

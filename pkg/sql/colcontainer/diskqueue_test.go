@@ -39,12 +39,12 @@ func TestDiskQueue(t *testing.T) {
 	queueCfg, cleanup := colcontainerutils.NewTestingDiskQueueCfg(t, true /* inMem */)
 	defer cleanup()
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	for _, rewindable := range []bool{false, true} {
 		for _, bufferSizeBytes := range []int{0, 16<<10 + rng.Intn(1<<20) /* 16 KiB up to 1 MiB */} {
 			for _, maxFileSizeBytes := range []int{10 << 10 /* 10 KiB */, 1<<20 + rng.Intn(64<<20) /* 1 MiB up to 64 MiB */} {
 				alwaysCompress := rng.Float64() < 0.5
-				diskQueueCacheMode := colcontainer.DiskQueueCacheModeIntertwinedCalls
+				diskQueueCacheMode := colcontainer.DiskQueueCacheModeDefault
 				// testReuseCache will test the reuse cache modes.
 				testReuseCache := rng.Float64() < 0.5
 				dequeuedProbabilityBeforeAllEnqueuesAreDone := 0.5
@@ -76,10 +76,10 @@ func TestDiskQueue(t *testing.T) {
 							batches = append(batches, coldatatestutils.CopyBatch(b, typs, testColumnFactory))
 						},
 					})
-					op.Init(ctx)
 					typs := op.Typs()
 
-					queueCfg.SetCacheMode(diskQueueCacheMode)
+					queueCfg.CacheMode = diskQueueCacheMode
+					queueCfg.SetDefaultBufferSizeBytesForCacheMode()
 					if !rewindable {
 						if !testReuseCache {
 							queueCfg.BufferSizeBytes = bufferSizeBytes
@@ -109,7 +109,7 @@ func TestDiskQueue(t *testing.T) {
 					// since that is the common pattern.
 					dest := coldata.NewMemBatch(typs, testColumnFactory)
 					for {
-						src := op.Next()
+						src := op.Next(ctx)
 						require.NoError(t, q.Enqueue(ctx, src))
 						if src.Length() == 0 {
 							break
@@ -181,7 +181,7 @@ func TestDiskQueueCloseOnErr(t *testing.T) {
 
 	serverCfg := &execinfra.ServerConfig{}
 	serverCfg.TestingKnobs.ForceDiskSpill = true
-	diskMon := execinfra.NewLimitedMonitorNoFlowCtx(ctx, testDiskMonitor, serverCfg, nil /* sd */, t.Name())
+	diskMon := execinfra.NewLimitedMonitor(ctx, testDiskMonitor, serverCfg, t.Name())
 	defer diskMon.Stop(ctx)
 	diskAcc := diskMon.MakeBoundAccount()
 	defer diskAcc.Close(ctx)
@@ -231,7 +231,7 @@ func BenchmarkDiskQueue(b *testing.B) {
 	queueCfg.BufferSizeBytes = int(bufSize)
 	queueCfg.MaxFileSizeBytes = int(blockSize)
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	typs := []*types.T{types.Int}
 	batch := coldatatestutils.RandomBatch(testAllocator, rng, typs, coldata.BatchSize(), 0, 0)
 	op := colexecop.NewRepeatableBatchSource(testAllocator, batch, typs)
@@ -241,7 +241,7 @@ func BenchmarkDiskQueue(b *testing.B) {
 		q, err := colcontainer.NewDiskQueue(ctx, typs, queueCfg, testDiskAcc)
 		require.NoError(b, err)
 		for {
-			batchToEnqueue := op.Next()
+			batchToEnqueue := op.Next(ctx)
 			if err := q.Enqueue(ctx, batchToEnqueue); err != nil {
 				b.Fatal(err)
 			}

@@ -14,7 +14,6 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -65,13 +64,13 @@ type optTableUpserter struct {
 	// fetchCols indicate which columns need to be fetched from the target table,
 	// in order to detect whether a conflict has occurred, as well as to provide
 	// existing values for updates.
-	fetchCols []catalog.Column
+	fetchCols []descpb.ColumnDescriptor
 
 	// updateCols indicate which columns need an update during a conflict.
-	updateCols []catalog.Column
+	updateCols []descpb.ColumnDescriptor
 
 	// returnCols indicate which columns need to be returned by the Upsert.
-	returnCols []catalog.Column
+	returnCols []descpb.ColumnDescriptor
 
 	// canaryOrdinal is the ordinal position of the column within the input row
 	// that is used to decide whether to execute an insert or update operation.
@@ -98,17 +97,17 @@ var _ tableWriter = &optTableUpserter{}
 
 // init is part of the tableWriter interface.
 func (tu *optTableUpserter) init(
-	ctx context.Context, txn *kv.Txn, evalCtx *tree.EvalContext, sv *settings.Values,
+	ctx context.Context, txn *kv.Txn, evalCtx *tree.EvalContext,
 ) error {
-	tu.tableWriterBase.init(txn, tu.ri.Helper.TableDesc, evalCtx, sv)
+	tu.tableWriterBase.init(txn, tu.ri.Helper.TableDesc, evalCtx)
 
-	// rowsNeeded, set upon initialization, indicates pkg/sql/backfill.gowhether or not we want
+	// rowsNeeded, set upon initialization, indicates whether or not we want
 	// rows returned from the operation.
 	if tu.rowsNeeded {
 		tu.resultRow = make(tree.Datums, len(tu.returnCols))
 		tu.rows = rowcontainer.NewRowContainer(
 			evalCtx.Mon.MakeBoundAccount(),
-			colinfo.ColTypeInfoFromColumns(tu.returnCols),
+			colinfo.ColTypeInfoFromColDescs(tu.returnCols),
 		)
 
 		// Create the map from colIds to the expected columns.
@@ -118,7 +117,7 @@ func (tu *optTableUpserter) init(
 		tu.colIDToReturnIndex = catalog.ColumnIDToOrdinalMap(tu.tableDesc().PublicColumns())
 		if tu.ri.InsertColIDtoRowIndex.Len() == tu.colIDToReturnIndex.Len() {
 			for i := range tu.ri.InsertCols {
-				colID := tu.ri.InsertCols[i].GetID()
+				colID := tu.ri.InsertCols[i].ID
 				resultIndex, ok := tu.colIDToReturnIndex.Get(colID)
 				if !ok || resultIndex != tu.ri.InsertColIDtoRowIndex.GetDefault(colID) {
 					tu.insertReorderingRequired = true
@@ -268,11 +267,7 @@ func (tu *optTableUpserter) updateConflictingRow(
 	//   via GenerateInsertRow().
 	// - for the fetched part, we assume that the data in the table is
 	//   correct already.
-	if err := enforceLocalColumnConstraints(
-		updateValues,
-		tu.updateCols,
-		true, /* isUpdate */
-	); err != nil {
+	if err := enforceLocalColumnConstraints(updateValues, tu.updateCols); err != nil {
 		return err
 	}
 

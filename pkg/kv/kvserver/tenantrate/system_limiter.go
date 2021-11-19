@@ -10,11 +10,7 @@
 
 package tenantrate
 
-import (
-	"context"
-
-	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcostmodel"
-)
+import "context"
 
 // systemLimiter implements Limiter for the use of tracking metrics for the
 // system tenant. It does not actually perform any rate-limiting.
@@ -22,18 +18,18 @@ type systemLimiter struct {
 	tenantMetrics
 }
 
-func (s systemLimiter) Wait(ctx context.Context, reqInfo tenantcostmodel.RequestInfo) error {
-	if isWrite, writeBytes := reqInfo.IsWrite(); isWrite {
+func (s systemLimiter) Wait(ctx context.Context, isWrite bool, writeBytes int64) error {
+	if isWrite {
 		s.writeRequestsAdmitted.Inc(1)
-		s.writeBytesAdmitted.Inc(writeBytes)
 	} else {
 		s.readRequestsAdmitted.Inc(1)
 	}
+	s.writeBytesAdmitted.Inc(writeBytes)
 	return nil
 }
 
-func (s systemLimiter) RecordRead(ctx context.Context, respInfo tenantcostmodel.ResponseInfo) {
-	s.readBytesAdmitted.Inc(respInfo.ReadBytes())
+func (s systemLimiter) RecordRead(ctx context.Context, readBytes int64) {
+	s.readBytesAdmitted.Inc(readBytes)
 }
 
 var _ Limiter = (*systemLimiter)(nil)

@@ -21,15 +21,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 )
 
-// DequalifyAndValidateExpr validates that an expression has the given type and
-// contains no functions with a volatility greater than maxVolatility. The
-// type-checked and constant-folded expression, the type of the expression, and
-// the set of column IDs within the expression are returned, if valid.
+// DequalifyAndValidateExpr validates that an expression has the given type
+// and contains no functions with a volatility greater than maxVolatility. The
+// type-checked and constant-folded expression and the set of column IDs within
+// the expression are returned, if valid.
 //
 // The serialized expression is returned because returning the created
 // tree.TypedExpr would be dangerous. It contains dummyColumns which do not
@@ -40,42 +39,50 @@ func DequalifyAndValidateExpr(
 	desc catalog.TableDescriptor,
 	expr tree.Expr,
 	typ *types.T,
-	context string,
+	op string,
 	semaCtx *tree.SemaContext,
 	maxVolatility tree.Volatility,
 	tn *tree.TableName,
-) (string, *types.T, catalog.TableColSet, error) {
+) (string, catalog.TableColSet, error) {
 	var colIDs catalog.TableColSet
 	nonDropColumns := desc.NonDropColumns()
+	nonDropColumnDescs := make([]descpb.ColumnDescriptor, len(nonDropColumns))
+	for i, col := range nonDropColumns {
+		nonDropColumnDescs[i] = *col.ColumnDesc()
+	}
+
 	sourceInfo := colinfo.NewSourceInfoForSingleTable(
-		*tn, colinfo.ResultColumnsFromColumns(desc.GetID(), nonDropColumns),
+		*tn, colinfo.ResultColumnsFromColDescs(
+			desc.GetID(),
+			nonDropColumnDescs,
+		),
 	)
 	expr, err := dequalifyColumnRefs(ctx, sourceInfo, expr)
 	if err != nil {
-		return "", nil, colIDs, err
+		return "", colIDs, err
 	}
 
 	// Replace the column variables with dummyColumns so that they can be
 	// type-checked.
 	replacedExpr, colIDs, err := replaceColumnVars(desc, expr)
 	if err != nil {
-		return "", nil, colIDs, err
+		return "", colIDs, err
 	}
 
 	typedExpr, err := SanitizeVarFreeExpr(
 		ctx,
 		replacedExpr,
 		typ,
-		context,
+		op,
 		semaCtx,
 		maxVolatility,
 	)
 
 	if err != nil {
-		return "", nil, colIDs, err
+		return "", colIDs, err
 	}
 
-	return tree.Serialize(typedExpr), typedExpr.ResolvedType(), colIDs, nil
+	return tree.Serialize(typedExpr), colIDs, nil
 }
 
 // ExtractColumnIDs returns the set of column IDs within the given expression.
@@ -161,71 +168,13 @@ func FormatExprForDisplay(
 	desc catalog.TableDescriptor,
 	exprStr string,
 	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
 	fmtFlags tree.FmtFlags,
-) (string, error) {
-	return formatExprForDisplayImpl(
-		ctx,
-		desc,
-		exprStr,
-		semaCtx,
-		sessionData,
-		fmtFlags,
-		false, /* wrapNonFuncExprs */
-	)
-}
-
-// FormatExprForExpressionIndexDisplay formats an expression index's expression
-// element string for display. It is similar to FormatExprForDisplay. The only
-// difference is that non-function expressions will be wrapped in parentheses to
-// match the parsing requirements for expression indexes.
-func FormatExprForExpressionIndexDisplay(
-	ctx context.Context,
-	desc catalog.TableDescriptor,
-	exprStr string,
-	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
-	fmtFlags tree.FmtFlags,
-) (string, error) {
-	return formatExprForDisplayImpl(
-		ctx,
-		desc,
-		exprStr,
-		semaCtx,
-		sessionData,
-		fmtFlags,
-		true, /* wrapNonFuncExprs */
-	)
-}
-
-func formatExprForDisplayImpl(
-	ctx context.Context,
-	desc catalog.TableDescriptor,
-	exprStr string,
-	semaCtx *tree.SemaContext,
-	sessionData *sessiondata.SessionData,
-	fmtFlags tree.FmtFlags,
-	wrapNonFuncExprs bool,
 ) (string, error) {
 	expr, err := deserializeExprForFormatting(ctx, desc, exprStr, semaCtx, fmtFlags)
 	if err != nil {
 		return "", err
 	}
-	// Replace any IDs in the expr with their fully qualified names.
-	replacedExpr, err := ReplaceIDsWithFQNames(ctx, expr, semaCtx)
-	if err != nil {
-		return "", err
-	}
-	f := tree.NewFmtCtx(fmtFlags, tree.FmtDataConversionConfig(sessionData.DataConversionConfig))
-	_, isFunc := expr.(*tree.FuncExpr)
-	if wrapNonFuncExprs && !isFunc {
-		f.WriteByte('(')
-	}
-	f.FormatNode(replacedExpr)
-	if wrapNonFuncExprs && !isFunc {
-		f.WriteByte(')')
-	}
-	return f.CloseAndGetString(), nil
+	return tree.AsStringWithFlags(expr, fmtFlags), nil
 }
 
 func deserializeExprForFormatting(
@@ -240,9 +189,15 @@ func deserializeExprForFormatting(
 		return nil, err
 	}
 
+	// Replace any IDs in the expr with their fully qualified names.
+	seqReplacedExpr, err := replaceIDsWithFQNames(ctx, expr, semaCtx)
+	if err != nil {
+		return nil, err
+	}
+
 	// Replace the column variables with dummyColumns so that they can be
 	// type-checked.
-	replacedExpr, _, err := replaceColumnVars(desc, expr)
+	replacedExpr, _, err := replaceColumnVars(desc, seqReplacedExpr)
 	if err != nil {
 		return nil, err
 	}
@@ -287,13 +242,13 @@ type nameResolver struct {
 
 // newNameResolver creates and returns a nameResolver.
 func newNameResolver(
-	evalCtx *tree.EvalContext, tableID descpb.ID, tn *tree.TableName, cols []catalog.Column,
+	evalCtx *tree.EvalContext, tableID descpb.ID, tn *tree.TableName, cols []*descpb.ColumnDescriptor,
 ) *nameResolver {
 	source := colinfo.NewSourceInfoForSingleTable(
 		*tn,
-		colinfo.ResultColumnsFromColumns(tableID, cols),
+		colinfo.ResultColumnsFromColDescPtrs(tableID, cols),
 	)
-	nrc := &nameResolverIVarContainer{append(make([]catalog.Column, 0, len(cols)), cols...)}
+	nrc := &nameResolverIVarContainer{cols}
 	ivarHelper := tree.MakeIndexedVarHelper(nrc, len(cols))
 
 	return &nameResolver{
@@ -309,15 +264,15 @@ func newNameResolver(
 // unresolved names replaced with IndexedVars.
 func (nr *nameResolver) resolveNames(expr tree.Expr) (tree.Expr, error) {
 	var v NameResolutionVisitor
-	return ResolveNamesUsingVisitor(&v, expr, nr.source, *nr.ivarHelper, nr.evalCtx.SessionData().SearchPath)
+	return ResolveNamesUsingVisitor(&v, expr, nr.source, *nr.ivarHelper, nr.evalCtx.SessionData.SearchPath)
 }
 
 // addColumn adds a new column to the nameResolver so that it can be resolved in
 // future calls to resolveNames.
-func (nr *nameResolver) addColumn(col catalog.Column) {
+func (nr *nameResolver) addColumn(col *descpb.ColumnDescriptor) {
 	nr.ivarHelper.AppendSlot()
 	nr.nrc.cols = append(nr.nrc.cols, col)
-	newCols := colinfo.ResultColumnsFromColumns(nr.tableID, []catalog.Column{col})
+	newCols := colinfo.ResultColumnsFromColDescs(nr.tableID, []descpb.ColumnDescriptor{*col})
 	nr.source.SourceColumns = append(nr.source.SourceColumns, newCols...)
 }
 
@@ -331,7 +286,7 @@ func (nr *nameResolver) addIVarContainerToSemaCtx(semaCtx *tree.SemaContext) {
 // tree.IndexedVarContainer. It is used to resolve and type check columns in
 // expressions. It does not support evaluation.
 type nameResolverIVarContainer struct {
-	cols []catalog.Column
+	cols []*descpb.ColumnDescriptor
 }
 
 // IndexedVarEval implements the tree.IndexedVarContainer interface.
@@ -344,7 +299,7 @@ func (nrc *nameResolverIVarContainer) IndexedVarEval(
 
 // IndexedVarResolvedType implements the tree.IndexedVarContainer interface.
 func (nrc *nameResolverIVarContainer) IndexedVarResolvedType(idx int) *types.T {
-	return nrc.cols[idx].GetType()
+	return nrc.cols[idx].Type
 }
 
 // IndexVarNodeFormatter implements the tree.IndexedVarContainer interface.

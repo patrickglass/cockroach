@@ -160,7 +160,7 @@ func TestMakeTableDescColumns(t *testing.T) {
 		},
 		{
 			`"char"`,
-			types.QChar,
+			types.MakeQChar(0),
 			true,
 		},
 		{
@@ -182,7 +182,7 @@ func TestMakeTableDescColumns(t *testing.T) {
 	for i, d := range testData {
 		s := "CREATE TABLE foo.test (a " + d.sqlType + " PRIMARY KEY, b " + d.sqlType + ")"
 		schema, err := CreateTestTableDescriptor(context.Background(), 1, 100, s,
-			descpb.NewBasePrivilegeDescriptor(security.AdminRoleName()))
+			descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName()))
 		if err != nil {
 			t.Fatalf("%d: %v", i, err)
 		}
@@ -210,94 +210,87 @@ func TestMakeTableDescIndexes(t *testing.T) {
 		{
 			"a INT PRIMARY KEY",
 			descpb.IndexDescriptor{
-				Name:                tabledesc.PrimaryKeyIndexName("test"),
-				ID:                  1,
-				Unique:              true,
-				KeyColumnNames:      []string{"a"},
-				KeyColumnIDs:        []descpb.ColumnID{1},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-				EncodingType:        descpb.PrimaryIndexEncoding,
-				Version:             descpb.PrimaryIndexWithStoredColumnsVersion,
+				Name:             tabledesc.PrimaryKeyIndexName,
+				ID:               1,
+				Unique:           true,
+				ColumnNames:      []string{"a"},
+				ColumnIDs:        []descpb.ColumnID{1},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+				Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 			[]descpb.IndexDescriptor{},
 		},
 		{
 			"a INT UNIQUE, b INT PRIMARY KEY",
 			descpb.IndexDescriptor{
-				Name:                "test_pkey",
-				ID:                  1,
-				Unique:              true,
-				KeyColumnNames:      []string{"b"},
-				KeyColumnIDs:        []descpb.ColumnID{2},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-				StoreColumnNames:    []string{"a"},
-				StoreColumnIDs:      []descpb.ColumnID{1},
-				EncodingType:        descpb.PrimaryIndexEncoding,
-				Version:             descpb.PrimaryIndexWithStoredColumnsVersion,
+				Name:             "primary",
+				ID:               1,
+				Unique:           true,
+				ColumnNames:      []string{"b"},
+				ColumnIDs:        []descpb.ColumnID{2},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+				Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 			[]descpb.IndexDescriptor{
 				{
-					Name:                "test_a_key",
-					ID:                  2,
-					Unique:              true,
-					KeyColumnNames:      []string{"a"},
-					KeyColumnIDs:        []descpb.ColumnID{1},
-					KeySuffixColumnIDs:  []descpb.ColumnID{2},
-					KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-					Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+					Name:             "test_a_key",
+					ID:               2,
+					Unique:           true,
+					ColumnNames:      []string{"a"},
+					ColumnIDs:        []descpb.ColumnID{1},
+					ExtraColumnIDs:   []descpb.ColumnID{2},
+					ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+					Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 				},
 			},
 		},
 		{
 			"a INT, b INT, CONSTRAINT c PRIMARY KEY (a, b)",
 			descpb.IndexDescriptor{
-				Name:                "c",
-				ID:                  1,
-				Unique:              true,
-				KeyColumnNames:      []string{"a", "b"},
-				KeyColumnIDs:        []descpb.ColumnID{1, 2},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-				EncodingType:        descpb.PrimaryIndexEncoding,
-				Version:             descpb.PrimaryIndexWithStoredColumnsVersion,
+				Name:             "c",
+				ID:               1,
+				Unique:           true,
+				ColumnNames:      []string{"a", "b"},
+				ColumnIDs:        []descpb.ColumnID{1, 2},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+				Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 			[]descpb.IndexDescriptor{},
 		},
 		{
 			"a INT, b INT, CONSTRAINT c UNIQUE (b), PRIMARY KEY (a, b)",
 			descpb.IndexDescriptor{
-				Name:                tabledesc.PrimaryKeyIndexName("test"),
-				ID:                  1,
-				Unique:              true,
-				KeyColumnNames:      []string{"a", "b"},
-				KeyColumnIDs:        []descpb.ColumnID{1, 2},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-				EncodingType:        descpb.PrimaryIndexEncoding,
-				Version:             descpb.PrimaryIndexWithStoredColumnsVersion,
+				Name:             "primary",
+				ID:               1,
+				Unique:           true,
+				ColumnNames:      []string{"a", "b"},
+				ColumnIDs:        []descpb.ColumnID{1, 2},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+				Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 			[]descpb.IndexDescriptor{
 				{
-					Name:                "c",
-					ID:                  2,
-					Unique:              true,
-					KeyColumnNames:      []string{"b"},
-					KeyColumnIDs:        []descpb.ColumnID{2},
-					KeySuffixColumnIDs:  []descpb.ColumnID{1},
-					KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
-					Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+					Name:             "c",
+					ID:               2,
+					Unique:           true,
+					ColumnNames:      []string{"b"},
+					ColumnIDs:        []descpb.ColumnID{2},
+					ExtraColumnIDs:   []descpb.ColumnID{1},
+					ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
+					Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 				},
 			},
 		},
 		{
 			"a INT, b INT, PRIMARY KEY (a, b)",
 			descpb.IndexDescriptor{
-				Name:                tabledesc.PrimaryKeyIndexName("test"),
-				ID:                  1,
-				Unique:              true,
-				KeyColumnNames:      []string{"a", "b"},
-				KeyColumnIDs:        []descpb.ColumnID{1, 2},
-				KeyColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
-				EncodingType:        descpb.PrimaryIndexEncoding,
-				Version:             descpb.PrimaryIndexWithStoredColumnsVersion,
+				Name:             tabledesc.PrimaryKeyIndexName,
+				ID:               1,
+				Unique:           true,
+				ColumnNames:      []string{"a", "b"},
+				ColumnIDs:        []descpb.ColumnID{1, 2},
+				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC, descpb.IndexDescriptor_ASC},
+				Version:          descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 			[]descpb.IndexDescriptor{},
 		},
@@ -305,7 +298,7 @@ func TestMakeTableDescIndexes(t *testing.T) {
 	for i, d := range testData {
 		s := "CREATE TABLE foo.test (" + d.sql + ")"
 		schema, err := CreateTestTableDescriptor(context.Background(), 1, 100, s,
-			descpb.NewBasePrivilegeDescriptor(security.AdminRoleName()))
+			descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName()))
 		if err != nil {
 			t.Fatalf("%d (%s): %v", i, d.sql, err)
 		}
@@ -375,7 +368,7 @@ func TestMakeTableDescUniqueConstraints(t *testing.T) {
 	for i, d := range testData {
 		s := "CREATE TABLE foo.test (" + d.sql + ")"
 		schema, err := CreateTestTableDescriptor(context.Background(), 1, 100, s,
-			descpb.NewBasePrivilegeDescriptor(security.AdminRoleName()))
+			descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName()))
 		if err != nil {
 			t.Fatalf("%d (%s): %v", i, d.sql, err)
 		}
@@ -394,7 +387,7 @@ func TestPrimaryKeyUnspecified(t *testing.T) {
 	s := "CREATE TABLE foo.test (a INT, b INT, CONSTRAINT c UNIQUE (b))"
 	ctx := context.Background()
 	desc, err := CreateTestTableDescriptor(ctx, 1, 100, s,
-		descpb.NewBasePrivilegeDescriptor(security.AdminRoleName()))
+		descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,68 +529,6 @@ func TestSerializedUDTsInTableDescriptor(t *testing.T) {
 	}
 }
 
-// TestSerializedUDTsInView tests that view queries containing
-// explicit type references and members of user defined types are serialized
-// in a way that is stable across changes to the type itself. For example,
-// we want to ensure that enum members are serialized in a way that is stable
-// across renames to the member itself.
-func TestSerializedUDTsInView(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	ctx := context.Background()
-	testdata := []struct {
-		viewQuery    string
-		expectedExpr string
-	}{
-		// Test simple UDT in the view query.
-		{
-			"SELECT 'hello':::greeting",
-			`(SELECT b'\x80':::@100053)`,
-		},
-		// Test when a UDT is used in a view query, but isn't the
-		// final type of the column.
-		{
-			"SELECT 'hello'::greeting < 'hello'::greeting",
-			`(SELECT b'\x80':::@100053 < b'\x80':::@100053)`,
-		},
-		// Test when a UDT is used in various parts of a view (subquery, CTE, etc.).
-		{
-			"SELECT k FROM (SELECT 'hello'::greeting AS k)",
-			`(SELECT k FROM (SELECT b'\x80':::@100053 AS k))`,
-		},
-		{
-			"WITH w AS (SELECT 'hello':::greeting AS k) SELECT k FROM w",
-			`(WITH w AS (SELECT b'\x80':::@100053 AS k) SELECT k FROM w)`,
-		},
-	}
-
-	params, _ := tests.CreateTestServerParams()
-	s, sqlDB, kvDB := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(ctx)
-	if _, err := sqlDB.Exec(`
-	CREATE DATABASE test;
-	USE test;
-	CREATE TYPE greeting AS ENUM ('hello');
-`); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range testdata {
-		create := "CREATE VIEW v AS (" + tc.viewQuery + ")"
-		if _, err := sqlDB.Exec(create); err != nil {
-			t.Fatal(err)
-		}
-		desc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "v")
-		foundViewQuery := desc.GetViewQuery()
-		if tc.expectedExpr != foundViewQuery {
-			t.Errorf("for view %s, found %s, expected %s", tc.viewQuery, foundViewQuery, tc.expectedExpr)
-		}
-		if _, err := sqlDB.Exec("DROP VIEW v"); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
 // TestJobsCache verifies that a job for a given table gets cached and reused
 // for following schema changes in the same transaction.
 func TestJobsCache(t *testing.T) {
@@ -606,8 +537,8 @@ func TestJobsCache(t *testing.T) {
 	ctx := context.Background()
 
 	foundInCache := false
-	runAfterSCJobsCacheLookup := func(record *jobs.Record) {
-		if record != nil {
+	runAfterSCJobsCacheLookup := func(job *jobs.Job) {
+		if job != nil {
 			foundInCache = true
 		}
 	}

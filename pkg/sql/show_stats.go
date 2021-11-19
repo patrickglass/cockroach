@@ -32,7 +32,6 @@ var showTableStatsColumns = colinfo.ResultColumns{
 	{Name: "row_count", Typ: types.Int},
 	{Name: "distinct_count", Typ: types.Int},
 	{Name: "null_count", Typ: types.Int},
-	{Name: "avg_size", Typ: types.Int},
 	{Name: "histogram_id", Typ: types.Int},
 }
 
@@ -78,7 +77,6 @@ func (p *planner) ShowTableStats(ctx context.Context, n *tree.ShowTableStats) (p
 					      "rowCount",
 					      "distinctCount",
 					      "nullCount",
-					      "avgSize",
 					      histogram
 				 FROM system.table_statistics
 				 WHERE "tableID" = $1
@@ -97,7 +95,6 @@ func (p *planner) ShowTableStats(ctx context.Context, n *tree.ShowTableStats) (p
 				rowCountIdx
 				distinctCountIdx
 				nullCountIdx
-				avgSizeIdx
 				histogramIdx
 				numCols
 			)
@@ -127,7 +124,6 @@ func (p *planner) ShowTableStats(ctx context.Context, n *tree.ShowTableStats) (p
 					result[i].RowCount = (uint64)(*r[rowCountIdx].(*tree.DInt))
 					result[i].DistinctCount = (uint64)(*r[distinctCountIdx].(*tree.DInt))
 					result[i].NullCount = (uint64)(*r[nullCountIdx].(*tree.DInt))
-					result[i].AvgSize = (uint64)(*r[avgSizeIdx].(*tree.DInt))
 					if r[nameIdx] != tree.DNull {
 						result[i].Name = string(*r[nameIdx].(*tree.DString))
 					}
@@ -183,7 +179,6 @@ func (p *planner) ShowTableStats(ctx context.Context, n *tree.ShowTableStats) (p
 					r[rowCountIdx],
 					r[distinctCountIdx],
 					r[nullCountIdx],
-					r[avgSizeIdx],
 					histogramID,
 				}
 				if _, err := v.rows.AddRow(ctx, res); err != nil {

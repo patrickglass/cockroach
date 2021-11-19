@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for is_null_ops.eg.go. It's formatted
 // in a special way, so it's both valid Go and a valid text/template input.
@@ -22,7 +20,10 @@
 package colexec
 
 import (
+	"context"
+
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
@@ -31,7 +32,7 @@ import (
 )
 
 type isNullProjBase struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	allocator *colmem.Allocator
 	colIdx    int
 	outputIdx int
@@ -52,11 +53,11 @@ func NewIsNullProjOp(
 ) colexecop.Operator {
 	input = colexecutils.NewVectorTypeEnforcer(allocator, input, types.Bool, outputIdx)
 	base := isNullProjBase{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
-		allocator:      allocator,
-		colIdx:         colIdx,
-		outputIdx:      outputIdx,
-		negate:         negate,
+		OneInputNode: colexecop.NewOneInputNode(input),
+		allocator:    allocator,
+		colIdx:       colIdx,
+		outputIdx:    outputIdx,
+		negate:       negate,
 	}
 	if isTupleNull {
 		return &isTupleNullProjOp{isNullProjBase: base}
@@ -77,8 +78,12 @@ type is_KINDNullProjOp struct {
 
 var _ colexecop.Operator = &is_KINDNullProjOp{}
 
-func (o *is_KINDNullProjOp) Next() coldata.Batch {
-	batch := o.Input.Next()
+func (o *is_KINDNullProjOp) Init() {
+	o.Input.Init()
+}
+
+func (o *is_KINDNullProjOp) Next(ctx context.Context) coldata.Batch {
+	batch := o.Input.Next(ctx)
 	n := batch.Length()
 	if n == 0 {
 		return coldata.ZeroBatch
@@ -138,7 +143,7 @@ func _COMPUTE_IS_NULL(
 	if nulls.NullAt(i) {
 		projCol[i] = !o.negate
 	} else {
-		projCol[i] = isTupleNull(datums.Get(i).(tree.Datum), o.negate)
+		projCol[i] = isTupleNull(datums.Get(i).(*coldataext.Datum).Datum, o.negate)
 	}
 	// {{else}}
 	// {{if .HasNulls}}
@@ -154,7 +159,7 @@ func _COMPUTE_IS_NULL(
 } // */}}
 
 type isNullSelBase struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	colIdx int
 	negate bool
 }
@@ -168,9 +173,9 @@ func NewIsNullSelOp(
 	input colexecop.Operator, colIdx int, negate bool, isTupleNull bool,
 ) colexecop.Operator {
 	base := isNullSelBase{
-		OneInputHelper: colexecop.MakeOneInputHelper(input),
-		colIdx:         colIdx,
-		negate:         negate,
+		OneInputNode: colexecop.NewOneInputNode(input),
+		colIdx:       colIdx,
+		negate:       negate,
 	}
 	if isTupleNull {
 		return &isTupleNullSelOp{isNullSelBase: base}
@@ -189,9 +194,13 @@ type is_KINDNullSelOp struct {
 
 var _ colexecop.Operator = &is_KINDNullSelOp{}
 
-func (o *is_KINDNullSelOp) Next() coldata.Batch {
+func (o *is_KINDNullSelOp) Init() {
+	o.Input.Init()
+}
+
+func (o *is_KINDNullSelOp) Next(ctx context.Context) coldata.Batch {
 	for {
-		batch := o.Input.Next()
+		batch := o.Input.Next(ctx)
 		n := batch.Length()
 		if n == 0 {
 			return batch
@@ -251,7 +260,7 @@ func _MAYBE_SELECT(
 	// {{if .IsTuple}}
 	selectTuple := nulls.NullAt(i) != o.negate
 	if !selectTuple {
-		selectTuple = isTupleNull(datums.Get(i).(tree.Datum), o.negate)
+		selectTuple = isTupleNull(datums.Get(i).(*coldataext.Datum).Datum, o.negate)
 	}
 	if selectTuple {
 		sel[idx] = i

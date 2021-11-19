@@ -20,21 +20,25 @@ import (
 // fnOp is an operator that executes an arbitrary function for its side-effects,
 // once per input batch, passing the input batch unmodified along.
 type fnOp struct {
-	colexecop.OneInputHelper
+	colexecop.OneInputNode
 	colexecop.NonExplainable
 
 	fn func()
 }
 
-var _ colexecop.ResettableOperator = &fnOp{}
+var _ colexecop.ResettableOperator = fnOp{}
 
-func (f *fnOp) Next() coldata.Batch {
-	batch := f.Input.Next()
+func (f fnOp) Init() {
+	f.Input.Init()
+}
+
+func (f fnOp) Next(ctx context.Context) coldata.Batch {
+	batch := f.Input.Next(ctx)
 	f.fn()
 	return batch
 }
 
-func (f *fnOp) Reset(ctx context.Context) {
+func (f fnOp) Reset(ctx context.Context) {
 	if resettableOp, ok := f.Input.(colexecop.Resetter); ok {
 		resettableOp.Reset(ctx)
 	}

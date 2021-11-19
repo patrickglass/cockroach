@@ -4,7 +4,7 @@
 # starting with "NOTE" or "TODO".
 #
 # Beware that this configuration is quite insecure. By default, it will make
-# CockroachDB accessible on port 26257 on your Kubernetes nodes' network
+# CockroachDB accesible on port 26257 on your Kubernetes nodes' network
 # interfaces, meaning that if your nodes are reachable from the Internet, then
 # this CockroachDB cluster will be too. To disable this behavior, remove the 
 # `hostNetwork` configuration field below.
@@ -140,31 +140,30 @@ spec:
       - name: cockroachdb
         # NOTE: Always use the most recent version of CockroachDB for the best
         # performance and reliability.
-        image: cockroachdb/cockroach:v21.2.0
+        image: cockroachdb/cockroach:v20.2.5
         imagePullPolicy: IfNotPresent
         # TODO: Change these to appropriate values for the hardware that you're running. You can see
         # the resources that can be allocated on each of your Kubernetes nodes by running:
         #   kubectl describe nodes
         # Note that requests and limits should have identical values.
-        resources:
-          requests:
-            cpu: "2"
-            memory: "8Gi"
-          limits:
-            cpu: "2"
-            memory: "8Gi" 
+        # resources:
+        #   requests:
+        #     cpu: "16"
+        #     memory: "8Gi"
+        #   limits:
+        #     cpu: "16"
+        #     memory: "8Gi" 
         ports:
         - containerPort: 26257
           name: grpc
         - containerPort: 8080
           name: http
-# We recommend that you do not configure a liveness probe on a production environment, as this can impact the availability of production databases.
-#       livenessProbe:
-#         httpGet:
-#           path: "/health"
-#           port: http
-#         initialDelaySeconds: 30
-#         periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: "/health"
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 5
         readinessProbe:
           httpGet:
             path: "/health?ready=1"
@@ -203,7 +202,7 @@ spec:
       # TODO: This specifically asks for a storage class with the name "ssd". A
       # storage class of this name doesn't exist by default. See our docs for
       # more information on how to create an optimized storage class for use here:
-      # https://www.cockroachlabs.com/docs/stable/kubernetes-performance.html#disk-type
+      # https://www.cockroachlabs.com/docs/stable/orchestrate-cockroachdb-with-kubernetes-performance.html#disk-type
       storageClassName: ssd
       resources:
         requests:

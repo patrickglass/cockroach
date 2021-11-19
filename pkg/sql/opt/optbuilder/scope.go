@@ -108,6 +108,19 @@ type scope struct {
 	atRoot bool
 }
 
+// cteSource represents a CTE in the given query.
+type cteSource struct {
+	id           opt.WithID
+	name         tree.AliasClause
+	cols         physical.Presentation
+	originalExpr tree.Statement
+	expr         memo.RelExpr
+	mtr          tree.MaterializeClause
+	// If set, this function is called when a CTE is referenced. It can throw an
+	// error.
+	onRef func()
+}
+
 // exprKind is used to represent the kind of the current expression in the
 // SQL query.
 type exprKind int8
@@ -219,7 +232,7 @@ func (s *scope) appendOrdinaryColumnsFromTable(tabMeta *opt.TableMeta, alias *tr
 			continue
 		}
 		s.cols = append(s.cols, scopeColumn{
-			name:       scopeColName(tabCol.ColName()),
+			name:       tabCol.ColName(),
 			table:      *alias,
 			typ:        tabCol.DatumType(),
 			id:         tabMeta.MetaID.ColumnID(i),
@@ -260,10 +273,11 @@ func (s *scope) addExtraColumns(cols []scopeColumn) {
 	}
 }
 
-// addColumn adds a column to scope with the given name and typed expression.
+// addColumn adds a column to scope with the given alias and typed expression.
 // It returns a pointer to the new column. The column ID and group are left
 // empty so they can be filled in later.
-func (s *scope) addColumn(name scopeColumnName, expr tree.TypedExpr) *scopeColumn {
+func (s *scope) addColumn(alias string, expr tree.TypedExpr) *scopeColumn {
+	name := tree.Name(alias)
 	s.cols = append(s.cols, scopeColumn{
 		name: name,
 		typ:  expr.ResolvedType(),
@@ -335,8 +349,8 @@ func (s *scope) makeColumnTypes() []*types.T {
 }
 
 // makeOrderingChoice returns an OrderingChoice that corresponds to s.ordering.
-func (s *scope) makeOrderingChoice() props.OrderingChoice {
-	var oc props.OrderingChoice
+func (s *scope) makeOrderingChoice() physical.OrderingChoice {
+	var oc physical.OrderingChoice
 	oc.FromOrdering(s.ordering)
 	return oc
 }
@@ -360,7 +374,7 @@ func (s *scope) makePresentation() physical.Presentation {
 		col := &s.cols[i]
 		if col.visibility == visible {
 			presentation = append(presentation, opt.AliasedColumn{
-				Alias: string(col.name.ReferenceName()),
+				Alias: string(col.name),
 				ID:    col.id,
 			})
 		}
@@ -378,7 +392,7 @@ func (s *scope) makePresentationWithHiddenCols() physical.Presentation {
 	for i := range s.cols {
 		col := &s.cols[i]
 		presentation = append(presentation, opt.AliasedColumn{
-			Alias: string(col.name.ReferenceName()),
+			Alias: string(col.name),
 			ID:    col.id,
 		})
 	}
@@ -458,7 +472,7 @@ func (s *scope) resolveAndRequireType(expr tree.Expr, desired *types.T) tree.Typ
 	if err != nil {
 		panic(err)
 	}
-	return tree.ReType(s.ensureNullType(texpr, desired), desired)
+	return s.ensureNullType(texpr, desired)
 }
 
 // ensureNullType tests the type of the given expression. If types.Unknown, then
@@ -570,7 +584,7 @@ func (s *scope) setTableAlias(alias tree.Name) {
 
 // See (*scope).findExistingCol.
 func findExistingColInList(
-	expr tree.TypedExpr, cols []scopeColumn, allowSideEffects bool, evalCtx *tree.EvalContext,
+	expr tree.TypedExpr, cols []scopeColumn, allowSideEffects bool,
 ) *scopeColumn {
 	exprStr := symbolicExprStr(expr)
 	for i := range cols {
@@ -583,7 +597,7 @@ func findExistingColInList(
 				return col
 			}
 			var p props.Shared
-			memo.BuildSharedProps(col.scalar, &p, evalCtx)
+			memo.BuildSharedProps(col.scalar, &p)
 			if !p.VolatilitySet.HasVolatile() {
 				return col
 			}
@@ -598,7 +612,7 @@ func findExistingColInList(
 // If a column is found and we are tracking view dependencies, we add the column
 // to the view dependencies since it means this column is being referenced.
 func (s *scope) findExistingCol(expr tree.TypedExpr, allowSideEffects bool) *scopeColumn {
-	col := findExistingColInList(expr, s.cols, allowSideEffects, s.builder.evalCtx)
+	col := findExistingColInList(expr, s.cols, allowSideEffects)
 	if col != nil {
 		s.builder.trackReferencedColumnForViews(col)
 	}
@@ -738,7 +752,7 @@ func (c *candidateTracker) Add(col *scopeColumn, matchClass columnMatchClass) {
 // FindSourceProvidingColumn is part of the tree.ColumnItemResolver interface.
 func (s *scope) FindSourceProvidingColumn(
 	_ context.Context, colName tree.Name,
-) (prefix *tree.TableName, srcMeta colinfo.ColumnSourceMeta, colHint int, err error) {
+) (prefix *tree.TableName, srcMeta tree.ColumnSourceMeta, colHint int, err error) {
 	// We start from the current scope; if we find at least one match we are done
 	// (either with a result or an ambiguity error). Otherwise, we search the
 	// parent scope.
@@ -756,7 +770,7 @@ func (s *scope) FindSourceProvidingColumn(
 
 		for i := range s.cols {
 			col := &s.cols[i]
-			if !col.name.MatchesReferenceName(colName) {
+			if col.name != colName {
 				continue
 			}
 
@@ -808,7 +822,7 @@ func (s *scope) newAmbiguousColumnError(n tree.Name, matchClass columnMatchClass
 	// class.
 	for i := range s.cols {
 		col := &s.cols[i]
-		if !col.name.MatchesReferenceName(n) {
+		if col.name != n {
 			continue
 		}
 		var match bool
@@ -848,9 +862,9 @@ func (s *scope) newAmbiguousColumnError(n tree.Name, matchClass columnMatchClass
 func (s *scope) FindSourceMatchingName(
 	_ context.Context, tn tree.TableName,
 ) (
-	res colinfo.NumResolutionResults,
+	res tree.NumResolutionResults,
 	prefix *tree.TableName,
-	srcMeta colinfo.ColumnSourceMeta,
+	srcMeta tree.ColumnSourceMeta,
 	err error,
 ) {
 	// If multiple sources match tn in the same scope, we return an error
@@ -870,18 +884,18 @@ func (s *scope) FindSourceMatchingName(
 				continue
 			}
 			if found {
-				return colinfo.MoreThanOne, nil, s, newAmbiguousSourceError(&tn)
+				return tree.MoreThanOne, nil, s, newAmbiguousSourceError(&tn)
 			}
 			found = true
 			source = src
 		}
 
 		if found {
-			return colinfo.ExactlyOne, &source, s, nil
+			return tree.ExactlyOne, &source, s, nil
 		}
 	}
 
-	return colinfo.NoResults, nil, s, nil
+	return tree.NoResults, nil, s, nil
 }
 
 // sourceNameMatches checks whether a request for table name toFind
@@ -911,10 +925,10 @@ func sourceNameMatches(srcName tree.TableName, toFind tree.TableName) bool {
 func (s *scope) Resolve(
 	_ context.Context,
 	prefix *tree.TableName,
-	srcMeta colinfo.ColumnSourceMeta,
+	srcMeta tree.ColumnSourceMeta,
 	colHint int,
 	colName tree.Name,
-) (colinfo.ColumnResolutionResult, error) {
+) (tree.ColumnResolutionResult, error) {
 	if colHint >= 0 {
 		// Column was found by FindSourceProvidingColumn above.
 		return srcMeta.(*scopeColumn), nil
@@ -924,7 +938,7 @@ func (s *scope) Resolve(
 	inScope := srcMeta.(*scope)
 	for i := range inScope.cols {
 		col := &inScope.cols[i]
-		if col.name.MatchesReferenceName(colName) && sourceNameMatches(*prefix, col.table) {
+		if col.name == colName && sourceNameMatches(*prefix, col.table) {
 			return col, nil
 		}
 	}
@@ -973,17 +987,9 @@ func (s *scope) VisitPre(expr tree.Expr) (recurse bool, newExpr tree.Expr) {
 		return s.VisitPre(vn)
 
 	case *tree.ColumnItem:
-		colI, resolveErr := colinfo.ResolveColumnItem(s.builder.ctx, s, t)
-		if resolveErr != nil {
-			if sqlerrors.IsUndefinedColumnError(resolveErr) {
-				// Attempt to resolve as columnname.*, which allows items
-				// such as SELECT row_to_json(tbl_name) FROM tbl_name to work.
-				return func() (bool, tree.Expr) {
-					defer wrapColTupleStarPanic(resolveErr)
-					return s.VisitPre(columnNameAsTupleStar(string(t.ColumnName)))
-				}()
-			}
-			panic(resolveErr)
+		colI, err := t.Resolve(s.builder.ctx, s)
+		if err != nil {
+			panic(err)
 		}
 		return false, colI.(*scopeColumn)
 
@@ -1024,7 +1030,7 @@ func (s *scope) VisitPre(expr tree.Expr) (recurse bool, newExpr tree.Expr) {
 		}
 
 	case *tree.ComparisonExpr:
-		switch t.Operator.Symbol {
+		switch t.Operator {
 		case tree.In, tree.NotIn, tree.Any, tree.Some, tree.All:
 			if sub, ok := t.Right.(*tree.Subquery); ok {
 				// Copy the Comparison expression so that the tree isn't mutated.
@@ -1085,7 +1091,7 @@ func (s *scope) replaceSRF(f *tree.FuncExpr, def *tree.FunctionDefinition) *srf 
 
 	var typedFuncExpr = typedFunc.(*tree.FuncExpr)
 	if s.builder.shouldCreateDefaultColumn(typedFuncExpr) {
-		outCol = srfScope.addColumn(scopeColName(tree.Name(def.Name)), typedFunc)
+		outCol = srfScope.addColumn(def.Name, typedFunc)
 	}
 	out := s.builder.buildFunction(typedFuncExpr, s, srfScope, outCol, nil)
 	srf := &srf{
@@ -1317,17 +1323,12 @@ func (s *scope) replaceWindowFn(f *tree.FuncExpr, def *tree.FunctionDefinition) 
 		},
 	}
 
-	if col := findExistingColInList(
-		&info,
-		s.windows,
-		false, /* allowSideEffects */
-		s.builder.evalCtx,
-	); col != nil {
+	if col := findExistingColInList(&info, s.windows, false /* allowSideEffects */); col != nil {
 		return col.expr
 	}
 
 	info.col = &scopeColumn{
-		name: scopeColName(tree.Name(def.Name)),
+		name: tree.Name(def.Name),
 		typ:  f.ResolvedType(),
 		id:   s.builder.factory.Metadata().AddColumn(def.Name, f.ResolvedType()),
 		expr: &info,
@@ -1599,39 +1600,15 @@ func (s *scope) String() string {
 		if i > 0 {
 			buf.WriteByte(',')
 		}
-		fmt.Fprintf(&buf, "%s:%d", c.name.ReferenceName(), c.id)
+		fmt.Fprintf(&buf, "%s:%d", c.name.String(), c.id)
 	}
 	for i, c := range s.extraCols {
 		if i > 0 || len(s.cols) > 0 {
 			buf.WriteByte(',')
 		}
-		fmt.Fprintf(&buf, "%s:%d!extra", c.name.ReferenceName(), c.id)
+		fmt.Fprintf(&buf, "%s:%d!extra", c.name.String(), c.id)
 	}
 	buf.WriteByte(')')
 
 	return buf.String()
-}
-
-func columnNameAsTupleStar(colName string) *tree.TupleStar {
-	return &tree.TupleStar{
-		Expr: &tree.UnresolvedName{
-			Star:     true,
-			NumParts: 2,
-			Parts:    tree.NameParts{"", colName},
-		},
-	}
-}
-
-// wrapColTupleStarPanic checks for panics and if the pgcode is
-// UndefinedTable panics with the originalError.
-// Otherwise, it will panic with the recovered error.
-func wrapColTupleStarPanic(originalError error) {
-	if r := recover(); r != nil {
-		if err, ok := r.(error); ok {
-			if sqlerrors.IsUndefinedRelationError(err) {
-				panic(originalError)
-			}
-		}
-		panic(r)
-	}
 }

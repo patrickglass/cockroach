@@ -111,7 +111,7 @@ func (h *defaultAggregatorHelper) performAggregation(
 	_ context.Context, vecs []coldata.Vec, inputLen int, sel []int, bucket *aggBucket, _ []bool,
 ) {
 	for fnIdx, fn := range bucket.fns {
-		fn.Compute(vecs, h.spec.Aggregations[fnIdx].ColIdx, 0 /* startIdx */, inputLen, sel)
+		fn.Compute(vecs, h.spec.Aggregations[fnIdx].ColIdx, inputLen, sel)
 	}
 }
 
@@ -189,10 +189,7 @@ func (h *filteringSingleFunctionHashHelper) applyFilter(
 		return vecs, inputLen, sel, false
 	}
 	h.filterInput.reset(vecs, inputLen, sel)
-	// Note that it is ok that we call Init on every iteration - it is a noop
-	// every time except for the first one.
-	h.filter.Init(ctx)
-	newBatch := h.filter.Next()
+	newBatch := h.filter.Next(ctx)
 	return newBatch.ColVecs(), newBatch.Length(), newBatch.Selection(), true
 }
 
@@ -231,7 +228,7 @@ func (h *filteringHashAggregatorHelper) performAggregation(
 		if inputLen > 0 {
 			// It is possible that all tuples to aggregate have been filtered
 			// out, so we need to check the length.
-			fn.Compute(vecs, h.spec.Aggregations[fnIdx].ColIdx, 0 /* startIdx */, inputLen, sel)
+			fn.Compute(vecs, h.spec.Aggregations[fnIdx].ColIdx, inputLen, sel)
 		}
 		if maybeModified {
 			// Restore the state so that the next iteration sees the input with
@@ -297,7 +294,7 @@ func newDistinctAggregatorHelperBase(
 			}
 		}
 	}
-	b.aggColsConverter = colconv.NewVecToDatumConverter(len(args.InputTypes), vecIdxsToConvert, false /* willRelease */)
+	b.aggColsConverter = colconv.NewVecToDatumConverter(len(args.InputTypes), vecIdxsToConvert)
 	b.scratch.converted = []tree.Datum{nil}
 	b.scratch.sel = make([]int, maxBatchSize)
 	return b
@@ -439,7 +436,7 @@ func (h *filteringDistinctHashAggregatorHelper) performAggregation(
 			maybeModified = true
 		}
 		if inputLen > 0 {
-			bucket.fns[aggFnIdx].Compute(vecs, aggFn.ColIdx, 0 /* startIdx */, inputLen, sel)
+			bucket.fns[aggFnIdx].Compute(vecs, aggFn.ColIdx, inputLen, sel)
 		}
 		if maybeModified {
 			vecs, inputLen, sel = h.restoreState()
@@ -487,7 +484,7 @@ func (h *distinctOrderedAggregatorHelper) performAggregation(
 			maybeModified = true
 		}
 		if inputLen > 0 {
-			bucket.fns[aggFnIdx].Compute(vecs, aggFn.ColIdx, 0 /* startIdx */, inputLen, sel)
+			bucket.fns[aggFnIdx].Compute(vecs, aggFn.ColIdx, inputLen, sel)
 		}
 		if maybeModified {
 			vecs, inputLen, sel = h.restoreState()
@@ -517,9 +514,9 @@ func newSingleBatchOperator(
 	}
 }
 
-func (o *singleBatchOperator) Init(context.Context) {}
+func (o *singleBatchOperator) Init() {}
 
-func (o *singleBatchOperator) Next() coldata.Batch {
+func (o *singleBatchOperator) Next(context.Context) coldata.Batch {
 	if o.nexted {
 		return coldata.ZeroBatch
 	}
@@ -532,7 +529,11 @@ func (o *singleBatchOperator) reset(vecs []coldata.Vec, inputLen int, sel []int)
 	for i, vec := range vecs {
 		o.batch.ReplaceCol(vec, i)
 	}
-	colexecutils.UpdateBatchState(o.batch, inputLen, sel != nil, sel)
+	o.batch.SetSelection(sel != nil)
+	if sel != nil {
+		copy(o.batch.Selection(), sel[:inputLen])
+	}
+	o.batch.SetLength(inputLen)
 }
 
 // aggBucket stores the aggregation functions for the corresponding aggregation

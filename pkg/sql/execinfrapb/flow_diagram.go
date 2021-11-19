@@ -149,11 +149,11 @@ func (tr *TableReaderSpec) summary() (string, []string) {
 		tbl := tr.BuildTableDescriptor()
 		// only show the first span
 		idx := tbl.ActiveIndexes()[int(tr.IndexIdx)]
-		valDirs := catalogkeys.IndexKeyValDirs(idx)
+		valDirs := catalogkeys.IndexKeyValDirs(idx.IndexDesc())
 
 		var spanStr strings.Builder
 		spanStr.WriteString("Spans: ")
-		spanStr.WriteString(catalogkeys.PrettySpan(valDirs, tr.Spans[0], 2))
+		spanStr.WriteString(catalogkeys.PrettySpan(valDirs, tr.Spans[0].Span, 2))
 
 		if len(tr.Spans) > 1 {
 			spanStr.WriteString(fmt.Sprintf(" and %d other", len(tr.Spans)-1))
@@ -181,9 +181,6 @@ func (jr *JoinReaderSpec) summary() (string, []string) {
 	}
 	if !jr.LookupExpr.Empty() {
 		details = append(details, fmt.Sprintf("Lookup join on: %s", jr.LookupExpr))
-	}
-	if !jr.RemoteLookupExpr.Empty() {
-		details = append(details, fmt.Sprintf("Remote lookup join on: %s", jr.RemoteLookupExpr))
 	}
 	if !jr.OnExpr.Empty() {
 		details = append(details, fmt.Sprintf("ON %s", jr.OnExpr))
@@ -311,9 +308,6 @@ func (s *SorterSpec) summary() (string, []string) {
 	if s.OrderingMatchLen != 0 {
 		details = append(details, fmt.Sprintf("match len: %d", s.OrderingMatchLen))
 	}
-	if s.Limit > 0 {
-		details = append(details, fmt.Sprintf("TopK: %d", s.Limit))
-	}
 	return "Sorter", details
 }
 
@@ -408,12 +402,10 @@ func (is *InputSyncSpec) summary(showTypes bool) (string, []string) {
 		}
 	}
 	switch is.Type {
-	case InputSyncSpec_PARALLEL_UNORDERED:
+	case InputSyncSpec_UNORDERED:
 		return "unordered", typs
 	case InputSyncSpec_ORDERED:
 		return "ordered", append(typs, is.Ordering.diagramString())
-	case InputSyncSpec_SERIAL_UNORDERED:
-		return "serial unordered", typs
 	default:
 		return "unknown", []string{}
 	}
@@ -442,26 +434,24 @@ func (r *OutputRouterSpec) summary() (string, []string) {
 
 // summary implements the diagramCellType interface.
 func (post *PostProcessSpec) summary() []string {
+	return post.summaryWithPrefix("")
+}
+
+// prefix is prepended to every line outputted to disambiguate processors
+// (namely InterleavedReaderJoiner) that have multiple PostProcessors.
+func (post *PostProcessSpec) summaryWithPrefix(prefix string) []string {
 	var res []string
 	if post.Projection {
 		outputColumns := "None"
-		outputCols := post.OutputColumns
-		if post.OriginalOutputColumns != nil {
-			outputCols = post.OriginalOutputColumns
+		if len(post.OutputColumns) > 0 {
+			outputColumns = colListStr(post.OutputColumns)
 		}
-		if len(outputCols) > 0 {
-			outputColumns = colListStr(outputCols)
-		}
-		res = append(res, fmt.Sprintf("Out: %s", outputColumns))
+		res = append(res, fmt.Sprintf("%sOut: %s", prefix, outputColumns))
 	}
-	renderExprs := post.RenderExprs
-	if post.OriginalRenderExprs != nil {
-		renderExprs = post.OriginalRenderExprs
-	}
-	if len(renderExprs) > 0 {
+	if len(post.RenderExprs) > 0 {
 		var buf bytes.Buffer
-		buf.WriteString("Render: ")
-		for i, expr := range renderExprs {
+		buf.WriteString(fmt.Sprintf("%sRender: ", prefix))
+		for i, expr := range post.RenderExprs {
 			if i > 0 {
 				buf.WriteString(", ")
 			}
@@ -474,13 +464,13 @@ func (post *PostProcessSpec) summary() []string {
 	if post.Limit != 0 || post.Offset != 0 {
 		var buf bytes.Buffer
 		if post.Limit != 0 {
-			fmt.Fprintf(&buf, "Limit %d", post.Limit)
+			fmt.Fprintf(&buf, "%sLimit %d", prefix, post.Limit)
 		}
 		if post.Offset != 0 {
 			if buf.Len() != 0 {
 				buf.WriteByte(' ')
 			}
-			fmt.Fprintf(&buf, "Offset %d", post.Offset)
+			fmt.Fprintf(&buf, "%sOffset %d", prefix, post.Offset)
 		}
 		res = append(res, buf.String())
 	}

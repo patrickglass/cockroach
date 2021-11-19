@@ -13,8 +13,9 @@ package sql
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
 // bufferNode consumes its input one row at a time, stores it in the buffer,
@@ -23,18 +24,21 @@ import (
 type bufferNode struct {
 	plan planNode
 
-	// typs is the schema of rows buffered by this node.
-	typs       []*types.T
-	rows       rowContainerHelper
-	currentRow tree.Datums
+	// TODO(yuzefovich): the buffer should probably be backed by disk. If so, the
+	// comments about TempStorage suggest that it should be used by DistSQL
+	// processors, but this node is local.
+	bufferedRows       *rowcontainer.RowContainer
+	passThruNextRowIdx int
 
 	// label is a string used to describe the node in an EXPLAIN plan.
 	label string
 }
 
 func (n *bufferNode) startExec(params runParams) error {
-	n.typs = planTypes(n.plan)
-	n.rows.Init(n.typs, params.extendedEvalCtx, n.label)
+	n.bufferedRows = rowcontainer.NewRowContainer(
+		params.EvalContext().Mon.MakeBoundAccount(),
+		colinfo.ColTypeInfoFromResCols(getPlanColumns(n.plan, false /* mut */)),
+	)
 	return nil
 }
 
@@ -49,20 +53,20 @@ func (n *bufferNode) Next(params runParams) (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	n.currentRow = n.plan.Values()
-	if err = n.rows.AddRow(params.ctx, n.currentRow); err != nil {
+	if _, err = n.bufferedRows.AddRow(params.ctx, n.plan.Values()); err != nil {
 		return false, err
 	}
+	n.passThruNextRowIdx++
 	return true, nil
 }
 
 func (n *bufferNode) Values() tree.Datums {
-	return n.currentRow
+	return n.bufferedRows.At(n.passThruNextRowIdx - 1)
 }
 
 func (n *bufferNode) Close(ctx context.Context) {
 	n.plan.Close(ctx)
-	n.rows.Close(ctx)
+	n.bufferedRows.Close(ctx)
 }
 
 // scanBufferNode behaves like an iterator into the bufferNode it is
@@ -71,34 +75,24 @@ func (n *bufferNode) Close(ctx context.Context) {
 type scanBufferNode struct {
 	buffer *bufferNode
 
-	iterator   *rowContainerIterator
-	currentRow tree.Datums
+	nextRowIdx int
 
 	// label is a string used to describe the node in an EXPLAIN plan.
 	label string
 }
 
-func (n *scanBufferNode) startExec(params runParams) error {
-	n.iterator = newRowContainerIterator(params.ctx, n.buffer.rows, n.buffer.typs)
+func (n *scanBufferNode) startExec(runParams) error {
 	return nil
 }
 
 func (n *scanBufferNode) Next(runParams) (bool, error) {
-	var err error
-	n.currentRow, err = n.iterator.Next()
-	if n.currentRow == nil || err != nil {
-		return false, err
-	}
-	return true, nil
+	n.nextRowIdx++
+	return n.nextRowIdx <= n.buffer.bufferedRows.Len(), nil
 }
 
 func (n *scanBufferNode) Values() tree.Datums {
-	return n.currentRow
+	return n.buffer.bufferedRows.At(n.nextRowIdx - 1)
 }
 
 func (n *scanBufferNode) Close(context.Context) {
-	if n.iterator != nil {
-		n.iterator.Close()
-		n.iterator = nil
-	}
 }

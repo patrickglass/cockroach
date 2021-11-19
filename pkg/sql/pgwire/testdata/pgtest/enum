@@ -90,10 +90,10 @@ ReadyForQuery
 {"Type":"ReadyForQuery","TxStatus":"I"}
 
 # Prepare a query and type hint a user defined type. Then bind this prepared
-# statement with a user defined type argument.
+# statement with a user defined type argument ([104, 105] = 'hi').
 send crdb_only
 Parse {"Name": "s1", "Query": "INSERT INTO tb VALUES ($1)", "ParameterOIDs": [100052]}
-Bind {"DestinationPortal": "p", "PreparedStatement": "s1", "ParameterFormatCodes": [0], "Parameters": [{"text":"hi"}]}
+Bind {"DestinationPortal": "p", "PreparedStatement": "s1", "ParameterFormatCodes": [0], "Parameters": [[104, 105]]}
 Execute {"Portal": "p"}
 Sync
 ----
@@ -106,30 +106,15 @@ ReadyForQuery
 {"Type":"CommandComplete","CommandTag":"INSERT 0 1"}
 {"Type":"ReadyForQuery","TxStatus":"I"}
 
-send noncrdb_only
-Parse {"Name": "s1", "Query": "INSERT INTO tb VALUES ($1)"}
-Bind {"DestinationPortal": "p", "PreparedStatement": "s1", "ParameterFormatCodes": [0], "Parameters": [{"text":"hi"}]}
-Execute {"Portal": "p"}
-Sync
-----
-
-until noncrdb_only
-ReadyForQuery
-----
-{"Type":"ParseComplete"}
-{"Type":"BindComplete"}
-{"Type":"CommandComplete","CommandTag":"INSERT 0 1"}
-{"Type":"ReadyForQuery","TxStatus":"I"}
-
 # Ensure that our value was successfully inserted.
-send
+send crdb_only
 Query {"String": "SELECT * FROM tb"}
 ----
 
-until ignore_type_oids ignore_table_oids ignore_data_type_sizes
+until crdb_only
 ReadyForQuery
 ----
-{"Type":"RowDescription","Fields":[{"Name":"x","TableOID":0,"TableAttributeNumber":1,"DataTypeOID":0,"DataTypeSize":0,"TypeModifier":-1,"Format":0}]}
+{"Type":"RowDescription","Fields":[{"Name":"x","TableOID":54,"TableAttributeNumber":1,"DataTypeOID":100052,"DataTypeSize":-1,"TypeModifier":-1,"Format":0}]}
 {"Type":"DataRow","Values":[{"text":"hi"}]}
 {"Type":"CommandComplete","CommandTag":"SELECT 1"}
 {"Type":"ReadyForQuery","TxStatus":"I"}
@@ -137,7 +122,7 @@ ReadyForQuery
 # Prepare a query and use the binary format (ParameterFormatCodes = [1])
 send
 Parse {"Name": "s2", "Query": "INSERT INTO tb VALUES ($1)"}
-Bind {"DestinationPortal": "p2", "PreparedStatement": "s2", "ParameterFormatCodes": [1], "Parameters": [{"text":"hi"}]}
+Bind {"DestinationPortal": "p2", "PreparedStatement": "s2", "ParameterFormatCodes": [1], "Parameters": [[104, 105]]}
 Execute {"Portal": "p2"}
 Sync
 ----
@@ -196,7 +181,7 @@ ReadyForQuery
 # The "Parameters" field is the byte array representation of the binary string above.
 send crdb_only
 Parse {"Name": "s4", "Query": "INSERT INTO tba VALUES ($1)"}
-Bind {"DestinationPortal": "p4", "PreparedStatement": "s4", "ParameterFormatCodes": [1], "Parameters": [{"binary":"0000000100000000000186d40000000100000001000000026869"}]}
+Bind {"DestinationPortal": "p4", "PreparedStatement": "s4", "ParameterFormatCodes": [1], "Parameters": [[0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 134, 212, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 104, 105]]}
 Execute {"Portal": "p4"}
 Sync
 ----
@@ -207,41 +192,4 @@ ReadyForQuery
 {"Type":"ParseComplete"}
 {"Type":"BindComplete"}
 {"Type":"CommandComplete","CommandTag":"INSERT 0 1"}
-{"Type":"ReadyForQuery","TxStatus":"I"}
-
-send
-Query {"String": "ALTER TYPE te ADD VALUE 'hola'"}
-----
-
-until
-ReadyForQuery
-----
-{"Type":"CommandComplete","CommandTag":"ALTER TYPE"}
-{"Type":"ReadyForQuery","TxStatus":"I"}
-
-# Reuse original prepared statement now that there's a new enum value.
-send
-Bind {"DestinationPortal": "p", "PreparedStatement": "s1", "ParameterFormatCodes": [0], "Parameters": [{"text":"hola"}]}
-Execute {"Portal": "p"}
-Sync
-----
-
-until
-ReadyForQuery
-----
-{"Type":"BindComplete"}
-{"Type":"CommandComplete","CommandTag":"INSERT 0 1"}
-{"Type":"ReadyForQuery","TxStatus":"I"}
-
-# Ensure that our value was successfully inserted.
-send
-Query {"String": "SELECT * FROM tb WHERE x = 'hola'"}
-----
-
-until ignore_type_oids ignore_table_oids ignore_data_type_sizes
-ReadyForQuery
-----
-{"Type":"RowDescription","Fields":[{"Name":"x","TableOID":0,"TableAttributeNumber":1,"DataTypeOID":0,"DataTypeSize":0,"TypeModifier":-1,"Format":0}]}
-{"Type":"DataRow","Values":[{"text":"hola"}]}
-{"Type":"CommandComplete","CommandTag":"SELECT 1"}
 {"Type":"ReadyForQuery","TxStatus":"I"}

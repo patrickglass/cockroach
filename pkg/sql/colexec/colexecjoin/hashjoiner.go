@@ -12,7 +12,6 @@ package colexecjoin
 
 import (
 	"context"
-	"math"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -167,7 +166,7 @@ type hashJoinerSourceSpec struct {
 // all build table rows that have never been matched and stitching it together
 // with NULL values on the probe side.
 type hashJoiner struct {
-	*joinHelper
+	twoInputNode
 
 	// buildSideAllocator should be used when building the hash table from the
 	// right input.
@@ -187,6 +186,10 @@ type hashJoiner struct {
 	// ht holds the HashTable that is populated during the build phase and used
 	// during the probe phase.
 	ht *colexechash.HashTable
+	// memoryLimit is the total amount of RAM available for the hash joiner.
+	// This limits the output batches (and is also the same limit for the size
+	// of the hash table).
+	memoryLimit int64
 	// output stores the resulting output batch that is constructed and returned
 	// for every input batch during the probe phase.
 	output      coldata.Batch
@@ -242,10 +245,9 @@ var _ colexecop.Resetter = &hashJoiner{}
 // TPCH queries using tpchvec/bench.
 const HashJoinerInitialNumBuckets = 256
 
-func (hj *hashJoiner) Init(ctx context.Context) {
-	if !hj.init(ctx) {
-		return
-	}
+func (hj *hashJoiner) Init() {
+	hj.inputOne.Init()
+	hj.inputTwo.Init()
 
 	allowNullEquality, probeMode := false, colexechash.HashTableDefaultProbeMode
 	if hj.spec.JoinType.IsSetOpJoin() {
@@ -256,7 +258,6 @@ func (hj *hashJoiner) Init(ctx context.Context) {
 	// TPCH queries using tpchvec/bench.
 	const hashTableLoadFactor = 1.0
 	hj.ht = colexechash.NewHashTable(
-		ctx,
 		hj.buildSideAllocator,
 		hashTableLoadFactor,
 		hj.hashTableInitialNumBuckets,
@@ -273,11 +274,11 @@ func (hj *hashJoiner) Init(ctx context.Context) {
 	hj.state = hjBuilding
 }
 
-func (hj *hashJoiner) Next() coldata.Batch {
+func (hj *hashJoiner) Next(ctx context.Context) coldata.Batch {
 	for {
 		switch hj.state {
 		case hjBuilding:
-			hj.build()
+			hj.build(ctx)
 			if hj.ht.Vals.Length() == 0 {
 				// The build side is empty, so we might be able to
 				// short-circuit probing phase altogether.
@@ -287,7 +288,7 @@ func (hj *hashJoiner) Next() coldata.Batch {
 			}
 			continue
 		case hjProbing:
-			output := hj.exec()
+			output := hj.exec(ctx)
 			if output.Length() == 0 {
 				if hj.spec.trackBuildMatches {
 					hj.state = hjEmittingRight
@@ -314,8 +315,8 @@ func (hj *hashJoiner) Next() coldata.Batch {
 	}
 }
 
-func (hj *hashJoiner) build() {
-	hj.ht.FullBuild(hj.inputTwo)
+func (hj *hashJoiner) build(ctx context.Context) {
+	hj.ht.FullBuild(ctx, hj.inputTwo)
 
 	// We might have duplicates in the hash table, so we need to set up
 	// same and visited slices for the prober.
@@ -394,10 +395,12 @@ func (hj *hashJoiner) emitRight(matched bool) {
 			outCol := outCols[i]
 			valCol := hj.ht.Vals.ColVec(i)
 			outCol.Copy(
-				coldata.SliceArgs{
-					Src:       valCol,
-					SrcEndIdx: nResults,
-					Sel:       hj.probeState.buildIdx,
+				coldata.CopySliceArgs{
+					SliceArgs: coldata.SliceArgs{
+						Src:       valCol,
+						SrcEndIdx: nResults,
+						Sel:       hj.probeState.buildIdx,
+					},
 				},
 			)
 		}
@@ -450,7 +453,7 @@ func (hj *hashJoiner) prepareForCollecting(batchSize int) {
 // left source columns and M is the number of right source columns. The first N
 // columns correspond to the respective left source columns, followed by the
 // right source columns as the last M elements.
-func (hj *hashJoiner) exec() coldata.Batch {
+func (hj *hashJoiner) exec(ctx context.Context) coldata.Batch {
 	if batch := hj.probeState.prevBatch; batch != nil {
 		// We didn't finish probing the last read batch on the previous call to
 		// exec, so we continue where we left off.
@@ -471,7 +474,7 @@ func (hj *hashJoiner) exec() coldata.Batch {
 		// There were no matches in that batch, so we move on to the next one.
 	}
 	for {
-		batch := hj.inputOne.Next()
+		batch := hj.inputOne.Next(ctx)
 		batchSize := batch.Length()
 
 		if batchSize == 0 {
@@ -493,7 +496,9 @@ func (hj *hashJoiner) exec() coldata.Batch {
 			// ComputeBuckets.
 			hj.probeState.buckets = hj.probeState.buckets[:batchSize]
 		}
-		hj.ht.ComputeBuckets(hj.probeState.buckets, hj.ht.Keys, batchSize, sel)
+		hj.ht.ComputeBuckets(
+			ctx, hj.probeState.buckets, hj.ht.Keys, batchSize, sel,
+		)
 
 		// Then, we initialize GroupID with the initial hash buckets and
 		// ToCheck with all applicable indices.
@@ -582,10 +587,12 @@ func (hj *hashJoiner) congregate(nResults int, batch coldata.Batch) {
 				outCol := outCols[i]
 				valCol := batch.ColVec(i)
 				outCol.Copy(
-					coldata.SliceArgs{
-						Src:       valCol,
-						Sel:       hj.probeState.probeIdx,
-						SrcEndIdx: nResults,
+					coldata.CopySliceArgs{
+						SliceArgs: coldata.SliceArgs{
+							Src:       valCol,
+							Sel:       hj.probeState.probeIdx,
+							SrcEndIdx: nResults,
+						},
 					},
 				)
 			}
@@ -604,10 +611,12 @@ func (hj *hashJoiner) congregate(nResults int, batch coldata.Batch) {
 					// hj.buildIdx[i] == 0 which will copy the garbage zeroth row of the
 					// hash table, but we will set the NULL value below.
 					outCol.Copy(
-						coldata.SliceArgs{
-							Src:       valCol,
-							SrcEndIdx: nResults,
-							Sel:       hj.probeState.buildIdx,
+						coldata.CopySliceArgs{
+							SliceArgs: coldata.SliceArgs{
+								Src:       valCol,
+								SrcEndIdx: nResults,
+								Sel:       hj.probeState.buildIdx,
+							},
 						},
 					)
 				}
@@ -655,7 +664,7 @@ func (hj *hashJoiner) congregate(nResults int, batch coldata.Batch) {
 	})
 }
 
-func (hj *hashJoiner) ExportBuffered(input colexecop.Operator) coldata.Batch {
+func (hj *hashJoiner) ExportBuffered(ctx context.Context, input colexecop.Operator) coldata.Batch {
 	if hj.inputOne == input {
 		// We do not buffer anything from the left source. Furthermore, the memory
 		// limit can only hit during the building of the hash table step at which
@@ -690,28 +699,17 @@ func (hj *hashJoiner) ExportBuffered(input colexecop.Operator) coldata.Batch {
 }
 
 func (hj *hashJoiner) resetOutput(nResults int) {
+	minCapacity := nResults
+	if minCapacity < 1 {
+		minCapacity = 1
+	}
 	// We're resetting the output meaning that we have already fully built the
 	// hash table from the right input and now are only populating output one
 	// batch at a time. If we were to use a limited allocator, we could hit the
 	// limit here, and it would have been very hard to fall back to disk backed
 	// hash joiner because we might have already emitted partial output.
-	//
-	// We are also consciously not limiting the size of the output batch based
-	// on the memory footprint based on the following reasoning:
-	// 1. the main code-path (congregate()) has already modified the internal
-	// state under the assumption that nResults rows will be emitted with the
-	// next batch
-	// 2. nResults is usually limited by size of the batch coming from the left
-	// input, so we assume that it is of reasonable memory footprint
-	// 3. in emitRight() method, the output batch will never use more memory
-	// than the hash table itself, so if we haven't spilled yet, then the output
-	// batch will be of reasonable size too
-	// 4. when the hashJoiner is used by the external hash joiner as the main
-	// strategy, the hash-based partitioner is responsible for making sure that
-	// partitions fit within memory limit.
-	const maxOutputBatchMemSize = math.MaxInt64
 	hj.output, _ = hj.outputUnlimitedAllocator.ResetMaybeReallocate(
-		hj.outputTypes, hj.output, nResults, maxOutputBatchMemSize,
+		hj.outputTypes, hj.output, minCapacity, hj.memoryLimit,
 	)
 }
 
@@ -806,12 +804,14 @@ func NewHashJoiner(
 	spec HashJoinerSpec,
 	leftSource, rightSource colexecop.Operator,
 	initialNumBuckets uint64,
+	memoryLimit int64,
 ) colexecop.ResettableOperator {
 	return &hashJoiner{
-		joinHelper:                 newJoinHelper(leftSource, rightSource),
+		twoInputNode:               newTwoInputNode(leftSource, rightSource),
 		buildSideAllocator:         buildSideAllocator,
 		outputUnlimitedAllocator:   outputUnlimitedAllocator,
 		spec:                       spec,
+		memoryLimit:                memoryLimit,
 		outputTypes:                spec.JoinType.MakeOutputTypes(spec.Left.SourceTypes, spec.Right.SourceTypes),
 		hashTableInitialNumBuckets: initialNumBuckets,
 	}

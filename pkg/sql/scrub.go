@@ -17,10 +17,12 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -56,7 +58,7 @@ type checkOperation interface {
 	Start(params runParams) error
 
 	// Next will return the next check result. The datums returned have
-	// the column types specified by scrubTypes, which are the values
+	// the column types specified by scrubTypes, which are the valeus
 	// returned to the user.
 	//
 	// Next is not called if Done() is false.
@@ -156,7 +158,7 @@ func (n *scrubNode) Close(ctx context.Context) {
 func (n *scrubNode) startScrubDatabase(ctx context.Context, p *planner, name *tree.Name) error {
 	// Check that the database exists.
 	database := string(*name)
-	dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(ctx, p.txn,
+	_, dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(ctx, p.txn,
 		database, tree.DatabaseLookupFlags{Required: true})
 	if err != nil {
 		return err
@@ -169,9 +171,7 @@ func (n *scrubNode) startScrubDatabase(ctx context.Context, p *planner, name *tr
 
 	var tbNames tree.TableNames
 	for _, schema := range schemas {
-		toAppend, _, err := resolver.GetObjectNamesAndIDs(
-			ctx, p.txn, p, p.ExecCfg().Codec, dbDesc, schema, true, /*explicitPrefix*/
-		)
+		toAppend, err := resolver.GetObjectNames(ctx, p.txn, p, p.ExecCfg().Codec, dbDesc, schema, true /*explicitPrefix*/)
 		if err != nil {
 			return err
 		}
@@ -180,8 +180,14 @@ func (n *scrubNode) startScrubDatabase(ctx context.Context, p *planner, name *tr
 
 	for i := range tbNames {
 		tableName := &tbNames[i]
-		_, objDesc, err := p.Accessor().GetObjectDesc(
-			ctx, p.txn, tableName.Catalog(), tableName.Schema(), tableName.Table(),
+		objDesc, err := p.LogicalSchemaAccessor().GetObjectDesc(
+			ctx,
+			p.txn,
+			p.ExecCfg().Settings,
+			p.ExecCfg().Codec,
+			tableName.Catalog(),
+			tableName.Schema(),
+			tableName.Table(),
 			p.ObjectLookupFlags(true /*required*/, false /*requireMutable*/),
 		)
 		if err != nil {
@@ -278,13 +284,13 @@ func (n *scrubNode) startScrubTable(
 // getPrimaryColIdxs returns a list of the primary index columns and
 // their corresponding index in the columns list.
 func getPrimaryColIdxs(
-	tableDesc catalog.TableDescriptor, columns []catalog.Column,
+	tableDesc catalog.TableDescriptor, columns []*descpb.ColumnDescriptor,
 ) (primaryColIdxs []int, err error) {
-	for i := 0; i < tableDesc.GetPrimaryIndex().NumKeyColumns(); i++ {
-		colID := tableDesc.GetPrimaryIndex().GetKeyColumnID(i)
+	for i := 0; i < tableDesc.GetPrimaryIndex().NumColumns(); i++ {
+		colID := tableDesc.GetPrimaryIndex().GetColumnID(i)
 		rowIdx := -1
 		for idx, col := range columns {
-			if col.GetID() == colID {
+			if col.ID == colID {
 				rowIdx = idx
 				break
 			}
@@ -293,7 +299,7 @@ func getPrimaryColIdxs(
 			return nil, errors.Errorf(
 				"could not find primary index column in projection: columnID=%d columnName=%s",
 				colID,
-				tableDesc.GetPrimaryIndex().GetKeyColumnName(i))
+				tableDesc.GetPrimaryIndex().GetColumnName(i))
 		}
 		primaryColIdxs = append(primaryColIdxs, rowIdx)
 	}
@@ -341,7 +347,7 @@ func createPhysicalCheckOperations(
 	tableDesc catalog.TableDescriptor, tableName *tree.TableName,
 ) (checks []checkOperation) {
 	for _, idx := range tableDesc.ActiveIndexes() {
-		checks = append(checks, newPhysicalCheckOperation(tableName, tableDesc, idx))
+		checks = append(checks, newPhysicalCheckOperation(tableName, tableDesc, idx.IndexDesc()))
 	}
 	return checks
 }
@@ -365,7 +371,7 @@ func createIndexCheckOperations(
 			results = append(results, newIndexCheckOperation(
 				tableName,
 				tableDesc,
-				idx,
+				idx.IndexDesc(),
 				asOf,
 			))
 		}
@@ -382,7 +388,7 @@ func createIndexCheckOperations(
 			results = append(results, newIndexCheckOperation(
 				tableName,
 				tableDesc,
-				idx,
+				idx.IndexDesc(),
 				asOf,
 			))
 			delete(names, idx.GetName())
@@ -469,14 +475,15 @@ func createConstraintCheckOperations(
 	return results, nil
 }
 
-// scrubRunDistSQL run a distSQLPhysicalPlan plan in distSQL. If non-nil
-// rowContainerHelper is returned, the caller must close it.
+// scrubRunDistSQL run a distSQLPhysicalPlan plan in distSQL. If
+// RowContainer is returned, the caller must close it.
 func scrubRunDistSQL(
 	ctx context.Context, planCtx *PlanningCtx, p *planner, plan *PhysicalPlan, columnTypes []*types.T,
-) (*rowContainerHelper, error) {
-	var rowContainer rowContainerHelper
-	rowContainer.Init(columnTypes, &p.extendedEvalCtx, "scrub" /* opName */)
-	rowResultWriter := NewRowResultWriter(&rowContainer)
+) (*rowcontainer.RowContainer, error) {
+	ci := colinfo.ColTypeInfoFromColTypes(columnTypes)
+	acc := p.extendedEvalCtx.Mon.MakeBoundAccount()
+	rows := rowcontainer.NewRowContainer(acc, ci)
+	rowResultWriter := NewRowResultWriter(rows)
 	recv := MakeDistSQLReceiver(
 		ctx,
 		rowResultWriter,
@@ -496,12 +503,11 @@ func scrubRunDistSQL(
 		planCtx, p.txn, plan, recv, &evalCtxCopy, nil, /* finishedSetupFn */
 	)()
 	if rowResultWriter.Err() != nil {
-		rowContainer.Close(ctx)
-		return nil, rowResultWriter.Err()
-	} else if rowContainer.Len() == 0 {
-		rowContainer.Close(ctx)
+		return rows, rowResultWriter.Err()
+	} else if rows.Len() == 0 {
+		rows.Close(ctx)
 		return nil, nil
 	}
 
-	return &rowContainer, nil
+	return rows, nil
 }

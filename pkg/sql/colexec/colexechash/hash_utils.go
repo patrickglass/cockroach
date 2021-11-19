@@ -130,18 +130,13 @@ func NewTupleHashDistributor(initHashValue uint64, numOutputs int) *TupleHashDis
 	}
 }
 
-// Init initializes the TupleHashDistributor. Second, third, etc calls are
-// noops.
-func (d *TupleHashDistributor) Init(ctx context.Context) {
-	d.cancelChecker.Init(ctx)
-}
-
 // Distribute populates selection vectors to route each of the tuples in b to
 // one of the numOutputs outputs according to the computed on hashCols hash
 // values.
 // NOTE: b is assumed to be non-zero batch.
-// NOTE: the distributor *must* be initialized before the first use.
-func (d *TupleHashDistributor) Distribute(b coldata.Batch, hashCols []uint32) [][]int {
+func (d *TupleHashDistributor) Distribute(
+	ctx context.Context, b coldata.Batch, hashCols []uint32,
+) [][]int {
 	n := b.Length()
 	if cap(d.buckets) < n {
 		d.buckets = make([]uint64, n)
@@ -157,7 +152,7 @@ func (d *TupleHashDistributor) Distribute(b coldata.Batch, hashCols []uint32) []
 	}
 
 	for _, i := range hashCols {
-		rehash(d.buckets, b.ColVec(int(i)), n, b.Selection(), d.cancelChecker, &d.overloadHelper, &d.datumAlloc)
+		rehash(ctx, d.buckets, b.ColVec(int(i)), n, b.Selection(), d.cancelChecker, d.overloadHelper, &d.datumAlloc)
 	}
 
 	finalizeHash(d.buckets, n, uint64(len(d.selections)))

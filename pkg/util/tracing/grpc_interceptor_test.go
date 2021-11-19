@@ -14,7 +14,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"runtime"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -30,23 +29,6 @@ import (
 	"google.golang.org/grpc"
 )
 
-// testStructuredImpl is a testing implementation of Structured event.
-type testStructuredImpl struct {
-	*types.StringValue
-}
-
-var _ tracing.Structured = &testStructuredImpl{}
-
-func (t *testStructuredImpl) String() string {
-	return fmt.Sprintf("structured=%s", t.Value)
-}
-
-func newTestStructured(s string) *testStructuredImpl {
-	return &testStructuredImpl{
-		&types.StringValue{Value: s},
-	}
-}
-
 // TestGRPCInterceptors verifies that the streaming and unary tracing
 // interceptors work as advertised. We expect to see a span on the client side
 // and a span on the server side.
@@ -54,7 +36,9 @@ func TestGRPCInterceptors(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	const (
-		magicValue = "magic-value"
+		k          = "test-baggage-key"
+		v          = "test-baggage-value"
+		magicValue = 150
 	)
 
 	checkForSpanAndReturnRecording := func(ctx context.Context) (*types.Any, error) {
@@ -62,8 +46,18 @@ func TestGRPCInterceptors(t *testing.T) {
 		if sp == nil {
 			return nil, errors.New("no span in ctx")
 		}
-		sp.RecordStructured(newTestStructured(magicValue))
-		recs := sp.GetRecording(tracing.RecordingVerbose)
+		actV, ok := sp.GetRecording()[0].Baggage[k]
+		if !ok {
+			return nil, errors.Newf("%s not set in baggage", k)
+		}
+		if v != actV {
+			return nil, errors.Newf("expected %v, got %v instead", v, actV)
+		}
+
+		sp.RecordStructured(&types.Int32Value{Value: magicValue})
+		sp.SetVerbose(true) // want the tags
+		recs := sp.GetRecording()
+		sp.SetVerbose(false)
 		if len(recs) != 1 {
 			return nil, errors.Newf("expected exactly one recorded span, not %+v", recs)
 		}
@@ -123,8 +117,13 @@ func TestGRPCInterceptors(t *testing.T) {
 	}))
 	conn, err := grpc.DialContext(context.Background(), ln.Addr().String(),
 		grpc.WithInsecure(),
-		grpc.WithUnaryInterceptor(tracing.ClientInterceptor(tr, nil /* init */)),
-		grpc.WithStreamInterceptor(tracing.StreamClientInterceptor(tr, nil /* init */)),
+		grpc.WithUnaryInterceptor(tracing.ClientInterceptor(
+			tr, func(sp *tracing.Span) {
+				sp.SetBaggageItem(k, v)
+			})),
+		grpc.WithStreamInterceptor(tracing.StreamClientInterceptor(tr, func(sp *tracing.Span) {
+			sp.SetBaggageItem(k, v)
+		})),
 	)
 	require.NoError(t, err)
 	defer func() {
@@ -187,18 +186,20 @@ func TestGRPCInterceptors(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, sp := tr.StartSpanCtx(context.Background(), "root", tracing.WithRecording(tracing.RecordingVerbose))
+			ctx, sp := tr.StartSpanCtx(context.Background(), tc.name, tracing.WithForceRealSpan())
 			recAny, err := tc.do(ctx)
 			require.NoError(t, err)
 			var rec tracingpb.RecordedSpan
 			require.NoError(t, types.UnmarshalAny(recAny, &rec))
-			require.Len(t, rec.StructuredRecords, 1)
+			require.Len(t, rec.InternalStructured, 1)
 			sp.ImportRemoteSpans([]tracingpb.RecordedSpan{rec})
+			sp.Finish()
 			var n int
-			finalRecs := sp.FinishAndGetRecording(tracing.RecordingVerbose)
+			sp.SetVerbose(true) // to get the tags
+			finalRecs := sp.GetRecording()
 			sp.SetVerbose(false)
 			for _, rec := range finalRecs {
-				n += len(rec.StructuredRecords)
+				n += len(rec.InternalStructured)
 				// Remove all of the _unfinished tags. These crop up because
 				// in this test we are pulling the recorder in the handler impl,
 				// but the span is only closed in the interceptor. Additionally,
@@ -212,23 +213,17 @@ func TestGRPCInterceptors(t *testing.T) {
 			require.Equal(t, 1, n)
 
 			exp := fmt.Sprintf(`
-				span: root
+				span: %[1]s
 					span: /cockroach.testutils.grpcutils.GRPCTest/%[1]s
-						tags: span.kind=client
+						tags: component=gRPC span.kind=client test-baggage-key=test-baggage-value
 					span: /cockroach.testutils.grpcutils.GRPCTest/%[1]s
-						tags: span.kind=server
-						event: structured=magic-value`, tc.name)
-			require.NoError(t, tracing.CheckRecordedSpans(finalRecs, exp))
+						tags: component=gRPC span.kind=server test-baggage-key=test-baggage-value`, tc.name)
+			require.NoError(t, tracing.TestingCheckRecordedSpans(finalRecs, exp))
 		})
 	}
-	// Force a GC so that the finalizer for the stream client span runs and closes
-	// the span. Nothing else closes that span in this test. See
-	// newTracingClientStream().
-	runtime.GC()
 	testutils.SucceedsSoon(t, func() error {
-		return tr.VisitSpans(func(sp tracing.RegistrySpan) error {
-			rec := sp.GetRecording(tracing.RecordingVerbose)[0]
-			return errors.Newf("leaked span: %s %s", rec.Operation, rec.Tags)
+		return tr.VisitSpans(func(sp *tracing.Span) error {
+			return errors.Newf("leaked span: %s", sp.GetRecording()[0].Operation)
 		})
 	})
 }

@@ -15,7 +15,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -116,45 +116,6 @@ func (c *CustomFuncs) IsConstValueEqual(const1, const2 opt.ScalarExpr) bool {
 	}
 }
 
-// UnifyComparison attempts to convert a constant expression to the type of the
-// variable expression, if that conversion can round-trip and is monotonic.
-// Otherwise it returns ok=false.
-func (c *CustomFuncs) UnifyComparison(
-	v *memo.VariableExpr, cnst *memo.ConstExpr,
-) (_ opt.ScalarExpr, ok bool) {
-	desiredType := v.DataType()
-	originalType := cnst.DataType()
-
-	// Don't bother if they're already the same.
-	if desiredType.Equivalent(originalType) {
-		return nil, false
-	}
-
-	if !isMonotonicConversion(originalType, desiredType) {
-		return nil, false
-	}
-
-	// Check that the datum can round-trip between the types. If this is true, it
-	// means we don't lose any information needed to generate spans, and combined
-	// with monotonicity means that it's safe to convert the RHS to the type of
-	// the LHS.
-	convertedDatum, err := tree.PerformCast(c.f.evalCtx, cnst.Value, desiredType)
-	if err != nil {
-		return nil, false
-	}
-
-	convertedBack, err := tree.PerformCast(c.f.evalCtx, convertedDatum, originalType)
-	if err != nil {
-		return nil, false
-	}
-
-	if convertedBack.Compare(c.f.evalCtx, cnst.Value) != 0 {
-		return nil, false
-	}
-
-	return c.f.ConstructConst(convertedDatum, desiredType), true
-}
-
 // SimplifyWhens removes known unreachable WHEN cases and constructs a new CASE
 // statement. Any known true condition is converted to the ELSE. If only the
 // ELSE remains, its expression is returned. condition must be a ConstValue.
@@ -252,8 +213,8 @@ func (c *CustomFuncs) MakeUnorderedSubquery() *memo.SubqueryPrivate {
 }
 
 // SubqueryOrdering returns the ordering property on a SubqueryPrivate.
-func (c *CustomFuncs) SubqueryOrdering(sub *memo.SubqueryPrivate) props.OrderingChoice {
-	var oc props.OrderingChoice
+func (c *CustomFuncs) SubqueryOrdering(sub *memo.SubqueryPrivate) physical.OrderingChoice {
+	var oc physical.OrderingChoice
 	oc.FromOrdering(sub.Ordering)
 	return oc
 }

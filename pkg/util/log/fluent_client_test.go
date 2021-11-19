@@ -47,7 +47,7 @@ func TestFluentClient(t *testing.T) {
 	cfg.Sinks.FluentServers = map[string]*logconfig.FluentSinkConfig{
 		"ops": {
 			Address:  serverAddr,
-			Channels: logconfig.SelectChannels(channel.OPS)},
+			Channels: logconfig.ChannelList{Channels: []Channel{channel.OPS}}},
 	}
 	// Derive a full config using the same directory as the
 	// TestLogScope.
@@ -80,7 +80,7 @@ func TestFluentClient(t *testing.T) {
 	msg, err := json.Marshal(info)
 	require.NoError(t, err)
 
-	const expected = `{"c":1,"f":"util/log/fluent_client_test.go","g":222,"l":63,"message":"hello world","n":1,"r":1,"s":1,"sev":"I","t":"XXX","tag":"logtest.ops","v":"v999.0.0"}`
+	const expected = `{"c":1,"f":"util/log/fluent_client_test.go","g":222,"l":63,"message":"hello world","n":1,"r":1,"s":1,"sev":"I","t":"XXX","tag":"log_test.ops","v":"v999.0.0"}`
 	require.Equal(t, expected, string(msg))
 }
 

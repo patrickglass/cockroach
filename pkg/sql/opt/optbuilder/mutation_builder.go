@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -146,17 +145,9 @@ type mutationBuilder struct {
 	// are joined into larger LEFT OUTER JOIN expressions.
 	subqueries []*scope
 
-	// parsedColComputedExprs is a cached set of parsed computed expressions
+	// parsedColExprs is a cached set of parsed default and computed expressions
 	// from the table schema. These are parsed once and cached for reuse.
-	parsedColComputedExprs []tree.Expr
-
-	// parsedColDefaultExprs is a cached set of parsed default expressions
-	// from the table schema. These are parsed once and cached for reuse.
-	parsedColDefaultExprs []tree.Expr
-
-	// parsedColOnUpdateExprs is a cached set of parsed ON UPDATE expressions from
-	// the table schema. These are parsed once and cached for reuse.
-	parsedColOnUpdateExprs []tree.Expr
+	parsedColExprs []tree.Expr
 
 	// parsedIndexExprs is a cached set of parsed partial index predicate
 	// expressions from the table schema. These are parsed once and cached for
@@ -289,7 +280,7 @@ func (mb *mutationBuilder) buildInputForUpdate(
 		tableOrdinals(mb.tab, columnKinds{
 			includeMutations:       true,
 			includeSystem:          true,
-			includeInverted:        false,
+			includeVirtualInverted: false,
 			includeVirtualComputed: true,
 		}),
 		indexFlags,
@@ -321,8 +312,8 @@ func (mb *mutationBuilder) buildInputForUpdate(
 		mb.outScope.appendColumnsFromScope(mb.fetchScope)
 		mb.outScope.appendColumnsFromScope(fromScope)
 
-		left := mb.fetchScope.expr
-		right := fromScope.expr
+		left := mb.fetchScope.expr.(memo.RelExpr)
+		right := fromScope.expr.(memo.RelExpr)
 		mb.outScope.expr = mb.b.factory.ConstructInnerJoin(left, right, memo.TrueFilter, memo.EmptyJoinPrivate)
 	} else {
 		mb.outScope = mb.fetchScope
@@ -405,7 +396,7 @@ func (mb *mutationBuilder) buildInputForDelete(
 		tableOrdinals(mb.tab, columnKinds{
 			includeMutations:       true,
 			includeSystem:          true,
-			includeInverted:        false,
+			includeVirtualInverted: false,
 			includeVirtualComputed: true,
 		}),
 		indexFlags,
@@ -549,7 +540,7 @@ func (mb *mutationBuilder) replaceDefaultExprs(inRows *tree.Select) (outRows *tr
 					copy(newTuple, tuple[:itup])
 				}
 
-				val = mb.parseDefaultExpr(mb.targetColList[itup])
+				val = mb.parseDefaultOrComputedExpr(mb.targetColList[itup])
 			}
 			if newTuple != nil {
 				newTuple = append(newTuple, val)
@@ -590,7 +581,7 @@ func (mb *mutationBuilder) replaceDefaultExprs(inRows *tree.Select) (outRows *tr
 // NOTE: colIDs is updated with the column IDs of any synthesized columns which
 // are added to mb.outScope.
 func (mb *mutationBuilder) addSynthesizedDefaultCols(
-	colIDs opt.OptionalColList, includeOrdinary bool, applyOnUpdate bool,
+	colIDs opt.OptionalColList, includeOrdinary bool,
 ) {
 	// We will construct a new Project operator that will contain the newly
 	// synthesized column(s).
@@ -600,8 +591,6 @@ func (mb *mutationBuilder) addSynthesizedDefaultCols(
 		tabCol := mb.tab.Column(i)
 		if kind := tabCol.Kind(); kind == cat.WriteOnly {
 			// Always include WriteOnly columns.
-		} else if tabCol.UseOnUpdate(mb.b.evalCtx.SessionData()) && applyOnUpdate {
-			// Use ON UPDATE columns if specified.
 		} else if includeOrdinary && kind == cat.Ordinary {
 			// Include Ordinary columns if indicated.
 		} else {
@@ -616,25 +605,12 @@ func (mb *mutationBuilder) addSynthesizedDefaultCols(
 			continue
 		}
 
-		// Use ON UPDATE expression if specified, default otherwise
 		tabColID := mb.tabID.ColumnID(i)
-		var mutationSuffix string
-		var expr tree.Expr
-		if tabCol.UseOnUpdate(mb.b.evalCtx.SessionData()) && applyOnUpdate {
-			mutationSuffix = "on_update"
-			expr = mb.parseOnUpdateExpr(tabColID)
-		} else {
-			mutationSuffix = "default"
-			expr = mb.parseDefaultExpr(tabColID)
-		}
+		expr := mb.parseDefaultOrComputedExpr(tabColID)
 
-		// Add synthesized column. It is important to use the real column
-		// reference name, as this column may later be referred to by a computed
-		// column.
-		colName := scopeColName(tabCol.ColName()).WithMetadataName(
-			string(tabCol.ColName()) + "_" + mutationSuffix,
-		)
-		newCol, _ := pb.Add(colName, expr, tabCol.DatumType())
+		// Add synthesized column. It is important to use the real column name, as
+		// this column may later be referred to by a computed column.
+		newCol, _ := pb.Add(tabCol.ColName(), expr, tabCol.DatumType())
 
 		// Remember id of newly synthesized column.
 		colIDs[i] = newCol
@@ -683,13 +659,10 @@ func (mb *mutationBuilder) addSynthesizedComputedCols(colIDs opt.OptionalColList
 		}
 
 		tabColID := mb.tabID.ColumnID(i)
-		expr := mb.parseComputedExpr(tabColID)
+		expr := mb.parseDefaultOrComputedExpr(tabColID)
 
 		// Add synthesized column.
-		colName := scopeColName(tabCol.ColName()).WithMetadataName(
-			string(tabCol.ColName()) + "_comp",
-		)
-		newCol, scalar := pb.Add(colName, expr, tabCol.DatumType())
+		newCol, scalar := pb.Add(tabCol.ColName(), expr, tabCol.DatumType())
 
 		if restrict && kind != cat.WriteOnly {
 			// Check if any of the columns referred to in the computed column
@@ -701,7 +674,7 @@ func (mb *mutationBuilder) addSynthesizedComputedCols(colIDs opt.OptionalColList
 				refCols.Add(newCol)
 			} else {
 				var p props.Shared
-				memo.BuildSharedProps(scalar, &p, mb.b.evalCtx)
+				memo.BuildSharedProps(scalar, &p)
 				refCols = p.OuterCols
 			}
 			if !refCols.Intersects(updatedColSet) {
@@ -821,7 +794,7 @@ func (mb *mutationBuilder) roundDecimalValues(colIDs opt.OptionalColList, roundC
 		// addUpdateColumns would not include columns in the FROM clause. Those
 		// columns are only in-scope in the RETURNING clause via
 		// mb.extraAccessibleCols.
-		scopeCol.name = scopeColName(mb.tab.Column(i).ColName())
+		scopeCol.name = mb.tab.Column(i).ColName()
 	}
 
 	if projectionsScope != nil {
@@ -884,12 +857,9 @@ func (mb *mutationBuilder) addCheckConstraintCols(isUpdate bool) {
 				panic(err)
 			}
 
+			alias := fmt.Sprintf("check%d", i+1)
 			texpr := mb.outScope.resolveAndRequireType(expr, types.Bool)
-
-			// Use an anonymous name because the column cannot be referenced
-			// in other expressions.
-			colName := scopeColName("").WithMetadataName(fmt.Sprintf("check%d", i+1))
-			scopeCol := projectionsScope.addColumn(colName, texpr)
+			scopeCol := projectionsScope.addColumn(alias, texpr)
 
 			// TODO(ridwanmsharif): Maybe we can avoid building constraints here
 			// and instead use the constraints stored in the table metadata.
@@ -928,23 +898,47 @@ func (mb *mutationBuilder) mutationColumnIDs() opt.ColSet {
 // projectPartialIndexPutCols builds a Project that synthesizes boolean PUT
 // columns for each partial index defined on the target table. See
 // partialIndexPutColIDs for more info on these columns.
-func (mb *mutationBuilder) projectPartialIndexPutCols() {
-	mb.projectPartialIndexColsImpl(mb.outScope, nil /* delScope */)
+//
+// putScope must contain the columns representing the values of each mutated row
+// AFTER the mutation is applied.
+func (mb *mutationBuilder) projectPartialIndexPutCols(putScope *scope) {
+	if putScope == nil {
+		panic(errors.AssertionFailedf("cannot project partial index PUT columns with nil scope"))
+	}
+	mb.projectPartialIndexColsImpl(putScope, nil /* delScope */)
 }
 
 // projectPartialIndexDelCols builds a Project that synthesizes boolean PUT
 // columns for each partial index defined on the target table. See
 // partialIndexDelColIDs for more info on these columns.
-func (mb *mutationBuilder) projectPartialIndexDelCols() {
-	mb.projectPartialIndexColsImpl(nil /* putScope */, mb.fetchScope)
+//
+// delScope must contain the columns representing the values of each mutated row
+// BEFORE the mutation is applied.
+func (mb *mutationBuilder) projectPartialIndexDelCols(delScope *scope) {
+	if delScope == nil {
+		panic(errors.AssertionFailedf("cannot project partial index DEL columns with nil scope"))
+	}
+	mb.projectPartialIndexColsImpl(nil /* putScope */, delScope)
 }
 
-// projectPartialIndexPutAndDelCols builds a Project that synthesizes boolean
-// PUT and DEL columns for each partial index defined on the target table. See
+// projectPartialIndexPutAndDelCols builds a Project that synthesizes boolean PUT and
+// DEL columns for each partial index defined on the target table. See
 // partialIndexPutColIDs and partialIndexDelColIDs for more info on these
 // columns.
-func (mb *mutationBuilder) projectPartialIndexPutAndDelCols() {
-	mb.projectPartialIndexColsImpl(mb.outScope, mb.fetchScope)
+//
+// putScope must contain the columns representing the values of each mutated row
+// AFTER the mutation is applied.
+//
+// delScope must contain the columns representing the values of each mutated row
+// BEFORE the mutation is applied.
+func (mb *mutationBuilder) projectPartialIndexPutAndDelCols(putScope, delScope *scope) {
+	if putScope == nil {
+		panic(errors.AssertionFailedf("cannot project partial index PUT columns with nil scope"))
+	}
+	if delScope == nil {
+		panic(errors.AssertionFailedf("cannot project partial index DEL columns with nil scope"))
+	}
+	mb.projectPartialIndexColsImpl(putScope, delScope)
 }
 
 // projectPartialIndexColsImpl builds a Project that synthesizes boolean PUT and
@@ -973,11 +967,8 @@ func (mb *mutationBuilder) projectPartialIndexColsImpl(putScope, delScope *scope
 			// Build synthesized PUT columns.
 			if putScope != nil {
 				texpr := putScope.resolveAndRequireType(expr, types.Bool)
-
-				// Use an anonymous name because the column cannot be referenced
-				// in other expressions.
-				colName := scopeColName("").WithMetadataName(fmt.Sprintf("partial_index_put%d", ord+1))
-				scopeCol := projectionScope.addColumn(colName, texpr)
+				alias := fmt.Sprintf("partial_index_put%d", ord+1)
+				scopeCol := projectionScope.addColumn(alias, texpr)
 
 				mb.b.buildScalar(texpr, putScope, projectionScope, scopeCol, nil)
 				mb.partialIndexPutColIDs[ord] = scopeCol.id
@@ -986,11 +977,8 @@ func (mb *mutationBuilder) projectPartialIndexColsImpl(putScope, delScope *scope
 			// Build synthesized DEL columns.
 			if delScope != nil {
 				texpr := delScope.resolveAndRequireType(expr, types.Bool)
-
-				// Use an anonymous name because the column cannot be referenced
-				// in other expressions.
-				colName := scopeColName("").WithMetadataName(fmt.Sprintf("partial_index_del%d", ord+1))
-				scopeCol := projectionScope.addColumn(colName, texpr)
+				alias := fmt.Sprintf("partial_index_del%d", ord+1)
+				scopeCol := projectionScope.addColumn(alias, texpr)
 
 				mb.b.buildScalar(texpr, delScope, projectionScope, scopeCol, nil)
 				mb.partialIndexDelColIDs[ord] = scopeCol.id
@@ -1163,77 +1151,38 @@ func (mb *mutationBuilder) checkNumCols(expected, actual int) {
 	}
 }
 
-// parseComputedExpr parses the computed expression for the given table column,
-// and caches it for reuse.
-func (mb *mutationBuilder) parseComputedExpr(colID opt.ColumnID) tree.Expr {
-	if mb.parsedColComputedExprs == nil {
-		mb.parsedColComputedExprs = make([]tree.Expr, mb.tab.ColumnCount())
+// parseDefaultOrComputedExpr parses the default (including nullable) or
+// computed value expression for the given table column, and caches it for
+// reuse.
+func (mb *mutationBuilder) parseDefaultOrComputedExpr(colID opt.ColumnID) tree.Expr {
+	if mb.parsedColExprs == nil {
+		mb.parsedColExprs = make([]tree.Expr, mb.tab.ColumnCount())
 	}
 
-	ord := mb.tabID.ColumnOrdinal(colID)
-	return mb.parseColExpr(
-		colID,
-		mb.parsedColComputedExprs,
-		mb.tab.Column(ord).ComputedExprStr(),
-	)
-}
-
-// parseDefaultExpr parses the default (including nullable) expression for the
-// given table column, and caches it for reuse.
-func (mb *mutationBuilder) parseDefaultExpr(colID opt.ColumnID) tree.Expr {
-	if mb.parsedColDefaultExprs == nil {
-		mb.parsedColDefaultExprs = make([]tree.Expr, mb.tab.ColumnCount())
-	}
-
-	ord := mb.tabID.ColumnOrdinal(colID)
-	col := mb.tab.Column(ord)
-	exprStr := col.DefaultExprStr()
-
-	// If no default expression, return NULL or a default value.
-	if exprStr == "" {
-		if col.IsMutation() && !col.IsNullable() {
-			// Synthesize default value for NOT NULL mutation column so that it can be
-			// set when in the write-only state. This is only used when no other value
-			// is possible (no default value available, NULL not allowed).
-			datum, err := tree.NewDefaultDatum(mb.b.evalCtx, col.DatumType())
-			if err != nil {
-				panic(err)
-			}
-			return datum
-		}
-
-		return tree.DNull
-	}
-
-	return mb.parseColExpr(
-		colID,
-		mb.parsedColDefaultExprs,
-		exprStr,
-	)
-}
-
-// parseOnUpdateExpr parses the on update (including nullable) expression for
-// the given table column, and caches it for reuse.
-func (mb *mutationBuilder) parseOnUpdateExpr(colID opt.ColumnID) tree.Expr {
-	if mb.parsedColOnUpdateExprs == nil {
-		mb.parsedColOnUpdateExprs = make([]tree.Expr, mb.tab.ColumnCount())
-	}
-
-	ord := mb.tabID.ColumnOrdinal(colID)
-	return mb.parseColExpr(
-		colID,
-		mb.parsedColOnUpdateExprs,
-		mb.tab.Column(ord).OnUpdateExprStr(),
-	)
-}
-
-func (mb *mutationBuilder) parseColExpr(
-	colID opt.ColumnID, cache []tree.Expr, exprStr string,
-) tree.Expr {
 	// Return expression from cache, if it was already parsed previously.
 	ord := mb.tabID.ColumnOrdinal(colID)
-	if cache[ord] != nil {
-		return cache[ord]
+	if mb.parsedColExprs[ord] != nil {
+		return mb.parsedColExprs[ord]
+	}
+
+	var exprStr string
+	tabCol := mb.tab.Column(ord)
+	switch {
+	case tabCol.IsComputed():
+		exprStr = tabCol.ComputedExprStr()
+	case tabCol.HasDefault():
+		exprStr = tabCol.DefaultExprStr()
+	case tabCol.IsMutation() && !tabCol.IsNullable():
+		// Synthesize default value for NOT NULL mutation column so that it can be
+		// set when in the write-only state. This is only used when no other value
+		// is possible (no default value available, NULL not allowed).
+		datum, err := tree.NewDefaultDatum(mb.b.evalCtx, tabCol.DatumType())
+		if err != nil {
+			panic(err)
+		}
+		return datum
+	default:
+		return tree.DNull
 	}
 
 	expr, err := parser.ParseExpr(exprStr)
@@ -1241,7 +1190,7 @@ func (mb *mutationBuilder) parseColExpr(
 		panic(err)
 	}
 
-	cache[ord] = expr
+	mb.parsedColExprs[ord] = expr
 	return expr
 }
 
@@ -1370,7 +1319,6 @@ func resultsNeeded(r tree.ReturningClause) bool {
 // be different (eg. TEXT and VARCHAR will fit the same scalar type String).
 //
 // This is used by the UPDATE, INSERT and UPSERT code.
-// TODO(mgartner): Remove this once assignment casts are fully supported.
 func checkDatumTypeFitsColumnType(col *cat.Column, typ *types.T) {
 	if typ.Equivalent(col.DatumType()) {
 		return
@@ -1382,99 +1330,6 @@ func checkDatumTypeFitsColumnType(col *cat.Column, typ *types.T) {
 		typ, col.DatumType(), tree.ErrNameString(colName))
 	err = errors.WithHint(err, "you will need to rewrite or cast the expression")
 	panic(err)
-}
-
-// addAssignmentCasts builds a projection that wraps mutation values with
-// assignment casts when possible so that the resulting columns have types
-// identical to those in outTypes. If all the columns in inScope already have
-// identical types, then no projection is built. If there is no valid assignment
-// cast from a column type in inScope to the corresponding target column type,
-// then this function will error.
-func (mb *mutationBuilder) addAssignmentCasts(inScope *scope, outTypes []*types.T) *scope {
-	expr := inScope.expr
-
-	// Do a quick check to see if any casts are needed.
-	castRequired := false
-	for i := 0; i < len(inScope.cols); i++ {
-		if !inScope.cols[i].typ.Identical(outTypes[i]) {
-			castRequired = true
-			break
-		}
-	}
-	if !castRequired {
-		// No mutation casts are needed.
-		return inScope
-	}
-
-	projectionScope := inScope.push()
-	projectionScope.cols = make([]scopeColumn, 0, len(inScope.cols))
-	for i := 0; i < len(inScope.cols); i++ {
-		srcType := inScope.cols[i].typ
-		targetType := outTypes[i]
-		if !srcType.Identical(targetType) {
-			// Check if an assignment cast is available from the inScope column
-			// type to the out type.
-			if !tree.ValidCast(srcType, targetType, tree.CastContextAssignment) {
-				ord := mb.tabID.ColumnOrdinal(mb.targetColList[i])
-				colName := string(mb.tab.Column(ord).ColName())
-				err := pgerror.Newf(pgcode.DatatypeMismatch,
-					"value type %s doesn't match type %s of column %q",
-					srcType, targetType, tree.ErrNameString(colName))
-				err = errors.WithHint(err, "you will need to rewrite or cast the expression")
-				panic(err)
-			}
-
-			// Create a new column which casts the input column to the correct
-			// type.
-			variable := mb.b.factory.ConstructVariable(inScope.cols[i].id)
-			cast := mb.b.factory.ConstructAssignmentCast(variable, outTypes[i])
-			mb.b.synthesizeColumn(projectionScope, inScope.cols[i].name, outTypes[i], nil /* expr */, cast)
-		} else {
-			// The column is already the correct type, so add it as a
-			// passthrough column.
-			projectionScope.appendColumn(&inScope.cols[i])
-		}
-	}
-
-	projectionScope.expr = mb.b.constructProject(expr, projectionScope.cols)
-	return projectionScope
-}
-
-// checkColumnIsNotGeneratedAlwaysAsIdentity verifies that if current column
-// is not created as an IDENTITY column with the
-// `GENERATED ALWAYS AS IDENTITY` syntax.
-// Such an IDENTITY column is not allowed to be overridden explicitly.
-// Users need to specify the INSERT/UPSERT/UPDATE statement with
-// the OVERRIDING SYSTEM VALUE syntax.
-//
-// TODO(janexing): to implement the OVERRIDING SYSTEM VALUE syntax
-// under `INSERT/UPSERT/UPDATE` statement.
-// check also https://github.com/cockroachdb/cockroach/issues/68201.
-//
-// This function is used in code for UPDATE, INSERT and UPSERT statement.
-func checkColumnIsNotGeneratedAlwaysAsIdentity(col *cat.Column) {
-	if !col.IsGeneratedAlwaysAsIdentity() {
-		return
-	}
-	colName := string(col.ColName())
-	err := sqlerrors.NewGeneratedAlwaysAsIdentityColumnOverrideError(colName)
-	panic(err)
-}
-
-// checkUpdateExpression verifies if current column
-// is compatible with the update expression.
-func checkUpdateExpression(col *cat.Column, updateExpr *tree.UpdateExpr) {
-	if col.IsGeneratedAlwaysAsIdentity() {
-		switch updateExpr.Expr.(type) {
-		// if current column was created with the `GENERATED ALWAYS` syntax,
-		// this column can only be updated to DEFAULT in the update statement.
-		case tree.DefaultVal:
-			return
-		default:
-			err := sqlerrors.NewGeneratedAlwaysAsIdentityColumnUpdateError(string(col.ColName()))
-			panic(err)
-		}
-	}
 }
 
 // partialIndexCount returns the number of public, write-only, and delete-only
@@ -1537,7 +1392,7 @@ func (mb *mutationBuilder) buildCheckInputScan(
 		outCol := mb.md.AddColumn(string(tableCol.ColName()), tableCol.DatumType())
 		withScanScope.cols[i] = scopeColumn{
 			id:   outCol,
-			name: scopeColName(tableCol.ColName()),
+			name: tableCol.ColName(),
 			typ:  tableCol.DatumType(),
 		}
 

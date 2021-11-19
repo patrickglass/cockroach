@@ -16,8 +16,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldatatestutils"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexecargs"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexectestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -33,33 +31,34 @@ func TestSerialUnorderedSynchronizer(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	const numInputs = 3
 	const numBatches = 4
 
 	typs := []*types.T{types.Int}
-	inputs := make([]colexecargs.OpWithMetaInfo, numInputs)
+	inputs := make([]SynchronizerInput, numInputs)
 	for i := range inputs {
 		batch := coldatatestutils.RandomBatch(testAllocator, rng, typs, coldata.BatchSize(), 0 /* length */, rng.Float64())
 		source := colexecop.NewRepeatableBatchSource(testAllocator, batch, typs)
 		source.ResetBatchesToReturn(numBatches)
 		inputIdx := i
-		inputs[i].Root = source
-		inputs[i].MetadataSources = []colexecop.MetadataSource{
-			colexectestutils.CallbackMetadataSource{
-				DrainMetaCb: func() []execinfrapb.ProducerMetadata {
-					return []execinfrapb.ProducerMetadata{{Err: errors.Errorf("input %d test-induced metadata", inputIdx)}}
+		inputs[i] = SynchronizerInput{
+			Op: source,
+			MetadataSources: []execinfrapb.MetadataSource{
+				execinfrapb.CallbackMetadataSource{
+					DrainMetaCb: func(_ context.Context) []execinfrapb.ProducerMetadata {
+						return []execinfrapb.ProducerMetadata{{Err: errors.Errorf("input %d test-induced metadata", inputIdx)}}
+					},
 				},
 			},
 		}
 	}
 	s := NewSerialUnorderedSynchronizer(inputs)
-	s.Init(ctx)
 	resultBatches := 0
 	for {
-		b := s.Next()
+		b := s.Next(ctx)
 		if b.Length() == 0 {
-			require.Equal(t, len(inputs), len(s.DrainMeta()))
+			require.Equal(t, len(inputs), len(s.DrainMeta(ctx)))
 			break
 		}
 		resultBatches++

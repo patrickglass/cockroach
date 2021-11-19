@@ -21,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colexectestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecop"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -85,12 +86,12 @@ func TestDefaultAggregateFunc(t *testing.T) {
 			name: "JsonAggWithStringAgg",
 			typs: []*types.T{types.Int, types.Jsonb, types.String},
 			input: colexectestutils.Tuples{
-				{nil, `{"id": 1}`, "a"},
-				{nil, `{"id": 2}`, "b"},
-				{0, `{"id": 1}`, "c"},
-				{0, `{"id": 2}`, "d"},
-				{0, `{"id": 2}`, "e"},
-				{1, `{"id": 3}`, "f"},
+				{nil, `'{"id": 1}'`, "a"},
+				{nil, `'{"id": 2}'`, "b"},
+				{0, `'{"id": 1}'`, "c"},
+				{0, `'{"id": 2}'`, "d"},
+				{0, `'{"id": 2}'`, "e"},
+				{1, `'{"id": 3}'`, "f"},
 			},
 			groupCols: []uint32{0},
 			aggCols:   [][]uint32{{0}, {1}, {2}, {2}},
@@ -101,15 +102,15 @@ func TestDefaultAggregateFunc(t *testing.T) {
 				execinfrapb.StringAgg,
 			},
 			expected: colexectestutils.Tuples{
-				{nil, `[{"id": 1}, {"id": 2}]`, `["a", "b"]`, "a_b"},
-				{0, `[{"id": 1}, {"id": 2}, {"id": 2}]`, `["c", "d", "e"]`, "c_d_e"},
-				{1, `[{"id": 3}]`, `["f"]`, "f"},
+				{nil, `'[{"id": 1}, {"id": 2}]'`, `'["a", "b"]'`, "a_b"},
+				{0, `'[{"id": 1}, {"id": 2}, {"id": 2}]'`, `'["c", "d", "e"]'`, "c_d_e"},
+				{1, `'[{"id": 3}]'`, `'["f"]'`, "f"},
 			},
 			constArguments: [][]execinfrapb.Expression{nil, nil, nil, {{Expr: "'_'"}}},
 		},
 		{
 			name: "XorAgg",
-			typs: types.TwoIntCols,
+			typs: rowenc.TwoIntCols,
 			input: colexectestutils.Tuples{
 				{nil, 3},
 				{nil, 1},
@@ -146,19 +147,20 @@ func TestDefaultAggregateFunc(t *testing.T) {
 					&evalCtx, &semaCtx, tc.spec.Aggregations, tc.typs,
 				)
 				require.NoError(t, err)
-				colexectestutils.RunTestsWithTyps(t, testAllocator, []colexectestutils.Tuples{tc.input}, [][]*types.T{tc.typs}, tc.expected, colexectestutils.UnorderedVerifier, func(input []colexecop.Operator) (colexecop.Operator, error) {
-					return agg.new(&colexecagg.NewAggregatorArgs{
-						Allocator:      testAllocator,
-						MemAccount:     testMemAcc,
-						Input:          input[0],
-						InputTypes:     tc.typs,
-						Spec:           tc.spec,
-						EvalCtx:        &evalCtx,
-						Constructors:   constructors,
-						ConstArguments: constArguments,
-						OutputTypes:    outputTypes,
-					}), nil
-				})
+				colexectestutils.RunTestsWithTyps(t, testAllocator, []colexectestutils.Tuples{tc.input}, [][]*types.T{tc.typs}, tc.expected, colexectestutils.UnorderedVerifier,
+					func(input []colexecop.Operator) (colexecop.Operator, error) {
+						return agg.new(&colexecagg.NewAggregatorArgs{
+							Allocator:      testAllocator,
+							MemAccount:     testMemAcc,
+							Input:          input[0],
+							InputTypes:     tc.typs,
+							Spec:           tc.spec,
+							EvalCtx:        &evalCtx,
+							Constructors:   constructors,
+							ConstArguments: constArguments,
+							OutputTypes:    outputTypes,
+						})
+					})
 			})
 		}
 	}
@@ -170,10 +172,9 @@ func BenchmarkDefaultAggregateFunction(b *testing.B) {
 		for _, numInputRows := range []int{32, 32 * coldata.BatchSize()} {
 			for _, groupSize := range []int{1, 2, 32, 128, coldata.BatchSize()} {
 				benchmarkAggregateFunction(
-					b, agg, aggFn, []*types.T{types.String, types.String},
-					1 /* numGroupCol */, groupSize,
+					b, agg, aggFn, []*types.T{types.String, types.String}, groupSize,
 					0 /* distinctProb */, numInputRows,
-					0 /* chunkSize */, 0 /* limit */)
+				)
 			}
 		}
 	}

@@ -33,10 +33,9 @@ func TestCancelChecker(t *testing.T) {
 	typs := []*types.T{types.Int}
 	batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
 	op := NewCancelChecker(colexecop.NewRepeatableBatchSource(testAllocator, batch, typs))
-	op.Init(ctx)
 	cancel()
 	err := colexecerror.CatchVectorizedRuntimeError(func() {
-		op.Next()
+		op.Next(ctx)
 	})
 	require.True(t, errors.Is(err, cancelchecker.QueryCanceledError))
 }

@@ -23,7 +23,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/ccl/cliccl/cliflagsccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl/engineccl/enginepbccl"
 	"github.com/cockroachdb/cockroach/pkg/cli"
-	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
@@ -60,7 +59,7 @@ Specifying --active-store-key-id-only prints the key ID of the active store key
 and exits.
 `,
 		Args: cobra.ExactArgs(1),
-		RunE: clierrorplus.MaybeDecorateError(runEncryptionStatus),
+		RunE: cli.MaybeDecorateGRPCError(runEncryptionStatus),
 	}
 
 	encryptionActiveKeyCmd := &cobra.Command{
@@ -75,11 +74,11 @@ Plaintext:            # encryption not enabled
 AES128_CTR:be235...   # AES-128 encryption with store key ID
 `,
 		Args: cobra.ExactArgs(1),
-		RunE: clierrorplus.MaybeDecorateError(runEncryptionActiveKey),
+		RunE: cli.MaybeDecorateGRPCError(runEncryptionActiveKey),
 	}
 
 	// Add commands to the root debug command.
-	// We can't add them to the lists of commands (eg: DebugCmdsForPebble) as cli init() is called before us.
+	// We can't add them to the lists of commands (eg: DebugCmdsForRocksDB) as cli init() is called before us.
 	cli.DebugCmd.AddCommand(encryptionStatusCmd)
 	cli.DebugCmd.AddCommand(encryptionActiveKeyCmd)
 
@@ -91,21 +90,15 @@ AES128_CTR:be235...   # AES-128 encryption with store key ID
 		"print active store key ID and exit")
 
 	// Add encryption flag to all OSS debug commands that want it.
-	for _, cmd := range cli.DebugCmdsForPebble {
+	for _, cmd := range cli.DebugCmdsForRocksDB {
 		// storeEncryptionSpecs is in start.go.
 		cli.VarFlag(cmd.Flags(), &storeEncryptionSpecs, cliflagsccl.EnterpriseEncryption)
 	}
 
-	// init has already run in cli/debug.go since this package imports it, so
-	// DebugPebbleCmd already has all its subcommands. We could traverse those
-	// here. But we don't need to by using PersistentFlags.
-	cli.VarFlag(cli.DebugPebbleCmd.PersistentFlags(),
-		&storeEncryptionSpecs, cliflagsccl.EnterpriseEncryption)
-
-	cli.PopulateStorageConfigHook = fillEncryptionOptionsForStore
+	cli.PopulateRocksDBConfigHook = fillEncryptionOptionsForStore
 }
 
-// fillEncryptionOptionsForStore fills the StorageConfig fields
+// fillEncryptionOptionsForStore fills the RocksDBConfig fields
 // based on the --enterprise-encryption flag value.
 func fillEncryptionOptionsForStore(cfg *base.StorageConfig) error {
 	opts, err := baseccl.EncryptionOptionsForStore(cfg.Dir, storeEncryptionSpecs)
@@ -114,7 +107,7 @@ func fillEncryptionOptionsForStore(cfg *base.StorageConfig) error {
 	}
 
 	if opts != nil {
-		cfg.EncryptionOptions = opts
+		cfg.ExtraOptions = opts
 		cfg.UseFileRegistry = true
 	}
 	return nil
@@ -170,7 +163,7 @@ func runEncryptionStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if len(registries.KeyRegistry) == 0 {
+	if len(registries.FileRegistry) == 0 || len(registries.KeyRegistry) == 0 {
 		return nil
 	}
 
@@ -294,7 +287,7 @@ func runEncryptionActiveKey(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// getActiveEncryptionkey opens the file registry directly, bypassing Pebble.
+// getActiveEncryptionkey opens the file registry directly, bypassing rocksdb.
 // This allows looking up the active encryption key ID without knowing it.
 func getActiveEncryptionkey(dir string) (string, string, error) {
 	registryFile := filepath.Join(dir, fileRegistryFilename)

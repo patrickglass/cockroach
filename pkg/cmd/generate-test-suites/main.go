@@ -11,44 +11,19 @@
 package main
 
 import (
-	"errors"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"sort"
 	"strings"
-
-	"github.com/alessio/shellescape"
 )
 
 func main() {
 	// First list all tests.
-	infos, err := ioutil.ReadDir("pkg")
-	if err != nil {
-		panic(err)
-	}
-	var packagesToQuery []string
-	for _, info := range infos {
-		// We don't want to query into pkg/ui because it never contains any Go tests and
-		// because doing so causes a pull from `npm`.
-		if !info.IsDir() || info.Name() == "ui" {
-			continue
-		}
-		packagesToQuery = append(packagesToQuery, fmt.Sprintf("//pkg/%s/...", info.Name()))
-	}
-	allPackages := strings.Join(packagesToQuery, "+")
-	queryArgs := []string{"query", fmt.Sprintf("kind(go_test, %s)", allPackages), "--output=label"}
-	buf, err := exec.Command("bazel", queryArgs...).Output()
+	buf, err := exec.Command("bazel", "query", "kind(go_test, //pkg/...)", "--output=label").Output()
 	if err != nil {
 		log.Printf("Could not query Bazel tests: got error %v", err)
-		var cmderr *exec.ExitError
-		if errors.As(err, &cmderr) {
-			log.Printf("Got error output: %s", string(cmderr.Stderr))
-		} else {
-			log.Printf("Run `bazel %s` to reproduce the failure", shellescape.QuoteCommand(queryArgs))
-		}
 		os.Exit(1)
 	}
 	labels := strings.Split(string(buf[:]), "\n")
@@ -67,8 +42,8 @@ ALL_TESTS = [`)
 	fmt.Println(`]
 
 # These suites run only the tests with the appropriate "size" (excepting those
-# tagged "broken_in_bazel" or "flaky") [1]. Note that tests have a default
-# timeout depending on the size [2].
+# tagged "broken_in_bazel") [1]. Note that tests have a default timeout
+# depending on the size [2].
 
 # [1] https://docs.bazel.build/versions/master/be/general.html#test_suite
 # [2] https://docs.bazel.build/versions/master/be/common-definitions.html#common-attributes-tests`)
@@ -79,7 +54,6 @@ test_suite(
     name = "%[1]s_tests",
     tags = [
         "-broken_in_bazel",
-        "-flaky",
         "%[1]s",
     ],
     tests = ALL_TESTS,

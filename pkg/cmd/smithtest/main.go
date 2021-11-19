@@ -36,8 +36,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/google/go-github/github"
-	"github.com/jackc/pgconn"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx"
 	"github.com/lib/pq"
 	"github.com/pkg/browser"
 )
@@ -175,11 +174,11 @@ func (s WorkerSetup) run(ctx context.Context, rnd *rand.Rand) error {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if match := connRE.FindStringSubmatch(line); match != nil {
-			config, err := pgx.ParseConfig(match[1])
+			config, err := pgx.ParseURI(match[1])
 			if err != nil {
 				return errors.Wrap(err, "parse uri")
 			}
-			pgdb, err = pgx.ConnectConfig(ctx, config)
+			pgdb, err = pgx.Connect(config)
 			if err != nil {
 				return errors.Wrap(err, "connect")
 			}
@@ -204,7 +203,7 @@ func (s WorkerSetup) run(ctx context.Context, rnd *rand.Rand) error {
 	fmt.Println("worker started")
 
 	initSQL := sqlsmith.Setups[sqlsmith.RandSetup(rnd)](rnd)
-	if _, err := pgdb.Exec(ctx, initSQL); err != nil {
+	if _, err := pgdb.ExecEx(ctx, initSQL, nil); err != nil {
 		return errors.Wrap(err, "init")
 	}
 
@@ -227,7 +226,7 @@ func (s WorkerSetup) run(ctx context.Context, rnd *rand.Rand) error {
 		stmt := smither.Generate()
 		done := make(chan struct{}, 1)
 		go func() {
-			_, err = pgdb.Exec(ctx, stmt)
+			_, err = pgdb.ExecEx(ctx, stmt, nil)
 			done <- struct{}{}
 		}()
 		// Timeout slow statements by returning, which will cancel the
@@ -290,7 +289,7 @@ func (s WorkerSetup) run(ctx context.Context, rnd *rand.Rand) error {
 // for errors.
 func (s WorkerSetup) failure(ctx context.Context, initSQL, stmt string, err error) error {
 	var message, stack string
-	var pqerr pgconn.PgError
+	var pqerr pgx.PgError
 	if errors.As(err, &pqerr) {
 		stack = pqerr.Detail
 		message = pqerr.Message

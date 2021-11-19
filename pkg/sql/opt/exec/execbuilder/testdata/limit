@@ -25,7 +25,7 @@ vectorized: true
         │ columns: (k, v, w)
         │ ordering: +v
         │ estimated row count: 30 (missing stats)
-        │ table: t@t_pkey
+        │ table: t@primary
         │ key columns: k
         │
         └── • scan
@@ -56,18 +56,22 @@ vectorized: true
     │ distinct on: w
     │ order key: w
     │
-    └── • top-k
+    └── • limit
         │ columns: (w)
-        │ ordering: +w
         │ estimated row count: 100 (missing stats)
-        │ order: +w
-        │ k: 100
+        │ count: 100
         │
-        └── • scan
-              columns: (w)
-              estimated row count: 1,000 (missing stats)
-              table: t@t_pkey
-              spans: FULL SCAN
+        └── • sort
+            │ columns: (w)
+            │ ordering: +w
+            │ estimated row count: 1,000 (missing stats)
+            │ order: +w
+            │
+            └── • scan
+                  columns: (w)
+                  estimated row count: 1,000 (missing stats)
+                  table: t@primary
+                  spans: FULL SCAN
 
 query T
 EXPLAIN (VERBOSE) SELECT k, v FROM t ORDER BY k LIMIT 5
@@ -79,7 +83,7 @@ vectorized: true
   columns: (k, v)
   ordering: +k
   estimated row count: 5 (missing stats)
-  table: t@t_pkey
+  table: t@primary
   spans: LIMITED SCAN
   limit: 5
 
@@ -98,7 +102,7 @@ vectorized: true
       columns: (k, v)
       ordering: +k
       estimated row count: 1,000 (missing stats)
-      table: t@t_pkey
+      table: t@primary
       spans: FULL SCAN
 
 query T
@@ -153,27 +157,31 @@ vectorized: true
     │ ordering: -any_not_null
     │ estimated row count: 10 (missing stats)
     │
-    └── • top-k
+    └── • limit
         │ columns: (k, sum, any_not_null)
-        │ ordering: -any_not_null
         │ estimated row count: 10 (missing stats)
-        │ order: -any_not_null
-        │ k: 10
+        │ count: 10
         │
-        └── • group (streaming)
+        └── • sort
             │ columns: (k, sum, any_not_null)
+            │ ordering: -any_not_null
             │ estimated row count: 1,000 (missing stats)
-            │ aggregate 0: sum(w)
-            │ aggregate 1: any_not_null(v)
-            │ group by: k
-            │ ordered: +k
+            │ order: -any_not_null
             │
-            └── • scan
-                  columns: (k, v, w)
-                  ordering: +k
-                  estimated row count: 1,000 (missing stats)
-                  table: t@t_pkey
-                  spans: FULL SCAN
+            └── • group
+                │ columns: (k, sum, any_not_null)
+                │ estimated row count: 1,000 (missing stats)
+                │ aggregate 0: sum(w)
+                │ aggregate 1: any_not_null(v)
+                │ group by: k
+                │ ordered: +k
+                │
+                └── • scan
+                      columns: (k, v, w)
+                      ordering: +k
+                      estimated row count: 1,000 (missing stats)
+                      table: t@primary
+                      spans: FULL SCAN
 
 query T
 EXPLAIN (VERBOSE) SELECT k FROM (SELECT k, v FROM t ORDER BY v LIMIT 4)
@@ -250,7 +258,7 @@ vectorized: true
         └── • scan
               columns: (k, v, w)
               estimated row count: 1,000 (missing stats)
-              table: t@t_pkey
+              table: t@primary
               spans: FULL SCAN
 
 query T
@@ -266,7 +274,7 @@ vectorized: true
     │ columns: (k, v, w)
     │ ordering: +v
     │ estimated row count: 10 (missing stats)
-    │ table: t@t_pkey
+    │ table: t@primary
     │ key columns: k
     │
     └── • scan
@@ -307,7 +315,7 @@ vectorized: true
                   columns: (k, v, w)
                   ordering: +k
                   estimated row count: 1,000 (missing stats)
-                  table: t@t_pkey
+                  table: t@primary
                   spans: FULL SCAN
 
 # Regression test for #47283: scan with both hard limit and soft limit.
@@ -334,7 +342,7 @@ vectorized: true
     └── • scan
           columns: (k, a)
           estimated row count: 4 (missing stats)
-          table: t_47283@t_47283_pkey
+          table: t_47283@primary
           spans: LIMITED SCAN
           limit: 4
 
@@ -403,130 +411,75 @@ vectorized: true
 │ estimated row count: 5
 │ count: 5
 │
-└── • union all
+└── • sort
     │ estimated row count: 40
+    │ order: +date_should_be_completed
     │
-    ├── • union all
-    │   │ estimated row count: 35
-    │   │
-    │   ├── • union all
-    │   │   │ estimated row count: 30
-    │   │   │
-    │   │   ├── • union all
-    │   │   │   │ estimated row count: 25
-    │   │   │   │
-    │   │   │   ├── • union all
-    │   │   │   │   │ estimated row count: 20
-    │   │   │   │   │
-    │   │   │   │   ├── • union all
-    │   │   │   │   │   │ estimated row count: 15
-    │   │   │   │   │   │
-    │   │   │   │   │   ├── • union all
-    │   │   │   │   │   │   │ estimated row count: 10
-    │   │   │   │   │   │   │
-    │   │   │   │   │   │   ├── • scan
-    │   │   │   │   │   │   │     estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
-    │   │   │   │   │   │   │     table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
-    │   │   │   │   │   │   │     spans: [/0/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /0/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
-    │   │   │   │   │   │   │     limit: 5
-    │   │   │   │   │   │   │
-    │   │   │   │   │   │   └── • scan
-    │   │   │   │   │   │         estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
-    │   │   │   │   │   │         table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
-    │   │   │   │   │   │         spans: [/1/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /1/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
-    │   │   │   │   │   │         limit: 5
-    │   │   │   │   │   │
-    │   │   │   │   │   └── • scan
-    │   │   │   │   │         estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
-    │   │   │   │   │         table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
-    │   │   │   │   │         spans: [/2/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /2/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
-    │   │   │   │   │         limit: 5
-    │   │   │   │   │
-    │   │   │   │   └── • scan
-    │   │   │   │         estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
-    │   │   │   │         table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
-    │   │   │   │         spans: [/3/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /3/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
-    │   │   │   │         limit: 5
-    │   │   │   │
-    │   │   │   └── • scan
-    │   │   │         estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
-    │   │   │         table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
-    │   │   │         spans: [/4/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /4/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
-    │   │   │         limit: 5
-    │   │   │
-    │   │   └── • scan
-    │   │         estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
-    │   │         table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
-    │   │         spans: [/5/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /5/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
-    │   │         limit: 5
-    │   │
-    │   └── • scan
-    │         estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
-    │         table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
-    │         spans: [/6/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /6/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
-    │         limit: 5
-    │
-    └── • scan
-          estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
-          table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
-          spans: [/7/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /7/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
-          limit: 5
-
-query T
-EXPLAIN (VERBOSE) SELECT * FROM t ORDER BY v, w LIMIT 5
-----
-distribution: local
-vectorized: true
-·
-• top-k
-│ columns: (k, v, w)
-│ ordering: +v,+w
-│ estimated row count: 5 (missing stats)
-│ order: +v,+w
-│ k: 5
-│
-└── • scan
-      columns: (k, v, w)
-      estimated row count: 1,000 (missing stats)
-      table: t@t_pkey
-      spans: FULL SCAN
-
-
-
-statement ok
-CREATE TABLE a AS (SELECT i, i AS j FROM generate_series(0, 1000) AS gen(i));
-
-statement ok
-CREATE INDEX ON a (i, j);
-
-statement ok
-CREATE TABLE b AS SELECT k, k::STRING AS s FROM generate_series(0, 99) AS gen(k);
-
-statement ok
-CREATE INDEX ON b (k, s);
-
-statement ok
-ANALYZE a;
-
-statement ok
-ANALYZE b;
-
-query T retry
-EXPLAIN SELECT * FROM a INNER LOOKUP JOIN b ON k = j ORDER BY i LIMIT 5;
-----
-distribution: local
-vectorized: true
-·
-• limit
-│ estimated row count: 5
-│ count: 5
-│
-└── • lookup join
-    │ estimated row count: 100
-    │ table: b@b_k_s_idx
-    │ equality: (j) = (k)
-    │
-    └── • scan
-          estimated row count: 100 - 1,001 (100% of the table; stats collected <hidden> ago)
-          table: a@a_i_j_idx
-          spans: FULL SCAN
+    └── • union all
+        │ estimated row count: 40
+        │
+        ├── • union all
+        │   │ estimated row count: 35
+        │   │
+        │   ├── • union all
+        │   │   │ estimated row count: 30
+        │   │   │
+        │   │   ├── • union all
+        │   │   │   │ estimated row count: 25
+        │   │   │   │
+        │   │   │   ├── • union all
+        │   │   │   │   │ estimated row count: 20
+        │   │   │   │   │
+        │   │   │   │   ├── • union all
+        │   │   │   │   │   │ estimated row count: 15
+        │   │   │   │   │   │
+        │   │   │   │   │   ├── • union all
+        │   │   │   │   │   │   │ estimated row count: 10
+        │   │   │   │   │   │   │
+        │   │   │   │   │   │   ├── • scan
+        │   │   │   │   │   │   │     estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
+        │   │   │   │   │   │   │     table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
+        │   │   │   │   │   │   │     spans: [/0/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /0/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
+        │   │   │   │   │   │   │     limit: 5
+        │   │   │   │   │   │   │
+        │   │   │   │   │   │   └── • scan
+        │   │   │   │   │   │         estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
+        │   │   │   │   │   │         table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
+        │   │   │   │   │   │         spans: [/1/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /1/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
+        │   │   │   │   │   │         limit: 5
+        │   │   │   │   │   │
+        │   │   │   │   │   └── • scan
+        │   │   │   │   │         estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
+        │   │   │   │   │         table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
+        │   │   │   │   │         spans: [/2/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /2/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
+        │   │   │   │   │         limit: 5
+        │   │   │   │   │
+        │   │   │   │   └── • scan
+        │   │   │   │         estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
+        │   │   │   │         table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
+        │   │   │   │         spans: [/3/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /3/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
+        │   │   │   │         limit: 5
+        │   │   │   │
+        │   │   │   └── • scan
+        │   │   │         estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
+        │   │   │         table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
+        │   │   │         spans: [/4/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /4/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
+        │   │   │         limit: 5
+        │   │   │
+        │   │   └── • scan
+        │   │         estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
+        │   │         table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
+        │   │         spans: [/5/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /5/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
+        │   │         limit: 5
+        │   │
+        │   └── • scan
+        │         estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
+        │         table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
+        │         spans: [/6/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /6/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
+        │         limit: 5
+        │
+        └── • scan
+              estimated row count: 5 (0.05% of the table; stats collected <hidden> ago)
+              table: user_checklist_items@userchecklistitems_tenantid_userid_dateshouldbecompleted_locationname_orderitem
+              spans: [/7/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f'/'2020-10-01' - /7/'a2a0dd49-23cf-4cf2-b823-61701c416e60'/'01603523-c6f0-4e12-a43f-524c76b0fa8f']
+              limit: 5

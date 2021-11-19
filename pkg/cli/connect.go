@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server"
@@ -25,41 +24,23 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Sub-commands for connect command.
-var connectCmds = []*cobra.Command{
-	connectInitCmd,
-	connectJoinCmd,
-}
-
-var connectCmd = &cobra.Command{
-	Use:   "connect [command]",
-	Short: "Create certificates for securely connecting with clusters\n",
-	Long: `
-Bootstrap security certificates for connecting to new or existing clusters.`,
-	RunE: UsageAndErr,
-}
-
-func init() {
-	connectCmd.AddCommand(connectCmds...)
-}
-
-// connectInitCmd triggers a TLS initialization handshake and writes
+// connectCmd triggers a TLS initialization handshake and writes
 // certificates in the specified certs-dir for use with start.
-var connectInitCmd = &cobra.Command{
-	Use:   "init --certs-dir=<path to cockroach certs dir> --init-token=<shared secret> --join=<host 1>,<host 2>,...,<host N>",
+var connectCmd = &cobra.Command{
+	Use:   "connect --certs-dir=<path to cockroach certs dir> --init-token=<shared secret> --join=<host 1>,<host 2>,...,<host N>",
 	Short: "auto-build TLS certificates for use with the start command",
 	Long: `
 Connects to other nodes and negotiates an initialization bundle for use with
 secure inter-node connections.
 `,
 	Args: cobra.NoArgs,
-	RunE: clierrorplus.MaybeDecorateError(runConnectInit),
+	RunE: MaybeDecorateGRPCError(runConnect),
 }
 
-// runConnectInit connects to other nodes and negotiates an initialization bundle
+// runConnect connects to other nodes and negotiates an initialization bundle
 // for use with secure inter-node connections.
-func runConnectInit(cmd *cobra.Command, args []string) (retErr error) {
-	if err := validateConnectInitFlags(cmd, true /* requireExplicitFlags */); err != nil {
+func runConnect(cmd *cobra.Command, args []string) (retErr error) {
+	if err := validateConnectFlags(cmd, true /* requireExplicitFlags */); err != nil {
 		return err
 	}
 
@@ -127,7 +108,7 @@ func runConnectInit(cmd *cobra.Command, args []string) (retErr error) {
 				"cert files generated in: " + os.ExpandEnv(baseCfg.SSLCertsDir) + "\n\n" +
 				"Do not forget to generate a client certificate for the 'root' user!\n" +
 				"This must be done manually, preferably from a different unix user account\n" +
-				"than the one running the server. Example command:\n\n" +
+				"than the one running the server. Eample command:\n\n" +
 				"   " + os.Args[0] + " cert create-client root --ca-key=<path-to-client-ca-key>\n")
 		}
 	}()
@@ -139,7 +120,7 @@ func runConnectInit(cmd *cobra.Command, args []string) (retErr error) {
 	return server.InitHandshake(ctx, reporter, baseCfg, startCtx.initToken, startCtx.numExpectedNodes, peers, baseCfg.SSLCertsDir, rpcLn)
 }
 
-func validateConnectInitFlags(cmd *cobra.Command, requireExplicitFlags bool) error {
+func validateConnectFlags(cmd *cobra.Command, requireExplicitFlags bool) error {
 	if requireExplicitFlags {
 		f := flagSetForCmd(cmd)
 		if !(f.Lookup(cliflags.SingleNode.Name).Changed ||

@@ -17,7 +17,7 @@ go_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/clusterversion",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "//pkg/settings",
         "//pkg/util/log",
         "//pkg/util/protoutil",
@@ -30,16 +30,11 @@ go_library(
 go_test(
     name = "clusterversion_test",
     size = "small",
-    srcs = [
-        "clusterversion_test.go",
-        "cockroach_versions_test.go",
-    ],
+    srcs = ["cockroach_versions_test.go"],
     embed = [":clusterversion"],
     deps = [
-        "//pkg/roachpb:with-mocks",
-        "//pkg/settings",
+        "//pkg/roachpb",
         "//pkg/util/leaktest",
-        "//pkg/util/protoutil",
         "@com_github_cockroachdb_redact//:redact",
         "@com_github_dustin_go_humanize//:go-humanize",
         "@com_github_stretchr_testify//require",
@@ -64,7 +59,7 @@ go_proto_library(
     proto = ":clusterversion_proto",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/roachpb:with-mocks",
+        "//pkg/roachpb",
         "@com_github_gogo_protobuf//gogoproto",
     ],
 )

@@ -291,7 +291,7 @@ func TestEvalError(t *testing.T) {
 		{`'2010-09-28 12:00.1 MST'::timestamp`,
 			`unimplemented: timestamp abbreviations not supported`},
 		{`'abcd'::interval`,
-			`could not parse "abcd" as type interval: interval: missing number at position 0: "abcd"`},
+			`could not parse "abcd" as type interval: interval: missing unit`},
 		{`'1- 2:3:4 9'::interval`,
 			`could not parse "1- 2:3:4 9" as type interval: invalid input syntax for type interval 1- 2:3:4 9`},
 		{`e'\\xdedf0d36174'::BYTES`, `could not parse "\\xdedf0d36174" as type bytes: encoding/hex: odd length hex string`},
@@ -377,7 +377,7 @@ func TestHLCTimestampDecimalRoundTrip(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	rng, _ := randutil.NewTestRand()
+	rng, _ := randutil.NewPseudoRand()
 	for i := 0; i < 100; i++ {
 		ts := hlc.Timestamp{WallTime: rng.Int63(), Logical: rng.Int31()}
 		dec := tree.TimestampToDecimalDatum(ts)

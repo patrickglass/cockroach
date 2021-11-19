@@ -14,16 +14,14 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
-	"github.com/stretchr/testify/require"
 )
 
 func TestEagerReplication(t *testing.T) {
@@ -31,27 +29,14 @@ func TestEagerReplication(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	serv, _, _ := serverutils.StartServer(t, base.TestServerArgs{
-		// Need to trick the server to think it's part of a cluster, otherwise it
-		// will set the default zone config to require 1 replica and the split
-		// bellow will not trigger a replication attempt.
-		PartOfCluster: true,
-		Knobs: base.TestingKnobs{
-			Store: &kvserver.StoreTestingKnobs{
-				// Disable the replica scanner so that we rely on the eager replication code
-				// path that occurs after splits.
-				DisableScanner: true,
-			},
-		},
-	})
-	s := serv.(*server.TestServer)
-	defer s.Stopper().Stop(ctx)
-	store, err := s.Stores().GetStore(s.GetFirstStoreID())
-	require.NoError(t, err)
+	storeCfg := kvserver.TestStoreConfig(nil /* clock */)
+	// Disable the replica scanner so that we rely on the eager replication code
+	// path that occurs after splits.
+	storeCfg.TestingKnobs.DisableScanner = true
 
-	// Make sure everything goes through the replicate queue, so the start count
-	// is accurate.
-	require.NoError(t, store.ForceReplicationScanAndProcess())
+	stopper := stop.NewStopper()
+	defer stopper.Stop(ctx)
+	store := createTestStoreWithConfig(t, stopper, storeCfg)
 
 	// After bootstrap, all of the system ranges should be present in replicate
 	// queue purgatory (because we only have a single store in the test and thus
@@ -60,12 +45,17 @@ func TestEagerReplication(t *testing.T) {
 
 	t.Logf("purgatory start count is %d", purgatoryStartCount)
 	// Perform a split and check that there's one more range in the purgatory.
-	_, _, err = s.SplitRange(roachpb.Key("a"))
-	require.NoError(t, err)
+
+	key := roachpb.Key("a")
+	args := adminSplitArgs(key)
+	_, pErr := kv.SendWrapped(ctx, store.TestSender(), args)
+	if pErr != nil {
+		t.Fatal(pErr)
+	}
 
 	// The addition of replicas to the replicateQueue after a split
 	// occurs happens after the update of the descriptors in meta2
-	// leaving a tiny window of time in which the newly split replicas
+	// leaving a tiny window of time in which the newly split replica
 	// will not have been added to purgatory. Thus we loop.
 	testutils.SucceedsSoon(t, func() error {
 		expected := purgatoryStartCount + 1

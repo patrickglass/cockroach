@@ -292,7 +292,7 @@ func (g *geoJoinPlanner) extractGeoJoinCondition(
 
 	// The first argument should either come from the input or be a constant.
 	var p props.Shared
-	memo.BuildSharedProps(arg1, &p, g.factory.EvalContext())
+	memo.BuildSharedProps(arg1, &p)
 	if !p.OuterCols.Empty() {
 		if !p.OuterCols.SubsetOf(g.inputCols) {
 			return nil
@@ -468,7 +468,7 @@ func extractInfoFromExpr(
 	if !ok {
 		return 0, nil, nil, nil, false
 	}
-	if arg2.Col != tabID.ColumnID(index.InvertedColumn().InvertedSourceColumnOrdinal()) {
+	if arg2.Col != tabID.ColumnID(index.VirtualInvertedColumn().InvertedSourceColumnOrdinal()) {
 		// The column in the function does not match the index column.
 		return 0, nil, nil, nil, false
 	}
@@ -681,9 +681,9 @@ func (p *PreFilterer) PreFilter(
 						geogfn.UseSphereOrSpheroid(tree.MustBeDBool(p.additionalPreFilterParams[1]))
 				}
 				// TODO(sumeer): refactor to share code with geogfn.DWithin.
-				proj, err := geoprojbase.Projection(fs.srid)
-				if err != nil {
-					return false, err
+				proj, ok := geoprojbase.Projection(fs.srid)
+				if !ok {
+					return false, errors.Errorf("cannot compute DWithin on unknown SRID %d", fs.srid)
 				}
 				angleToExpand := s1.Angle(distance / proj.Spheroid.SphereRadius)
 				if useSphereOrSpheroid == geogfn.UseSpheroid {

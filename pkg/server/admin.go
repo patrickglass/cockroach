@@ -36,6 +36,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/server/debug"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
@@ -44,6 +45,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -241,15 +244,6 @@ func (s *adminServer) Databases(
 		return nil, err
 	}
 
-	return s.databasesHelper(ctx, req, sessionUser, 0, 0)
-}
-
-func (s *adminServer) databasesHelper(
-	ctx context.Context,
-	req *serverpb.DatabasesRequest,
-	sessionUser security.SQLUsername,
-	limit, offset int,
-) (_ *serverpb.DatabasesResponse, retErr error) {
 	it, err := s.server.sqlServer.internalExecutor.QueryIteratorEx(
 		ctx, "admin-show-dbs", nil, /* txn */
 		sessiondata.InternalExecutorOverride{User: sessionUser},
@@ -301,15 +295,8 @@ func (s *adminServer) DatabaseDetails(
 		return nil, err
 	}
 
-	return s.databaseDetailsHelper(ctx, req, userName)
-}
+	var resp serverpb.DatabaseDetailsResponse
 
-func (s *adminServer) getDatabaseGrants(
-	ctx context.Context,
-	req *serverpb.DatabaseDetailsRequest,
-	userName security.SQLUsername,
-	limit, offset int,
-) (resp []serverpb.DatabaseDetailsResponse_Grant, retErr error) {
 	escDBName := tree.NameStringP(&req.Database)
 	// Placeholders don't work with SHOW statements, so we need to manually
 	// escape the database name.
@@ -317,21 +304,11 @@ func (s *adminServer) getDatabaseGrants(
 	// TODO(cdo): Use placeholders when they're supported by SHOW.
 
 	// Marshal grants.
-	query := makeSQLQuery()
-	// We use Sprintf instead of the more canonical query argument approach, as
-	// that doesn't support arguments inside a SHOW subquery yet.
-	query.Append(fmt.Sprintf("SELECT * FROM [SHOW GRANTS ON DATABASE %s]", escDBName))
-	if limit > 0 {
-		query.Append(" LIMIT $", limit)
-		if offset > 0 {
-			query.Append(" OFFSET $", offset)
-		}
-	}
 	it, err := s.server.sqlServer.internalExecutor.QueryIteratorEx(
 		ctx, "admin-show-grants", nil, /* txn */
 		sessiondata.InternalExecutorOverride{User: userName},
 		// We only want to show the grants on the database.
-		query.String(), query.QueryArguments()...,
+		fmt.Sprintf("SELECT * FROM [SHOW GRANTS ON DATABASE %s]", escDBName),
 	)
 	if err = s.maybeHandleNotFoundError(err); err != nil {
 		return nil, err
@@ -369,37 +346,20 @@ func (s *adminServer) getDatabaseGrants(
 					return nil, err
 				}
 				grant.Privileges = strings.Split(privileges, ",")
-				resp = append(resp, grant)
+				resp.Grants = append(resp.Grants, grant)
 			}
 			if err = s.maybeHandleNotFoundError(err); err != nil {
 				return nil, err
 			}
 		}
 	}
-	return resp, retErr
-}
 
-func (s *adminServer) getDatabaseTables(
-	ctx context.Context,
-	req *serverpb.DatabaseDetailsRequest,
-	userName security.SQLUsername,
-	limit, offset int,
-) (resp []string, retErr error) {
-	query := makeSQLQuery()
-	query.Append(`SELECT table_schema, table_name FROM information_schema.tables
-WHERE table_catalog = $ AND table_type != 'SYSTEM VIEW'`, req.Database)
-	query.Append(" ORDER BY table_name")
-	if limit > 0 {
-		query.Append(" LIMIT $", limit)
-		if offset > 0 {
-			query.Append(" OFFSET $", offset)
-		}
-	}
 	// Marshal table names.
-	it, err := s.server.sqlServer.internalExecutor.QueryIteratorEx(
+	it, err = s.server.sqlServer.internalExecutor.QueryIteratorEx(
 		ctx, "admin-show-tables", nil, /* txn */
 		sessiondata.InternalExecutorOverride{User: userName, Database: req.Database},
-		query.String(), query.QueryArguments()...)
+		`SELECT table_schema, table_name FROM information_schema.tables
+WHERE table_catalog = $1 AND table_type != 'SYSTEM VIEW';`, req.Database)
 	if err = s.maybeHandleNotFoundError(err); err != nil {
 		return nil, err
 	}
@@ -429,7 +389,7 @@ WHERE table_catalog = $ AND table_type != 'SYSTEM VIEW'`, req.Database)
 				if err := scanner.Scan(row, "table_name", &tableName); err != nil {
 					return nil, err
 				}
-				resp = append(resp, fmt.Sprintf("%s.%s",
+				resp.TableNames = append(resp.TableNames, fmt.Sprintf("%s.%s",
 					tree.NameStringP(&schemaName), tree.NameStringP(&tableName)))
 			}
 			if err = s.maybeHandleNotFoundError(err); err != nil {
@@ -437,159 +397,34 @@ WHERE table_catalog = $ AND table_type != 'SYSTEM VIEW'`, req.Database)
 			}
 		}
 	}
-	return resp, retErr
-}
 
-func (s *adminServer) getMiscDatabaseDetails(
-	ctx context.Context,
-	req *serverpb.DatabaseDetailsRequest,
-	userName security.SQLUsername,
-	resp *serverpb.DatabaseDetailsResponse,
-) (*serverpb.DatabaseDetailsResponse, error) {
-	if resp == nil {
-		resp = &serverpb.DatabaseDetailsResponse{}
-	}
 	// Query the descriptor ID and zone configuration for this database.
-	databaseID, err := s.queryDatabaseID(ctx, userName, req.Database)
-	if err != nil {
-		return nil, s.serverError(err)
-	}
-	resp.DescriptorID = int64(databaseID)
-
-	id, zone, zoneExists, err := s.queryZonePath(ctx, userName, []descpb.ID{databaseID})
-	if err != nil {
-		return nil, s.serverError(err)
-	}
-
-	if !zoneExists {
-		zone = s.server.cfg.DefaultZoneConfig
-	}
-	resp.ZoneConfig = zone
-
-	switch id {
-	case databaseID:
-		resp.ZoneConfigLevel = serverpb.ZoneConfigurationLevel_DATABASE
-	default:
-		resp.ZoneConfigLevel = serverpb.ZoneConfigurationLevel_CLUSTER
-	}
-	return resp, nil
-}
-
-func (s *adminServer) databaseDetailsHelper(
-	ctx context.Context, req *serverpb.DatabaseDetailsRequest, userName security.SQLUsername,
-) (_ *serverpb.DatabaseDetailsResponse, retErr error) {
-	var resp serverpb.DatabaseDetailsResponse
-	var err error
-
-	resp.Grants, err = s.getDatabaseGrants(ctx, req, userName, 0, 0)
-	if err != nil {
-		return nil, err
-	}
-	resp.TableNames, err = s.getDatabaseTables(ctx, req, userName, 0, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = s.getMiscDatabaseDetails(ctx, req, userName, &resp)
-	if err != nil {
-		return nil, err
-	}
-
-	if req.IncludeStats {
-		tableSpans, err := s.getDatabaseTableSpans(ctx, userName, req.Database, resp.TableNames)
+	{
+		databaseID, err := s.queryDatabaseID(ctx, userName, req.Database)
 		if err != nil {
-			return nil, err
+			return nil, s.serverError(err)
 		}
-		resp.Stats, err = s.getDatabaseStats(ctx, tableSpans)
+		resp.DescriptorID = int64(databaseID)
+
+		id, zone, zoneExists, err := s.queryZonePath(ctx, userName, []descpb.ID{databaseID})
 		if err != nil {
-			return nil, err
+			return nil, s.serverError(err)
+		}
+
+		if !zoneExists {
+			zone = s.server.cfg.DefaultZoneConfig
+		}
+		resp.ZoneConfig = zone
+
+		switch id {
+		case databaseID:
+			resp.ZoneConfigLevel = serverpb.ZoneConfigurationLevel_DATABASE
+		default:
+			resp.ZoneConfigLevel = serverpb.ZoneConfigurationLevel_CLUSTER
 		}
 	}
 
 	return &resp, nil
-}
-
-func (s *adminServer) getDatabaseTableSpans(
-	ctx context.Context, userName security.SQLUsername, dbName string, tableNames []string,
-) (map[string]roachpb.Span, error) {
-	tableSpans := make(map[string]roachpb.Span, len(tableNames))
-
-	for _, tableName := range tableNames {
-		fullyQualifiedTableName, err := getFullyQualifiedTableName(dbName, tableName)
-		if err != nil {
-			return nil, err
-		}
-		tableID, err := s.queryTableID(ctx, userName, dbName, fullyQualifiedTableName)
-		if err != nil {
-			return nil, s.serverError(err)
-		}
-		tableSpans[tableName] = generateTableSpan(tableID)
-	}
-	return tableSpans, nil
-}
-
-func (s *adminServer) getDatabaseStats(
-	ctx context.Context, tableSpans map[string]roachpb.Span,
-) (*serverpb.DatabaseDetailsResponse_Stats, error) {
-	var stats serverpb.DatabaseDetailsResponse_Stats
-
-	type tableStatsResponse struct {
-		name string
-		resp *serverpb.TableStatsResponse
-		err  error
-	}
-
-	responses := make(chan tableStatsResponse, len(tableSpans))
-
-	for tableName, tableSpan := range tableSpans {
-		if err := s.server.stopper.RunAsyncTask(
-			ctx, "server.adminServer: requesting table stats",
-			func(ctx context.Context) {
-				statsResponse, err := s.statsForSpan(ctx, tableSpan)
-
-				responses <- tableStatsResponse{
-					name: tableName,
-					resp: statsResponse,
-					err:  err,
-				}
-			}); err != nil {
-			return nil, err
-		}
-	}
-
-	// Track all nodes storing databases.
-	nodeIDs := make(map[roachpb.NodeID]struct{})
-	for i := 0; i < len(tableSpans); i++ {
-		select {
-		case response := <-responses:
-			if response.err != nil {
-				stats.MissingTables = append(
-					stats.MissingTables,
-					&serverpb.DatabaseDetailsResponse_Stats_MissingTable{
-						Name:         response.name,
-						ErrorMessage: response.err.Error(),
-					})
-			} else {
-				stats.RangeCount += response.resp.RangeCount
-				stats.ApproximateDiskBytes += response.resp.ApproximateDiskBytes
-				for _, id := range response.resp.NodeIDs {
-					nodeIDs[id] = struct{}{}
-				}
-			}
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-
-	stats.NodeIDs = make([]roachpb.NodeID, 0, len(nodeIDs))
-	for id := range nodeIDs {
-		stats.NodeIDs = append(stats.NodeIDs, id)
-	}
-	sort.Slice(stats.NodeIDs, func(i, j int) bool {
-		return stats.NodeIDs[i] < stats.NodeIDs[j]
-	})
-
-	return &stats, nil
 }
 
 // getFullyQualifiedTableName, given a database name and a tableName that either
@@ -631,12 +466,6 @@ func (s *adminServer) TableDetails(
 		return nil, err
 	}
 
-	return s.tableDetailsHelper(ctx, req, userName)
-}
-
-func (s *adminServer) tableDetailsHelper(
-	ctx context.Context, req *serverpb.TableDetailsRequest, userName security.SQLUsername,
-) (_ *serverpb.TableDetailsResponse, retErr error) {
 	escQualTable, err := getFullyQualifiedTableName(req.Database, req.Table)
 	if err != nil {
 		return nil, err
@@ -1071,18 +900,9 @@ func (s *adminServer) statsForSpan(
 		}
 	}
 
-	nodeIDList := make([]roachpb.NodeID, 0, len(nodeIDs))
-	for id := range nodeIDs {
-		nodeIDList = append(nodeIDList, id)
-	}
-	sort.Slice(nodeIDList, func(i, j int) bool {
-		return nodeIDList[i] < nodeIDList[j]
-	})
-
 	// Construct TableStatsResponse by sending an RPC to every node involved.
 	tableStatResponse := serverpb.TableStatsResponse{
 		NodeCount: int64(len(nodeIDs)),
-		NodeIDs:   nodeIDList,
 		// TODO(mrtracy): The "RangeCount" returned by TableStats is more
 		// accurate than the "RangeCount" returned by TableDetails, because this
 		// method always consistently queries the meta2 key range for the table;
@@ -1096,7 +916,7 @@ func (s *adminServer) statsForSpan(
 		// TableStats' meta2 query through the DistSender so that it will share
 		// the advantage of populating the cache (without the disadvantage of
 		// potentially returning stale data).
-		// See GitHub #5435 for some discussion.
+		// See Github #5435 for some discussion.
 		RangeCount: int64(len(rangeDescKVs)),
 	}
 	type nodeResponse struct {
@@ -1237,16 +1057,6 @@ func (s *adminServer) Events(
 		limit = defaultAPIEventLimit
 	}
 
-	return s.eventsHelper(ctx, req, userName, int(limit), 0, redactEvents)
-}
-
-func (s *adminServer) eventsHelper(
-	ctx context.Context,
-	req *serverpb.EventsRequest,
-	userName security.SQLUsername,
-	limit, offset int,
-	redactEvents bool,
-) (_ *serverpb.EventsResponse, retErr error) {
 	// Execute the query.
 	q := makeSQLQuery()
 	q.Append(`SELECT timestamp, "eventType", "targetID", "reportingID", info, "uniqueID" `)
@@ -1261,9 +1071,6 @@ func (s *adminServer) eventsHelper(
 	q.Append("ORDER BY timestamp DESC ")
 	if limit > 0 {
 		q.Append("LIMIT $", limit)
-		if offset > 0 {
-			q.Append(" OFFSET $", offset)
-		}
 	}
 	if len(q.Errors()) > 0 {
 		return nil, combineAllErrors(q.Errors())
@@ -1386,6 +1193,8 @@ func (s *adminServer) RangeLog(
 		limit = defaultAPIEventLimit
 	}
 
+	includeRawKeys := debug.GatewayRemoteAllowed(ctx, s.server.ClusterSettings())
+
 	// Execute the query.
 	q := makeSQLQuery()
 	q.Append(`SELECT timestamp, "rangeID", "storeID", "eventType", "otherRangeID", info `)
@@ -1474,9 +1283,17 @@ func (s *adminServer) RangeLog(
 				return nil, errors.Wrapf(err, "info didn't parse correctly: %s", info)
 			}
 			if event.Info.NewDesc != nil {
+				if !includeRawKeys {
+					event.Info.NewDesc.StartKey = nil
+					event.Info.NewDesc.EndKey = nil
+				}
 				prettyInfo.NewDesc = event.Info.NewDesc.String()
 			}
 			if event.Info.UpdatedDesc != nil {
+				if !includeRawKeys {
+					event.Info.UpdatedDesc.StartKey = nil
+					event.Info.UpdatedDesc.EndKey = nil
+				}
 				prettyInfo.UpdatedDesc = event.Info.UpdatedDesc.String()
 			}
 			if event.Info.AddedReplica != nil {
@@ -1890,12 +1707,45 @@ func (s *adminServer) Jobs(
 	scanner := makeResultScanner(it.Types())
 	for ; ok; ok, err = it.Next(ctx) {
 		row := it.Cur()
-		var job serverpb.JobResponse
-		err := scanRowIntoJob(scanner, row, &job)
-		if err != nil {
+		var job serverpb.JobsResponse_Job
+		var fractionCompletedOrNil *float32
+		var highwaterOrNil *apd.Decimal
+		var runningStatusOrNil *string
+		if err := scanner.ScanAll(
+			row,
+			&job.ID,
+			&job.Type,
+			&job.Description,
+			&job.Statement,
+			&job.Username,
+			&job.DescriptorIDs,
+			&job.Status,
+			&runningStatusOrNil,
+			&job.Created,
+			&job.Started,
+			&job.Finished,
+			&job.Modified,
+			&fractionCompletedOrNil,
+			&highwaterOrNil,
+			&job.Error,
+		); err != nil {
 			return nil, err
 		}
-
+		if highwaterOrNil != nil {
+			highwaterTimestamp, err := tree.DecimalToHLC(highwaterOrNil)
+			if err != nil {
+				return nil, errors.Wrap(err, "highwater timestamp had unexpected format")
+			}
+			goTime := highwaterTimestamp.GoTime()
+			job.HighwaterTimestamp = &goTime
+			job.HighwaterDecimal = highwaterOrNil.String()
+		}
+		if fractionCompletedOrNil != nil {
+			job.FractionCompleted = *fractionCompletedOrNil
+		}
+		if runningStatusOrNil != nil {
+			job.RunningStatus = *runningStatusOrNil
+		}
 		resp.Jobs = append(resp.Jobs, job)
 	}
 
@@ -1903,102 +1753,6 @@ func (s *adminServer) Jobs(
 		return nil, err
 	}
 	return &resp, nil
-}
-
-func scanRowIntoJob(scanner resultScanner, row tree.Datums, job *serverpb.JobResponse) error {
-	var fractionCompletedOrNil *float32
-	var highwaterOrNil *apd.Decimal
-	var runningStatusOrNil *string
-	if err := scanner.ScanAll(
-		row,
-		&job.ID,
-		&job.Type,
-		&job.Description,
-		&job.Statement,
-		&job.Username,
-		&job.DescriptorIDs,
-		&job.Status,
-		&runningStatusOrNil,
-		&job.Created,
-		&job.Started,
-		&job.Finished,
-		&job.Modified,
-		&fractionCompletedOrNil,
-		&highwaterOrNil,
-		&job.Error,
-	); err != nil {
-		return err
-	}
-	if highwaterOrNil != nil {
-		highwaterTimestamp, err := tree.DecimalToHLC(highwaterOrNil)
-		if err != nil {
-			return errors.Wrap(err, "highwater timestamp had unexpected format")
-		}
-		goTime := highwaterTimestamp.GoTime()
-		job.HighwaterTimestamp = &goTime
-		job.HighwaterDecimal = highwaterOrNil.String()
-	}
-	if fractionCompletedOrNil != nil {
-		job.FractionCompleted = *fractionCompletedOrNil
-	}
-	if runningStatusOrNil != nil {
-		job.RunningStatus = *runningStatusOrNil
-	}
-	return nil
-}
-
-func (s *adminServer) Job(
-	ctx context.Context, request *serverpb.JobRequest,
-) (_ *serverpb.JobResponse, retErr error) {
-	// All errors returned by this method must be serverErrors. We are careful
-	// to not use serverError* methods in the body of the function, so we can
-	// just do it here.
-	defer func() {
-		if retErr != nil {
-			retErr = s.serverError(retErr)
-		}
-	}()
-
-	ctx = s.server.AnnotateCtx(ctx)
-
-	userName, err := userFromContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	const query = `
-      SELECT job_id, job_type, description, statement, user_name, descriptor_ids, status,
-						 running_status, created, started, finished, modified,
-						 fraction_completed, high_water_timestamp, error
-        FROM crdb_internal.jobs
-       WHERE job_id = $1`
-
-	row, cols, err := s.server.sqlServer.internalExecutor.QueryRowExWithCols(
-		ctx, "admin-job", nil,
-		sessiondata.InternalExecutorOverride{User: userName},
-		query,
-		request.JobId,
-	)
-
-	if err != nil {
-		return nil, errors.Wrapf(err, "expected to find 1 job with job_id=%d", request.JobId)
-	}
-
-	if row == nil {
-		return nil, errors.Errorf(
-			"could not get job for job_id %d; 0 rows returned", request.JobId,
-		)
-	}
-
-	scanner := makeResultScanner(cols)
-
-	var job serverpb.JobResponse
-	err = scanRowIntoJob(scanner, row, &job)
-	if err != nil {
-		return nil, err
-	}
-
-	return &job, nil
 }
 
 func (s *adminServer) Locations(
@@ -2365,6 +2119,15 @@ func (s *adminServer) DataDistribution(
 				zoneConfigQuery,
 			)
 			if err != nil {
+				// This case arises regularly in databases which were upgraded from
+				// 19.2 up to 20.2 and beyond. This occurs because, due to bugs, there
+				// is no namespace entry from system.namespace2 despite the fact that
+				// is the descriptor name for the new namespace table. It can also arise
+				// due to the non-transactional nature of this API.
+				if pgerror.GetPGCode(err) == pgcode.UndefinedTable {
+					continue
+				}
+
 				return nil, err
 			}
 			if row == nil {
@@ -2482,6 +2245,10 @@ func (s *adminServer) EnqueueRange(
 
 	if _, err := s.requireAdminUser(ctx); err != nil {
 		return nil, err
+	}
+
+	if !debug.GatewayRemoteAllowed(ctx, s.server.ClusterSettings()) {
+		return nil, remoteDebuggingErr
 	}
 
 	if req.NodeID < 0 {

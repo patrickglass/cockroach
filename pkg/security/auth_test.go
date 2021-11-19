@@ -195,8 +195,6 @@ func TestAuthenticationHook(t *testing.T) {
 		{false, "foo", security.NodeUserName(), "", true, false, false},
 		// Secure mode, node user.
 		{false, security.NodeUser, security.NodeUserName(), "", true, true, true},
-		// Secure mode, node cert and unrelated user.
-		{false, security.NodeUser, fooUser, "", true, false, false},
 		// Secure mode, root user.
 		{false, security.RootUser, security.NodeUserName(), "", true, false, false},
 		// Secure mode, tenant cert, foo user.
@@ -224,11 +222,11 @@ func TestAuthenticationHook(t *testing.T) {
 			if err != nil {
 				return
 			}
-			err = hook(ctx, tc.username, true /* clientConnection */)
+			_, err = hook(ctx, tc.username, true /* clientConnection */)
 			if (err == nil) != tc.publicHookSuccess {
 				t.Fatalf("expected success=%t, got err=%v", tc.publicHookSuccess, err)
 			}
-			err = hook(ctx, tc.username, false /* clientConnection */)
+			_, err = hook(ctx, tc.username, false /* clientConnection */)
 			if (err == nil) != tc.privateHookSuccess {
 				t.Fatalf("expected success=%t, got err=%v", tc.privateHookSuccess, err)
 			}

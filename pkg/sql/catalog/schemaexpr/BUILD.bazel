@@ -11,7 +11,7 @@ go_library(
         "default_exprs.go",
         "doc.go",
         "expr.go",
-        "hash_sharded_compute_expr.go",
+        "expr_filter.go",
         "partial_index.go",
         "select_name_resolution.go",
         "unique_contraint.go",
@@ -31,6 +31,7 @@ go_library(
         "//pkg/sql/types",
         "//pkg/util/errorutil/unimplemented",
         "@com_github_cockroachdb_errors//:errors",
+        "@com_github_lib_pq//oid",
     ],
 )
 

@@ -19,10 +19,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/cli/clierrorplus"
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlclient"
-	"github.com/cockroachdb/cockroach/pkg/cli/clisqlexec"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
@@ -50,15 +47,15 @@ Display the node IDs for all active (that is, running and not decommissioned) me
 To retrieve the IDs for inactive members, see 'node status --decommission'.
 	`,
 	Args: cobra.NoArgs,
-	RunE: clierrorplus.MaybeDecorateError(runLsNodes),
+	RunE: MaybeDecorateGRPCError(runLsNodes),
 }
 
-func runLsNodes(cmd *cobra.Command, args []string) (resErr error) {
+func runLsNodes(cmd *cobra.Command, args []string) error {
 	conn, err := makeSQLClient("cockroach node ls", useSystemDb)
 	if err != nil {
 		return err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
+	defer conn.Close()
 
 	if cliCtx.cmdTimeout != 0 {
 		if err := conn.Exec(fmt.Sprintf("SET statement_timeout=%d", cliCtx.cmdTimeout), nil); err != nil {
@@ -66,9 +63,9 @@ func runLsNodes(cmd *cobra.Command, args []string) (resErr error) {
 		}
 	}
 
-	_, rows, err := sqlExecCtx.RunQuery(
+	_, rows, err := runQuery(
 		conn,
-		clisqlclient.MakeQuery(`SELECT node_id FROM crdb_internal.gossip_liveness
+		makeQuery(`SELECT node_id FROM crdb_internal.gossip_liveness
                WHERE membership = 'active' OR split_part(expiration,',',1)::decimal > now()::decimal`),
 		false,
 	)
@@ -77,8 +74,7 @@ func runLsNodes(cmd *cobra.Command, args []string) (resErr error) {
 		return err
 	}
 
-	return sqlExecCtx.PrintQueryOutput(os.Stdout, stderr, lsNodesColumnHeaders,
-		clisqlexec.NewRowSliceIter(rows, "r"))
+	return printQueryOutput(os.Stdout, lsNodesColumnHeaders, newRowSliceIter(rows, "r"))
 }
 
 var baseNodeColumnHeaders = []string{
@@ -124,7 +120,7 @@ If a node ID is specified, this will show the status for the corresponding node.
 is specified, this will display the status for all nodes in the cluster.
 	`,
 	Args: cobra.MaximumNArgs(1),
-	RunE: clierrorplus.MaybeDecorateError(runStatusNode),
+	RunE: MaybeDecorateGRPCError(runStatusNode),
 }
 
 func runStatusNode(cmd *cobra.Command, args []string) error {
@@ -133,13 +129,11 @@ func runStatusNode(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	sliceIter := clisqlexec.NewRowSliceIter(rows, getStatusNodeAlignment())
-	return sqlExecCtx.PrintQueryOutput(os.Stdout, stderr, getStatusNodeHeaders(), sliceIter)
+	sliceIter := newRowSliceIter(rows, getStatusNodeAlignment())
+	return printQueryOutput(os.Stdout, getStatusNodeHeaders(), sliceIter)
 }
 
-func runStatusNodeInner(
-	showDecommissioned bool, args []string,
-) (colNames []string, rowVals [][]string, resErr error) {
+func runStatusNodeInner(showDecommissioned bool, args []string) ([]string, [][]string, error) {
 	joinUsingID := func(queries []string) (query string) {
 		for i, q := range queries {
 			if i == 0 {
@@ -207,7 +201,7 @@ FROM crdb_internal.gossip_liveness LEFT JOIN crdb_internal.gossip_nodes USING (n
 	if err != nil {
 		return nil, nil, err
 	}
-	defer func() { resErr = errors.CombineErrors(resErr, conn.Close()) }()
+	defer conn.Close()
 
 	queriesToJoin := []string{baseQuery}
 
@@ -231,15 +225,15 @@ FROM crdb_internal.gossip_liveness LEFT JOIN crdb_internal.gossip_nodes USING (n
 
 	switch len(args) {
 	case 0:
-		query := clisqlclient.MakeQuery(queryString + " ORDER BY id")
-		return sqlExecCtx.RunQuery(conn, query, false)
+		query := makeQuery(queryString + " ORDER BY id")
+		return runQuery(conn, query, false)
 	case 1:
 		nodeID, err := strconv.Atoi(args[0])
 		if err != nil {
 			return nil, nil, errors.Errorf("could not parse node_id %s", args[0])
 		}
-		query := clisqlclient.MakeQuery(queryString+" WHERE id = $1", nodeID)
-		headers, rows, err := sqlExecCtx.RunQuery(conn, query, false)
+		query := makeQuery(queryString+" WHERE id = $1", nodeID)
+		headers, rows, err := runQuery(conn, query, false)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -297,7 +291,7 @@ var decommissionNodeCmd = &cobra.Command{
 Marks the nodes with the supplied IDs as decommissioning.
 This will cause leases and replicas to be removed from these nodes.`,
 	Args: cobra.MinimumNArgs(0),
-	RunE: clierrorplus.MaybeDecorateError(runDecommissionNode),
+	RunE: MaybeDecorateGRPCError(runDecommissionNode),
 }
 
 func parseNodeIDs(strNodeIDs []string) ([]roachpb.NodeID, error) {
@@ -346,7 +340,7 @@ func runDecommissionNode(cmd *cobra.Command, args []string) error {
 	if err := runDecommissionNodeImpl(ctx, c, nodeCtx.nodeDecommissionWait, nodeIDs); err != nil {
 		cause := errors.UnwrapAll(err)
 		if s, ok := status.FromError(cause); ok && s.Code() == codes.NotFound {
-			// Are we trying to decommission a node that does not
+			// Are we trying to decommision a node that does not
 			// exist? See Server.Decommission for where this specific grpc error
 			// code is generated.
 			return errors.New("node does not exist")
@@ -530,12 +524,12 @@ For the nodes with the supplied IDs, resets the decommissioning states,
 signaling the affected nodes to participate in the cluster again.
 	`,
 	Args: cobra.MinimumNArgs(0),
-	RunE: clierrorplus.MaybeDecorateError(runRecommissionNode),
+	RunE: MaybeDecorateGRPCError(runRecommissionNode),
 }
 
 func printDecommissionStatus(resp serverpb.DecommissionStatusResponse) error {
-	return sqlExecCtx.PrintQueryOutput(os.Stdout, stderr, decommissionNodesColumnHeaders,
-		clisqlexec.NewRowSliceIter(decommissionResponseValueToRows(resp.Status), decommissionResponseAlignment()))
+	return printQueryOutput(os.Stdout, decommissionNodesColumnHeaders,
+		newRowSliceIter(decommissionResponseValueToRows(resp.Status), decommissionResponseAlignment()))
 }
 
 func runRecommissionNode(cmd *cobra.Command, args []string) error {
@@ -608,7 +602,7 @@ After a successful drain, the server process is still running;
 use a service manager or orchestrator to terminate the process
 gracefully using e.g. a unix signal.`,
 	Args: cobra.NoArgs,
-	RunE: clierrorplus.MaybeDecorateError(runDrain),
+	RunE: MaybeDecorateGRPCError(runDrain),
 }
 
 // runDrain calls the Drain RPC without the flag to stop the
@@ -648,7 +642,7 @@ var nodeCmd = &cobra.Command{
 	Use:   "node [command]",
 	Short: "list, inspect, drain or remove nodes\n",
 	Long:  "List, inspect, drain or remove nodes.",
-	RunE:  UsageAndErr,
+	RunE:  usageAndErr,
 }
 
 func init() {

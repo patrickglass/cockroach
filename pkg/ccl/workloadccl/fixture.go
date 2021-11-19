@@ -72,12 +72,9 @@ func (s FixtureConfig) objectPathToURI(folder string) string {
 		Host:   s.GCSBucket,
 		Path:   folder,
 	}
-	q := url.Values{}
 	if s.BillingProject != `` {
-		q.Add("GOOGLE_BILLING_PROJECT", s.BillingProject)
+		u.RawQuery = `GOOGLE_BILLING_PROJECT=` + url.QueryEscape(s.BillingProject)
 	}
-	q.Add("AUTH", "implicit")
-	u.RawQuery = q.Encode()
 	return u.String()
 }
 
@@ -401,19 +398,6 @@ func ImportFixture(
 		pathPrefix = `workload://`
 	}
 
-	// Pre-create tables. It's required that we pre-create the tables before we
-	// parallelize the IMPORT because for multi-region setups, the create table
-	// will end up modifying the crdb_internal_region type (to install back
-	// references). If create table is done in parallel with IMPORT, some IMPORT
-	// jobs may fail because the type is being modified concurrently with the
-	// IMPORT. Removing the need to pre-create is being tracked with #70987.
-	for _, table := range tables {
-		err := createFixtureTable(sqlDB, dbName, table)
-		if err != nil {
-			return 0, errors.Wrapf(err, `creating table %s`, table.Name)
-		}
-	}
-
 	for _, t := range tables {
 		table := t
 		paths := csvServerPaths(pathPrefix, gen, table, numNodes*filesPerNode)
@@ -430,16 +414,6 @@ func ImportFixture(
 	return atomic.LoadInt64(&bytesAtomic), nil
 }
 
-func createFixtureTable(sqlDB *gosql.DB, dbName string, table workload.Table) error {
-	qualifiedTableName := makeQualifiedTableName(dbName, &table)
-	createTable := fmt.Sprintf(
-		`CREATE TABLE IF NOT EXISTS %s %s`,
-		qualifiedTableName,
-		table.Schema)
-	_, err := sqlDB.Exec(createTable)
-	return err
-}
-
 func importFixtureTable(
 	ctx context.Context,
 	sqlDB *gosql.DB,
@@ -452,9 +426,8 @@ func importFixtureTable(
 	start := timeutil.Now()
 	var buf bytes.Buffer
 	var params []interface{}
-
 	qualifiedTableName := makeQualifiedTableName(dbName, &table)
-	fmt.Fprintf(&buf, `IMPORT INTO %s CSV DATA (`, qualifiedTableName)
+	fmt.Fprintf(&buf, `IMPORT TABLE %s %s CSV DATA (`, qualifiedTableName, table.Schema)
 	// Generate $1,...,$N-1, where N is the number of csv paths.
 	for _, path := range paths {
 		params = append(params, path)
@@ -476,9 +449,6 @@ func importFixtureTable(
 	}
 	defer res.Close()
 	if !res.Next() {
-		if err := res.Err(); err != nil {
-			return 0, errors.Wrap(err, "unexpected error during import")
-		}
 		return 0, gosql.ErrNoRows
 	}
 	resCols, err := res.Columns()
@@ -609,19 +579,16 @@ func RestoreFixture(
 		table := table
 		g.GoCtx(func(ctx context.Context) error {
 			start := timeutil.Now()
-			restoreStmt := fmt.Sprintf(`RESTORE %s.%s FROM $1 WITH into_db=$2`, genName, table.TableName)
+			importStmt := fmt.Sprintf(`RESTORE %s.%s FROM $1 WITH into_db=$2`, genName, table.TableName)
 			log.Infof(ctx, "Restoring from %s", table.BackupURI)
 			var rows, index, tableBytes int64
 			var discard interface{}
-			res, err := sqlDB.Query(restoreStmt, table.BackupURI, database)
+			res, err := sqlDB.Query(importStmt, table.BackupURI, database)
 			if err != nil {
-				return errors.Wrapf(err, "restore: %s", table.BackupURI)
+				return errors.Wrapf(err, "backup: %s", table.BackupURI)
 			}
 			defer res.Close()
 			if !res.Next() {
-				if err := res.Err(); err != nil {
-					return errors.Wrap(err, "unexpected error during restore")
-				}
 				return gosql.ErrNoRows
 			}
 			resCols, err := res.Columns()

@@ -223,7 +223,7 @@ func newNodeDesc(nodeID roachpb.NodeID) *roachpb.NodeDescriptor {
 }
 
 // TestSendRPCOrder verifies that sendRPC correctly takes into account the
-// lease holder, attributes, and routing policy to determine where to send
+// lease holder, attributes and required consistency to determine where to send
 // remote requests.
 func TestSendRPCOrder(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -267,71 +267,74 @@ func TestSendRPCOrder(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name          string
-		routingPolicy roachpb.RoutingPolicy
-		tiers         []roachpb.Tier
-		leaseHolder   int32            // 0 for not caching a lease holder.
-		expReplica    []roachpb.NodeID // 0 elements ignored
+		args        roachpb.Request
+		tiers       []roachpb.Tier
+		expReplica  []roachpb.NodeID
+		leaseHolder int32 // 0 for not caching a lease holder.
+		// Naming is somewhat off, as eventually consistent reads usually
+		// do not have to go to the lease holder when a node has a read lease.
+		// Would really want CONSENSUS here, but that is not implemented.
+		// Likely a test setup here will never have a read lease, but good
+		// to keep in mind.
+		consistent bool
 	}{
+		// Inconsistent Scan without matching attributes.
 		{
-			name:          "route to leaseholder, without matching attributes",
-			routingPolicy: roachpb.RoutingPolicy_LEASEHOLDER,
-			tiers:         []roachpb.Tier{},
-			// No ordering.
+			args:       &roachpb.ScanRequest{},
+			tiers:      []roachpb.Tier{},
 			expReplica: []roachpb.NodeID{1, 2, 3, 4, 5},
 		},
+		// Inconsistent Scan with matching attributes.
+		// Should move the two nodes matching the attributes to the front and
+		// go stable.
 		{
-			name:          "route to leaseholder, with matching attributes",
-			routingPolicy: roachpb.RoutingPolicy_LEASEHOLDER,
-			tiers:         nodeTiers[5],
-			// Order nearest first.
+			args:  &roachpb.ScanRequest{},
+			tiers: nodeTiers[5],
+			// Compare only the first two resulting addresses.
 			expReplica: []roachpb.NodeID{5, 4, 0, 0, 0},
 		},
+
+		// Scan without matching attributes that requires but does not find
+		// a lease holder.
 		{
-			name:          "route to leaseholder, without matching attributes, known leaseholder",
-			routingPolicy: roachpb.RoutingPolicy_LEASEHOLDER,
-			tiers:         []roachpb.Tier{},
-			leaseHolder:   2,
-			// Order leaseholder first.
-			expReplica: []roachpb.NodeID{2, 0, 0, 0, 0},
+			args:       &roachpb.ScanRequest{},
+			tiers:      []roachpb.Tier{},
+			expReplica: []roachpb.NodeID{1, 2, 3, 4, 5},
+			consistent: true,
 		},
+		// Put without matching attributes that requires but does not find lease holder.
+		// Should go random and not change anything.
 		{
-			name:          "route to leaseholder, with matching attributes, known leaseholder",
-			routingPolicy: roachpb.RoutingPolicy_LEASEHOLDER,
-			tiers:         nodeTiers[5],
-			leaseHolder:   2,
-			// Order leaseholder first, then nearest.
-			expReplica: []roachpb.NodeID{2, 5, 4, 0, 0},
-		},
-		{
-			name:          "route to nearest, without matching attributes",
-			routingPolicy: roachpb.RoutingPolicy_NEAREST,
-			tiers:         []roachpb.Tier{},
-			// No ordering.
+			args:       &roachpb.PutRequest{},
+			tiers:      []roachpb.Tier{{Key: "nomatch", Value: ""}},
 			expReplica: []roachpb.NodeID{1, 2, 3, 4, 5},
 		},
+		// Put with matching attributes but no lease holder.
+		// Should move the two nodes matching the attributes to the front.
 		{
-			name:          "route to nearest, with matching attributes",
-			routingPolicy: roachpb.RoutingPolicy_NEAREST,
-			tiers:         nodeTiers[5],
-			// Order nearest first.
+			args:  &roachpb.PutRequest{},
+			tiers: append(nodeTiers[5], roachpb.Tier{Key: "irrelevant", Value: ""}),
+			// Compare only the first two resulting addresses.
 			expReplica: []roachpb.NodeID{5, 4, 0, 0, 0},
 		},
+		// Put with matching attributes that finds the lease holder (node 2).
+		// Should address the lease holder and the two nodes matching the attributes
+		// (the last and second to last) in that order.
 		{
-			name:          "route to nearest, without matching attributes, known leaseholder",
-			routingPolicy: roachpb.RoutingPolicy_NEAREST,
-			tiers:         []roachpb.Tier{},
-			leaseHolder:   2,
-			// No ordering.
-			expReplica: []roachpb.NodeID{1, 2, 3, 4, 5},
+			args:  &roachpb.PutRequest{},
+			tiers: append(nodeTiers[5], roachpb.Tier{Key: "irrelevant", Value: ""}),
+			// Compare only the first resulting address as we have a lease holder
+			// and that means we're only trying to send there.
+			expReplica:  []roachpb.NodeID{2, 0, 0, 0, 0},
+			leaseHolder: 2,
 		},
+		// Inconsistent Get without matching attributes but lease holder (node 3). Should just
+		// go random as the lease holder does not matter.
 		{
-			name:          "route to nearest, with matching attributes, known leaseholder",
-			routingPolicy: roachpb.RoutingPolicy_NEAREST,
-			tiers:         nodeTiers[5],
-			leaseHolder:   2,
-			// Order nearest first.
-			expReplica: []roachpb.NodeID{5, 4, 0, 0, 0},
+			args:        &roachpb.GetRequest{},
+			tiers:       []roachpb.Tier{},
+			expReplica:  []roachpb.NodeID{1, 2, 3, 4, 5},
+			leaseHolder: 2,
 		},
 	}
 
@@ -387,8 +390,8 @@ func TestSendRPCOrder(t *testing.T) {
 
 	ds := NewDistSender(cfg)
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
+	for n, tc := range testCases {
+		t.Run("", func(t *testing.T) {
 			verifyCall = makeVerifier(tc.expReplica)
 
 			{
@@ -401,8 +404,9 @@ func TestSendRPCOrder(t *testing.T) {
 					},
 				}
 				g.NodeID.Reset(nd.NodeID)
-				err := g.SetNodeDescriptor(nd)
-				require.NoError(t, err)
+				if err := g.SetNodeDescriptor(nd); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			ds.rangeCache.Clear()
@@ -415,17 +419,29 @@ func TestSendRPCOrder(t *testing.T) {
 				Lease: lease,
 			})
 
+			args := tc.args
+			{
+				header := args.Header()
+				header.Key = roachpb.Key("a")
+				args.SetHeader(header)
+			}
+			if roachpb.IsRange(args) {
+				header := args.Header()
+				header.EndKey = args.Header().Key.Next()
+				args.SetHeader(header)
+			}
+			consistency := roachpb.CONSISTENT
+			if !tc.consistent {
+				consistency = roachpb.INCONSISTENT
+			}
 			// Kill the cached NodeDescriptor, enforcing a lookup from Gossip.
 			ds.nodeDescriptor = nil
-
-			// Issue the request.
-			header := roachpb.Header{
-				RangeID:       rangeID, // Not used in this test, but why not.
-				RoutingPolicy: tc.routingPolicy,
+			if _, err := kv.SendWrappedWith(ctx, ds, roachpb.Header{
+				RangeID:         rangeID, // Not used in this test, but why not.
+				ReadConsistency: consistency,
+			}, args); err != nil {
+				t.Errorf("%d: %s", n, err)
 			}
-			req := roachpb.NewScan(roachpb.Key("a"), roachpb.Key("b"), false)
-			_, pErr := kv.SendWrappedWith(ctx, ds, header, req)
-			require.Nil(t, pErr)
 		})
 	}
 }
@@ -3308,7 +3324,6 @@ func TestMultipleErrorsMerged(t *testing.T) {
 	retryErr := roachpb.NewTransactionRetryError(roachpb.RETRY_SERIALIZABLE, "test err")
 	abortErr := roachpb.NewTransactionAbortedError(roachpb.ABORT_REASON_ABORTED_RECORD_FOUND)
 	conditionFailedErr := &roachpb.ConditionFailedError{}
-	writeIntentErr := &roachpb.WriteIntentError{}
 	sendErr := sendError{}
 	ambiguousErr := &roachpb.AmbiguousResultError{}
 	randomErr := &roachpb.IntegerOverflowError{}
@@ -3376,22 +3391,6 @@ func TestMultipleErrorsMerged(t *testing.T) {
 		},
 		{
 			err1:   conditionFailedErr,
-			err2:   randomErr,
-			expErr: "results in overflow",
-		},
-		// WriteIntentError also has a low score since it's "not ambiguous".
-		{
-			err1:   writeIntentErr,
-			err2:   ambiguousErr,
-			expErr: "result is ambiguous",
-		},
-		{
-			err1:   writeIntentErr,
-			err2:   sendErr,
-			expErr: "failed to send RPC",
-		},
-		{
-			err1:   writeIntentErr,
 			err2:   randomErr,
 			expErr: "results in overflow",
 		},
@@ -4388,11 +4387,10 @@ func TestSendToReplicasSkipsStaleReplicas(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := cluster.MakeTestingClusterSettings()
-			tr := tracing.NewTracer()
 			getRangeDescCacheSize := func() int64 {
 				return 1 << 20
 			}
-			rc := rangecache.NewRangeCache(st, nil /* db */, getRangeDescCacheSize, stopper, tr)
+			rc := rangecache.NewRangeCache(st, nil /* db */, getRangeDescCacheSize, stopper, st.Tracer)
 			rc.Insert(ctx, roachpb.RangeInfo{
 				Desc: desc,
 				Lease: roachpb.Lease{
@@ -4433,7 +4431,7 @@ func TestSendToReplicasSkipsStaleReplicas(t *testing.T) {
 			}
 
 			cfg := DistSenderConfig{
-				AmbientCtx: log.AmbientContext{Tracer: tr},
+				AmbientCtx: log.AmbientContext{Tracer: st.Tracer},
 				Clock:      clock,
 				NodeDescs:  ns,
 				RPCContext: rpcContext,

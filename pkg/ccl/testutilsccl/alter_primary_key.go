@@ -15,7 +15,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
@@ -48,6 +47,9 @@ type AlterPrimaryKeyCorrectZoneConfigTestCase struct {
 func AlterPrimaryKeyCorrectZoneConfigTest(
 	t *testing.T, createDBStatement string, testCases []AlterPrimaryKeyCorrectZoneConfigTestCase,
 ) {
+	// Decrease the adopt loop interval so that retries happen quickly.
+	defer sqltestutils.SetTestJobsAdoptInterval()()
+
 	chunkSize := int64(100)
 	maxValue := 4000
 
@@ -91,8 +93,6 @@ func AlterPrimaryKeyCorrectZoneConfigTest(
 						return nil
 					},
 				},
-				// Decrease the adopt loop interval so that retries happen quickly.
-				JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 			}
 			s, sqlDB, _ := serverutils.StartServer(t, params)
 			db = sqlDB

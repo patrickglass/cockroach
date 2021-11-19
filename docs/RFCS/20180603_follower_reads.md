@@ -1,5 +1,5 @@
 - Feature Name: Follower Reads
-- Status: completed
+- Status: accepted
 - Start Date: 2018-06-03
 - Authors: Spencer Kimball, Tobias Schottdorf
 - RFC PR: #21056

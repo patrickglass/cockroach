@@ -9,9 +9,7 @@
 // licenses/APL.txt.
 
 // {{/*
-//go:build execgen_template
 // +build execgen_template
-
 //
 // This file is the execgen template for values_differ.eg.go. It's formatted
 // in a special way, so it's both valid Go and a valid text/template input.
@@ -35,7 +33,7 @@ import (
 // pick up the right packages when run within the bazel sandbox.
 var (
 	_ = typeconv.DatumVecCanonicalTypeFamily
-	_ = coldataext.CompareDatum
+	_ coldataext.Datum
 	_ tree.AggType
 )
 
@@ -61,10 +59,9 @@ func _ASSIGN_NE(_, _, _, _, _, _ string) bool {
 // */}}
 
 // valuesDiffer takes in two ColVecs as well as values indices to check whether
-// the values differ. This function pays attention to NULLs.
-func valuesDiffer(
-	aColVec coldata.Vec, aValueIdx int, bColVec coldata.Vec, bValueIdx int, nullsAreDistinct bool,
-) bool {
+// the values differ. This function pays attention to NULLs, and two NULL
+// values do *not* differ.
+func valuesDiffer(aColVec coldata.Vec, aValueIdx int, bColVec coldata.Vec, bValueIdx int) bool {
 	switch aColVec.CanonicalTypeFamily() {
 	// {{range .}}
 	case _CANONICAL_TYPE_FAMILY:
@@ -78,7 +75,7 @@ func valuesDiffer(
 			aNull := aNulls.MaybeHasNulls() && aNulls.NullAt(aValueIdx)
 			bNull := bNulls.MaybeHasNulls() && bNulls.NullAt(bValueIdx)
 			if aNull && bNull {
-				return nullsAreDistinct
+				return false
 			} else if aNull || bNull {
 				return true
 			}

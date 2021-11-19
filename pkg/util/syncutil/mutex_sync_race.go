@@ -8,8 +8,8 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-//go:build !deadlock && race
-// +build !deadlock,race
+// +build !deadlock
+// +build race
 
 package syncutil
 
@@ -17,9 +17,6 @@ import (
 	"sync"
 	"sync/atomic"
 )
-
-// DeadlockEnabled is true if the deadlock detector is enabled.
-const DeadlockEnabled = false
 
 // A Mutex is a mutual exclusion lock.
 type Mutex struct {

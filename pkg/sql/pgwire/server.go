@@ -21,7 +21,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/security"
@@ -30,9 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/hba"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/identmap"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
@@ -121,12 +118,6 @@ var (
 		Measurement: "SQL Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
-	MetaConnLatency = metric.Metadata{
-		Name:        "sql.conn.latency",
-		Help:        "Latency to establish and authenticate a SQL connection",
-		Measurement: "Nanoseconds",
-		Unit:        metric.Unit_NANOSECONDS,
-	}
 )
 
 const (
@@ -188,8 +179,7 @@ type Server struct {
 
 	auth struct {
 		syncutil.RWMutex
-		conf        *hba.Conf
-		identityMap *identmap.Conf
+		conf *hba.Conf
 	}
 
 	sqlMemoryPool *mon.BytesMonitor
@@ -227,7 +217,6 @@ type ServerMetrics struct {
 	BytesOutCount  *metric.Counter
 	Conns          *metric.Gauge
 	NewConns       *metric.Counter
-	ConnLatency    *metric.Histogram
 	ConnMemMetrics sql.BaseMemoryMetrics
 	SQLMemMetrics  sql.MemoryMetrics
 }
@@ -240,7 +229,6 @@ func makeServerMetrics(
 		BytesOutCount:  metric.NewCounter(MetaBytesOut),
 		Conns:          metric.NewGauge(MetaConns),
 		NewConns:       metric.NewCounter(MetaNewConns),
-		ConnLatency:    metric.NewLatency(MetaConnLatency, histogramWindow),
 		ConnMemMetrics: sql.MakeBaseMemMetrics("conns", histogramWindow),
 		SQLMemMetrics:  sqlMemMetrics,
 	}
@@ -302,21 +290,13 @@ func MakeServer(
 	server.mu.connCancelMap = make(cancelChanMap)
 	server.mu.Unlock()
 
-	connAuthConf.SetOnChange(&st.SV, func(ctx context.Context) {
-		loadLocalHBAConfigUponRemoteSettingChange(
-			ambientCtx.AnnotateCtx(context.Background()), server, st)
-	})
-	connIdentityMapConf.SetOnChange(&st.SV, func(ctx context.Context) {
-		loadLocalIdentityMapUponRemoteSettingChange(
-			ambientCtx.AnnotateCtx(context.Background()), server, st)
-	})
+	connAuthConf.SetOnChange(&st.SV,
+		func() {
+			loadLocalAuthConfigUponRemoteSettingChange(
+				ambientCtx.AnnotateCtx(context.Background()), server, st)
+		})
 
 	return server
-}
-
-// BytesOut returns the total number of bytes transmitted from this server.
-func (s *Server) BytesOut() uint64 {
-	return uint64(s.metrics.BytesOutCount.Count())
 }
 
 // AnnotateCtxForIncomingConn annotates the provided context with a
@@ -372,7 +352,6 @@ func (s *Server) Metrics() (res []interface{}) {
 		&s.SQLServer.InternalMetrics.ExecutedStatementCounters,
 		&s.SQLServer.InternalMetrics.EngineMetrics,
 		&s.SQLServer.InternalMetrics.GuardrailMetrics,
-		&s.SQLServer.ServerMetrics.StatsMetrics,
 	}
 }
 
@@ -699,20 +678,17 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn, socketType Socket
 		testingAuthHook = k.AuthHook
 	}
 
-	hbaConf, identMap := s.GetAuthenticationConfiguration()
 	// Defer the rest of the processing to the connection handler.
 	// This includes authentication.
 	s.serveConn(
 		ctx, conn, sArgs,
 		reserved,
-		connStart,
 		authOptions{
 			connType:        connType,
 			connDetails:     connDetails,
 			insecure:        s.cfg.Insecure,
 			ie:              s.execCfg.InternalExecutor,
-			auth:            hbaConf,
-			identMap:        identMap,
+			auth:            s.GetAuthenticationConfiguration(),
 			testingAuthHook: testingAuthHook,
 		})
 	return nil
@@ -736,9 +712,8 @@ func parseClientProvidedSessionParameters(
 	trustClientProvidedRemoteAddr bool,
 ) (sql.SessionArgs, error) {
 	args := sql.SessionArgs{
-		SessionDefaults:             make(map[string]string),
-		CustomOptionSessionDefaults: make(map[string]string),
-		RemoteAddr:                  origRemoteAddr,
+		SessionDefaults: make(map[string]string),
+		RemoteAddr:      origRemoteAddr,
 	}
 	foundBufferSize := false
 
@@ -746,10 +721,8 @@ func parseClientProvidedSessionParameters(
 		// Read a key-value pair from the client.
 		key, err := buf.GetString()
 		if err != nil {
-			return sql.SessionArgs{}, pgerror.Wrap(
-				err, pgcode.ProtocolViolation,
-				"error reading option key",
-			)
+			return sql.SessionArgs{}, pgerror.Newf(pgcode.ProtocolViolation,
+				"error reading option key: %s", err)
 		}
 		if len(key) == 0 {
 			// End of parameter list.
@@ -757,10 +730,8 @@ func parseClientProvidedSessionParameters(
 		}
 		value, err := buf.GetString()
 		if err != nil {
-			return sql.SessionArgs{}, pgerror.Wrapf(
-				err, pgcode.ProtocolViolation,
-				"error reading option value for key %q", key,
-			)
+			return sql.SessionArgs{}, pgerror.Newf(pgcode.ProtocolViolation,
+				"error reading option value: %s", err)
 		}
 
 		// Case-fold for the key for easier comparison.
@@ -774,10 +745,6 @@ func parseClientProvidedSessionParameters(
 			// here, so that further lookups for authentication have the correct
 			// identifier.
 			args.User, _ = security.MakeSQLUsernameFromUserInput(value, security.UsernameValidation)
-			// TODO(#sql-experience): we should retrieve the admin status during
-			// authentication using the roles cache, instead of using a simple/naive
-			// username match. See #69355.
-			args.IsSuperuser = args.User.IsRootUser()
 
 		case "results_buffer_size":
 			if args.ConnResultsBufferSize, err = humanizeutil.ParseBytes(value); err != nil {
@@ -799,17 +766,13 @@ func parseClientProvidedSessionParameters(
 
 			hostS, portS, err := net.SplitHostPort(value)
 			if err != nil {
-				return sql.SessionArgs{}, pgerror.Wrap(
-					err, pgcode.ProtocolViolation,
-					"invalid address format",
-				)
+				return sql.SessionArgs{}, pgerror.Newf(pgcode.ProtocolViolation,
+					"invalid address format: %v", err)
 			}
 			port, err := strconv.Atoi(portS)
 			if err != nil {
-				return sql.SessionArgs{}, pgerror.Wrap(
-					err, pgcode.ProtocolViolation,
-					"remote port is not numeric",
-				)
+				return sql.SessionArgs{}, pgerror.Newf(pgcode.ProtocolViolation,
+					"remote port is not numeric: %v", err)
 			}
 			ip := net.ParseIP(hostS)
 			if ip == nil {
@@ -850,27 +813,16 @@ func parseClientProvidedSessionParameters(
 		args.SessionDefaults["database"] = catalogkeys.DefaultDatabaseName
 	}
 
-	// The client might override the application name,
-	// which would prevent it from being counted in telemetry.
-	// We've decided that this noise in the data is acceptable.
-	if appName, ok := args.SessionDefaults["application_name"]; ok {
-		if appName == catconstants.ReportableAppNamePrefix+catconstants.InternalSQLAppName {
-			telemetry.Inc(sqltelemetry.CockroachShellCounter)
-		}
-	}
-
 	return args, nil
 }
 
 func loadParameter(ctx context.Context, key, value string, args *sql.SessionArgs) error {
-	key = strings.ToLower(key)
 	exists, configurable := sql.IsSessionVariableConfigurable(key)
 
 	switch {
 	case exists && configurable:
 		args.SessionDefaults[key] = value
-	case sql.IsCustomOptionSessionVariable(key):
-		args.CustomOptionSessionDefaults[key] = value
+
 	case !exists:
 		if _, ok := sql.UnsupportedVars[key]; ok {
 			counter := sqltelemetry.UnimplementedClientStatusParameterCounter(key)
@@ -945,7 +897,7 @@ func splitOptions(options string) []string {
 	for i < len(options) {
 		sb.Reset()
 		// skip leading space
-		for i < len(options) && unicode.IsSpace(rune(options[i])) {
+		for i < len(options) && options[i] == ' ' {
 			i++
 		}
 		if i == len(options) {
@@ -955,7 +907,7 @@ func splitOptions(options string) []string {
 		lastWasEscape := false
 
 		for i < len(options) {
-			if unicode.IsSpace(rune(options[i])) && !lastWasEscape {
+			if options[i] == ' ' && !lastWasEscape {
 				break
 			}
 			if !lastWasEscape && options[i] == '\\' {

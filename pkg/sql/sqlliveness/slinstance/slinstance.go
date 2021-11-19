@@ -58,61 +58,28 @@ type Writer interface {
 }
 
 type session struct {
-	id sqlliveness.SessionID
-	mu struct {
-		syncutil.RWMutex
-		exp                    hlc.Timestamp
-		sessionExpiryCallbacks []func(ctx context.Context)
-	}
+	id  sqlliveness.SessionID
+	exp hlc.Timestamp
 }
 
 // ID implements the Session interface method ID.
 func (s *session) ID() sqlliveness.SessionID { return s.id }
 
 // Expiration implements the Session interface method Expiration.
-func (s *session) Expiration() hlc.Timestamp {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.mu.exp
-}
-
-// RegisterCallbackForSessionExpiry adds the given function to the list
-// of functions called after a session expires. The functions are
-// executed in a goroutine.
-func (s *session) RegisterCallbackForSessionExpiry(sExp func(context.Context)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.mu.sessionExpiryCallbacks = append(s.mu.sessionExpiryCallbacks, sExp)
-}
-
-func (s *session) invokeSessionExpiryCallbacks(ctx context.Context) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, callback := range s.mu.sessionExpiryCallbacks {
-		go callback(ctx)
-	}
-}
-
-func (s *session) setExpiration(exp hlc.Timestamp) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.mu.exp = exp
-}
+func (s *session) Expiration() hlc.Timestamp { return s.exp }
 
 // Instance implements the sqlliveness.Instance interface by storing the
 // liveness sessions in table system.sqlliveness and relying on a heart beat
 // loop to extend the existing sessions' expirations or creating a new session
 // to replace a session that has expired and deleted from the table.
-// TODO(rima): Rename Instance to avoid confusion with sqlinstance.SQLInstance.
 type Instance struct {
-	clock     *hlc.Clock
-	settings  *cluster.Settings
-	stopper   *stop.Stopper
-	storage   Writer
-	ttl       func() time.Duration
-	hb        func() time.Duration
-	testKnobs sqlliveness.TestingKnobs
-	mu        struct {
+	clock    *hlc.Clock
+	settings *cluster.Settings
+	stopper  *stop.Stopper
+	storage  Writer
+	ttl      func() time.Duration
+	hb       func() time.Duration
+	mu       struct {
 		started bool
 		syncutil.Mutex
 		blockCh chan struct{}
@@ -137,14 +104,9 @@ func (l *Instance) setSession(s *session) {
 	l.mu.Unlock()
 }
 
-func (l *Instance) clearSession(ctx context.Context) {
+func (l *Instance) clearSession() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if expiration := l.mu.s.Expiration(); expiration.Less(l.clock.Now()) {
-		// If the session has expired, invoke the session expiry callbacks
-		// associated with the session.
-		l.mu.s.invokeSessionExpiryCallbacks(ctx)
-	}
 	l.mu.s = nil
 	l.mu.blockCh = make(chan struct{})
 }
@@ -154,8 +116,7 @@ func (l *Instance) clearSession(ctx context.Context) {
 func (l *Instance) createSession(ctx context.Context) (*session, error) {
 	id := sqlliveness.SessionID(uuid.MakeV4().GetBytes())
 	exp := l.clock.Now().Add(l.ttl().Nanoseconds(), 0)
-	s := &session{id: id}
-	s.mu.exp = exp
+	s := &session{id: id, exp: exp}
 
 	opts := retry.Options{
 		InitialBackoff: 10 * time.Millisecond,
@@ -166,7 +127,7 @@ func (l *Instance) createSession(ctx context.Context) (*session, error) {
 	var err error
 	for i, r := 0, retry.StartWithCtx(ctx, opts); r.Next(); {
 		i++
-		if err = l.storage.Insert(ctx, s.id, s.Expiration()); err != nil {
+		if err = l.storage.Insert(ctx, s.id, s.exp); err != nil {
 			if ctx.Err() != nil {
 				break
 			}
@@ -184,7 +145,7 @@ func (l *Instance) createSession(ctx context.Context) (*session, error) {
 	return s, nil
 }
 
-func (l *Instance) extendSession(ctx context.Context, s *session) (bool, error) {
+func (l *Instance) extendSession(ctx context.Context, s sqlliveness.Session) (bool, error) {
 	exp := l.clock.Now().Add(l.ttl().Nanoseconds(), 0)
 
 	opts := retry.Options{
@@ -211,7 +172,9 @@ func (l *Instance) extendSession(ctx context.Context, s *session) (bool, error) 
 		return false, nil
 	}
 
-	s.setExpiration(exp)
+	l.mu.Lock()
+	l.mu.s.exp = exp
+	l.mu.Unlock()
 	return true, nil
 }
 
@@ -241,11 +204,11 @@ func (l *Instance) heartbeatLoop(ctx context.Context) {
 			}
 			found, err := l.extendSession(ctx, s)
 			if err != nil {
-				l.clearSession(ctx)
+				l.clearSession()
 				return
 			}
 			if !found {
-				l.clearSession(ctx)
+				l.clearSession()
 				// Start next loop iteration immediately to insert a new session.
 				t.Reset(0)
 				continue
@@ -261,11 +224,7 @@ func (l *Instance) heartbeatLoop(ctx context.Context) {
 // NewSQLInstance returns a new Instance struct and starts its heartbeating
 // loop.
 func NewSQLInstance(
-	stopper *stop.Stopper,
-	clock *hlc.Clock,
-	storage Writer,
-	settings *cluster.Settings,
-	testKnobs *sqlliveness.TestingKnobs,
+	stopper *stop.Stopper, clock *hlc.Clock, storage Writer, settings *cluster.Settings,
 ) *Instance {
 	l := &Instance{
 		clock:    clock,
@@ -278,9 +237,6 @@ func NewSQLInstance(
 		hb: func() time.Duration {
 			return DefaultHeartBeat.Get(&settings.SV)
 		},
-	}
-	if testKnobs != nil {
-		l.testKnobs = *testKnobs
 	}
 	l.mu.blockCh = make(chan struct{})
 	return l
@@ -302,11 +258,6 @@ func (l *Instance) Start(ctx context.Context) {
 // invariant is that there exists at most one live session at any point in time.
 // If the current one has expired then a new one is created.
 func (l *Instance) Session(ctx context.Context) (sqlliveness.Session, error) {
-	if l.testKnobs.SessionOverride != nil {
-		if s, err := l.testKnobs.SessionOverride(ctx); s != nil || err != nil {
-			return s, err
-		}
-	}
 	l.mu.Lock()
 	if !l.mu.started {
 		l.mu.Unlock()
