@@ -27,7 +27,7 @@
   "keywords": [],
   "license": "MIT",
   "dependencies": {
-    "@babel/runtime": "^7.12.13"
+    "@babel/runtime": "^7.26.10"
   },
   "devDependencies": {
     "@bazel/typescript": "4.1.0",
